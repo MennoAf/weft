@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "loom": {
+      "command": "uv",
+      "args": ["run", "--directory", "/Users/jasonbauman/Documents/code_projects/Personal/Loom", "python", "-m", "loom.mcp"],
+      "env": {
+        "LOOM_PROJECT_DIR": "/Users/jasonbauman/Documents/code_projects/Personal/Weft"
+      }
+    }
+  }
+}
