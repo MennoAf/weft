@@ -21,13 +21,9 @@ from weft.models import (
     RelationType,
     _weft_id,
 )
+from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
-
-
-def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars per token."""
-    return max(1, len(text) // 4)
 
 
 async def store_memory(
@@ -38,7 +34,7 @@ async def store_memory(
     """Store a new memory. Returns the created Memory."""
     memory_id = _weft_id()
     now = datetime.now(timezone.utc)
-    token_count = _estimate_tokens(create.content)
+    token_count = estimate_tokens(create.content)
 
     embedding_str = _vec_to_pgvector(embedding) if embedding else None
 
@@ -147,6 +143,7 @@ async def search_by_vector(
     limit: int = 10,
     threshold: float = 0.0,
     status: MemoryStatus | None = MemoryStatus.active,
+    memory_type: MemoryType | None = None,
     topic: str | None = None,
     project_id: str | None = None,
 ) -> list[MemoryRecall]:
@@ -162,6 +159,11 @@ async def search_by_vector(
     if status:
         conditions.append(f"status = ${idx}")
         params.append(status.value)
+        idx += 1
+
+    if memory_type:
+        conditions.append(f"type = ${idx}")
+        params.append(memory_type.value)
         idx += 1
 
     if topic:
@@ -217,7 +219,7 @@ async def update_memory(
         params.append(content)
         idx += 1
         sets.append(f"token_count = ${idx}")
-        params.append(_estimate_tokens(content))
+        params.append(estimate_tokens(content))
         idx += 1
 
     if confidence is not None:

@@ -51,18 +51,23 @@ async def weft_recall(
     query: str,
     topic: str | None = None,
     type: str | None = None,
+    status: str | None = None,
     project_id: str | None = None,
     limit: int = 10,
     threshold: float = 0.3,
 ) -> dict:
-    """Retrieve memories by semantic query, topic filter, type filter, or combination."""
+    """Retrieve memories by semantic query, topic filter, type filter, status filter, or combination."""
     app: AppContext = ctx.request_context.lifespan_context
+    memory_type = MemoryType(type) if type else None
+    memory_status = MemoryStatus(status) if status else MemoryStatus.active
     embedding = await app.embedding.embed(query)
     results = await search_by_vector(
         app.pool,
         embedding,
         limit=limit,
         threshold=threshold,
+        status=memory_status,
+        memory_type=memory_type,
         topic=topic,
         project_id=project_id,
     )
