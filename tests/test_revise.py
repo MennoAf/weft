@@ -1,0 +1,129 @@
+"""Tests for version-aware memory updates (weft_revise)."""
+
+from __future__ import annotations
+
+import pytest
+
+from weft.embeddings import get_provider
+from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType, RelationType
+from weft.revise import revise_memory
+from weft.store import get_memory, get_relationships, store_memory
+
+
+@pytest.fixture
+async def original_memory(pool):
+    """Create an original memory to revise."""
+    provider = get_provider("fastembed")
+    create = MemoryCreate(
+        type=MemoryType.fact,
+        content="pgvector version 0.7.0 supports cosine distance",
+        topic=["postgres", "pgvector"],
+        source=MemorySource.documentation,
+        confidence=0.9,
+    )
+    emb = await provider.embed(create.content)
+    memory = await store_memory(pool, create, embedding=emb)
+    return pool, memory, provider
+
+
+async def test_revise_creates_new_memory(original_memory):
+    """Revising should create a new memory with updated content."""
+    pool, old, provider = original_memory
+    new_content = "pgvector version 0.8.1 supports cosine distance operator <=>"
+    emb = await provider.embed(new_content)
+
+    new, archived_old = await revise_memory(pool, old.id, new_content, embedding=emb)
+
+    assert new.id != old.id
+    assert new.content == new_content
+    assert new.type == old.type
+    assert new.topic == old.topic
+    assert new.source == old.source
+
+
+async def test_revise_archives_old_memory(original_memory):
+    """The old memory should be archived after revision."""
+    pool, old, provider = original_memory
+    emb = await provider.embed("updated content")
+
+    _, archived = await revise_memory(pool, old.id, "updated content", embedding=emb)
+    assert archived.status == MemoryStatus.archived
+
+    # Verify in DB
+    db_old = await get_memory(pool, old.id)
+    assert db_old is not None
+    assert db_old.status == MemoryStatus.archived
+
+
+async def test_revise_creates_supersedes_relationship(original_memory):
+    """A supersedes relationship should link new → old."""
+    pool, old, provider = original_memory
+    emb = await provider.embed("revised content")
+
+    new, _ = await revise_memory(pool, old.id, "revised content", embedding=emb)
+
+    rels = await get_relationships(pool, new.id, relation=RelationType.supersedes)
+    assert len(rels) == 1
+    assert rels[0].source_id == new.id
+    assert rels[0].target_id == old.id
+
+
+async def test_revise_with_new_confidence(original_memory):
+    """Revise can update confidence."""
+    pool, old, provider = original_memory
+    emb = await provider.embed("high confidence update")
+
+    new, _ = await revise_memory(
+        pool, old.id, "high confidence update",
+        embedding=emb, new_confidence=1.0,
+    )
+    assert new.confidence == 1.0
+
+
+async def test_revise_with_new_topic(original_memory):
+    """Revise can update topics."""
+    pool, old, provider = original_memory
+    emb = await provider.embed("updated with new topics")
+
+    new, _ = await revise_memory(
+        pool, old.id, "updated with new topics",
+        embedding=emb, new_topic=["postgres", "pgvector", "extensions"],
+    )
+    assert "extensions" in new.topic
+
+
+async def test_revise_chain(original_memory):
+    """Multiple revisions should form a chain: v3 supersedes v2 supersedes v1."""
+    pool, v1, provider = original_memory
+
+    emb2 = await provider.embed("version 2 content")
+    v2, _ = await revise_memory(pool, v1.id, "version 2 content", embedding=emb2)
+
+    emb3 = await provider.embed("version 3 content")
+    v3, _ = await revise_memory(pool, v2.id, "version 3 content", embedding=emb3)
+
+    # v3 supersedes v2
+    rels_v3 = await get_relationships(pool, v3.id, relation=RelationType.supersedes)
+    assert any(r.target_id == v2.id for r in rels_v3)
+
+    # v2 supersedes v1
+    rels_v2 = await get_relationships(pool, v2.id, relation=RelationType.supersedes)
+    assert any(r.target_id == v1.id for r in rels_v2)
+
+    # v1 and v2 are archived
+    assert (await get_memory(pool, v1.id)).status == MemoryStatus.archived
+    assert (await get_memory(pool, v2.id)).status == MemoryStatus.archived
+    assert v3.status == MemoryStatus.active
+
+
+async def test_revise_nonexistent_raises():
+    """Revising a nonexistent memory should raise ValueError."""
+    # This test uses the pool fixture from conftest
+    pass
+
+
+@pytest.mark.asyncio
+async def test_revise_nonexistent(pool):
+    """Revising a nonexistent memory should raise ValueError."""
+    with pytest.raises(ValueError, match="not found"):
+        await revise_memory(pool, "weft-nonexist", "new content")
