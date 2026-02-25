@@ -1,0 +1,418 @@
+"""Postgres store — ONLY writer to the database for memory data.
+
+Handles CRUD operations, relationship management, and vector similarity search.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+
+import asyncpg
+
+from weft.models import (
+    Memory,
+    MemoryCreate,
+    MemoryRecall,
+    MemoryRelationship,
+    MemoryStatus,
+    MemoryType,
+    RelationType,
+    _weft_id,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+
+async def store_memory(
+    pool: asyncpg.Pool,
+    create: MemoryCreate,
+    embedding: list[float] | None = None,
+) -> Memory:
+    """Store a new memory. Returns the created Memory."""
+    memory_id = _weft_id()
+    now = datetime.now(timezone.utc)
+    token_count = _estimate_tokens(create.content)
+
+    embedding_str = _vec_to_pgvector(embedding) if embedding else None
+
+    await pool.execute(
+        """
+        INSERT INTO memories (
+            id, type, topic, content, source, confidence,
+            token_count, created_at, updated_at, accessed_at,
+            access_count, project_id, agent_id, embedding, status
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $8, $8,
+            0, $9, $10, $11, 'active'
+        )
+        """,
+        memory_id,
+        create.type.value,
+        create.topic,
+        create.content,
+        create.source.value,
+        create.confidence,
+        token_count,
+        now,
+        create.project_id,
+        create.agent_id,
+        embedding_str,
+    )
+
+    return Memory(
+        id=memory_id,
+        type=create.type,
+        topic=create.topic,
+        content=create.content,
+        source=create.source,
+        confidence=create.confidence,
+        token_count=token_count,
+        created_at=now,
+        updated_at=now,
+        accessed_at=now,
+        access_count=0,
+        project_id=create.project_id,
+        agent_id=create.agent_id,
+        status=MemoryStatus.active,
+    )
+
+
+async def get_memory(pool: asyncpg.Pool, memory_id: str) -> Memory | None:
+    """Fetch a single memory by ID. Returns None if not found."""
+    row = await pool.fetchrow("SELECT * FROM memories WHERE id = $1", memory_id)
+    if not row:
+        return None
+    return _row_to_memory(row)
+
+
+async def list_memories(
+    pool: asyncpg.Pool,
+    *,
+    status: MemoryStatus | None = MemoryStatus.active,
+    memory_type: MemoryType | None = None,
+    topic: str | None = None,
+    project_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Memory]:
+    """List memories with optional filters."""
+    conditions = []
+    params: list = []
+    idx = 1
+
+    if status:
+        conditions.append(f"status = ${idx}")
+        params.append(status.value)
+        idx += 1
+
+    if memory_type:
+        conditions.append(f"type = ${idx}")
+        params.append(memory_type.value)
+        idx += 1
+
+    if topic:
+        conditions.append(f"${idx} = ANY(topic)")
+        params.append(topic)
+        idx += 1
+
+    if project_id is not None:
+        conditions.append(f"project_id = ${idx}")
+        params.append(project_id)
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT * FROM memories {where}
+        ORDER BY updated_at DESC
+        LIMIT ${idx} OFFSET ${idx + 1}
+    """
+    params.extend([limit, offset])
+
+    rows = await pool.fetch(query, *params)
+    return [_row_to_memory(r) for r in rows]
+
+
+async def search_by_vector(
+    pool: asyncpg.Pool,
+    embedding: list[float],
+    *,
+    limit: int = 10,
+    threshold: float = 0.0,
+    status: MemoryStatus | None = MemoryStatus.active,
+    topic: str | None = None,
+    project_id: str | None = None,
+) -> list[MemoryRecall]:
+    """Search memories by vector similarity (cosine distance)."""
+    conditions = ["embedding IS NOT NULL"]
+    params: list = []
+    idx = 1
+
+    embedding_str = _vec_to_pgvector(embedding)
+    params.append(embedding_str)
+    idx += 1  # $1 = embedding
+
+    if status:
+        conditions.append(f"status = ${idx}")
+        params.append(status.value)
+        idx += 1
+
+    if topic:
+        conditions.append(f"${idx} = ANY(topic)")
+        params.append(topic)
+        idx += 1
+
+    if project_id is not None:
+        conditions.append(f"project_id = ${idx}")
+        params.append(project_id)
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    query = f"""
+        SELECT *,
+               1 - (embedding <=> $1::vector) AS similarity
+        FROM memories
+        {where}
+        ORDER BY embedding <=> $1::vector
+        LIMIT ${idx}
+    """
+    params.append(limit)
+
+    rows = await pool.fetch(query, *params)
+
+    results = []
+    for row in rows:
+        sim = float(row["similarity"])
+        if sim >= threshold:
+            memory = _row_to_memory(row)
+            results.append(MemoryRecall(memory=memory, similarity=sim))
+    return results
+
+
+async def update_memory(
+    pool: asyncpg.Pool,
+    memory_id: str,
+    *,
+    content: str | None = None,
+    confidence: float | None = None,
+    status: MemoryStatus | None = None,
+    topic: list[str] | None = None,
+    embedding: list[float] | None = None,
+) -> Memory | None:
+    """Update mutable fields of a memory. Returns updated Memory or None."""
+    sets = ["updated_at = now()"]
+    params: list = []
+    idx = 1
+
+    if content is not None:
+        sets.append(f"content = ${idx}")
+        params.append(content)
+        idx += 1
+        sets.append(f"token_count = ${idx}")
+        params.append(_estimate_tokens(content))
+        idx += 1
+
+    if confidence is not None:
+        sets.append(f"confidence = ${idx}")
+        params.append(confidence)
+        idx += 1
+
+    if status is not None:
+        sets.append(f"status = ${idx}")
+        params.append(status.value)
+        idx += 1
+
+    if topic is not None:
+        sets.append(f"topic = ${idx}")
+        params.append(topic)
+        idx += 1
+
+    if embedding is not None:
+        sets.append(f"embedding = ${idx}")
+        params.append(_vec_to_pgvector(embedding))
+        idx += 1
+
+    set_clause = ", ".join(sets)
+    params.append(memory_id)
+
+    row = await pool.fetchrow(
+        f"UPDATE memories SET {set_clause} WHERE id = ${idx} RETURNING *",
+        *params,
+    )
+    return _row_to_memory(row) if row else None
+
+
+async def delete_memory(pool: asyncpg.Pool, memory_id: str, *, hard: bool = False) -> bool:
+    """Delete a memory. Soft-delete (archive) by default, hard-delete if specified."""
+    if hard:
+        result = await pool.execute("DELETE FROM memories WHERE id = $1", memory_id)
+    else:
+        result = await pool.execute(
+            "UPDATE memories SET status = 'archived', updated_at = now() WHERE id = $1",
+            memory_id,
+        )
+    return result.split()[-1] != "0"
+
+
+async def touch_memory(pool: asyncpg.Pool, memory_id: str) -> None:
+    """Update accessed_at and increment access_count."""
+    await pool.execute(
+        """
+        UPDATE memories
+        SET accessed_at = now(), access_count = access_count + 1
+        WHERE id = $1
+        """,
+        memory_id,
+    )
+
+
+# --- Relationships ---
+
+
+async def add_relationship(
+    pool: asyncpg.Pool,
+    source_id: str,
+    target_id: str,
+    relation: RelationType,
+) -> MemoryRelationship:
+    """Create a relationship between two memories."""
+    now = datetime.now(timezone.utc)
+    await pool.execute(
+        """
+        INSERT INTO memory_relationships (source_id, target_id, relation, created_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (source_id, target_id, relation) DO NOTHING
+        """,
+        source_id,
+        target_id,
+        relation.value,
+        now,
+    )
+    return MemoryRelationship(
+        source_id=source_id,
+        target_id=target_id,
+        relation=relation,
+        created_at=now,
+    )
+
+
+async def get_relationships(
+    pool: asyncpg.Pool,
+    memory_id: str,
+    *,
+    relation: RelationType | None = None,
+) -> list[MemoryRelationship]:
+    """Get all relationships for a memory (as source or target)."""
+    if relation:
+        rows = await pool.fetch(
+            """
+            SELECT * FROM memory_relationships
+            WHERE (source_id = $1 OR target_id = $1) AND relation = $2
+            """,
+            memory_id,
+            relation.value,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT * FROM memory_relationships WHERE source_id = $1 OR target_id = $1",
+            memory_id,
+        )
+    return [
+        MemoryRelationship(
+            source_id=r["source_id"],
+            target_id=r["target_id"],
+            relation=RelationType(r["relation"]),
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+
+
+async def remove_relationship(
+    pool: asyncpg.Pool,
+    source_id: str,
+    target_id: str,
+    relation: RelationType,
+) -> bool:
+    """Remove a specific relationship. Returns True if deleted."""
+    result = await pool.execute(
+        """
+        DELETE FROM memory_relationships
+        WHERE source_id = $1 AND target_id = $2 AND relation = $3
+        """,
+        source_id,
+        target_id,
+        relation.value,
+    )
+    return result.split()[-1] != "0"
+
+
+# --- Stats ---
+
+
+async def get_stats(pool: asyncpg.Pool) -> dict:
+    """Get memory statistics."""
+    total = await pool.fetchval("SELECT COUNT(*) FROM memories")
+    by_status = await pool.fetch(
+        "SELECT status, COUNT(*) as count FROM memories GROUP BY status"
+    )
+    by_type = await pool.fetch(
+        "SELECT type, COUNT(*) as count FROM memories WHERE status = 'active' GROUP BY type"
+    )
+    by_topic = await pool.fetch(
+        """
+        SELECT unnest(topic) as topic, COUNT(*) as count
+        FROM memories WHERE status = 'active'
+        GROUP BY topic ORDER BY count DESC LIMIT 20
+        """
+    )
+    recent = await pool.fetch(
+        "SELECT id, content, accessed_at FROM memories WHERE status = 'active' ORDER BY accessed_at DESC LIMIT 5"
+    )
+
+    return {
+        "total": total,
+        "by_status": {r["status"]: r["count"] for r in by_status},
+        "by_type": {r["type"]: r["count"] for r in by_type},
+        "top_topics": {r["topic"]: r["count"] for r in by_topic},
+        "recently_accessed": [
+            {"id": r["id"], "content": r["content"][:80], "accessed_at": r["accessed_at"].isoformat()}
+            for r in recent
+        ],
+    }
+
+
+# --- Helpers ---
+
+
+def _vec_to_pgvector(vec: list[float]) -> str:
+    """Convert a list of floats to pgvector string format."""
+    return "[" + ",".join(str(v) for v in vec) + "]"
+
+
+def _row_to_memory(row: asyncpg.Record) -> Memory:
+    """Convert a database row to a Memory model."""
+    return Memory(
+        id=row["id"],
+        type=MemoryType(row["type"]),
+        topic=list(row["topic"]) if row["topic"] else [],
+        content=row["content"],
+        source=row["source"],
+        confidence=row["confidence"],
+        token_count=row["token_count"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        accessed_at=row["accessed_at"],
+        access_count=row["access_count"],
+        project_id=row["project_id"],
+        agent_id=row["agent_id"],
+        status=MemoryStatus(row["status"]),
+    )
