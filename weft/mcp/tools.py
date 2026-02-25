@@ -92,6 +92,29 @@ async def weft_forget(
 
 
 @mcp.tool()
+async def weft_revise(
+    ctx: Context,
+    memory_id: str,
+    new_content: str,
+    new_confidence: float | None = None,
+    new_topic: list[str] | None = None,
+) -> dict:
+    """Update a memory's content, creating a new version that supersedes the old one."""
+    from weft.revise import revise_memory
+
+    app: AppContext = ctx.request_context.lifespan_context
+    embedding = await app.embedding.embed(new_content)
+    new, old = await revise_memory(
+        app.pool, memory_id, new_content,
+        embedding=embedding, new_confidence=new_confidence, new_topic=new_topic,
+    )
+    await app.cache.set_memory(new)
+    await app.cache.invalidate_memory(old.id)
+    await app.cache.invalidate_stats()
+    return {"new": new.to_dict(), "superseded": old.to_dict()}
+
+
+@mcp.tool()
 async def weft_status(ctx: Context) -> dict:
     """Memory statistics: total, by topic, by type, by confidence, recently accessed."""
     app: AppContext = ctx.request_context.lifespan_context
