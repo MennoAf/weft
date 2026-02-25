@@ -44,3 +44,39 @@ Collected during Weft project setup and Phase 1 decomposition.
 
 ### 9. `loom_ready` should filter dead-lettered tasks by default
 - Even if the status bug is fixed, `loom_ready` should have an explicit `exclude_dead_letter=True` default
+
+## Process Observations (Phase 1 Build)
+
+Context: Phase 1 was built by a single orchestrator agent (Warp) working sequentially rather than the intended multi-agent pattern where Warp dispatches to subagents. Some observations are specific to this solo-agent usage, but others apply to multi-agent too.
+
+### 10. Auto-close parent epics when all children complete
+- All 5 Phase 1 epics remain in `epic` status despite every child task being done
+- The orchestrator shouldn't have to manually track and close epics — when the last child completes, the epic should auto-transition to `done`
+- In a multi-agent workflow, the orchestrator may not even know when the last subagent finishes a child — auto-close prevents orphaned epics
+
+### 11. Decompose generates flat dependency-free lists within epics
+- Every sub-task decomposition produced tasks with `depends_on: []` — no inter-task ordering
+- In a multi-agent build, this is dangerous: all tasks appear ready simultaneously, and a subagent could claim "Postgres CRUD" before "Pydantic Models" is done
+- **The decompose LLM has enough context to infer ordering** (e.g., task B mentions files from task A). It should wire up `depends_on` edges automatically within the epic
+- This is the same underlying issue as bug #4, but at the intra-epic level rather than cross-epic
+
+### 12. `loom_done` requires claim-first — no shortcut for orchestrator cleanup
+- When the orchestrator builds something that covers multiple tasks, it has to claim → done each one sequentially. `loom_batch_done` exists but requires them to be claimed first
+- **Suggestion:** Allow `loom_done` on `pending` tasks directly (or add a `loom_batch_resolve` that claims+completes atomically), so the orchestrator can close out work without the ceremony
+
+### 13. Decompose granularity could be configurable
+- Decompose produced 23 leaf tasks for Phase 1 — appropriate granularity for dispatching to subagents, but verbose for solo work
+- A `granularity` parameter (e.g., `coarse` / `fine` / `subagent-sized`) would let the orchestrator tune task size to the execution model
+- For multi-agent: fine-grained is correct (one task per subagent unit of work)
+- For single-agent or orchestrator-does-it-all: coarser tasks reduce bookkeeping
+
+### 14. Subagent dispatch guidance in decomposed tasks
+- The decomposed tasks include `context.files` and `context.description`, which is great for subagents
+- Missing: **explicit instructions for the subagent** — what to build, what constraints to follow, what to test
+- The `done_when` field partially covers this, but a dedicated `instructions` or `prompt` field in task context would make it trivial for the orchestrator to pass the task directly to a subagent via the Task tool
+- Currently the orchestrator has to synthesize context + done_when + project knowledge into a subagent prompt manually
+
+### 15. No "wave" or "batch dispatch" concept
+- The natural multi-agent pattern is: find all ready tasks → dispatch N subagents in parallel → wait for completion → repeat
+- Loom supports the primitives (`loom_ready` → `loom_batch_claim`) but there's no higher-level "dispatch a wave" operation
+- **Suggestion:** A `loom_orchestrate` or `loom_dispatch_wave` tool that returns the current ready set grouped by parallelizability, making it easy for the orchestrator to know which tasks can run simultaneously vs. which should be sequenced
