@@ -115,6 +115,37 @@ def status():
 
 
 @cli.command()
+@click.option("--dry-run", is_flag=True, help="Show what would happen without making changes")
+def consolidate(dry_run: bool):
+    """Run memory consolidation: decay, deduplicate, flag contradictions."""
+    from rich.console import Console
+
+    async def _consolidate():
+        import asyncpg
+        from weft.consolidation import consolidate as run_consolidation
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        report = await run_consolidation(pool, dry_run=dry_run)
+        await pool.close()
+        return report
+
+    report = asyncio.run(_consolidate())
+    console = Console()
+
+    prefix = "[dim](dry run)[/dim] " if dry_run else ""
+    console.print(f"\n[bold]{prefix}Consolidation Report[/bold]\n")
+    console.print(f"Decayed: {len(report.decayed)}")
+    console.print(f"Duplicates merged: {len(report.duplicates_merged)}")
+    console.print(f"Contradictions flagged: {len(report.contradictions_flagged)}")
+
+    if report.errors:
+        console.print(f"\n[red]Errors: {len(report.errors)}[/red]")
+        for err in report.errors:
+            console.print(f"  - {err}")
+
+
+@cli.command()
 @click.argument("query")
 @click.option("--limit", "-n", default=5, help="Number of results")
 @click.option("--topic", "-t", default=None, help="Filter by topic")

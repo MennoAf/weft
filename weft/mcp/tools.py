@@ -29,6 +29,7 @@ async def weft_remember(
     confidence: float = 0.7,
     project_id: str | None = None,
     agent_id: str | None = None,
+    check_contradictions: bool = True,
 ) -> dict:
     """Store a new memory with type, topics, content, confidence, and source."""
     app: AppContext = ctx.request_context.lifespan_context
@@ -45,7 +46,13 @@ async def weft_remember(
     memory = await store_memory(app.pool, create, embedding=embedding)
     await app.cache.set_memory(memory)
     await app.cache.invalidate_stats()
-    return memory.to_dict()
+    result = memory.to_dict()
+    if check_contradictions and embedding:
+        from weft.consolidation import check_contradictions_on_store
+        warnings = await check_contradictions_on_store(app.pool, memory.id, embedding)
+        if warnings:
+            result["contradiction_warnings"] = warnings
+    return result
 
 
 @mcp.tool()
@@ -167,6 +174,16 @@ async def weft_relate(
         return {"memory_id": memory_id, "target_id": target_id, "relation": relation, "removed": removed}
     else:
         return {"error": f"Unknown action: {action}. Use 'add', 'get', or 'remove'."}
+
+
+@mcp.tool()
+async def weft_consolidate(ctx: Context, dry_run: bool = False) -> dict:
+    """Run consolidation: decay stale memories, merge duplicates, flag contradictions."""
+    from weft.consolidation import consolidate
+    app: AppContext = ctx.request_context.lifespan_context
+    report = await consolidate(app.pool, dry_run=dry_run)
+    await app.cache.invalidate_stats()
+    return report.to_dict()
 
 
 @mcp.tool()

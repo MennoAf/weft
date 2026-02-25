@@ -51,7 +51,7 @@ class ConsolidationConfig:
     decay: DecayConfig = field(default_factory=DecayConfig)
     duplicate_threshold: float = 0.95
     contradiction_similarity_min: float = 0.7
-    contradiction_similarity_max: float = 0.95
+    contradiction_similarity_max: float = 0.99
     max_candidates: int = 100
 
 
@@ -237,7 +237,7 @@ async def find_contradictions(
     pool: asyncpg.Pool,
     *,
     sim_min: float = 0.7,
-    sim_max: float = 0.95,
+    sim_max: float = 0.99,
     dry_run: bool = False,
 ) -> list[tuple[str, str]]:
     """Find memories that may contradict each other.
@@ -388,7 +388,7 @@ async def check_contradictions_on_store(
     embedding: list[float],
     *,
     sim_min: float = 0.7,
-    sim_max: float = 0.95,
+    sim_max: float = 0.99,
 ) -> list[dict]:
     """Check if a newly stored memory contradicts existing ones.
 
