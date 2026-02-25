@@ -1,0 +1,59 @@
+"""Smoke tests — verify core infrastructure works."""
+
+from __future__ import annotations
+
+import pytest
+
+
+async def test_pool_connects(pool):
+    """Verify asyncpg pool connects and migrations ran."""
+    result = await pool.fetchval("SELECT COUNT(*) FROM memories")
+    assert result == 0
+
+
+async def test_tables_exist(pool):
+    """Verify all expected tables were created by migrations."""
+    tables = await pool.fetch(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+    )
+    names = {t["tablename"] for t in tables}
+    assert "memories" in names
+    assert "memory_relationships" in names
+    assert "schema_migrations" in names
+
+
+async def test_pgvector_enabled(pool):
+    """Verify pgvector extension is loaded."""
+    version = await pool.fetchval(
+        "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+    )
+    assert version is not None
+
+
+async def test_redis_connects(redis_conn):
+    """Verify Redis connection works."""
+    await redis_conn.set("test_key", "test_value")
+    val = await redis_conn.get("test_key")
+    assert val == "test_value"
+
+
+async def test_embedding_provider():
+    """Verify FastEmbed provider generates correct dimensions."""
+    from weft.embeddings import get_provider
+
+    provider = get_provider("fastembed")
+    vec = await provider.embed("test embedding")
+    assert len(vec) == 384
+    assert all(isinstance(v, float) for v in vec)
+
+
+async def test_memory_model():
+    """Verify Pydantic model creation and serialization."""
+    from weft.models import Memory, MemoryType
+
+    m = Memory(type=MemoryType.fact, content="test memory", topic=["test"])
+    assert m.id.startswith("weft-")
+    assert len(m.id) == 13  # "weft-" + 8 hex chars
+    d = m.to_dict()
+    assert d["type"] == "fact"
+    assert d["status"] == "active"
