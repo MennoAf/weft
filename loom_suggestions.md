@@ -1,6 +1,6 @@
 # Loom Feedback & Suggestions
 
-Collected during Weft project setup and Phase 1 decomposition.
+Collected during Weft project setup, Phase 1, and Phase 2 builds.
 
 ## Bugs
 
@@ -80,3 +80,29 @@ Context: Phase 1 was built by a single orchestrator agent (Warp) working sequent
 - The natural multi-agent pattern is: find all ready tasks → dispatch N subagents in parallel → wait for completion → repeat
 - Loom supports the primitives (`loom_ready` → `loom_batch_claim`) but there's no higher-level "dispatch a wave" operation
 - **Suggestion:** A `loom_orchestrate` or `loom_dispatch_wave` tool that returns the current ready set grouped by parallelizability, making it easy for the orchestrator to know which tasks can run simultaneously vs. which should be sequenced
+
+## Process Observations (Phase 2 Build)
+
+Context: Phase 2 was again built by a single orchestrator (Warp) working sequentially. 18 tasks across 6 epics, completed in 5 waves.
+
+### 16. Decompose still generates 0 dependency edges (Phase 2 confirms)
+- Phase 2 had 6 epics decomposed into 18 leaf tasks — every single decompose produced `dependency_edges: 0`
+- This is the same issue as #4 and #11, now confirmed across two full phases and 11 total decompositions
+- Had to manually wire 12 cross-task dependency edges again
+- **This is the single biggest friction point with Loom.** The orchestrator spends more time designing the DAG than building the features.
+
+### 17. Decompose generates incorrect file paths
+- **Observed:** Decompose produced `context.files` entries like `src/store.py`, `src/weft/mcp_tools.py`, `src/tools/weft_recall.py`
+- **Actual paths:** `weft/store.py`, `weft/mcp/tools.py`
+- **Impact:** In a multi-agent setup, subagents receiving these tasks would waste time looking for files that don't exist
+- **Root cause:** The decompose LLM guesses file paths without access to the actual codebase structure
+- **Suggestion:** Either pass the file tree to decompose (e.g., `loom_decompose(context="file tree: ...")`) or add a `loom_verify_paths` post-processing step that validates/corrects paths against the repo
+
+### 18. Task granularity mismatch — work naturally groups differently than decompose predicts
+- **Observed:** Several "Wave 2" tasks (Token Store Integration, MCP Filter Integration) were already done as part of Wave 1 because they were trivial 2-line extensions of the same file edit
+- **Impact:** Had to claim → immediate-done on tasks that were already complete, which is bookkeeping overhead
+- **Suggestion:** Either allow the orchestrator to merge tasks (`loom_merge [task1, task2]`) or make decompose smarter about grouping related edits to the same file into a single task
+
+### 19. Phase 1 epics still not auto-closed (confirming #10)
+- After Phase 2 completion, there are now 3 epics from Phase 1 still in `epic` status despite all children being done for the entire Phase 2 build cycle
+- Combined with 3 dead-lettered tasks showing as `pending`, the `loom_status` overview shows misleading numbers: `pending: 3, epic: 3` when the real state is `0 pending, 0 open epics`
