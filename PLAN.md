@@ -53,7 +53,7 @@ related_to:     [memory_id]     # Fuzzy association
 contradicts:    [memory_id]     # Conflict marker — needs resolution
 project_id:     string | null   # null = global memory, string = project-scoped
 agent_id:       string | null   # Which agent created this (for multi-agent setups)
-embedding:      vector(1536)    # For semantic retrieval (text-embedding-3-small dimension)
+embedding:      vector          # Dimension varies by provider (384/768/1536)
 status:         active | archived | decayed
 ```
 
@@ -78,12 +78,22 @@ Separate table (like Loom's `task_deps`) because relationships are many-to-many 
 
 ## Decisions (Not Open Questions)
 
-### 1. Embedding provider: OpenAI text-embedding-3-small
-- $0.02/1M tokens — effectively free for our scale
-- 1536 dimensions, good quality for retrieval
-- No torch dependency (unlike sentence-transformers)
-- Can swap to Anthropic if they release an embedding API
-- Abstracted behind an interface so the provider is pluggable
+### 1. Pluggable embedding providers
+- **Default: fastembed** (BAAI/bge-small-en-v1.5, 384d) — zero config, no API key, works offline, lightweight ONNX runtime
+- **Supported providers:** fastembed (local), Google text-embedding-004 (768d), OpenAI text-embedding-3-small (1536d), Anthropic (stub — no API yet)
+- Common protocol: `EmbeddingProvider.embed(text) -> list[float]` + batch variant
+- **Dimension strategy:** each provider uses its native dimensions. Switching providers triggers a one-time re-embed migration. At our scale (hundreds to low thousands of memories) this takes seconds.
+- Provider configured via `weft config set embedding.provider google` with API keys in env vars
+- No torch dependency — fastembed uses ONNX, API providers use their SDK
+
+```
+embeddings/
+  base.py          # EmbeddingProvider protocol
+  fastembed.py     # Default — BAAI/bge-small-en-v1.5 (384d)
+  google.py        # text-embedding-004 (768d)
+  openai.py        # text-embedding-3-small (1536d)
+  anthropic.py     # Stub — not yet available
+```
 
 ### 2. Start explicit, add auto-extraction later
 - Phase 1: Only `weft_remember` stores memories. Agent decides what's worth remembering.
@@ -100,12 +110,16 @@ Separate table (like Loom's `task_deps`) because relationships are many-to-many 
 - Diversity: after picking top candidates, deduplicate by topic so you don't get 10 memories about the same thing
 - Return memories in priority order with total token count
 
-### 5. Separate MCP server
+### 5. Dedicated infrastructure — two separate stacks
+- **Weft's own Postgres (with pgvector) + Redis** — not shared with Loom
+- Memory workloads are fundamentally different: vector indexes, cosine similarity, embedding caches
+- Loom's Postgres stays untouched — no pgvector extension, no memory tables, no coupling
+- `weft up` spins up Weft-specific containers (e.g., `pgvector/pgvector:pg16` + Redis)
+- `weft down` tears down only Weft's containers
+- Loom continues to manage its own infra independently
 - Weft runs as its own MCP server alongside Loom
 - Projects register both in `.mcp.json`: `"loom": {...}, "weft": {...}`
 - Clean separation of concerns: Loom = tasks, Weft = memory
-- Shared Postgres instance is fine (different tables, same migrations pattern)
-- Shared Redis instance is fine (different key prefixes)
 
 ### 6. Bootstrap from MEMORY.md
 - Phase 1 deliverable: `weft import` CLI command that parses existing MEMORY.md files
@@ -152,8 +166,11 @@ Agent (Claude Code)
   │     │     ├── Session context (current working set)
   │     │     └── Embedding cache (avoid re-computing)
   │     │
-  │     ├── embeddings.py → OpenAI API
-  │     │     └── text → vector, with local cache
+  │     ├── embeddings/ → Pluggable providers
+  │     │     ├── base.py (EmbeddingProvider protocol)
+  │     │     ├── fastembed.py (default, local ONNX)
+  │     │     ├── google.py / openai.py / anthropic.py
+  │     │     └── Embedding cache (avoid re-computing)
   │     │
   │     ├── relevance.py → Scoring engine
   │     │     └── relevance * confidence * recency * frequency → budget packing
@@ -171,7 +188,7 @@ Agent (Claude Code)
 |--------|------|
 | `store.py` | ONLY writer to Postgres for memory data |
 | `cache.py` | ONLY reader from Redis for memory data; falls back to store.py |
-| `embeddings.py` | ONLY module that calls the embedding API |
+| `embeddings/` | ONLY module(s) that call embedding APIs; all go through `base.py` protocol |
 | `mcp/tools.py` | Each tool ≤15 lines; thin coordinators only |
 | `db/migrations/` | Never modify existing files; always add new numbered ones |
 
@@ -191,13 +208,14 @@ Agent (Claude Code)
 ## Build Phases
 
 ### Phase 1: Foundation (MVP)
+- Project scaffold: `pyproject.toml`, package structure, docker-compose (pgvector/pgvector:pg16 + Redis)
 - Data model + migrations (Postgres + pgvector)
 - `store.py` — CRUD for memories and relationships
 - `cache.py` — Redis caching layer
-- `embeddings.py` — OpenAI embedding client with cache
+- `embeddings/` — Pluggable provider interface + fastembed default (BAAI/bge-small-en-v1.5)
 - MCP tools: `weft_remember`, `weft_recall`, `weft_forget`, `weft_status`
 - CLI: `weft up`, `weft down`, `weft status`, `weft recall`
-- Tests: testcontainers, same pattern as Loom
+- Tests: testcontainers (pgvector image), same pattern as Loom
 - **Validation**: Store 10 memories, recall by query, verify semantic search works
 
 ### Phase 2: Retrieval & Context
@@ -225,10 +243,14 @@ Agent (Claude Code)
 
 ## Build Strategy
 
-Use Loom to orchestrate building Weft:
+Use Loom to orchestrate building Weft, **one phase at a time**:
 1. `loom_create_project` → "weft"
-2. Feed this plan into `loom_decompose`
-3. Multi-agent build using Loom's worktree pattern (3 agents per wave)
-4. Weft's own tests validate memory operations
-5. When Phase 2 is done, import Warp's MEMORY.md as the first real user
-6. When Phase 4 is done, register Weft in Loom's `.mcp.json` and retire the flat MEMORY.md files
+2. Decompose only the current phase via `loom_decompose` — do NOT decompose all phases at once
+3. Build, test, validate the current phase
+4. Once validated, decompose the next phase
+5. Multi-agent build using Loom's worktree pattern (3 agents per wave)
+6. Weft's own tests validate memory operations
+7. When Phase 2 is done, import Warp's MEMORY.md as the first real user
+8. When Phase 4 is done, register Weft in Loom's `.mcp.json` and retire the flat MEMORY.md files
+
+This incremental approach lets us identify issues early, adjust the plan between phases, and avoid decomposing work that may change based on Phase 1 learnings.
