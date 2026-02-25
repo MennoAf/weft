@@ -5,11 +5,14 @@ from __future__ import annotations
 from fastmcp import Context
 
 from weft.mcp.server import AppContext, mcp
-from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType
+from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType, RelationType
 from weft.store import (
+    add_relationship,
     delete_memory,
+    get_relationships,
     get_stats,
     list_memories,
+    remove_relationship,
     search_by_vector,
     store_memory,
     touch_memory,
@@ -139,6 +142,31 @@ async def weft_revise(
     await app.cache.invalidate_memory(old.id)
     await app.cache.invalidate_stats()
     return {"new": new.to_dict(), "superseded": old.to_dict()}
+
+
+@mcp.tool()
+async def weft_relate(
+    ctx: Context,
+    action: str,
+    memory_id: str,
+    target_id: str | None = None,
+    relation: str | None = None,
+) -> dict:
+    """Manage relationships between memories: add, get, or remove."""
+    app: AppContext = ctx.request_context.lifespan_context
+    if action == "add":
+        rel = await add_relationship(app.pool, source_id=memory_id, target_id=target_id, relation=RelationType(relation))
+        return {"source_id": rel.source_id, "target_id": rel.target_id, "relation": rel.relation.value, "created_at": rel.created_at.isoformat()}
+    elif action == "get":
+        rels = await get_relationships(app.pool, memory_id, relation=RelationType(relation) if relation else None)
+        return {"memory_id": memory_id, "count": len(rels), "relationships": [
+            {"source_id": r.source_id, "target_id": r.target_id, "relation": r.relation.value, "created_at": r.created_at.isoformat()} for r in rels
+        ]}
+    elif action == "remove":
+        removed = await remove_relationship(app.pool, source_id=memory_id, target_id=target_id, relation=RelationType(relation))
+        return {"memory_id": memory_id, "target_id": target_id, "relation": relation, "removed": removed}
+    else:
+        return {"error": f"Unknown action: {action}. Use 'add', 'get', or 'remove'."}
 
 
 @mcp.tool()
