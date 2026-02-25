@@ -92,6 +92,33 @@ async def weft_forget(
 
 
 @mcp.tool()
+async def weft_context(
+    ctx: Context,
+    query: str,
+    budget_tokens: int = 4000,
+    topic: str | None = None,
+    type: str | None = None,
+    project_id: str | None = None,
+    max_per_topic: int = 3,
+) -> dict:
+    """Budget-aware context loading: best memories for a situation within N tokens."""
+    from weft.context import build_context
+
+    app: AppContext = ctx.request_context.lifespan_context
+    memory_type = MemoryType(type) if type else None
+    embedding = await app.embedding.embed(query)
+    result = await build_context(
+        app.pool, embedding,
+        budget_tokens=budget_tokens, max_per_topic=max_per_topic,
+        memory_type=memory_type, topic=topic, project_id=project_id,
+    )
+    # Touch the memories that made it into context
+    for mem_dict in result["memories"]:
+        await touch_memory(app.pool, mem_dict["id"])
+    return result
+
+
+@mcp.tool()
 async def weft_revise(
     ctx: Context,
     memory_id: str,
