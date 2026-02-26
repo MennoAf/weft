@@ -201,6 +201,25 @@ async def weft_feedback(
 
 
 @mcp.tool()
+async def weft_prime(
+    ctx: Context,
+    project_id: str | None = None,
+    budget_tokens: int = 4000,
+    recent_days: int = 7,
+) -> dict:
+    """Session primer: assemble structured context with preferences, recent work, and relevant memories."""
+    from weft.primer import build_primer
+
+    app: AppContext = ctx.request_context.lifespan_context
+    return await build_primer(
+        app.pool,
+        project_id=project_id,
+        budget_tokens=budget_tokens,
+        recent_days=recent_days,
+    )
+
+
+@mcp.tool()
 async def weft_status(ctx: Context) -> dict:
     """Memory statistics: total, by topic, by type, by confidence, recently accessed."""
     app: AppContext = ctx.request_context.lifespan_context
