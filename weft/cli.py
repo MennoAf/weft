@@ -21,6 +21,13 @@ def cli():
     pass
 
 
+@cli.command(name="mcp")
+def mcp_server():
+    """Start the Weft MCP server (stdio transport)."""
+    from weft.mcp import mcp
+    mcp.run()
+
+
 @cli.command()
 def up():
     """Start Weft infrastructure (Postgres + Redis) and run migrations."""
