@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import asyncpg
+
 from weft.models import MemoryCreate, MemorySource, MemoryType
 
 # Stop words to exclude from topic extraction
@@ -180,3 +182,90 @@ def parse_memory_md_text(text: str) -> ParseResult:
         )
 
     return result
+
+
+# --- Import with embeddings and dedup ---
+
+
+@dataclass
+class ImportReport:
+    """Result of importing memories into the store."""
+
+    stored: int = 0
+    skipped_duplicate: int = 0
+    skipped_empty: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+async def import_memories(
+    pool: asyncpg.Pool,
+    provider: "EmbeddingProvider",  # noqa: F821 — string annotation to avoid circular import
+    creates: list[MemoryCreate],
+    *,
+    project_id: str | None = None,
+    dry_run: bool = False,
+    similarity_threshold: float = 0.95,
+) -> ImportReport:
+    """Import parsed memories into the store with embedding generation and dedup.
+
+    For each MemoryCreate:
+    1. Generate embedding
+    2. Search for near-duplicates (similarity > threshold)
+    3. Skip if duplicate found
+    4. Otherwise store the memory with its embedding
+
+    Args:
+        pool: Database connection pool
+        provider: Embedding provider for vectorization
+        creates: List of MemoryCreate objects from parser
+        project_id: Optional project_id to assign to all memories
+        dry_run: If True, report what would happen without storing
+        similarity_threshold: Cosine similarity threshold for dedup (default 0.95)
+
+    Returns:
+        ImportReport with counts and any errors
+    """
+    from weft.store import search_by_vector, store_memory
+
+    report = ImportReport()
+
+    for create in creates:
+        if not create.content.strip():
+            report.skipped_empty += 1
+            continue
+
+        try:
+            # Override project_id if provided
+            if project_id is not None:
+                create = MemoryCreate(
+                    type=create.type,
+                    content=create.content,
+                    topic=create.topic,
+                    source=create.source,
+                    confidence=create.confidence,
+                    project_id=project_id,
+                    agent_id=create.agent_id,
+                )
+
+            # Generate embedding
+            embedding = await provider.embed(create.content)
+
+            # Check for near-duplicates
+            dupes = await search_by_vector(
+                pool,
+                embedding,
+                limit=1,
+                threshold=similarity_threshold,
+            )
+            if dupes:
+                report.skipped_duplicate += 1
+                continue
+
+            if not dry_run:
+                await store_memory(pool, create, embedding=embedding)
+            report.stored += 1
+
+        except Exception as e:
+            report.errors.append(f"Error importing '{create.content[:50]}...': {e}")
+
+    return report

@@ -35,6 +35,7 @@ def _make_scored(
         confidence_factor=1.0,
         recency_factor=1.0,
         frequency_factor=1.0,
+        usefulness_factor=1.0,
         score=score,
     )
 

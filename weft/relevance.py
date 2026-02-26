@@ -1,7 +1,7 @@
 """Relevance scoring engine — pure functions, no DB access.
 
 Combines multiple signals into a unified relevance score:
-  final_score = similarity * confidence_factor * recency_factor * frequency_factor
+  final_score = similarity * confidence_factor * recency_factor * frequency_factor * usefulness_factor
 
 All functions operate on Memory model fields + similarity from SearchResult.
 """
@@ -33,6 +33,7 @@ class ScoredMemory:
     confidence_factor: float
     recency_factor: float
     frequency_factor: float
+    usefulness_factor: float
     score: float
 
     def to_dict(self) -> dict:
@@ -88,6 +89,15 @@ def frequency_factor(
     return 1.0 + (boost_max * raw)
 
 
+def usefulness_factor(usefulness_score: float) -> float:
+    """Usefulness feedback factor. Range [0.5, 1.0].
+
+    Maps usefulness_score (0.0-1.0) to a factor that modestly penalizes
+    low-usefulness memories without being too aggressive.
+    """
+    return 0.5 + 0.5 * max(0.0, min(1.0, usefulness_score))
+
+
 def score_memory(
     recall: MemoryRecall,
     *,
@@ -109,8 +119,9 @@ def score_memory(
         boost_max=w.frequency_boost_max,
         boost_scale=w.frequency_boost_scale,
     )
+    uf = usefulness_factor(mem.usefulness_score)
 
-    final = recall.similarity * cf * rf * ff
+    final = recall.similarity * cf * rf * ff * uf
 
     return ScoredMemory(
         memory=mem,
@@ -118,6 +129,7 @@ def score_memory(
         confidence_factor=cf,
         recency_factor=rf,
         frequency_factor=ff,
+        usefulness_factor=uf,
         score=final,
     )
 

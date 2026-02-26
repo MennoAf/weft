@@ -180,6 +180,56 @@ def export_cmd(fmt: str, memory_type: str | None, topic: str | None, status: str
         click.echo(result)
 
 
+@cli.command(name="import")
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--dry-run", is_flag=True, help="Show what would be imported without storing")
+@click.option("--project-id", default=None, help="Assign project ID to imported memories")
+def import_cmd(file: str, dry_run: bool, project_id: str | None):
+    """Import memories from a MEMORY.md file."""
+    from weft.importer import import_memories, parse_memory_md
+
+    # Parse the file first
+    parsed = parse_memory_md(file)
+    click.echo(f"Parsed {len(parsed.memories)} memories from {file}")
+    if parsed.skipped:
+        click.echo(f"Skipped {parsed.skipped} empty sections")
+
+    if not parsed.memories:
+        click.echo("Nothing to import.")
+        return
+
+    async def _import():
+        import asyncpg
+
+        from weft.embeddings import get_provider
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        provider = get_provider(config.embedding.provider)
+        report = await import_memories(
+            pool,
+            provider,
+            parsed.memories,
+            project_id=project_id,
+            dry_run=dry_run,
+        )
+        await pool.close()
+        return report
+
+    report = asyncio.run(_import())
+
+    prefix = "(dry run) " if dry_run else ""
+    click.echo(f"\n{prefix}Import Report:")
+    click.echo(f"  Stored: {report.stored}")
+    click.echo(f"  Duplicates skipped: {report.skipped_duplicate}")
+    if report.skipped_empty:
+        click.echo(f"  Empty skipped: {report.skipped_empty}")
+    if report.errors:
+        click.echo(f"  Errors: {len(report.errors)}")
+        for err in report.errors:
+            click.echo(f"    - {err}")
+
+
 @cli.command()
 @click.argument("query")
 @click.option("--limit", "-n", default=5, help="Number of results")
