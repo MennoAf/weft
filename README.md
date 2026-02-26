@@ -198,6 +198,7 @@ Return memory statistics: total count, breakdown by type/topic/status, recently 
 ## CLI Reference
 
 ```
+weft mcp                 Start the MCP server (stdio transport)
 weft up                  Start Postgres + Redis, run migrations
 weft down                Stop containers
 weft status              Show memory statistics
