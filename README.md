@@ -14,6 +14,7 @@ Current agent memory is a flat markdown file with no structure, no retrieval bey
 - **Cross-project sharing** with isolation (global memories visible everywhere, project-scoped memories stay private)
 - **Token-budget context assembly** so sessions start with the right 5% of knowledge
 - **Feedback loop** that adjusts relevance based on whether memories were actually helpful
+- **Fallback resilience** so agents still have memory access when infrastructure is down
 
 ## Quickstart
 
@@ -73,11 +74,12 @@ Then use Weft tools from any MCP-compatible client (Claude Desktop, Claude Code,
 │  weft_remember  weft_recall  weft_context   │
 │  weft_revise    weft_forget  weft_feedback  │
 │  weft_relate    weft_consolidate            │
-│  weft_prime     weft_status                 │
+│  weft_prime     weft_status  weft_extract   │
 ├─────────────────────────────────────────────┤
 │            Business Logic                   │
 │  store  relevance  context  primer          │
 │  consolidation  importer  exporter          │
+│  extract  fallback                          │
 ├─────────────────────────────────────────────┤
 │            Infrastructure                   │
 │  PostgreSQL + pgvector  │  Redis cache      │
@@ -189,6 +191,17 @@ Run the consolidation pipeline: decay stale memories, merge duplicates, flag con
 |-----------|------|---------|-------------|
 | `dry_run` | `bool` | `false` | Preview changes without applying |
 
+### weft_extract
+
+Extract memory candidates from a block of text using heuristic pattern matching. Returns proposals for review -- does NOT auto-store.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `text` | `str` | *required* | Text to extract candidates from |
+| `min_confidence` | `float` | `0.5` | Minimum confidence threshold for candidates |
+
+Returns `{ count, candidates }` where each candidate has `content`, `type`, `confidence`, `topic`, `source_line`.
+
 ### weft_status
 
 Return memory statistics: total count, breakdown by type/topic/status, recently accessed.
@@ -275,7 +288,7 @@ Both services include health checks. Data is persisted in named Docker volumes (
 
 ```bash
 uv sync                        # Install dependencies
-uv run pytest tests/ -v        # Run all tests (224 tests)
+uv run pytest tests/ -v        # Run all tests (249 tests)
 uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
