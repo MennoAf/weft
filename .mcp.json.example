@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "weft": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/weft", "python", "-m", "weft.mcp"],
+      "env": {}
+    }
+  }
+}
