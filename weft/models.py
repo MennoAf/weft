@@ -65,6 +65,8 @@ class Memory(BaseModel):
     project_id: str | None = None
     agent_id: str | None = None
     status: MemoryStatus = MemoryStatus.active
+    usefulness_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    usefulness_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""
@@ -72,6 +74,8 @@ class Memory(BaseModel):
         d["type"] = self.type.value
         d["source"] = self.source.value
         d["status"] = self.status.value
+        d["usefulness_score"] = self.usefulness_score
+        d["usefulness_count"] = self.usefulness_count
         return d
 
 
