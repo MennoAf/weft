@@ -14,6 +14,7 @@ from weft.relevance import (
     rank_memories,
     recency_factor,
     score_memory,
+    usefulness_factor,
 )
 
 NOW = datetime(2026, 2, 25, 12, 0, 0, tzinfo=timezone.utc)

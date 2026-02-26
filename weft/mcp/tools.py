@@ -12,6 +12,7 @@ from weft.store import (
     get_relationships,
     get_stats,
     list_memories,
+    record_feedback,
     remove_relationship,
     search_by_vector,
     store_memory,
@@ -184,6 +185,19 @@ async def weft_consolidate(ctx: Context, dry_run: bool = False) -> dict:
     report = await consolidate(app.pool, dry_run=dry_run)
     await app.cache.invalidate_stats()
     return report.to_dict()
+
+
+@mcp.tool()
+async def weft_feedback(
+    ctx: Context,
+    memory_id: str,
+    helpful: bool,
+) -> dict:
+    """Record whether a memory was helpful. Adjusts usefulness score for future ranking."""
+    app: AppContext = ctx.request_context.lifespan_context
+    result = await record_feedback(app.pool, memory_id, helpful)
+    await app.cache.invalidate_memory(memory_id)
+    return result
 
 
 @mcp.tool()
