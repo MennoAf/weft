@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import click
 
-from weft.config import load_config
+from weft.config import CONFIG_PATH, load_config, load_config_file, save_config_value
 
 COMPOSE_FILE = Path(__file__).parent.parent / "docker-compose.weft.yml"
 
@@ -145,6 +146,40 @@ def consolidate(dry_run: bool):
             console.print(f"  - {err}")
 
 
+@cli.command(name="export")
+@click.option("--format", "-f", "fmt", type=click.Choice(["md", "json"]), default="md", help="Output format")
+@click.option("--type", "-t", "memory_type", default=None, help="Filter by memory type")
+@click.option("--topic", default=None, help="Filter by topic")
+@click.option("--status", "-s", default="active", help="Filter by status")
+@click.option("--output", "-o", "output_file", default=None, type=click.Path(), help="Write to file instead of stdout")
+def export_cmd(fmt: str, memory_type: str | None, topic: str | None, status: str, output_file: str | None):
+    """Export memories as markdown or JSON."""
+
+    async def _export():
+        import asyncpg
+        from weft.exporter import export_memories
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        result = await export_memories(
+            pool,
+            format=fmt,
+            memory_type=memory_type,
+            topic=topic,
+            status=status,
+        )
+        await pool.close()
+        return result
+
+    result = asyncio.run(_export())
+
+    if output_file:
+        Path(output_file).write_text(result, encoding="utf-8")
+        click.echo(f"Exported to {output_file}")
+    else:
+        click.echo(result)
+
+
 @cli.command()
 @click.argument("query")
 @click.option("--limit", "-n", default=5, help="Number of results")
@@ -181,3 +216,90 @@ def recall(query: str, limit: int, topic: str | None):
         console.print(f"[bold]{i}.[/bold] [{m.type.value}] (sim={sim}, conf={m.confidence})")
         console.print(f"   {m.content[:120]}")
         console.print(f"   [dim]topics: {topics} | id: {m.id}[/dim]\n")
+
+
+@cli.group()
+def config():
+    """View and modify Weft configuration."""
+    pass
+
+
+@config.command()
+def show():
+    """Display current configuration as a table."""
+    from rich.console import Console
+    from rich.table import Table
+
+    cfg = load_config()
+    console = Console()
+
+    t = Table(title="Weft Configuration")
+    t.add_column("Key", style="bold")
+    t.add_column("Value")
+    t.add_column("Source", style="dim")
+
+    # Determine which keys are set in the TOML file vs env vars
+    toml_data = load_config_file()
+    toml_flat: set[str] = set()
+    for k, v in toml_data.items():
+        if isinstance(v, dict):
+            for sk in v:
+                toml_flat.add(f"{k}.{sk}")
+        else:
+            toml_flat.add(k)
+
+    env_keys: dict[str, str] = {
+        "database.url": "WEFT_DATABASE_URL",
+        "redis.url": "WEFT_REDIS_URL",
+        "embedding.provider": "WEFT_EMBEDDING_PROVIDER",
+        "embedding.model": "WEFT_EMBEDDING_MODEL",
+        "log_level": "WEFT_LOG_LEVEL",
+    }
+
+    def _source(key: str) -> str:
+        env_var = env_keys.get(key)
+        if env_var and os.environ.get(env_var):
+            return f"env ({env_var})"
+        if key in toml_flat:
+            return f"toml ({CONFIG_PATH})"
+        return "default"
+
+    rows = [
+        ("project_name", cfg.project_name),
+        ("log_level", cfg.log_level),
+        ("database.url", cfg.database.url),
+        ("database.pool_min_size", str(cfg.database.pool_min_size)),
+        ("database.pool_max_size", str(cfg.database.pool_max_size)),
+        ("redis.url", cfg.redis.url),
+        ("embedding.provider", cfg.embedding.provider),
+        ("embedding.model", cfg.embedding.model),
+        ("embedding.dimensions", str(cfg.embedding.dimensions)),
+        ("embedding.batch_size", str(cfg.embedding.batch_size)),
+        ("retrieval.default_top_k", str(cfg.retrieval.default_top_k)),
+        ("retrieval.similarity_threshold", str(cfg.retrieval.similarity_threshold)),
+        ("retrieval.context_budget_tokens", str(cfg.retrieval.context_budget_tokens)),
+        ("decay.enabled", str(cfg.decay.enabled)),
+        ("decay.half_life_days", str(cfg.decay.half_life_days)),
+        ("decay.floor_score", str(cfg.decay.floor_score)),
+    ]
+
+    for key, value in rows:
+        t.add_row(key, value, _source(key))
+
+    console.print(t)
+
+
+@config.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str):
+    """Persist a configuration value to ~/.weft/config.toml."""
+    from weft.config import _KEY_MAP
+
+    if key not in _KEY_MAP:
+        valid = ", ".join(sorted(_KEY_MAP.keys()))
+        click.echo(f"Error: Unknown config key '{key}'.\nValid keys: {valid}", err=True)
+        sys.exit(1)
+
+    save_config_value(key, value)
+    click.echo(f"Saved {key} = {value} to {CONFIG_PATH}")

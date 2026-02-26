@@ -120,7 +120,7 @@ async def list_memories(
         idx += 1
 
     if project_id is not None:
-        conditions.append(f"project_id = ${idx}")
+        conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
         idx += 1
 
@@ -172,7 +172,7 @@ async def search_by_vector(
         idx += 1
 
     if project_id is not None:
-        conditions.append(f"project_id = ${idx}")
+        conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
         idx += 1
 
@@ -274,6 +274,48 @@ async def touch_memory(pool: asyncpg.Pool, memory_id: str) -> None:
         """,
         memory_id,
     )
+
+
+async def record_feedback(
+    pool: asyncpg.Pool,
+    memory_id: str,
+    helpful: bool,
+    alpha: float = 0.3,
+) -> dict:
+    """Record usefulness feedback using exponential moving average.
+
+    new_score = alpha * signal + (1 - alpha) * old_score
+    where signal = 1.0 for helpful, 0.0 for not helpful.
+    """
+    row = await pool.fetchrow(
+        "SELECT usefulness_score, usefulness_count FROM memories WHERE id = $1",
+        memory_id,
+    )
+    if row is None:
+        raise ValueError(f"Memory {memory_id} not found")
+
+    old_score = float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0
+    signal = 1.0 if helpful else 0.0
+    new_score = alpha * signal + (1 - alpha) * old_score
+    new_score = max(0.0, min(1.0, new_score))
+    new_count = (row["usefulness_count"] or 0) + 1
+
+    await pool.execute(
+        """
+        UPDATE memories
+        SET usefulness_score = $1, usefulness_count = $2, updated_at = now()
+        WHERE id = $3
+        """,
+        new_score,
+        new_count,
+        memory_id,
+    )
+
+    return {
+        "memory_id": memory_id,
+        "usefulness_score": new_score,
+        "usefulness_count": new_count,
+    }
 
 
 # --- Relationships ---
@@ -417,4 +459,6 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         project_id=row["project_id"],
         agent_id=row["agent_id"],
         status=MemoryStatus(row["status"]),
+        usefulness_score=float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0,
+        usefulness_count=row["usefulness_count"] if row["usefulness_count"] is not None else 0,
     )
