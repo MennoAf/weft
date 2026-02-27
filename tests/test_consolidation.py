@@ -341,6 +341,43 @@ class TestContentConflicts:
             "JavaScript is popular for web development",
         )
 
+    def test_complementary_memories_not_flagged(self):
+        """Complementary memories about the same system should NOT be
+        flagged as contradictions, even if one uses negation words
+        or they contain different numbers."""
+        # Module contracts (has "NEVER") vs key modules list (no negation)
+        assert not _content_conflicts(
+            "Module Contracts: graph/store.py — ONLY writer to Postgres. "
+            "graph/cache.py — ONLY reader from Redis. "
+            "db/migrations/ — NEVER modify existing files, only add new ones.",
+            "Key Modules by Area: Orchestration: sweeper.py (claim TTL), "
+            "retry.py (retry + DLQ), loop.py (main loop). "
+            "Cloud: connections.py (Cloud SQL), secrets.py (GCP).",
+        )
+
+    def test_complementary_with_different_numbers_not_flagged(self):
+        """Different phases/metrics in long memories should not conflict."""
+        assert not _content_conflicts(
+            "Phase 6 Dogfooding: Complete — 71 tasks done across 8 rounds. "
+            "Loom built itself using 3 agents per round.",
+            "Phase 7 Orchestration Reliability: Complete — 739 tests passing. "
+            "6 streams merged: reset, escalation dedup, merge reliability.",
+        )
+
+    def test_same_metric_different_value_flagged(self):
+        """Same metric with different values should be flagged."""
+        assert _content_conflicts(
+            "pgvector version is 0.7.0",
+            "pgvector version is 0.8.1",
+        )
+
+    def test_short_negation_same_subject_flagged(self):
+        """Short, focused claims with opposing negation should be flagged."""
+        assert _content_conflicts(
+            "Redis supports clustering natively",
+            "Redis does not support clustering natively",
+        )
+
 
 class TestFindContradictions:
     """Integration tests for find_contradictions() against real DB + embeddings."""

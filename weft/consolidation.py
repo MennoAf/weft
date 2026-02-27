@@ -295,33 +295,75 @@ async def find_contradictions(
     return flagged
 
 
+_STOP_WORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+    "should", "may", "might", "must", "can", "could",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below",
+    "and", "but", "or", "if", "then", "else", "when", "while",
+    "that", "this", "these", "those", "it", "its",
+    "i", "we", "you", "he", "she", "they", "me", "us",
+})
+
+_NEGATION_WORDS = frozenset({
+    "not", "never", "no", "don't", "doesn't", "shouldn't",
+    "cannot", "can't", "without", "won't", "isn't", "aren't",
+})
+
+
+def _content_words(text: str, exclude: frozenset[str] = frozenset()) -> set[str]:
+    """Extract significant content words, excluding stop words and extras."""
+    return set(text.lower().split()) - _STOP_WORDS - exclude
+
+
+def _subject_overlap_ratio(content_a: str, content_b: str, exclude: frozenset[str] = frozenset()) -> float:
+    """Ratio of shared content words to the smaller set's size.
+
+    High ratio (>= 0.5) means both texts discuss the same specific subject.
+    Low ratio means they cover different aspects of a broader topic.
+    """
+    a = _content_words(content_a, exclude)
+    b = _content_words(content_b, exclude)
+    smaller = min(len(a), len(b))
+    if smaller == 0:
+        return 0.0
+    return len(a & b) / smaller
+
+
 def _content_conflicts(content_a: str, content_b: str) -> bool:
     """Heuristic check for conflicting content.
 
-    Looks for negation patterns, different numbers/versions, and
-    opposing statements.
+    Looks for negation patterns and different numbers/versions,
+    but only when both memories share strong subject overlap (>= 50%
+    of content words). This avoids false positives on complementary
+    memories about the same system that merely discuss different aspects.
     """
     a_lower = content_a.lower()
     b_lower = content_b.lower()
 
-    # Negation patterns: one has "not", "never", "don't", the other doesn't
-    negation_words = {"not", "never", "no", "don't", "doesn't", "shouldn't", "cannot", "can't", "without"}
-    a_negations = negation_words & set(a_lower.split())
-    b_negations = negation_words & set(b_lower.split())
-    if bool(a_negations) != bool(b_negations):
-        return True
+    a_words = set(a_lower.split())
+    b_words = set(b_lower.split())
 
-    # Version/number conflicts: different numbers in similar contexts
+    # --- Negation check ---
+    # One memory has negation words, the other doesn't.
+    # Only flag if they share strong subject overlap (same claim, opposite assertion).
+    a_negations = _NEGATION_WORDS & a_words
+    b_negations = _NEGATION_WORDS & b_words
+    if bool(a_negations) != bool(b_negations):
+        if _subject_overlap_ratio(a_lower, b_lower, _NEGATION_WORDS) >= 0.5:
+            return True
+
+    # --- Version/number check ---
+    # Different numbers in both memories.
+    # Only flag if they share strong subject overlap (same metric, different value).
     import re
 
     a_numbers = set(re.findall(r'\d+\.?\d*', a_lower))
     b_numbers = set(re.findall(r'\d+\.?\d*', b_lower))
     if a_numbers and b_numbers and a_numbers != b_numbers:
-        # Only flag if they share significant non-numeric words
-        a_words = set(a_lower.split()) - a_numbers
-        b_words = set(b_lower.split()) - b_numbers
-        overlap = a_words & b_words
-        if len(overlap) >= 3:
+        exclude = frozenset(a_numbers | b_numbers)
+        if _subject_overlap_ratio(a_lower, b_lower, exclude) >= 0.5:
             return True
 
     return False
@@ -387,7 +429,7 @@ async def check_contradictions_on_store(
     memory_id: str,
     embedding: list[float],
     *,
-    sim_min: float = 0.7,
+    sim_min: float = 0.8,
     sim_max: float = 0.99,
 ) -> list[dict]:
     """Check if a newly stored memory contradicts existing ones.
