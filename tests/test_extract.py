@@ -102,3 +102,49 @@ def test_extract_has_source_line():
     assert len(results) >= 1
     assert "source_line" in results[0]
     assert results[0]["source_line"] == text
+
+
+# --- Solution/learning patterns ---
+
+
+def test_extract_trick_was():
+    """Detects 'the trick was' pattern."""
+    text = "The trick was adding a keepalive ping to the connection pool"
+    results = extract_candidates(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "solution"
+
+
+def test_extract_had_to():
+    """Detects 'had to' pattern for workarounds."""
+    text = "Had to pin fastembed to 0.3.1 because 0.4.0 breaks the embedding dimensions"
+    results = extract_candidates(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "solution"
+
+
+def test_extract_watch_out():
+    """Detects gotcha/caveat patterns."""
+    text = "Watch out for asyncpg pool going stale after long idle periods"
+    results = extract_candidates(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "solution"
+
+
+def test_extract_turns_out():
+    """Detects 'turns out' discovery patterns."""
+    text = "Turns out the Ryuk reaper container needs explicit cleanup in conftest"
+    results = extract_candidates(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "solution"
+
+
+def test_extract_learned_from_task():
+    """Extracts multiple solution patterns from task-style notes."""
+    text = """The fix was using a background keepalive task that pings every 5 minutes
+Watch out for testcontainers leaving zombie containers on CI
+Had to add retry logic for the initial DB connection on startup"""
+    results = extract_candidates(text)
+    assert len(results) >= 2
+    types = [r["type"] for r in results]
+    assert all(t == "solution" for t in types)

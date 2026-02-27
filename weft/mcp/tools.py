@@ -355,3 +355,61 @@ async def weft_extract(
     from weft.extract import extract_candidates
     candidates = extract_candidates(text, min_confidence=min_confidence)
     return {"count": len(candidates), "candidates": candidates}
+
+
+@mcp.tool()
+async def weft_learn(
+    ctx: Context,
+    content: str,
+    task_id: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    min_confidence: float = 0.7,
+) -> dict:
+    """Store lessons learned from completed work. Extracts memories from free-text
+    notes about what was learned (gotchas, patterns, fixes) and auto-stores
+    candidates above the confidence threshold. Designed for post-task capture —
+    call after loom_done with what the agent (or you) learned during the task."""
+    try:
+        from weft.extract import extract_candidates
+
+        app: AppContext = ctx.request_context.lifespan_context
+        candidates = extract_candidates(content, min_confidence=min_confidence)
+
+        # Also store the raw content as a solution memory if no patterns matched
+        # but the content is substantial enough to be useful
+        if not candidates and len(content.split()) >= 10:
+            candidates = [{
+                "content": content.strip(),
+                "type": "solution",
+                "confidence": min_confidence,
+                "topic": [],
+            }]
+
+        stored: list[dict] = []
+        for c in candidates:
+            create = MemoryCreate(
+                type=MemoryType(c["type"]),
+                content=c["content"],
+                topic=c.get("topic", []) + ([f"task:{task_id}"] if task_id else []),
+                source=MemorySource.conversation,
+                confidence=c["confidence"],
+                project_id=project_id,
+                agent_id=agent_id,
+            )
+            embedding = await app.embedding.embed(c["content"])
+            memory = await store_memory(app.pool, create, embedding=embedding)
+            await app.cache.set_memory(memory)
+            stored.append(memory.to_dict())
+
+        await app.cache.invalidate_stats()
+        return {
+            "candidates_found": len(candidates),
+            "stored": len(stored),
+            "memories": stored,
+            "task_id": task_id,
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_learn", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_learn", e)
