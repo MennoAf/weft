@@ -50,6 +50,7 @@ async def weft_remember(
     project_id: str | None = None,
     agent_id: str | None = None,
     check_contradictions: bool = True,
+    pinned: bool = False,
 ) -> dict:
     """Store a new memory with type, topics, content, confidence, and source."""
     try:
@@ -62,6 +63,7 @@ async def weft_remember(
             confidence=confidence,
             project_id=project_id,
             agent_id=agent_id,
+            pinned=pinned,
         )
         embedding = await app.embedding.embed(content)
         memory = await store_memory(app.pool, create, embedding=embedding)
@@ -256,6 +258,26 @@ async def weft_feedback(
 
 
 @mcp.tool()
+async def weft_pin(
+    ctx: Context,
+    memory_id: str,
+    pinned: bool = True,
+) -> dict:
+    """Pin or unpin a memory. Pinned memories are always included in prime and context calls."""
+    try:
+        from weft.store import update_memory
+
+        app: AppContext = ctx.request_context.lifespan_context
+        updated = await update_memory(app.pool, memory_id, pinned=pinned)
+        if not updated:
+            return {"error": f"Memory {memory_id} not found"}
+        await app.cache.invalidate_memory(memory_id)
+        return {"memory_id": memory_id, "pinned": updated.pinned}
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_pin", e)
+
+
+@mcp.tool()
 async def weft_prime(
     ctx: Context,
     project_id: str | None = None,
@@ -278,6 +300,7 @@ async def weft_prime(
         from weft.fallback import read_fallback
         content = read_fallback()
         return {
+            "pinned": [],
             "preferences": [],
             "recent_work": [],
             "relevant": [{"content": content, "type": "fallback"}] if content else [],

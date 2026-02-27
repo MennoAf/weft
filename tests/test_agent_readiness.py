@@ -85,12 +85,12 @@ async def test_fallback_parse_matches_export_format(pool, tmp_path):
 
 
 async def test_mcp_tools_all_registered():
-    """All 12 MCP tools are registered."""
+    """All MCP tools are registered."""
     from weft.mcp import tools
     expected = [
         "weft_remember", "weft_recall", "weft_forget", "weft_context",
         "weft_revise", "weft_relate", "weft_consolidate", "weft_feedback",
-        "weft_prime", "weft_status", "weft_extract",
+        "weft_pin", "weft_prime", "weft_status", "weft_extract",
     ]
     for name in expected:
         assert hasattr(tools, name), f"Missing MCP tool: {name}"

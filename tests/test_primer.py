@@ -226,6 +226,7 @@ async def test_primer_return_structure(pool):
     result = await build_primer(pool, budget_tokens=4000)
 
     expected_keys = {
+        "pinned",
         "preferences",
         "recent_work",
         "relevant",
@@ -236,6 +237,7 @@ async def test_primer_return_structure(pool):
     assert set(result.keys()) == expected_keys
 
     # Type checks
+    assert isinstance(result["pinned"], list)
     assert isinstance(result["preferences"], list)
     assert isinstance(result["recent_work"], list)
     assert isinstance(result["relevant"], list)

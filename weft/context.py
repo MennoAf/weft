@@ -13,7 +13,7 @@ import asyncpg
 
 from weft.models import MemoryRecall, MemoryStatus, MemoryType
 from weft.relevance import RelevanceWeights, ScoredMemory, rank_memories
-from weft.store import search_by_vector
+from weft.store import list_memories, search_by_vector
 
 
 def _deduplicate_by_topic(
@@ -83,7 +83,24 @@ async def build_context(
             "budget_tokens": int,
         }
     """
-    # 1. Retrieve candidates
+    # 0. Load pinned memories first (always included)
+    pinned_mems = await list_memories(
+        pool, status=MemoryStatus.active, pinned=True,
+        project_id=project_id, limit=100,
+    )
+    pinned_packed: list[dict] = []
+    pinned_ids: set[str] = set()
+    pinned_tokens = 0
+    for mem in pinned_mems:
+        cost = mem.token_count or 1
+        if pinned_tokens + cost <= budget_tokens:
+            pinned_packed.append(mem.to_dict())
+            pinned_ids.add(mem.id)
+            pinned_tokens += cost
+
+    remaining_budget = budget_tokens - pinned_tokens
+
+    # 1. Retrieve candidates via vector search
     recalls: list[MemoryRecall] = await search_by_vector(
         pool,
         query_embedding,
@@ -95,7 +112,10 @@ async def build_context(
         project_id=project_id,
     )
 
-    if not recalls:
+    # Filter out already-included pinned memories
+    recalls = [r for r in recalls if r.memory.id not in pinned_ids]
+
+    if not recalls and not pinned_packed:
         return {
             "memories": [],
             "total_tokens": 0,
@@ -105,20 +125,21 @@ async def build_context(
         }
 
     # 2. Score with relevance engine
-    scored = rank_memories(recalls, weights=weights)
+    scored = rank_memories(recalls, weights=weights) if recalls else []
 
     # 3. Deduplicate by topic
     diverse = _deduplicate_by_topic(scored, max_per_topic=max_per_topic)
 
-    # 4. Pack within budget
-    packed = _pack_by_budget(diverse, budget_tokens)
+    # 4. Pack within remaining budget (after pinned)
+    packed = _pack_by_budget(diverse, remaining_budget)
 
-    total_tokens = sum(sm.memory.token_count or 1 for sm in packed)
+    total_tokens = pinned_tokens + sum(sm.memory.token_count or 1 for sm in packed)
+    all_memories = pinned_packed + [sm.to_dict() for sm in packed]
 
     return {
-        "memories": [sm.to_dict() for sm in packed],
+        "memories": all_memories,
         "total_tokens": total_tokens,
         "remaining_budget": budget_tokens - total_tokens,
-        "count": len(packed),
+        "count": len(all_memories),
         "budget_tokens": budget_tokens,
     }

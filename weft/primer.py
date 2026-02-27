@@ -1,6 +1,7 @@
 """Session primer — assemble structured context for session startup.
 
-Builds a payload with three priority layers:
+Builds a payload with four priority layers:
+0. Pinned memories (always included first)
 1. Preferences & user_model (immortal, always included)
 2. Recent work (accessed within N days)
 3. Project-relevant memories (fill remaining budget)
@@ -63,7 +64,8 @@ async def build_primer(
     """Assemble a structured context payload from memories.
 
     Sections are filled in priority order within the token budget:
-    1. preferences + user_model (always first)
+    0. pinned memories (always first)
+    1. preferences + user_model (always second)
     2. recently accessed memories
     3. project-relevant memories
 
@@ -71,6 +73,21 @@ async def build_primer(
     """
     used_tokens = 0
     seen_ids: set[str] = set()
+
+    # --- Section 0: Pinned memories (highest priority) ---
+    pinned_raw = await _fetch_with_globals(
+        pool, project_id,
+        status=MemoryStatus.active, pinned=True, limit=100,
+    )
+    pinned_raw.sort(key=lambda m: m.confidence, reverse=True)
+
+    pinned_section: list[dict] = []
+    for mem in pinned_raw:
+        cost = mem.token_count or estimate_tokens(mem.content)
+        if used_tokens + cost <= budget_tokens:
+            pinned_section.append(mem.to_dict())
+            seen_ids.add(mem.id)
+            used_tokens += cost
 
     # --- Section 1: Preferences & user_model (immortal) ---
     prefs_raw = await _fetch_with_globals(
@@ -90,6 +107,8 @@ async def build_primer(
 
     preferences_section: list[dict] = []
     for mem in immortals:
+        if mem.id in seen_ids:
+            continue
         cost = mem.token_count or estimate_tokens(mem.content)
         if used_tokens + cost <= budget_tokens:
             preferences_section.append(mem.to_dict())
@@ -135,6 +154,7 @@ async def build_primer(
                 used_tokens += cost
 
     return {
+        "pinned": pinned_section,
         "preferences": preferences_section,
         "recent_work": recent_section,
         "relevant": relevant_section,

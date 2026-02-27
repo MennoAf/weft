@@ -43,11 +43,11 @@ async def store_memory(
         INSERT INTO memories (
             id, type, topic, content, source, confidence,
             token_count, created_at, updated_at, accessed_at,
-            access_count, project_id, agent_id, embedding, status
+            access_count, project_id, agent_id, embedding, status, pinned
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
-            0, $9, $10, $11, 'active'
+            0, $9, $10, $11, 'active', $12
         )
         """,
         memory_id,
@@ -61,6 +61,7 @@ async def store_memory(
         create.project_id,
         create.agent_id,
         embedding_str,
+        create.pinned,
     )
 
     return Memory(
@@ -78,6 +79,7 @@ async def store_memory(
         project_id=create.project_id,
         agent_id=create.agent_id,
         status=MemoryStatus.active,
+        pinned=create.pinned,
     )
 
 
@@ -96,6 +98,7 @@ async def list_memories(
     memory_type: MemoryType | None = None,
     topic: str | None = None,
     project_id: str | None = None,
+    pinned: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Memory]:
@@ -122,6 +125,11 @@ async def list_memories(
     if project_id is not None:
         conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
+        idx += 1
+
+    if pinned is not None:
+        conditions.append(f"pinned = ${idx}")
+        params.append(pinned)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
@@ -208,6 +216,7 @@ async def update_memory(
     status: MemoryStatus | None = None,
     topic: list[str] | None = None,
     embedding: list[float] | None = None,
+    pinned: bool | None = None,
 ) -> Memory | None:
     """Update mutable fields of a memory. Returns updated Memory or None."""
     sets = ["updated_at = now()"]
@@ -240,6 +249,11 @@ async def update_memory(
     if embedding is not None:
         sets.append(f"embedding = ${idx}")
         params.append(_vec_to_pgvector(embedding))
+        idx += 1
+
+    if pinned is not None:
+        sets.append(f"pinned = ${idx}")
+        params.append(pinned)
         idx += 1
 
     set_clause = ", ".join(sets)
@@ -459,6 +473,7 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         project_id=row["project_id"],
         agent_id=row["agent_id"],
         status=MemoryStatus(row["status"]),
+        pinned=bool(row["pinned"]) if row.get("pinned") is not None else False,
         usefulness_score=float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0,
         usefulness_count=row["usefulness_count"] if row["usefulness_count"] is not None else 0,
     )
