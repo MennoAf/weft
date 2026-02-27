@@ -8,8 +8,8 @@
       }
     },
     "weft": {
-      "command": "uv",
-      "args": ["run", "--directory", "/Users/jasonbauman/Documents/code_projects/Personal/Weft", "python", "-m", "weft.mcp"]
+      "command": "weft",
+      "args": ["mcp"]
     }
   }
 }
