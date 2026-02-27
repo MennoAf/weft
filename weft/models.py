@@ -65,6 +65,7 @@ class Memory(BaseModel):
     project_id: str | None = None
     agent_id: str | None = None
     status: MemoryStatus = MemoryStatus.active
+    pinned: bool = False
     usefulness_score: float = Field(default=1.0, ge=0.0, le=1.0)
     usefulness_count: int = 0
 
@@ -98,6 +99,7 @@ class MemoryCreate(BaseModel):
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     project_id: str | None = None
     agent_id: str | None = None
+    pinned: bool = False
 
 
 class MemoryRecall(BaseModel):

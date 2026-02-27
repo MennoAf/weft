@@ -79,6 +79,14 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ALTER TABLE memories ADD COLUMN IF NOT EXISTS usefulness_count INTEGER DEFAULT 0;
         """,
     ),
+    (
+        5,
+        "Add pinned column to memories",
+        """
+        ALTER TABLE memories ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT FALSE;
+        CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories (pinned) WHERE pinned = TRUE;
+        """,
+    ),
 ]
 
 

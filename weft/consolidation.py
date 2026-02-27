@@ -100,7 +100,7 @@ def compute_decay_score(
     Score combines: recency, access frequency, and confidence.
     Immortal types (preference, user_model) always return 1.0.
     """
-    if memory.type in IMMORTAL_TYPES:
+    if memory.type in IMMORTAL_TYPES or memory.pinned:
         return 1.0
 
     cfg = config or DecayConfig()
@@ -144,7 +144,7 @@ async def run_decay(
     memories = await list_memories(pool, status=MemoryStatus.active, limit=1000)
 
     for mem in memories:
-        if mem.type in IMMORTAL_TYPES:
+        if mem.type in IMMORTAL_TYPES or mem.pinned:
             continue
         score = compute_decay_score(mem, now=now, config=cfg)
         if score <= cfg.floor_score and mem.confidence < cfg.min_confidence:
@@ -205,8 +205,14 @@ async def find_duplicates(
             if other.id == mem.id or other.id in seen_archived:
                 continue
             if result.similarity >= threshold:
-                # Keep the one with higher confidence, or more recent
-                if mem.confidence > other.confidence or (
+                # Pinned memories are always kept
+                if mem.pinned and not other.pinned:
+                    keep, archive = mem, other
+                elif other.pinned and not mem.pinned:
+                    keep, archive = other, mem
+                elif mem.pinned and other.pinned:
+                    continue  # don't merge two pinned memories
+                elif mem.confidence > other.confidence or (
                     mem.confidence == other.confidence
                     and mem.updated_at >= other.updated_at
                 ):
