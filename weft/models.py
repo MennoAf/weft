@@ -108,7 +108,20 @@ class MemoryRecall(BaseModel):
     memory: Memory
     similarity: float = 0.0
 
+    @property
+    def relevance_score(self) -> float:
+        """Composite score combining similarity, confidence, and usefulness.
+
+        Weighted: 50% similarity, 30% confidence, 20% usefulness.
+        """
+        return (
+            0.5 * self.similarity
+            + 0.3 * self.memory.confidence
+            + 0.2 * self.memory.usefulness_score
+        )
+
     def to_dict(self) -> dict[str, Any]:
         d = self.memory.to_dict()
         d["similarity"] = round(self.similarity, 4)
+        d["relevance_score"] = round(self.relevance_score, 4)
         return d
