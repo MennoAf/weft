@@ -57,3 +57,26 @@ async def test_memory_model():
     d = m.to_dict()
     assert d["type"] == "fact"
     assert d["status"] == "active"
+
+
+async def test_invalid_enum_raises_valueerror():
+    """Invalid enum values should raise ValueError, not pass silently."""
+    from weft.models import MemoryType, MemorySource, MemoryStatus
+
+    with pytest.raises(ValueError):
+        MemoryType("not_a_type")
+    with pytest.raises(ValueError):
+        MemorySource("observation")  # the original bug report example
+    with pytest.raises(ValueError):
+        MemoryStatus("bogus")
+
+
+async def test_input_error_response_format():
+    """_input_error_response returns structured error with detail."""
+    from weft.mcp.tools import _input_error_response
+
+    result = _input_error_response("weft_remember", ValueError("'observation' is not a valid MemorySource"))
+    assert result["error"] == "Invalid input"
+    assert "observation" in result["detail"]
+    assert result["tool"] == "weft_remember"
+    assert "degraded" not in result  # input errors are not degraded mode

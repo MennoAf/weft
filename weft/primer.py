@@ -19,6 +19,16 @@ from weft.store import list_memories
 from weft.tokens import estimate_tokens
 
 
+# Topics that signal aspirational/planned items rather than concrete work
+_IDEA_TOPICS = frozenset({"improvement", "idea", "issue-log", "backlog", "wishlist"})
+
+
+def _is_idea(mem: Memory) -> bool:
+    """Return True if the memory looks aspirational rather than concrete work."""
+    topics = {t.lower() for t in (mem.topic or [])}
+    return bool(topics & _IDEA_TOPICS)
+
+
 async def _fetch_with_globals(
     pool: asyncpg.Pool,
     project_id: str | None,
@@ -115,7 +125,7 @@ async def build_primer(
             seen_ids.add(mem.id)
             used_tokens += cost
 
-    # --- Section 2: Recent work ---
+    # --- Section 2: Recent work + ideas ---
     cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
     recent_raw = await _fetch_with_globals(
         pool, project_id,
@@ -129,11 +139,16 @@ async def build_primer(
     # Sort by accessed_at descending
     recent_candidates.sort(key=lambda m: m.accessed_at, reverse=True)
 
+    # Split into concrete work vs aspirational ideas
     recent_section: list[dict] = []
+    ideas_section: list[dict] = []
     for mem in recent_candidates:
         cost = mem.token_count or estimate_tokens(mem.content)
         if used_tokens + cost <= budget_tokens:
-            recent_section.append(mem.to_dict())
+            if _is_idea(mem):
+                ideas_section.append(mem.to_dict())
+            else:
+                recent_section.append(mem.to_dict())
             seen_ids.add(mem.id)
             used_tokens += cost
 
@@ -157,6 +172,7 @@ async def build_primer(
         "pinned": pinned_section,
         "preferences": preferences_section,
         "recent_work": recent_section,
+        "ideas": ideas_section,
         "relevant": relevant_section,
         "total_tokens": used_tokens,
         "budget_tokens": budget_tokens,

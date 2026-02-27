@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 # Exceptions that indicate the database is unreachable (not application logic errors).
 _DB_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, ConnectionRefusedError)
 
+# Exceptions from invalid input (bad enum values, wrong types, etc.)
+_INPUT_ERRORS = (ValueError, TypeError)
+
+
+def _input_error_response(tool_name: str, error: Exception) -> dict:
+    """Standard error response for invalid input parameters."""
+    logger.info("Invalid input in %s: %s", tool_name, error)
+    return {"error": "Invalid input", "detail": str(error), "tool": tool_name}
+
 
 def _db_error_response(tool_name: str, error: Exception) -> dict:
     """Standard error response when database is unavailable."""
@@ -76,6 +85,8 @@ async def weft_remember(
             if warnings:
                 result["contradiction_warnings"] = warnings
         return result
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_remember", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_remember", e)
 
@@ -111,6 +122,8 @@ async def weft_recall(
         for r in results:
             await touch_memory(app.pool, r.memory.id)
         return {"query": query, "count": len(results), "results": [r.to_dict() for r in results]}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_recall", e)
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_recall: %s", e)
         from weft.fallback import search_fallback
@@ -161,6 +174,8 @@ async def weft_context(
         for mem_dict in result["memories"]:
             await touch_memory(app.pool, mem_dict["id"])
         return result
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_context", e)
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_context: %s", e)
         from weft.fallback import search_fallback
@@ -224,6 +239,8 @@ async def weft_relate(
             return {"memory_id": memory_id, "target_id": target_id, "relation": relation, "removed": removed}
         else:
             return {"error": f"Unknown action: {action}. Use 'add', 'get', or 'remove'."}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_relate", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_relate", e)
 
@@ -303,6 +320,7 @@ async def weft_prime(
             "pinned": [],
             "preferences": [],
             "recent_work": [],
+            "ideas": [],
             "relevant": [{"content": content, "type": "fallback"}] if content else [],
             "total_tokens": 0,
             "budget_tokens": budget_tokens,

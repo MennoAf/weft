@@ -18,6 +18,7 @@ async def test_primer_empty_db(pool):
 
     assert result["preferences"] == []
     assert result["recent_work"] == []
+    assert result["ideas"] == []
     assert result["relevant"] == []
     assert result["total_tokens"] == 0
     assert result["budget_tokens"] == 4000
@@ -111,6 +112,7 @@ async def test_primer_budget_enforcement(pool):
     total_memories = (
         len(result["preferences"])
         + len(result["recent_work"])
+        + len(result["ideas"])
         + len(result["relevant"])
     )
     assert total_memories < 30
@@ -180,9 +182,10 @@ async def test_primer_project_scoping(pool):
     pref_contents = [p["content"] for p in result["preferences"]]
     assert any("verbose logging" in c for c in pref_contents)
 
-    # Project-scoped fact should appear in recent_work or relevant
+    # Project-scoped fact should appear in recent_work, ideas, or relevant
     all_contents = (
         [m["content"] for m in result["recent_work"]]
+        + [m["content"] for m in result["ideas"]]
         + [m["content"] for m in result["relevant"]]
     )
     assert any("microservices" in c for c in all_contents)
@@ -191,6 +194,7 @@ async def test_primer_project_scoping(pool):
     all_all = (
         [m["content"] for m in result["preferences"]]
         + [m["content"] for m in result["recent_work"]]
+        + [m["content"] for m in result["ideas"]]
         + [m["content"] for m in result["relevant"]]
     )
     assert not any("monolith" in c for c in all_all)
@@ -229,6 +233,7 @@ async def test_primer_return_structure(pool):
         "pinned",
         "preferences",
         "recent_work",
+        "ideas",
         "relevant",
         "total_tokens",
         "budget_tokens",
@@ -240,6 +245,7 @@ async def test_primer_return_structure(pool):
     assert isinstance(result["pinned"], list)
     assert isinstance(result["preferences"], list)
     assert isinstance(result["recent_work"], list)
+    assert isinstance(result["ideas"], list)
     assert isinstance(result["relevant"], list)
     assert isinstance(result["total_tokens"], int)
     assert isinstance(result["budget_tokens"], int)
@@ -247,3 +253,46 @@ async def test_primer_return_structure(pool):
 
     # Budget invariant
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
+
+
+async def test_primer_splits_ideas_from_recent_work(pool):
+    """Memories with idea/improvement topics go to ideas section, not recent_work."""
+    # Concrete work
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Fixed stale connection pool bug",
+        topic=["postgres", "bug", "fixed"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+    ))
+    # Improvement idea
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.architecture,
+        content="Weft should inject memories at loom_claim time",
+        topic=["weft", "improvement", "agent-context"],
+        source=MemorySource.conversation,
+        confidence=0.8,
+    ))
+    # Another idea with "idea" topic
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.architecture,
+        content="Cross-project issue log for field observations",
+        topic=["loom", "idea", "cross-project"],
+        source=MemorySource.conversation,
+        confidence=0.7,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    # Concrete work in recent_work
+    work_contents = [m["content"] for m in result["recent_work"]]
+    assert any("connection pool" in c for c in work_contents)
+
+    # Ideas in ideas section
+    idea_contents = [m["content"] for m in result["ideas"]]
+    assert any("loom_claim" in c for c in idea_contents)
+    assert any("issue log" in c for c in idea_contents)
+
+    # Ideas should NOT be in recent_work
+    assert not any("loom_claim" in c for c in work_contents)
+    assert not any("issue log" in c for c in work_contents)
