@@ -337,40 +337,131 @@ def _subject_overlap_ratio(content_a: str, content_b: str, exclude: frozenset[st
     return len(a & b) / smaller
 
 
+def _negated_phrases(text: str, window: int = 3) -> list[str]:
+    """Extract phrases that follow negation words (the negated subject).
+
+    Returns a list of lowercase phrases like "support hnsw indexing".
+    """
+    import re
+    words = re.findall(r'[a-z0-9]+(?:\.[a-z0-9]+)*', text.lower())
+    phrases: list[str] = []
+    for i, w in enumerate(words):
+        if w in _NEGATION_WORDS:
+            phrase_words = words[i + 1: i + 1 + window]
+            # Filter out stop words from the phrase to get the semantic core
+            core = [pw for pw in phrase_words if pw not in _STOP_WORDS]
+            if core:
+                phrases.append(" ".join(core))
+    return phrases
+
+
+def _overlap_threshold(content_a: str, content_b: str) -> float:
+    """Length-aware overlap threshold.
+
+    Short memories (< 30 words) that overlap at 50% are likely about the
+    same specific claim. Long memories about the same system will
+    incidentally share many words without contradicting each other.
+    """
+    shorter = min(len(content_a.split()), len(content_b.split()))
+    if shorter < 30:
+        return 0.5
+    if shorter < 60:
+        return 0.65
+    return 0.8
+
+
+def _number_context(text: str, window: int = 2) -> dict[str, str]:
+    """Map each number in text to its surrounding context words.
+
+    Returns {"0.8.1": "pgvector version", "30": "half life days", ...}.
+    """
+    import re
+    words = text.lower().split()
+    contexts: dict[str, str] = {}
+    for i, w in enumerate(words):
+        nums = re.findall(r'\d+\.?\d*', w)
+        for n in nums:
+            ctx_words = []
+            for j in range(max(0, i - window), i):
+                if words[j] not in _STOP_WORDS:
+                    ctx_words.append(words[j])
+            contexts[n] = " ".join(ctx_words)
+    return contexts
+
+
 def _content_conflicts(content_a: str, content_b: str) -> bool:
     """Heuristic check for conflicting content.
 
-    Looks for negation patterns and different numbers/versions,
-    but only when both memories share strong subject overlap (>= 50%
-    of content words). This avoids false positives on complementary
-    memories about the same system that merely discuss different aspects.
+    Two checks:
+    1. Negation: one memory negates a phrase that the other asserts.
+       We extract the *negated subject* and check if it appears in the
+       other memory, not just whether negation words exist.
+    2. Numbers: different numbers in similar surrounding context
+       (e.g., "version 0.7" vs "version 0.8"), not just any number diff.
+
+    Both checks require sufficient subject overlap, with the threshold
+    scaling by content length to avoid false positives on long memories.
     """
     a_lower = content_a.lower()
     b_lower = content_b.lower()
 
-    a_words = set(a_lower.split())
-    b_words = set(b_lower.split())
+    threshold = _overlap_threshold(a_lower, b_lower)
 
     # --- Negation check ---
-    # One memory has negation words, the other doesn't.
-    # Only flag if they share strong subject overlap (same claim, opposite assertion).
-    a_negations = _NEGATION_WORDS & a_words
-    b_negations = _NEGATION_WORDS & b_words
-    if bool(a_negations) != bool(b_negations):
-        if _subject_overlap_ratio(a_lower, b_lower, _NEGATION_WORDS) >= 0.5:
-            return True
+    # Extract what each memory negates, then check if the negated
+    # subject appears in the other memory's content.
+    a_neg_phrases = _negated_phrases(a_lower)
+    b_neg_phrases = _negated_phrases(b_lower)
+
+    # Only flag if exactly one side uses negation (asymmetric)
+    a_has_neg = len(a_neg_phrases) > 0
+    b_has_neg = len(b_neg_phrases) > 0
+
+    if a_has_neg != b_has_neg:
+        # Check if the negated subject appears in the non-negated memory
+        neg_phrases = a_neg_phrases if a_has_neg else b_neg_phrases
+        other_text = b_lower if a_has_neg else a_lower
+
+        for phrase in neg_phrases:
+            phrase_words = set(phrase.split())
+            other_words = _content_words(other_text)
+            # The negated subject must overlap with the other memory's content.
+            # Use prefix matching to handle conjugation (support/supports, use/uses).
+            matched = sum(
+                1 for pw in phrase_words
+                if any(ow.startswith(pw) or pw.startswith(ow) for ow in other_words)
+            )
+            if phrase_words and matched >= len(phrase_words) * 0.6:
+                if _subject_overlap_ratio(a_lower, b_lower, _NEGATION_WORDS) >= threshold:
+                    return True
 
     # --- Version/number check ---
-    # Different numbers in both memories.
-    # Only flag if they share strong subject overlap (same metric, different value).
+    # Only flag when numbers appear in similar surrounding context
+    # (e.g., both say "version X" but with different X).
     import re
 
-    a_numbers = set(re.findall(r'\d+\.?\d*', a_lower))
-    b_numbers = set(re.findall(r'\d+\.?\d*', b_lower))
-    if a_numbers and b_numbers and a_numbers != b_numbers:
-        exclude = frozenset(a_numbers | b_numbers)
-        if _subject_overlap_ratio(a_lower, b_lower, exclude) >= 0.5:
-            return True
+    a_num_ctx = _number_context(a_lower)
+    b_num_ctx = _number_context(b_lower)
+
+    if a_num_ctx and b_num_ctx:
+        # Find numbers that differ but share context
+        a_nums = set(a_num_ctx.keys())
+        b_nums = set(b_num_ctx.keys())
+        if a_nums != b_nums:
+            # Check if any differing numbers share the same context
+            for a_num, a_ctx in a_num_ctx.items():
+                if a_num in b_nums or not a_ctx:
+                    continue
+                a_ctx_words = set(a_ctx.split())
+                for b_num, b_ctx in b_num_ctx.items():
+                    if b_num in a_nums or not b_ctx:
+                        continue
+                    b_ctx_words = set(b_ctx.split())
+                    # Context words must overlap (same metric, different value)
+                    if a_ctx_words and a_ctx_words & b_ctx_words:
+                        exclude = frozenset(a_nums | b_nums)
+                        if _subject_overlap_ratio(a_lower, b_lower, exclude) >= threshold:
+                            return True
 
     return False
 
