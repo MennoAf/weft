@@ -24,14 +24,19 @@ from weft.store import (
 
 logger = logging.getLogger(__name__)
 
-# Broad tuple of exceptions that can surface when the database is unreachable.
-_DB_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, ConnectionRefusedError, Exception)
+# Exceptions that indicate the database is unreachable (not application logic errors).
+_DB_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, ConnectionRefusedError)
 
 
 def _db_error_response(tool_name: str, error: Exception) -> dict:
     """Standard error response when database is unavailable."""
-    logger.warning("Database unavailable in %s: %s", tool_name, error)
-    return {"error": "Database unavailable", "degraded": True, "tool": tool_name}
+    detail = type(error).__name__
+    if isinstance(error, asyncpg.InterfaceError):
+        detail = "stale connection pool (will auto-recover)"
+    elif isinstance(error, ConnectionRefusedError):
+        detail = "database unreachable"
+    logger.warning("Database unavailable in %s: %s — %s", tool_name, detail, error)
+    return {"error": "Database unavailable", "detail": detail, "degraded": True, "tool": tool_name}
 
 
 @mcp.tool()

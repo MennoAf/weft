@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import asyncpg
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_PATH = Path.home() / ".weft" / "fallback.md"
 
+# Pool health check interval in seconds
+_KEEPALIVE_INTERVAL = 300  # 5 minutes
+
 
 @dataclass
 class AppContext:
@@ -28,6 +32,36 @@ class AppContext:
     cache: Cache
     embedding: EmbeddingProvider
     config: WeftConfig
+    _keepalive_task: asyncio.Task | None = field(default=None, repr=False)
+
+
+async def _pool_keepalive(ctx: AppContext) -> None:
+    """Periodically ping the pool; recreate it if connections are stale."""
+    dsn = ctx.config.database.url
+    while True:
+        await asyncio.sleep(_KEEPALIVE_INTERVAL)
+        try:
+            async with ctx.pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+        except Exception as exc:
+            logger.warning("Pool health check failed: %s — recreating pool", exc)
+            old_pool = ctx.pool
+            try:
+                new_pool = await asyncpg.create_pool(
+                    dsn,
+                    min_size=ctx.config.database.pool_min_size,
+                    max_size=ctx.config.database.pool_max_size,
+                )
+                ctx.pool = new_pool
+                logger.info("Pool recreated successfully")
+            except Exception as create_exc:
+                logger.error("Failed to recreate pool: %s", create_exc)
+                continue
+            # Best-effort close of the old pool
+            try:
+                await old_pool.close()
+            except Exception:
+                pass
 
 
 @asynccontextmanager
@@ -60,9 +94,18 @@ async def lifespan(server: FastMCP):
     embedding = get_provider(config.embedding.provider, model_name=config.embedding.model)
 
     ctx = AppContext(pool=pool, cache=cache, embedding=embedding, config=config)
+
+    # Start background keepalive
+    ctx._keepalive_task = asyncio.create_task(_pool_keepalive(ctx))
+
     try:
         yield ctx
     finally:
+        ctx._keepalive_task.cancel()
+        try:
+            await ctx._keepalive_task
+        except asyncio.CancelledError:
+            pass
         await pool.close()
         await r.aclose()
 
