@@ -1,32 +1,6 @@
 # Weft — Persistent Agent Memory System
 
-## What Is Weft
-
-Weft is a structured, persistent memory system for AI agents. It replaces flat-file memory (like `.claude/memory/MEMORY.md`) with a queryable knowledge base that supports semantic retrieval, confidence tracking, relationship mapping, and automatic decay.
-
-Part of the trilogy: **Loom** (orchestration) → **Warp** (builder agent) → **Weft** (memory).
-
-## Why Weft Exists
-
-Current agent memory is a flat markdown file truncated at 200 lines. It has no structure, no retrieval beyond grep, no decay mechanism, and no way to distinguish high-confidence knowledge from speculation. When a session starts, the entire file loads into context whether it's relevant or not.
-
-Weft solves this by treating memory as a first-class data system rather than a text file.
-
-## How It Relates to Loom
-
-Weft is a **separate project** that reuses Loom's infrastructure patterns but has a fundamentally different data model:
-
-| Aspect | Loom (tasks) | Weft (memories) |
-|--------|-------------|-----------------|
-| Lifecycle | pending → claimed → done (terminal) | Created → revised → decayed (evolving) |
-| Relationships | DAG with crisp dependencies | Fuzzy: "related to", "supersedes", "contradicts" |
-| Retrieval | Status + priority filters | Semantic similarity + topic + recency |
-| Write trigger | Explicit API call (agent decides) | Semi-automatic extraction from conversation |
-| Core problem | Coordinate parallel work | Decide what 5% of knowledge matters right now |
-
-**Reusable from Loom:** Postgres + Redis architecture, MCP tool interface, event-driven updates, two-tier caching, migration system, CLI patterns.
-
-**New in Weft:** Data model, semantic retrieval engine, memory consolidation pipeline, context budget management, confidence/decay scoring.
+Weft is a structured, persistent memory system for AI agents. Part of the trilogy: Loom → Warp → Weft. Project details (architecture, data model, design rationale) are stored in Weft itself — call `weft_prime(project_id="weft")` for full context.
 
 ## Loom Task Management (IMPORTANT)
 
