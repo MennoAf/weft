@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,12 @@ import click
 from weft.config import CONFIG_PATH, load_config, load_config_file, save_config_value
 
 COMPOSE_FILE = Path(__file__).parent.parent / "docker-compose.weft.yml"
+
+# MCP server entry for Claude Code
+_MCP_ENTRY = {
+    "command": "weft",
+    "args": ["mcp"],
+}
 
 
 @click.group()
@@ -28,8 +36,35 @@ def mcp_server():
     mcp.run()
 
 
+def _register_mcp(project_dir: Path | None = None) -> None:
+    """Register Weft as an MCP server in Claude Code configuration.
+
+    If *project_dir* is given, writes to ``<project_dir>/.mcp.json``.
+    Otherwise writes to ``~/.claude.json`` (global scope).
+    """
+    if project_dir is not None:
+        mcp_path = project_dir / ".mcp.json"
+        data = json.loads(mcp_path.read_text()) if mcp_path.exists() else {}
+        servers = data.setdefault("mcpServers", {})
+        if servers.get("weft") == _MCP_ENTRY:
+            return  # already registered
+        servers["weft"] = _MCP_ENTRY
+        mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+        click.echo(f"Registered Weft MCP server in {mcp_path}")
+    else:
+        claude_json = Path.home() / ".claude.json"
+        data = json.loads(claude_json.read_text()) if claude_json.exists() else {}
+        servers = data.setdefault("mcpServers", {})
+        if servers.get("weft") == _MCP_ENTRY:
+            return
+        servers["weft"] = _MCP_ENTRY
+        claude_json.write_text(json.dumps(data, indent=2) + "\n")
+        click.echo(f"Registered Weft MCP server globally in {claude_json}")
+
+
 @cli.command()
-def up():
+@click.option("--global", "global_", is_flag=True, help="Register MCP server globally instead of per-project")
+def up(global_: bool):
     """Start Weft infrastructure (Postgres + Redis) and run migrations."""
     click.echo("Starting Weft containers...")
     result = subprocess.run(
@@ -58,6 +93,12 @@ def up():
         click.echo(f"Applied {len(applied)} migration(s).")
     else:
         click.echo("Migrations up to date.")
+
+    # Register MCP server
+    if global_:
+        _register_mcp()
+    else:
+        _register_mcp(Path.cwd())
 
 
 @cli.command()
