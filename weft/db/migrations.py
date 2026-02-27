@@ -99,28 +99,41 @@ async def _get_applied_versions(pool: asyncpg.Pool) -> set[int]:
     return {r["version"] for r in rows}
 
 
+# Advisory lock ID for serializing migrations across processes
+_MIGRATION_LOCK_ID = 839271  # arbitrary unique int
+
+
 async def run_migrations(pool: asyncpg.Pool) -> list[int]:
-    """Run all pending migrations in order. Returns list of applied versions."""
+    """Run all pending migrations in order. Returns list of applied versions.
+
+    Uses a Postgres advisory lock to serialize concurrent migration runs.
+    """
     applied: list[int] = []
 
-    # Migration 3 (schema_migrations table) must run first if not present
-    # but we need to handle bootstrap: run all migrations, then track them
-    for version, description, sql in sorted(MIGRATIONS, key=lambda m: m[0]):
-        # Execute each migration in a transaction
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(sql)
+    async with pool.acquire() as lock_conn:
+        # Acquire session-level advisory lock (blocks until available)
+        await lock_conn.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_ID)
+        try:
+            # Run all migrations (idempotent DDL — CREATE IF NOT EXISTS, etc.)
+            for version, description, sql in sorted(MIGRATIONS, key=lambda m: m[0]):
+                async with lock_conn.transaction():
+                    await lock_conn.execute(sql)
 
-    # Now track which ones were applied
-    existing = await _get_applied_versions(pool)
-    for version, description, _ in MIGRATIONS:
-        if version not in existing:
-            await pool.execute(
-                "INSERT INTO schema_migrations (version, description) VALUES ($1, $2)",
-                version,
-                description,
+            # Track which ones were newly applied
+            existing = await _get_applied_versions(pool)
+            for version, description, _ in MIGRATIONS:
+                if version not in existing:
+                    await lock_conn.execute(
+                        "INSERT INTO schema_migrations (version, description) "
+                        "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                        version,
+                        description,
+                    )
+                    applied.append(version)
+                    logger.info("Applied migration %d: %s", version, description)
+        finally:
+            await lock_conn.execute(
+                "SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_ID,
             )
-            applied.append(version)
-            logger.info("Applied migration %d: %s", version, description)
 
     return applied
