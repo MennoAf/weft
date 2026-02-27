@@ -36,7 +36,21 @@ _ARCHITECTURE_PATTERNS = [
     (re.compile(r"(?:three|two|multi)[- ](?:tier|layer|stage)\s+(.+)", re.IGNORECASE), "architecture", 0.75),
 ]
 
-ALL_PATTERNS = _PREFERENCE_PATTERNS + _FACT_PATTERNS + _PATTERN_PATTERNS + _ARCHITECTURE_PATTERNS
+# Patterns for lessons learned during task execution
+_SOLUTION_PATTERNS = [
+    (re.compile(r"(?:the )?(?:trick|fix|solution|workaround) (?:is|was)\s+(.+)", re.IGNORECASE), "solution", 0.8),
+    (re.compile(r"(?:had to|needed to|must)\s+(.+?)(?:\s+(?:because|since|due to|otherwise)\s+.+)?$", re.IGNORECASE), "solution", 0.75),
+    (re.compile(r"(?:watch out|be careful|careful with|gotcha|caveat)[:\s]+(.+)", re.IGNORECASE), "solution", 0.8),
+    (re.compile(r"(?:turns? out|discovered|learned|realized)\s+(?:that\s+)?(.+)", re.IGNORECASE), "solution", 0.75),
+    (re.compile(r"(?:the )?(?:issue|problem|bug) (?:is|was)\s+(.+)", re.IGNORECASE), "solution", 0.7),
+    (re.compile(r"(?:don't|do not|avoid) (?:forget to|skip)\s+(.+)", re.IGNORECASE), "solution", 0.75),
+    (re.compile(r"(?:important|critical|key)[:\s]+(.+)", re.IGNORECASE), "fact", 0.7),
+]
+
+ALL_PATTERNS = (
+    _PREFERENCE_PATTERNS + _SOLUTION_PATTERNS + _FACT_PATTERNS
+    + _PATTERN_PATTERNS + _ARCHITECTURE_PATTERNS
+)
 
 
 def _extract_topics(text: str) -> list[str]:

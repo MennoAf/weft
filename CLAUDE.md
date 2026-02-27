@@ -61,6 +61,14 @@ Call `weft_remember` when you learn something worth persisting across sessions:
 - After recalling memories with `weft_recall` or `weft_context`, call `weft_feedback(memory_id, helpful=true/false)` to indicate whether each memory was actually useful
 - This adjusts the usefulness score so helpful memories rank higher in future sessions
 
+### Post-Task Learning
+After completing a task (especially after `loom_done`), capture what was learned:
+- Call `weft_learn(content="...", task_id="loom-xxx")` with free-text notes about gotchas, patterns, or fixes discovered during the task
+- `weft_learn` auto-extracts and stores memories — no manual `weft_remember` calls needed
+- Tags stored memories with `task:<task_id>` for traceability
+- If no patterns are detected but content is substantial, stores the raw text as a solution memory
+- Subagents can include a `--learned` note in their `loom done` output for the orchestrator to process
+
 ### Bulk Extraction
 - Use `weft_extract` on conversation chunks or documentation to identify candidate memories you may have missed
 - Review the candidates before storing — `weft_extract` returns proposals, it does not auto-store
