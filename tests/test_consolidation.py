@@ -378,6 +378,45 @@ class TestContentConflicts:
             "Redis does not support clustering natively",
         )
 
+    def test_negation_as_constraint_not_flagged(self):
+        """Negation used as a rule/constraint should NOT conflict with
+        a description that simply omits the constraint."""
+        # "NEVER modify existing files" is a rule, not a contradiction of
+        # something the other memory asserts
+        assert not _content_conflicts(
+            "Weft store.py is the ONLY Postgres writer. NEVER bypass store.py for writes.",
+            "Weft architecture: store.py handles persistence, cache.py handles Redis, "
+            "primer.py assembles context, consolidation.py runs maintenance.",
+        )
+
+    def test_architecture_and_conventions_not_flagged(self):
+        """Architecture overview and coding conventions about the same system
+        should NOT be flagged, even with high topic overlap."""
+        assert not _content_conflicts(
+            "Weft uses pgvector for semantic search. Embeddings are 384-dimensional "
+            "vectors from fastembed. Redis caches memories with 1 hour TTL.",
+            "Weft coding conventions: always use fastembed as default provider. "
+            "store.py is the only module that writes to Postgres. "
+            "Use testcontainers for integration tests.",
+        )
+
+    def test_different_aspects_with_incidental_negation_not_flagged(self):
+        """Two memories about different aspects where one incidentally has
+        negation should NOT be flagged."""
+        assert not _content_conflicts(
+            "The consolidation pipeline cannot run during active writes "
+            "to prevent lock contention.",
+            "The consolidation pipeline has three phases: decay scoring, "
+            "near-duplicate detection, and contradiction detection.",
+        )
+
+    def test_true_contradiction_with_same_predicate(self):
+        """Memories making opposite claims about the same predicate should be flagged."""
+        assert _content_conflicts(
+            "Weft uses OpenAI embeddings for semantic search",
+            "Weft does not use OpenAI embeddings for semantic search",
+        )
+
 
 class TestFindContradictions:
     """Integration tests for find_contradictions() against real DB + embeddings."""
