@@ -11,25 +11,97 @@ Current agent memory is a flat markdown file with no structure, no retrieval bey
 - **Semantic search** via pgvector embeddings
 - **Memory types** with distinct lifecycles (preferences, facts, patterns, architecture decisions)
 - **Confidence & decay** so stale knowledge fades and useful knowledge rises
+- **Pinned memories** for critical conventions that should always be loaded
 - **Cross-project sharing** with isolation (global memories visible everywhere, project-scoped memories stay private)
 - **Token-budget context assembly** so sessions start with the right 5% of knowledge
 - **Feedback loop** that adjusts relevance based on whether memories were actually helpful
+- **Post-task learning** that captures gotchas and patterns from completed work
 - **Fallback resilience** so agents still have memory access when infrastructure is down
+
+## Installation
+
+### Prerequisites
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- Docker Desktop (for Postgres + Redis infrastructure)
+
+### Option 1: System-wide install with pipx (recommended for users)
+
+```bash
+# Install pipx if you don't have it
+brew install pipx  # or: pip install pipx
+
+# Install weft system-wide
+pipx install git+https://github.com/MennoAf/weft-memory.git
+
+# Verify
+weft --help
+```
+
+### Option 2: System-wide install with uv tool
+
+```bash
+# Install as a global uv tool
+uv tool install git+https://github.com/MennoAf/weft-memory.git
+
+# Verify
+weft --help
+```
+
+### Option 3: Local development install
+
+```bash
+# Clone and install in editable mode
+git clone https://github.com/MennoAf/weft-memory.git && cd weft-memory
+uv sync
+
+# All commands below use 'uv run weft' instead of 'weft'
+uv run weft --help
+```
 
 ## Quickstart
 
 ### 1. Start infrastructure
 
 ```bash
-# Clone and install
-git clone <repo-url> && cd weft
-uv sync
-
 # Start Postgres (pgvector) + Redis and run migrations
 weft up
 ```
 
-### 2. Import existing memories
+This launches two Docker containers (Postgres 16 with pgvector on port 5433, Redis 7 on port 6380) and runs database migrations automatically.
+
+### 2. Register as MCP server
+
+Add to your project's `.mcp.json` (or Claude Desktop config):
+
+**If installed via pipx/uv tool:**
+
+```json
+{
+  "mcpServers": {
+    "weft": {
+      "command": "weft",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**If using a local development install:**
+
+```json
+{
+  "mcpServers": {
+    "weft": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/weft-memory", "python", "-m", "weft.mcp"]
+    }
+  }
+}
+```
+
+### 3. Import existing memories (optional)
 
 ```bash
 # Import from a MEMORY.md file (deduplicates automatically)
@@ -39,7 +111,7 @@ weft import ~/.claude/memory/MEMORY.md
 weft import MEMORY.md --project-id my-project
 ```
 
-### 3. Query memories
+### 4. Query memories
 
 ```bash
 # Semantic search from the CLI
@@ -49,42 +121,41 @@ weft recall "database configuration patterns"
 weft status
 ```
 
-### 4. Register as MCP server
+### 5. Add Weft instructions to your CLAUDE.md
 
-Copy `.mcp.json.example` to your project's `.mcp.json` (or merge into an existing one), adjusting the `--directory` path:
+Add the following to your project's `CLAUDE.md` so the agent knows how to use Weft:
 
-```json
-{
-  "mcpServers": {
-    "weft": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/weft", "python", "-m", "weft.mcp"]
-    }
-  }
-}
+```markdown
+## Weft Memory
+
+Call `weft_prime` at the start of every session to load context.
+Use `weft_remember` to store important facts, patterns, and preferences.
+Use `weft_learn` after completing tasks to capture what was learned.
+Use `weft_feedback(memory_id, helpful=true/false)` to improve future recall.
 ```
 
-Then use Weft tools from any MCP-compatible client (Claude Desktop, Claude Code, etc.).
+See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all tools documented.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│                MCP Interface                │
-│  weft_remember  weft_recall  weft_context   │
-│  weft_revise    weft_forget  weft_feedback  │
-│  weft_relate    weft_consolidate            │
-│  weft_prime     weft_status  weft_extract   │
-├─────────────────────────────────────────────┤
-│            Business Logic                   │
-│  store  relevance  context  primer          │
-│  consolidation  importer  exporter          │
-│  extract  fallback                          │
-├─────────────────────────────────────────────┤
-│            Infrastructure                   │
-│  PostgreSQL + pgvector  │  Redis cache      │
-│  fastembed / OpenAI / Google embeddings     │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                  MCP Interface                   │
+│  weft_remember  weft_recall   weft_context       │
+│  weft_revise    weft_forget   weft_feedback      │
+│  weft_relate    weft_consolidate                 │
+│  weft_prime     weft_status   weft_extract       │
+│  weft_pin       weft_learn                       │
+├──────────────────────────────────────────────────┤
+│              Business Logic                      │
+│  store  relevance  context  primer               │
+│  consolidation  importer  exporter               │
+│  extract  fallback  revise                       │
+├──────────────────────────────────────────────────┤
+│              Infrastructure                      │
+│  PostgreSQL + pgvector  │  Redis cache           │
+│  fastembed (local, no API key needed)            │
+└──────────────────────────────────────────────────┘
 ```
 
 ## MCP Tool Reference
@@ -103,10 +174,11 @@ Store a new memory.
 | `project_id` | `str` | `null` | Scope to a project (null = global) |
 | `agent_id` | `str` | `null` | Originating agent identifier |
 | `check_contradictions` | `bool` | `true` | Check for contradicting memories on store |
+| `pinned` | `bool` | `false` | Pin this memory (always included in prime/context) |
 
 ### weft_recall
 
-Retrieve memories by semantic query.
+Retrieve memories by semantic query. Results include `similarity`, `confidence`, and `relevance_score` for trust assessment.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -133,7 +205,7 @@ Budget-aware context loading. Returns the best memories for a situation within a
 
 ### weft_prime
 
-Session primer: assemble structured context for session startup.
+Session primer: assemble structured context for session startup. Returns prioritized sections within a token budget.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -141,7 +213,7 @@ Session primer: assemble structured context for session startup.
 | `budget_tokens` | `int` | `4000` | Token budget |
 | `recent_days` | `int` | `7` | How far back to look for recent work |
 
-Returns `{ preferences, recent_work, relevant, total_tokens, budget_tokens, budget_remaining }`.
+Returns `{ pinned, preferences, recent_work, ideas, relevant, total_tokens, budget_tokens, budget_remaining }`.
 
 ### weft_revise
 
@@ -172,6 +244,27 @@ Record whether a memory was helpful. Adjusts the usefulness score for future ran
 | `memory_id` | `str` | *required* | Memory that was used |
 | `helpful` | `bool` | *required* | Was the memory helpful? |
 
+### weft_pin
+
+Pin or unpin a memory. Pinned memories are always included in `weft_prime` and `weft_context` results, and are protected from decay and deduplication.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `memory_id` | `str` | *required* | Memory to pin/unpin |
+| `pinned` | `bool` | `true` | Pin (true) or unpin (false) |
+
+### weft_learn
+
+Capture lessons learned from completed work. Extracts memory candidates from free-text notes (gotchas, fixes, patterns) and auto-stores them.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `content` | `str` | *required* | Free-text notes about what was learned |
+| `task_id` | `str` | `null` | Associated task ID (tagged as `task:<id>` topic) |
+| `project_id` | `str` | `null` | Scope to a project |
+| `agent_id` | `str` | `null` | Originating agent |
+| `min_confidence` | `float` | `0.7` | Minimum confidence to auto-store |
+
 ### weft_relate
 
 Manage relationships between memories.
@@ -193,14 +286,12 @@ Run the consolidation pipeline: decay stale memories, merge duplicates, flag con
 
 ### weft_extract
 
-Extract memory candidates from a block of text using heuristic pattern matching. Returns proposals for review -- does NOT auto-store.
+Extract memory candidates from a block of text using heuristic pattern matching. Returns proposals for review -- does NOT auto-store. Use `weft_learn` for auto-storing.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `text` | `str` | *required* | Text to extract candidates from |
 | `min_confidence` | `float` | `0.5` | Minimum confidence threshold for candidates |
-
-Returns `{ count, candidates }` where each candidate has `content`, `type`, `confidence`, `topic`, `source_line`.
 
 ### weft_status
 
@@ -288,7 +379,7 @@ Both services include health checks. Data is persisted in named Docker volumes (
 
 ```bash
 uv sync                        # Install dependencies
-uv run pytest tests/ -v        # Run all tests (249 tests)
+uv run pytest tests/ -v        # Run all tests (285 tests)
 uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
