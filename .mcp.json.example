@@ -1,9 +1,19 @@
 {
+  "_comment": "Copy this file to .mcp.json and adjust as needed",
+
+  "_option_1_comment": "If installed via pipx or uv tool:",
   "mcpServers": {
     "weft": {
+      "command": "weft",
+      "args": ["mcp"]
+    }
+  },
+
+  "_option_2_comment": "If using a local development install:",
+  "_mcpServers_dev": {
+    "weft": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/weft", "python", "-m", "weft.mcp"],
-      "env": {}
+      "args": ["run", "--directory", "/path/to/weft-memory", "python", "-m", "weft.mcp"]
     }
   }
 }

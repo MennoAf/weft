@@ -6,6 +6,12 @@ dist/
 build/
 .pytest_cache/
 .DS_Store
-.loom/config.yaml
-.loom/logs/
-.loom/completions/
+
+# Personal/local config
+.mcp.json
+.loom/
+.claude/
+
+# Internal planning docs
+PLAN.md
+loom_suggestions.md
