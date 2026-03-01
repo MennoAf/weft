@@ -231,6 +231,7 @@ async def test_primer_return_structure(pool):
 
     expected_keys = {
         "pinned",
+        "handoff",
         "preferences",
         "recent_work",
         "ideas",
@@ -243,6 +244,7 @@ async def test_primer_return_structure(pool):
 
     # Type checks
     assert isinstance(result["pinned"], list)
+    assert isinstance(result["handoff"], list)
     assert isinstance(result["preferences"], list)
     assert isinstance(result["recent_work"], list)
     assert isinstance(result["ideas"], list)
@@ -296,6 +298,39 @@ async def test_primer_splits_ideas_from_recent_work(pool):
     # Ideas should NOT be in recent_work
     assert not any("loom_claim" in c for c in work_contents)
     assert not any("issue log" in c for c in work_contents)
+
+
+async def test_primer_surfaces_most_recent_handoff(pool):
+    """Most recent handoff appears in the handoff section; older ones do not."""
+    # Older handoff
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Fixed caching bugs",
+        topic=["session-handoff"],
+        source=MemorySource.conversation,
+        confidence=1.0,
+    ))
+    # Newer handoff
+    import asyncio
+    await asyncio.sleep(0.01)  # ensure different created_at
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Shipped project detection\n\n**Next Steps:** Build cross-project pattern transfer",
+        topic=["session-handoff"],
+        source=MemorySource.conversation,
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    # Only the most recent handoff should appear
+    assert len(result["handoff"]) == 1
+    assert "project detection" in result["handoff"][0]["content"]
+    assert "caching bugs" not in result["handoff"][0]["content"]
+
+    # Handoff should NOT also appear in recent_work
+    work_contents = [m["content"] for m in result["recent_work"]]
+    assert not any("Session Handoff" in c for c in work_contents)
 
 
 async def test_primer_project_scoped_recent_work_first(pool):

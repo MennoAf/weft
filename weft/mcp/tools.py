@@ -371,6 +371,7 @@ async def weft_prime(
         content = read_fallback()
         return {
             "pinned": [],
+            "handoff": [],
             "preferences": [],
             "recent_work": [],
             "ideas": [],
@@ -504,3 +505,56 @@ async def weft_feedback_general(
         return {"id": memory.id, "category": category, "stored": True}
     except _DB_ERRORS as e:
         return _db_error_response("weft_feedback_general", e)
+
+
+@mcp.tool()
+async def weft_handoff(
+    ctx: Context,
+    summary: str,
+    in_progress: str | None = None,
+    next_steps: str | None = None,
+    open_questions: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Session handoff: capture context for the next session before clearing.
+
+    Call this before ending a session to preserve continuity. The next session's
+    weft_prime will surface the most recent handoff prominently so the incoming
+    agent can pick up where you left off.
+
+    Structure your handoff like a shift note:
+    - summary: what was accomplished this session
+    - in_progress: what's partially done or needs follow-up
+    - next_steps: what you'd recommend doing next and why
+    - open_questions: unresolved decisions or things to investigate"""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        # Build structured content
+        parts = [f"## Session Handoff\n\n**Summary:** {summary}"]
+        if in_progress:
+            parts.append(f"\n**In Progress:** {in_progress}")
+        if next_steps:
+            parts.append(f"\n**Next Steps:** {next_steps}")
+        if open_questions:
+            parts.append(f"\n**Open Questions:** {open_questions}")
+        content = "\n".join(parts)
+
+        create = MemoryCreate(
+            type=MemoryType.handoff,
+            content=content,
+            topic=["session-handoff"],
+            source=MemorySource.conversation,
+            confidence=1.0,
+            project_id=resolved_project,
+            agent_id=agent_id,
+        )
+        embedding = await app.embedding.embed(summary)
+        memory = await store_memory(app.pool, create, embedding=embedding)
+        await app.cache.set_memory(memory)
+        await app.cache.invalidate_stats()
+        return {"id": memory.id, "project_id": resolved_project, "stored": True}
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_handoff", e)
