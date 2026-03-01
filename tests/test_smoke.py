@@ -82,6 +82,90 @@ async def test_input_error_response_format():
     assert "degraded" not in result  # input errors are not degraded mode
 
 
+class TestDetectProjectId:
+    """Auto-detect project_id from MCP client roots."""
+
+    def test_extracts_directory_name(self):
+        from weft.mcp.tools import _detect_project_id
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        ctx = MagicMock()
+        root = MagicMock()
+        root.uri = "file:///Users/jason/Projects/Weft"
+        ctx.list_roots = AsyncMock(return_value=[root])
+
+        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        assert result == "weft"
+
+    def test_lowercases_name(self):
+        from weft.mcp.tools import _detect_project_id
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        ctx = MagicMock()
+        root = MagicMock()
+        root.uri = "file:///Users/jason/Projects/MyProject"
+        ctx.list_roots = AsyncMock(return_value=[root])
+
+        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        assert result == "myproject"
+
+    def test_empty_roots_returns_none(self):
+        from weft.mcp.tools import _detect_project_id
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        ctx = MagicMock()
+        ctx.list_roots = AsyncMock(return_value=[])
+
+        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        assert result is None
+
+    def test_exception_returns_none(self):
+        from weft.mcp.tools import _detect_project_id
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        ctx = MagicMock()
+        ctx.list_roots = AsyncMock(side_effect=Exception("not supported"))
+
+        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        assert result is None
+
+
+class TestResolveProjectId:
+    """Explicit project_id takes precedence over auto-detect."""
+
+    def test_explicit_wins(self):
+        from weft.mcp.tools import _resolve_project_id
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        ctx = MagicMock()
+        ctx.list_roots = AsyncMock(return_value=[])
+
+        result = asyncio.get_event_loop().run_until_complete(
+            _resolve_project_id(ctx, "my-project")
+        )
+        assert result == "my-project"
+
+    def test_falls_back_to_detect(self):
+        from weft.mcp.tools import _resolve_project_id
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        ctx = MagicMock()
+        root = MagicMock()
+        root.uri = "file:///Users/jason/Projects/Weft"
+        ctx.list_roots = AsyncMock(return_value=[root])
+
+        result = asyncio.get_event_loop().run_until_complete(
+            _resolve_project_id(ctx, None)
+        )
+        assert result == "weft"
+
+
 class TestCoerceList:
     """MCP transport sometimes serializes list params as JSON strings."""
 

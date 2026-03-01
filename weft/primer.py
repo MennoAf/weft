@@ -136,8 +136,13 @@ async def build_primer(
         m for m in recent_raw
         if m.id not in seen_ids and m.accessed_at >= cutoff
     ]
-    # Sort by accessed_at descending
-    recent_candidates.sort(key=lambda m: m.accessed_at, reverse=True)
+    # Sort: project-scoped first (when project_id is set), then by accessed_at
+    recent_candidates.sort(
+        key=lambda m: (
+            0 if project_id and m.project_id == project_id else 1,
+            -(m.accessed_at.timestamp()),
+        ),
+    )
 
     # Split into concrete work vs aspirational ideas
     recent_section: list[dict] = []

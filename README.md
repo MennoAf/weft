@@ -130,6 +130,9 @@ Add the following to your project's `CLAUDE.md` so the agent knows how to use We
 
 Call `weft_prime` at the start of every session to load context.
 Use `weft_remember` to store important facts, patterns, and preferences.
+Save immediately: architecture decisions, user preferences, solutions, session summaries.
+Wait for confirmation: behavioral patterns (2-3 occurrences), inferences about intent.
+Rule of thumb: if you'd want to know it next session, save it now.
 Use `weft_learn` after completing tasks to capture what was learned.
 Use `weft_feedback(memory_id, helpful=true/false)` to improve future recall.
 ```
@@ -145,7 +148,7 @@ See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all to
 │  weft_revise    weft_forget   weft_feedback      │
 │  weft_relate    weft_consolidate                 │
 │  weft_prime     weft_status   weft_extract       │
-│  weft_pin       weft_learn                       │
+│  weft_pin       weft_learn    weft_feedback_gen  │
 ├──────────────────────────────────────────────────┤
 │              Business Logic                      │
 │  store  relevance  context  primer               │
@@ -292,6 +295,16 @@ Extract memory candidates from a block of text using heuristic pattern matching.
 |-----------|------|---------|-------------|
 | `text` | `str` | *required* | Text to extract candidates from |
 | `min_confidence` | `float` | `0.5` | Minimum confidence threshold for candidates |
+
+### weft_feedback_general
+
+Submit general product feedback about Weft itself — friction points, feature requests, or praise. Unlike `weft_feedback` (per-memory ratings), this captures product-level observations from agents using Weft in the field. Feedback is stored as a memory tagged with `weft-feedback` for review.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `feedback` | `str` | *required* | The feedback content |
+| `category` | `str` | `"suggestion"` | One of: `suggestion`, `friction`, `praise`, `bug` |
+| `agent_id` | `str` | `null` | Originating agent identifier |
 
 ### weft_status
 
