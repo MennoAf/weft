@@ -91,6 +91,7 @@ async def test_mcp_tools_all_registered():
         "weft_remember", "weft_recall", "weft_forget", "weft_context",
         "weft_revise", "weft_relate", "weft_consolidate", "weft_feedback",
         "weft_pin", "weft_prime", "weft_status", "weft_extract", "weft_learn",
+        "weft_feedback_general",
     ]
     for name in expected:
         assert hasattr(tools, name), f"Missing MCP tool: {name}"

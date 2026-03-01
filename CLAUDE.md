@@ -46,7 +46,19 @@ Weft is this project's persistent memory system. When the Weft MCP server is ava
 - Review the primer output before diving into work — it contains your accumulated knowledge about the user and project
 
 ### When to Remember
-Call `weft_remember` when you learn something worth persisting across sessions:
+
+**Save immediately** — things that are true right now and won't change with more context:
+- Architecture decisions ("we just shipped X", "project uses Y")
+- User-stated preferences ("I prefer...", "always do X")
+- Solutions to problems you just solved (the fix, the gotcha, the workaround)
+- Session summaries after significant work
+
+**Wait for confirmation** — things that might be premature to store:
+- Behavioral patterns you've only seen once (wait for 2-3 occurrences)
+- Inferences about user intent (ask or observe more before storing)
+- Speculative connections between concepts
+
+**Memory types and confidence:**
 
 | What to store | Memory type | Confidence | Example |
 |--------------|-------------|------------|---------|
@@ -56,6 +68,8 @@ Call `weft_remember` when you learn something worth persisting across sessions:
 | Architecture decisions | `architecture` | 0.8-0.9 | "Three-tier caching: Redis L1, in-memory L2, DB L3" |
 | Problem solutions | `solution` | 0.7-0.8 | "Fix asyncpg connection leak by closing pool in finally block" |
 | User background | `user_model` | 0.8-0.9 | "User is a senior Python developer focused on AI tooling" |
+
+**Rule of thumb:** If you'd want to know this at the start of the next session, save it now.
 
 ### Feedback Loop
 - After recalling memories with `weft_recall` or `weft_context`, call `weft_feedback(memory_id, helpful=true/false)` to indicate whether each memory was actually useful

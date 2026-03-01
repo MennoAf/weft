@@ -53,6 +53,33 @@ def _coerce_list(value: str | list | None) -> list | None:
     return value  # let Pydantic raise if still wrong
 
 
+async def _detect_project_id(ctx: Context) -> str | None:
+    """Auto-detect project_id from MCP client roots.
+
+    Uses the directory name of the first root URI as the project identifier.
+    E.g. file:///Users/jason/Projects/Weft → "weft"
+    Returns None if roots are unavailable or empty.
+    """
+    try:
+        roots = await ctx.list_roots()
+        if roots:
+            uri = str(roots[0].uri)
+            # file:///path/to/ProjectName → "projectname"
+            path = uri.replace("file://", "").rstrip("/")
+            name = path.rsplit("/", 1)[-1] if "/" in path else path
+            return name.lower() or None
+    except Exception:
+        pass
+    return None
+
+
+async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
+    """Return the explicit project_id if provided, otherwise auto-detect."""
+    if explicit is not None:
+        return explicit
+    return await _detect_project_id(ctx)
+
+
 def _input_error_response(tool_name: str, error: Exception) -> dict:
     """Standard error response for invalid input parameters."""
     logger.info("Invalid input in %s: %s", tool_name, error)
@@ -83,16 +110,18 @@ async def weft_remember(
     check_contradictions: bool = True,
     pinned: bool = False,
 ) -> dict:
-    """Store a new memory with type, topics, content, confidence, and source."""
+    """Store a new memory with type, topics, content, confidence, and source.
+    If project_id is omitted, auto-detects from the client's working directory."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
         create = MemoryCreate(
             type=MemoryType(type),
             content=content,
             topic=_coerce_list(topic) or [],
             source=MemorySource(source),
             confidence=confidence,
-            project_id=project_id,
+            project_id=resolved_project,
             agent_id=agent_id,
             pinned=pinned,
         )
@@ -323,14 +352,16 @@ async def weft_prime(
     budget_tokens: int = 4000,
     recent_days: int = 7,
 ) -> dict:
-    """Session primer: assemble structured context with preferences, recent work, and relevant memories."""
+    """Session primer: assemble structured context with preferences, recent work, and relevant memories.
+    If project_id is omitted, auto-detects from the client's working directory."""
     try:
         from weft.primer import build_primer
 
         app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
         return await build_primer(
             app.pool,
-            project_id=project_id,
+            project_id=resolved_project,
             budget_tokens=budget_tokens,
             recent_days=recent_days,
         )
@@ -391,11 +422,13 @@ async def weft_learn(
     """Store lessons learned from completed work. Extracts memories from free-text
     notes about what was learned (gotchas, patterns, fixes) and auto-stores
     candidates above the confidence threshold. Designed for post-task capture —
-    call after loom_done with what the agent (or you) learned during the task."""
+    call after loom_done with what the agent (or you) learned during the task.
+    If project_id is omitted, auto-detects from the client's working directory."""
     try:
         from weft.extract import extract_candidates
 
         app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
         candidates = extract_candidates(content, min_confidence=min_confidence)
 
         # Also store the raw content as a solution memory if no patterns matched
@@ -416,7 +449,7 @@ async def weft_learn(
                 topic=c.get("topic", []) + ([f"task:{task_id}"] if task_id else []),
                 source=MemorySource.conversation,
                 confidence=c["confidence"],
-                project_id=project_id,
+                project_id=resolved_project,
                 agent_id=agent_id,
             )
             embedding = await app.embedding.embed(c["content"])
@@ -435,3 +468,39 @@ async def weft_learn(
         return _input_error_response("weft_learn", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_learn", e)
+
+
+@mcp.tool()
+async def weft_feedback_general(
+    ctx: Context,
+    feedback: str,
+    category: str = "suggestion",
+    agent_id: str | None = None,
+) -> dict:
+    """Submit general feedback about Weft itself — friction points, feature requests,
+    or praise. Unlike weft_feedback (per-memory ratings), this captures product-level
+    observations from agents using Weft in the field."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        valid_categories = ("suggestion", "friction", "praise", "bug")
+        if category not in valid_categories:
+            return _input_error_response(
+                "weft_feedback_general",
+                ValueError(f"category must be one of {valid_categories}, got '{category}'"),
+            )
+        create = MemoryCreate(
+            type=MemoryType.fact,
+            content=f"[{category.upper()}] {feedback}",
+            topic=["weft-feedback", category],
+            source=MemorySource.conversation,
+            confidence=0.8,
+            project_id="weft",
+            agent_id=agent_id,
+        )
+        embedding = await app.embedding.embed(feedback)
+        memory = await store_memory(app.pool, create, embedding=embedding)
+        await app.cache.set_memory(memory)
+        await app.cache.invalidate_stats()
+        return {"id": memory.id, "category": category, "stored": True}
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_feedback_general", e)

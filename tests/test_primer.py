@@ -296,3 +296,33 @@ async def test_primer_splits_ideas_from_recent_work(pool):
     # Ideas should NOT be in recent_work
     assert not any("loom_claim" in c for c in work_contents)
     assert not any("issue log" in c for c in work_contents)
+
+
+async def test_primer_project_scoped_recent_work_first(pool):
+    """When project_id is set, project-scoped memories appear before globals in recent_work."""
+    # Global memory (created first, so it's older)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Global fact about Redis caching patterns",
+        topic=["redis"],
+        source=MemorySource.conversation,
+        confidence=0.8,
+        project_id=None,
+    ))
+    # Project-scoped memory (created second but should appear first)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Weft uses fastembed for local embeddings",
+        topic=["embeddings"],
+        source=MemorySource.conversation,
+        confidence=0.8,
+        project_id="weft",
+    ))
+
+    result = await build_primer(pool, project_id="weft", budget_tokens=4000)
+
+    work = result["recent_work"]
+    assert len(work) == 2
+    # Project-scoped should come first
+    assert work[0]["project_id"] == "weft"
+    assert work[1]["project_id"] is None
