@@ -97,6 +97,15 @@ After completing a task (especially after `loom_done`), capture what was learned
 - Store project-specific facts with `project_id` set to the project identifier
 - When in doubt, store globally — it's better to have a memory available everywhere than to lose it
 
+### Session Handoff
+Before ending a session (especially before context clear), call `weft_handoff` to preserve continuity:
+- `summary`: what was accomplished
+- `in_progress`: what's partially done
+- `next_steps`: what to do next and why
+- `open_questions`: unresolved decisions
+
+The next session's `weft_prime` surfaces the most recent handoff prominently so the incoming agent picks up where you left off.
+
 ### Consolidation
 - Periodically run `weft_consolidate` to decay stale memories, merge duplicates, and flag contradictions
 - Use `weft_consolidate(dry_run=true)` first to preview what would change

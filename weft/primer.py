@@ -1,10 +1,11 @@
 """Session primer — assemble structured context for session startup.
 
-Builds a payload with four priority layers:
+Builds a payload with priority layers:
 0. Pinned memories (always included first)
-1. Preferences & user_model (immortal, always included)
-2. Recent work (accessed within N days)
-3. Project-relevant memories (fill remaining budget)
+1. Last session handoff (most recent only — continuity)
+2. Preferences & user_model (immortal, always included)
+3. Recent work (accessed within N days)
+4. Project-relevant memories (fill remaining budget)
 """
 
 from __future__ import annotations
@@ -99,7 +100,26 @@ async def build_primer(
             seen_ids.add(mem.id)
             used_tokens += cost
 
-    # --- Section 1: Preferences & user_model (immortal) ---
+    # --- Section 1: Last session handoff (most recent only) ---
+    handoff_raw = await _fetch_with_globals(
+        pool, project_id,
+        memory_type=MemoryType.handoff, status=MemoryStatus.active, limit=5,
+    )
+    # Filter out already-seen (e.g., if a handoff was also pinned)
+    handoff_candidates = [m for m in handoff_raw if m.id not in seen_ids]
+    # Take only the most recent handoff
+    handoff_candidates.sort(key=lambda m: m.created_at, reverse=True)
+
+    handoff_section: list[dict] = []
+    if handoff_candidates:
+        mem = handoff_candidates[0]
+        cost = mem.token_count or estimate_tokens(mem.content)
+        if used_tokens + cost <= budget_tokens:
+            handoff_section.append(mem.to_dict())
+            seen_ids.add(mem.id)
+            used_tokens += cost
+
+    # --- Section 2: Preferences & user_model (immortal) ---
     prefs_raw = await _fetch_with_globals(
         pool, project_id,
         memory_type=MemoryType.preference, status=MemoryStatus.active,
@@ -125,16 +145,18 @@ async def build_primer(
             seen_ids.add(mem.id)
             used_tokens += cost
 
-    # --- Section 2: Recent work + ideas ---
+    # --- Section 3: Recent work + ideas ---
     cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
     recent_raw = await _fetch_with_globals(
         pool, project_id,
         status=MemoryStatus.active, limit=50,
     )
-    # Filter to recently accessed, exclude already-seen
+    # Filter to recently accessed, exclude already-seen and handoffs
+    # (handoffs have their own section)
     recent_candidates = [
         m for m in recent_raw
         if m.id not in seen_ids and m.accessed_at >= cutoff
+        and m.type != MemoryType.handoff
     ]
     # Sort: project-scoped first (when project_id is set), then by accessed_at
     recent_candidates.sort(
@@ -157,7 +179,7 @@ async def build_primer(
             seen_ids.add(mem.id)
             used_tokens += cost
 
-    # --- Section 3: Relevant (fill remaining budget) ---
+    # --- Section 4: Relevant (fill remaining budget) ---
     relevant_section: list[dict] = []
     if project_id and used_tokens < budget_tokens:
         relevant_raw = await list_memories(
@@ -175,6 +197,7 @@ async def build_primer(
 
     return {
         "pinned": pinned_section,
+        "handoff": handoff_section,
         "preferences": preferences_section,
         "recent_work": recent_section,
         "ideas": ideas_section,

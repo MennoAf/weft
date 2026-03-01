@@ -134,6 +134,7 @@ Save immediately: architecture decisions, user preferences, solutions, session s
 Wait for confirmation: behavioral patterns (2-3 occurrences), inferences about intent.
 Rule of thumb: if you'd want to know it next session, save it now.
 Use `weft_learn` after completing tasks to capture what was learned.
+Use `weft_handoff` before ending a session to preserve continuity for the next agent.
 Use `weft_feedback(memory_id, helpful=true/false)` to improve future recall.
 ```
 
@@ -149,6 +150,7 @@ See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all to
 │  weft_relate    weft_consolidate                 │
 │  weft_prime     weft_status   weft_extract       │
 │  weft_pin       weft_learn    weft_feedback_gen  │
+│  weft_handoff                                    │
 ├──────────────────────────────────────────────────┤
 │              Business Logic                      │
 │  store  relevance  context  primer               │
@@ -216,7 +218,7 @@ Session primer: assemble structured context for session startup. Returns priorit
 | `budget_tokens` | `int` | `4000` | Token budget |
 | `recent_days` | `int` | `7` | How far back to look for recent work |
 
-Returns `{ pinned, preferences, recent_work, ideas, relevant, total_tokens, budget_tokens, budget_remaining }`.
+Returns `{ pinned, handoff, preferences, recent_work, ideas, relevant, total_tokens, budget_tokens, budget_remaining }`.
 
 ### weft_revise
 
@@ -267,6 +269,19 @@ Capture lessons learned from completed work. Extracts memory candidates from fre
 | `project_id` | `str` | `null` | Scope to a project |
 | `agent_id` | `str` | `null` | Originating agent |
 | `min_confidence` | `float` | `0.7` | Minimum confidence to auto-store |
+
+### weft_handoff
+
+Session handoff: capture context for the next session before clearing. The next `weft_prime` call surfaces the most recent handoff prominently for continuity.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `summary` | `str` | *required* | What was accomplished this session |
+| `in_progress` | `str` | `null` | What's partially done or needs follow-up |
+| `next_steps` | `str` | `null` | Recommended next actions and why |
+| `open_questions` | `str` | `null` | Unresolved decisions or things to investigate |
+| `project_id` | `str` | `null` | Scope to a project (auto-detected if omitted) |
+| `agent_id` | `str` | `null` | Originating agent identifier |
 
 ### weft_relate
 
