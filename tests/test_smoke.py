@@ -80,3 +80,35 @@ async def test_input_error_response_format():
     assert "observation" in result["detail"]
     assert result["tool"] == "weft_remember"
     assert "degraded" not in result  # input errors are not degraded mode
+
+
+class TestCoerceList:
+    """MCP transport sometimes serializes list params as JSON strings."""
+
+    def test_none_passthrough(self):
+        from weft.mcp.tools import _coerce_list
+        assert _coerce_list(None) is None
+
+    def test_list_passthrough(self):
+        from weft.mcp.tools import _coerce_list
+        assert _coerce_list(["a", "b"]) == ["a", "b"]
+
+    def test_json_string_to_list(self):
+        from weft.mcp.tools import _coerce_list
+        assert _coerce_list('["weft", "bug"]') == ["weft", "bug"]
+
+    def test_empty_json_array(self):
+        from weft.mcp.tools import _coerce_list
+        assert _coerce_list("[]") == []
+
+    def test_non_json_string_passthrough(self):
+        from weft.mcp.tools import _coerce_list
+        # Non-JSON strings pass through so Pydantic can raise properly
+        result = _coerce_list("not json")
+        assert result == "not json"
+
+    def test_json_string_not_array_passthrough(self):
+        from weft.mcp.tools import _coerce_list
+        # A JSON string that parses to non-list passes through
+        result = _coerce_list('"just a string"')
+        assert result == '"just a string"'

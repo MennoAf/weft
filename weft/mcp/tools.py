@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import asyncpg
@@ -29,6 +30,27 @@ _DB_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, Connection
 
 # Exceptions from invalid input (bad enum values, wrong types, etc.)
 _INPUT_ERRORS = (ValueError, TypeError)
+
+
+def _coerce_list(value: str | list | None) -> list | None:
+    """Coerce a JSON-string list to a native list.
+
+    Some MCP clients serialize list params as JSON strings instead of arrays.
+    E.g. topic arrives as '["a","b"]' instead of ["a","b"]. This helper
+    transparently handles that so Pydantic validation succeeds.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return value  # let Pydantic raise if still wrong
 
 
 def _input_error_response(tool_name: str, error: Exception) -> dict:
@@ -67,7 +89,7 @@ async def weft_remember(
         create = MemoryCreate(
             type=MemoryType(type),
             content=content,
-            topic=topic or [],
+            topic=_coerce_list(topic) or [],
             source=MemorySource(source),
             confidence=confidence,
             project_id=project_id,
@@ -205,7 +227,7 @@ async def weft_revise(
         embedding = await app.embedding.embed(new_content)
         new, old = await revise_memory(
             app.pool, memory_id, new_content,
-            embedding=embedding, new_confidence=new_confidence, new_topic=new_topic,
+            embedding=embedding, new_confidence=new_confidence, new_topic=_coerce_list(new_topic),
         )
         await app.cache.set_memory(new)
         await app.cache.invalidate_memory(old.id)
