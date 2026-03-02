@@ -79,7 +79,7 @@ async def test_filter_by_status_none_returns_all(mixed_memories):
     pool, memories, provider = mixed_memories
     emb = await provider.embed("all memories")
 
-    results = await search_by_vector(pool, emb, limit=10, status=None)
+    results = await search_by_vector(pool, emb, limit=10, status=None, threshold=-1.0)
     assert len(results) == len(memories)
 
 

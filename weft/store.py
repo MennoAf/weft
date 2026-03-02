@@ -170,6 +170,11 @@ async def search_by_vector(
     params.append(embedding_str)
     idx += 1  # $1 = embedding
 
+    # Similarity threshold in SQL so the DB handles filtering atomically
+    conditions.append(f"1 - (embedding <=> $1::vector) >= ${idx}")
+    params.append(threshold)
+    idx += 1
+
     if status:
         conditions.append(f"status = ${idx}")
         params.append(status.value)
@@ -206,10 +211,8 @@ async def search_by_vector(
 
     results = []
     for row in rows:
-        sim = float(row["similarity"])
-        if sim >= threshold:
-            memory = _row_to_memory(row)
-            results.append(MemoryRecall(memory=memory, similarity=sim))
+        memory = _row_to_memory(row)
+        results.append(MemoryRecall(memory=memory, similarity=float(row["similarity"])))
     return results
 
 
