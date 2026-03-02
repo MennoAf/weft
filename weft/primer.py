@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 
 import asyncpg
 
-from weft.models import Memory, MemoryStatus, MemoryType
-from weft.store import list_memories
+from weft.models import Memory, MemoryRecall, MemoryStatus, MemoryType
+from weft.store import list_memories, search_by_vector
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,12 @@ _GROUNDING_TOPIC = "project-grounding"
 
 # Cold-start threshold: if total primer items <= this AND no handoff, show onboarding.
 _COLD_START_THRESHOLD = 2
+
+# Query-biased search threshold — intentionally permissive (re-ranking, not filtering).
+_QUERY_SIMILARITY_THRESHOLD = 0.1
+
+# Blend weight for semantic similarity vs existing ranking signals.
+_SIMILARITY_WEIGHT = 0.4
 
 # Hints shown when a primer section is empty (disappear once populated).
 _SECTION_HINTS: dict[str, str] = {
@@ -123,6 +129,7 @@ async def build_primer(
     *,
     project_id: str | None = None,
     budget_tokens: int = 1800,
+    query_vec: list[float] | None = None,
 ) -> dict:
     """Assemble a tight session briefing from memories.
 
@@ -135,6 +142,10 @@ async def build_primer(
     4. issues — active issues (what's broken)
     5. decisions — closed decisions (what NOT to suggest)
 
+    When *query_vec* is provided, sections 3-5 (recent_work, issues,
+    decisions) use vector similarity search with blended re-ranking
+    instead of plain metadata queries.  Sections 0-2 are never biased.
+
     Everything else (architecture, patterns, reference facts, preferences)
     lives in recall — fetched on demand when the conversation needs it.
 
@@ -142,13 +153,14 @@ async def build_primer(
     packing happens sequentially in priority order.
     """
     now = datetime.now(timezone.utc)
+    biased = query_vec is not None
 
     # list_memories already handles `project_id = $X OR project_id IS NULL`
     # when project_id is provided, so a single call per section suffices.
     _pid = {"project_id": project_id} if project_id else {}
 
     # --- Fetch all sections in parallel ---
-    async def _empty() -> list[Memory]:
+    async def _empty() -> list:
         return []
 
     grounding_coro = (
@@ -167,30 +179,61 @@ async def build_primer(
         pool, memory_type=MemoryType.handoff, status=MemoryStatus.active,
         limit=5, **_pid,
     )
-    milestone_coro = list_memories(
-        pool, memory_type=MemoryType.milestone, status=MemoryStatus.active,
-        limit=10, **_pid,
-    )
-    issues_coro = list_memories(
-        pool, memory_type=MemoryType.issue, status=MemoryStatus.active,
-        limit=20, **_pid,
-    )
-    decisions_coro = list_memories(
-        pool, memory_type=MemoryType.decision, status=MemoryStatus.active,
-        limit=20, **_pid,
-    )
+
+    # Biased sections: use search_by_vector when query_vec is available.
+    if biased:
+        milestone_coro = search_by_vector(
+            pool, query_vec,
+            memory_type=MemoryType.milestone, status=MemoryStatus.active,
+            limit=10, threshold=_QUERY_SIMILARITY_THRESHOLD, **_pid,
+        )
+        issues_coro = search_by_vector(
+            pool, query_vec,
+            memory_type=MemoryType.issue, status=MemoryStatus.active,
+            limit=20, threshold=_QUERY_SIMILARITY_THRESHOLD, **_pid,
+        )
+        decisions_coro = search_by_vector(
+            pool, query_vec,
+            memory_type=MemoryType.decision, status=MemoryStatus.active,
+            limit=20, threshold=_QUERY_SIMILARITY_THRESHOLD, **_pid,
+        )
+    else:
+        milestone_coro = list_memories(
+            pool, memory_type=MemoryType.milestone, status=MemoryStatus.active,
+            limit=10, **_pid,
+        )
+        issues_coro = list_memories(
+            pool, memory_type=MemoryType.issue, status=MemoryStatus.active,
+            limit=20, **_pid,
+        )
+        decisions_coro = list_memories(
+            pool, memory_type=MemoryType.decision, status=MemoryStatus.active,
+            limit=20, **_pid,
+        )
 
     (
         grounding_raw,
         pinned_raw,
         handoff_raw,
-        milestone_raw,
-        issues_raw,
-        decisions_raw,
+        biased_milestones_raw,
+        biased_issues_raw,
+        biased_decisions_raw,
     ) = await asyncio.gather(
         grounding_coro, pinned_coro, handoff_coro,
         milestone_coro, issues_coro, decisions_coro,
     )
+
+    # Unwrap MemoryRecall → (Memory, similarity) when biased, else (Memory, None).
+    def _unwrap(items: list) -> list[tuple[Memory, float | None]]:
+        if not items:
+            return []
+        if isinstance(items[0], MemoryRecall):
+            return [(r.memory, r.similarity) for r in items]
+        return [(m, None) for m in items]
+
+    milestone_raw = _unwrap(biased_milestones_raw)
+    issues_raw = _unwrap(biased_issues_raw)
+    decisions_raw = _unwrap(biased_decisions_raw)
 
     # --- Budget packing (sequential, in priority order) ---
     used_tokens = 0
@@ -272,14 +315,30 @@ async def build_primer(
     # Section 3: Recent work (milestones from last 72h)
     cutoff = now.timestamp() - (72 * 3600)
     milestone_candidates = [
-        m for m in milestone_raw
+        (m, sim) for m, sim in milestone_raw
         if m.id not in seen_ids and m.created_at.timestamp() > cutoff
     ]
-    milestone_candidates.sort(key=lambda m: m.created_at, reverse=True)
+    if biased:
+        # Blend similarity with recency (newer = higher score).
+        _ts_range = (
+            max(m.created_at.timestamp() for m, _ in milestone_candidates)
+            - min(m.created_at.timestamp() for m, _ in milestone_candidates)
+        ) if len(milestone_candidates) > 1 else 1.0
+        milestone_candidates.sort(
+            key=lambda pair: (
+                _SIMILARITY_WEIGHT * (pair[1] or 0)
+                + (1 - _SIMILARITY_WEIGHT) * (
+                    (pair[0].created_at.timestamp() - cutoff) / max(_ts_range, 1.0)
+                )
+            ),
+            reverse=True,
+        )
+    else:
+        milestone_candidates.sort(key=lambda pair: pair[0].created_at, reverse=True)
 
     recent_work_section: list[dict] = []
     section_used = 0
-    for mem in milestone_candidates:
+    for mem, _sim in milestone_candidates:
         if len(recent_work_section) >= _MAX_RECENT_WORK:
             excluded += 1
             continue
@@ -304,12 +363,24 @@ async def build_primer(
     section_tokens["recent_work"] = section_used
 
     # Section 4: Active issues
-    issue_candidates = [m for m in issues_raw if m.id not in seen_ids]
-    issue_candidates.sort(key=lambda m: (m.usefulness_score, m.created_at.timestamp()), reverse=True)
+    issue_candidates = [(m, sim) for m, sim in issues_raw if m.id not in seen_ids]
+    if biased:
+        issue_candidates.sort(
+            key=lambda pair: (
+                _SIMILARITY_WEIGHT * (pair[1] or 0)
+                + (1 - _SIMILARITY_WEIGHT) * pair[0].usefulness_score
+            ),
+            reverse=True,
+        )
+    else:
+        issue_candidates.sort(
+            key=lambda pair: (pair[0].usefulness_score, pair[0].created_at.timestamp()),
+            reverse=True,
+        )
 
     issue_items: list[dict] = []
     section_used = 0
-    for mem in issue_candidates:
+    for mem, _sim in issue_candidates:
         cost = mem.token_count or estimate_tokens(mem.content)
         if (
             used_tokens + cost <= budget_tokens
@@ -324,18 +395,30 @@ async def build_primer(
     section_tokens["issues"] = section_used
 
     # Section 5: Closed decisions (what NOT to suggest)
-    decision_candidates = [m for m in decisions_raw if m.id not in seen_ids]
-    decision_candidates.sort(
-        key=lambda m: (
-            0 if project_id and m.project_id == project_id else 1,
-            -m.usefulness_score,
-            -(m.created_at.timestamp()),
-        ),
-    )
+    decision_candidates = [(m, sim) for m, sim in decisions_raw if m.id not in seen_ids]
+    if biased:
+        decision_candidates.sort(
+            key=lambda pair: (
+                0 if project_id and pair[0].project_id == project_id else 1,
+                -(
+                    _SIMILARITY_WEIGHT * (pair[1] or 0)
+                    + (1 - _SIMILARITY_WEIGHT) * pair[0].usefulness_score
+                ),
+                -(pair[0].created_at.timestamp()),
+            ),
+        )
+    else:
+        decision_candidates.sort(
+            key=lambda pair: (
+                0 if project_id and pair[0].project_id == project_id else 1,
+                -pair[0].usefulness_score,
+                -(pair[0].created_at.timestamp()),
+            ),
+        )
 
     decisions_section: list[dict] = []
     section_used = 0
-    for i, mem in enumerate(decision_candidates):
+    for i, (mem, _sim) in enumerate(decision_candidates):
         if len(decisions_section) >= _MAX_DECISIONS:
             excluded += len(decision_candidates) - i
             break
