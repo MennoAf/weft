@@ -10,7 +10,10 @@ from weft.models import Memory, MemoryCreate, MemorySource, MemoryStatus, Memory
 from weft.primer import (
     _MAX_GLOBAL_PREFS,
     _MAX_GLOBAL_RECENT,
+    _MAX_RECENT_ITEMS,
+    _REFERENCE_THRESHOLD,
     _is_completed,
+    _novelty_score,
     build_primer,
 )
 from weft.store import store_memory
@@ -712,3 +715,147 @@ async def test_primer_preferences_project_scoped_first(pool):
     # Project preference first despite lower confidence
     assert prefs[0]["project_id"] == "weft"
     assert prefs[1]["project_id"] is None
+
+
+# --- Novelty scoring tests ---
+
+
+class TestNoveltyScore:
+    """Unit tests for the _novelty_score ranking function."""
+
+    def test_low_access_count_no_penalty(self):
+        """Memories below the reference threshold get no penalty."""
+        mem = _make_mem("some fact")
+        mem.access_count = 1
+        score_low = _novelty_score(mem)
+
+        mem.access_count = _REFERENCE_THRESHOLD
+        score_at_threshold = _novelty_score(mem)
+
+        # At or below threshold, score equals raw accessed_at timestamp
+        assert score_low == score_at_threshold == mem.accessed_at.timestamp()
+
+    def test_high_access_count_penalized(self):
+        """Memories above the reference threshold get a lower novelty score."""
+        mem = _make_mem("reference material")
+        mem.access_count = 1
+        score_low = _novelty_score(mem)
+
+        mem.access_count = _REFERENCE_THRESHOLD + 10
+        score_high = _novelty_score(mem)
+
+        # Same accessed_at but high access_count => lower score
+        assert score_high < score_low
+
+    def test_penalty_grows_with_access_count(self):
+        """Higher access counts get progressively larger penalties."""
+        mem = _make_mem("frequently touched")
+
+        mem.access_count = _REFERENCE_THRESHOLD + 2
+        score_a = _novelty_score(mem)
+
+        mem.access_count = _REFERENCE_THRESHOLD + 20
+        score_b = _novelty_score(mem)
+
+        assert score_b < score_a
+
+    def test_very_recent_high_access_can_still_rank(self):
+        """A high-access memory touched just now ranks above a low-access
+        memory touched several days ago — the penalty is bounded."""
+        now = datetime.now(timezone.utc)
+        five_days_ago = now - timedelta(days=5)
+
+        recent_ref = _make_mem("reference, just touched")
+        recent_ref.accessed_at = now
+        recent_ref.access_count = 15
+
+        old_novel = _make_mem("novel but stale")
+        old_novel.accessed_at = five_days_ago
+        old_novel.access_count = 1
+
+        # The high-access memory touched NOW should still beat
+        # a low-access memory touched 5 days ago
+        assert _novelty_score(recent_ref) > _novelty_score(old_novel)
+
+
+async def test_primer_novelty_ranking_in_recent_work(pool):
+    """High access_count memories rank below low access_count memories
+    with similar accessed_at in the recent_work section."""
+    import asyncio
+
+    # Memory A: low access count, accessed recently
+    mem_a = await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="New discovery: connection pool needs keepalive",
+        topic=["postgres"],
+        source=MemorySource.conversation,
+        confidence=0.8,
+    ))
+    await asyncio.sleep(0.01)
+
+    # Memory B: high access count (reference material), accessed at similar time
+    mem_b = await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Redis cache has 1 hour TTL for memories",
+        topic=["caching"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+    ))
+    # Simulate many accesses (bumps accessed_at to now each time)
+    for _ in range(12):
+        await pool.execute(
+            "UPDATE memories SET accessed_at = now(), access_count = access_count + 1 WHERE id = $1",
+            mem_b.id,
+        )
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    work = result["recent_work"]
+    assert len(work) == 2
+    work_ids = [m["id"] for m in work]
+    # Low-access memory should rank first (more novel)
+    assert work_ids[0] == mem_a.id
+    assert work_ids[1] == mem_b.id
+
+
+async def test_primer_recent_work_hard_cap(pool):
+    """Recent work section respects _MAX_RECENT_ITEMS even with generous budget."""
+    import asyncio
+
+    # Create more items than the cap
+    for i in range(_MAX_RECENT_ITEMS + 4):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.fact,
+            content=f"Recent work item {i} with enough content to be meaningful",
+            topic=["work"],
+            source=MemorySource.conversation,
+            confidence=0.8,
+        ))
+        await asyncio.sleep(0.005)
+
+    result = await build_primer(pool, budget_tokens=10000)  # generous budget
+
+    # Hard cap should limit recent_work
+    assert len(result["recent_work"]) <= _MAX_RECENT_ITEMS
+
+
+async def test_primer_hard_cap_still_respects_budget(pool):
+    """Budget enforcement still works even below the hard cap."""
+    import asyncio
+
+    # Create a few items with large content
+    for i in range(3):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.fact,
+            content=f"Item {i}: " + "x" * 500,  # ~130 tokens each
+            topic=["work"],
+            source=MemorySource.conversation,
+            confidence=0.8,
+        ))
+        await asyncio.sleep(0.005)
+
+    # Tight budget — fewer than cap should appear
+    result = await build_primer(pool, budget_tokens=150)
+
+    assert len(result["recent_work"]) < 3
+    assert result["total_tokens"] <= 150
