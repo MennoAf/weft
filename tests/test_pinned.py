@@ -103,7 +103,7 @@ async def test_pinned_not_duplicated_in_other_sections(pool):
         [m["id"] for m in result["pinned"]]
         + [m["id"] for m in result["preferences"]]
         + [m["id"] for m in result["recent_work"]]
-        + [m["id"] for m in result["relevant"]]
+        + [m["id"] for m in result["active_issues"]["items"]]
     )
     assert len(all_ids) == len(set(all_ids)), "Pinned memory duplicated across sections"
 

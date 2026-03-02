@@ -8,7 +8,6 @@ import pytest
 
 from weft.models import Memory, MemoryCreate, MemorySource, MemoryStatus, MemoryType
 from weft.primer import (
-    _MAX_GLOBAL_IDEAS,
     _MAX_GLOBAL_PREFS,
     _MAX_GLOBAL_RECENT,
     _is_completed,
@@ -56,8 +55,7 @@ async def test_primer_empty_db(pool):
 
     assert result["preferences"] == []
     assert result["recent_work"] == []
-    assert result["ideas"] == []
-    assert result["relevant"] == []
+    assert result["active_issues"] == {"count": 0, "items": []}
     assert result["total_tokens"] == 0
     assert result["budget_tokens"] == 4000
     assert result["budget_remaining"] == 4000
@@ -150,8 +148,7 @@ async def test_primer_budget_enforcement(pool):
     total_memories = (
         len(result["preferences"])
         + len(result["recent_work"])
-        + len(result["ideas"])
-        + len(result["relevant"])
+        + result["active_issues"]["count"]
     )
     assert total_memories < 30
 
@@ -220,20 +217,15 @@ async def test_primer_project_scoping(pool):
     pref_contents = [p["content"] for p in result["preferences"]]
     assert any("verbose logging" in c for c in pref_contents)
 
-    # Project-scoped fact should appear in recent_work, ideas, or relevant
-    all_contents = (
-        [m["content"] for m in result["recent_work"]]
-        + [m["content"] for m in result["ideas"]]
-        + [m["content"] for m in result["relevant"]]
-    )
-    assert any("microservices" in c for c in all_contents)
+    # Project-scoped fact should appear in recent_work
+    work_contents = [m["content"] for m in result["recent_work"]]
+    assert any("microservices" in c for c in work_contents)
 
     # Other project's fact should NOT appear
     all_all = (
         [m["content"] for m in result["preferences"]]
         + [m["content"] for m in result["recent_work"]]
-        + [m["content"] for m in result["ideas"]]
-        + [m["content"] for m in result["relevant"]]
+        + [m["content"] for m in result["active_issues"]["items"]]
     )
     assert not any("monolith" in c for c in all_all)
 
@@ -258,9 +250,9 @@ async def test_primer_no_duplicates_across_sections(pool):
     pref_id = result["preferences"][0]["id"]
     assert pref_id not in recent_ids
 
-    # Should not appear in relevant either
-    relevant_ids = [m["id"] for m in result["relevant"]]
-    assert pref_id not in relevant_ids
+    # Should not appear in active_issues either
+    issue_ids = [m["id"] for m in result["active_issues"]["items"]]
+    assert pref_id not in issue_ids
 
 
 async def test_primer_return_structure(pool):
@@ -272,8 +264,7 @@ async def test_primer_return_structure(pool):
         "handoff",
         "preferences",
         "recent_work",
-        "ideas",
-        "relevant",
+        "active_issues",
         "total_tokens",
         "budget_tokens",
         "budget_remaining",
@@ -285,8 +276,9 @@ async def test_primer_return_structure(pool):
     assert isinstance(result["handoff"], list)
     assert isinstance(result["preferences"], list)
     assert isinstance(result["recent_work"], list)
-    assert isinstance(result["ideas"], list)
-    assert isinstance(result["relevant"], list)
+    assert isinstance(result["active_issues"], dict)
+    assert isinstance(result["active_issues"]["count"], int)
+    assert isinstance(result["active_issues"]["items"], list)
     assert isinstance(result["total_tokens"], int)
     assert isinstance(result["budget_tokens"], int)
     assert isinstance(result["budget_remaining"], int)
@@ -295,8 +287,8 @@ async def test_primer_return_structure(pool):
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
 
 
-async def test_primer_splits_ideas_from_recent_work(pool):
-    """Memories with idea/improvement topics go to ideas section, not recent_work."""
+async def test_primer_excludes_ideas_from_recent_work(pool):
+    """Memories with idea/improvement topics are excluded from recent_work entirely."""
     # Concrete work (live, not completed)
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
@@ -305,7 +297,7 @@ async def test_primer_splits_ideas_from_recent_work(pool):
         source=MemorySource.conversation,
         confidence=0.9,
     ))
-    # Improvement idea
+    # Improvement idea — should be excluded
     await store_memory(pool, MemoryCreate(
         type=MemoryType.architecture,
         content="Weft should inject memories at loom_claim time",
@@ -313,7 +305,7 @@ async def test_primer_splits_ideas_from_recent_work(pool):
         source=MemorySource.conversation,
         confidence=0.8,
     ))
-    # Another idea with "idea" topic
+    # Another idea with "idea" topic — should be excluded
     await store_memory(pool, MemoryCreate(
         type=MemoryType.architecture,
         content="Cross-project issue log for field observations",
@@ -328,14 +320,12 @@ async def test_primer_splits_ideas_from_recent_work(pool):
     work_contents = [m["content"] for m in result["recent_work"]]
     assert any("keepalive" in c for c in work_contents)
 
-    # Ideas in ideas section
-    idea_contents = [m["content"] for m in result["ideas"]]
-    assert any("loom_claim" in c for c in idea_contents)
-    assert any("issue log" in c for c in idea_contents)
-
     # Ideas should NOT be in recent_work
     assert not any("loom_claim" in c for c in work_contents)
     assert not any("issue log" in c for c in work_contents)
+
+    # Only the concrete fact should be present
+    assert len(result["recent_work"]) == 1
 
 
 async def test_primer_surfaces_most_recent_handoff(pool):
@@ -488,31 +478,35 @@ async def test_primer_completed_items_excluded(pool):
         assert "(FIXED)" not in item["content"]
 
 
-async def test_primer_completed_ideas_excluded(pool):
-    """DONE improvements are excluded from the ideas section entirely."""
-    # Open idea
+async def test_primer_active_issues_section(pool):
+    """Active issues appear in the active_issues section."""
     await store_memory(pool, MemoryCreate(
-        type=MemoryType.architecture,
-        content="Inject relevant Weft memories into task context at loom_claim time",
-        topic=["weft", "improvement"],
+        type=MemoryType.issue,
+        content="Connection pool timeout after 47 hours of uptime",
+        topic=["postgres", "bug"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.issue,
+        content="MCP topic coercion misses nested arrays",
+        topic=["mcp", "bug"],
         source=MemorySource.conversation,
         confidence=0.8,
-    ))
-    # Completed idea — should not appear
-    await store_memory(pool, MemoryCreate(
-        type=MemoryType.architecture,
-        content="Weft Improvement (DONE): Pinned memory tier shipped and tested",
-        topic=["weft", "improvement", "done"],
-        source=MemorySource.conversation,
-        confidence=0.7,
     ))
 
     result = await build_primer(pool, budget_tokens=4000)
 
-    ideas = result["ideas"]
-    # Only the open idea — completed one excluded
-    assert len(ideas) == 1
-    assert "(DONE)" not in ideas[0]["content"]
+    issues = result["active_issues"]
+    assert issues["count"] == 2
+    assert len(issues["items"]) == 2
+    contents = [i["content"] for i in issues["items"]]
+    assert any("Connection pool" in c for c in contents)
+    assert any("topic coercion" in c for c in contents)
+
+    # Issues should NOT appear in recent_work
+    work_contents = [m["content"] for m in result["recent_work"]]
+    assert not any("Connection pool" in c for c in work_contents)
 
 
 async def test_primer_completed_items_excluded_regardless_of_budget(pool):
@@ -584,41 +578,46 @@ async def test_primer_caps_global_recent_work(pool):
     assert len(global_items) <= _MAX_GLOBAL_RECENT
 
 
-async def test_primer_caps_global_ideas(pool):
-    """When project_id is set, non-project items in ideas are capped."""
-    import asyncio
+async def test_primer_active_issues_empty(pool):
+    """When no issues exist, active_issues has count=0 and empty items."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Some regular fact, not an issue",
+        topic=["general"],
+        source=MemorySource.conversation,
+        confidence=0.8,
+    ))
 
-    # Create more global ideas than the cap
-    for i in range(_MAX_GLOBAL_IDEAS + 3):
+    result = await build_primer(pool, budget_tokens=4000)
+
+    assert result["active_issues"] == {"count": 0, "items": []}
+
+
+async def test_primer_active_issues_budget_aware(pool):
+    """Active issues respect the token budget like all other sections."""
+    # Fill up most of the budget with preferences
+    for i in range(10):
         await store_memory(pool, MemoryCreate(
-            type=MemoryType.architecture,
-            content=f"Global improvement idea {i}",
-            topic=["improvement"],
+            type=MemoryType.preference,
+            content=f"Preference {i}: " + "x" * 200,
+            topic=["prefs"],
             source=MemorySource.conversation,
-            confidence=0.8,
-            project_id=None,
-        ))
-        await asyncio.sleep(0.005)
-
-    # Create project-scoped ideas (should all appear)
-    for i in range(2):
-        await store_memory(pool, MemoryCreate(
-            type=MemoryType.architecture,
-            content=f"Weft improvement idea {i}",
-            topic=["improvement"],
-            source=MemorySource.conversation,
-            confidence=0.8,
-            project_id="weft",
+            confidence=0.9,
         ))
 
-    result = await build_primer(pool, project_id="weft", budget_tokens=4000)
+    # Add an issue
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.issue,
+        content="A bug that might not fit: " + "y" * 200,
+        topic=["bug"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+    ))
 
-    ideas = result["ideas"]
-    project_ideas = [m for m in ideas if m["project_id"] == "weft"]
-    global_ideas = [m for m in ideas if m["project_id"] is None]
+    # Tiny budget — issue likely won't fit after preferences
+    result = await build_primer(pool, budget_tokens=100)
 
-    assert len(project_ideas) == 2
-    assert len(global_ideas) <= _MAX_GLOBAL_IDEAS
+    assert result["total_tokens"] <= 100
 
 
 async def test_primer_caps_global_preferences(pool):

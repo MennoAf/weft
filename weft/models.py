@@ -19,6 +19,7 @@ class MemoryType(str, Enum):
     architecture = "architecture"
     user_model = "user_model"
     handoff = "handoff"
+    issue = "issue"
 
 
 class MemorySource(str, Enum):

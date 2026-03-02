@@ -170,7 +170,7 @@ async def test_session_priming_workflow(pool):
 
     # All expected keys present
     assert set(result.keys()) == {
-        "pinned", "handoff", "preferences", "recent_work", "ideas", "relevant",
+        "pinned", "handoff", "preferences", "recent_work", "active_issues",
         "total_tokens", "budget_tokens", "budget_remaining",
     }
 
@@ -208,7 +208,7 @@ async def test_full_phase4_workflow(pool, provider):
     total_items = (
         len(primer["preferences"])
         + len(primer["recent_work"])
-        + len(primer["relevant"])
+        + primer["active_issues"]["count"]
     )
     assert total_items >= 1
 
