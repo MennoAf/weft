@@ -4,14 +4,13 @@ Builds a payload with priority layers:
 0. Pinned memories (always included first)
 1. Last session handoff (most recent only — continuity)
 2. Preferences & user_model (immortal, always included)
-3. Recent work (accessed within N days)
-4. Project-relevant memories (fill remaining budget)
+3. Recent work (accessed within N days, excluding ideas/aspirational items)
+4. Active issues (type=issue, lightweight summary of what's broken)
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Sequence
 
 import asyncpg
 
@@ -20,7 +19,8 @@ from weft.store import list_memories
 from weft.tokens import estimate_tokens
 
 
-# Topics that signal aspirational/planned items rather than concrete work
+# Topics that signal aspirational/planned items rather than concrete work.
+# These are excluded from the primer — ideas are pull-not-push context.
 _IDEA_TOPICS = frozenset({"improvement", "idea", "issue-log", "backlog", "wishlist"})
 
 # Content markers that indicate a memory describes completed/resolved work.
@@ -33,7 +33,6 @@ _COMPLETED_MARKERS = ("(DONE)", "(FIXED)", "Improvement (DONE)", "Bug (FIXED)",
 # can appear in each section. This prevents cross-project noise from
 # consuming budget that should go to project-relevant context.
 _MAX_GLOBAL_RECENT = 3
-_MAX_GLOBAL_IDEAS = 2
 _MAX_GLOBAL_PREFS = 3
 
 
@@ -102,9 +101,10 @@ async def build_primer(
 
     Sections are filled in priority order within the token budget:
     0. pinned memories (always first)
-    1. preferences + user_model (always second)
-    2. recently accessed memories
-    3. project-relevant memories
+    1. last session handoff (continuity)
+    2. preferences + user_model (immortal)
+    3. recent work (concrete, non-aspirational)
+    4. active issues (what's broken right now)
 
     Returns a dict with sections and budget info.
     """
@@ -190,19 +190,20 @@ async def build_primer(
             if is_global:
                 global_pref_count += 1
 
-    # --- Section 3: Recent work + ideas ---
+    # --- Section 3: Recent work (excludes ideas and completed items) ---
     cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
     recent_raw = await _fetch_with_globals(
         pool, project_id,
         status=MemoryStatus.active, limit=50,
     )
-    # Filter to recently accessed, exclude already-seen, handoffs, and
-    # completed items (DONE/FIXED — these are historical, not actionable).
+    # Filter to recently accessed, exclude already-seen, handoffs, issues,
+    # ideas (aspirational — pull not push), and completed items (DONE/FIXED).
     recent_candidates = [
         m for m in recent_raw
         if m.id not in seen_ids and m.accessed_at >= cutoff
-        and m.type != MemoryType.handoff
+        and m.type not in (MemoryType.handoff, MemoryType.issue)
         and not _is_completed(m)
+        and not _is_idea(m)
     ]
     # Sort: project-scoped first, then by accessed_at.
     recent_candidates.sort(
@@ -212,56 +213,43 @@ async def build_primer(
         ),
     )
 
-    # Split into concrete work vs aspirational ideas, capping globals per section
     recent_section: list[dict] = []
-    ideas_section: list[dict] = []
     global_recent_count = 0
-    global_ideas_count = 0
     for mem in recent_candidates:
         is_global = project_id and mem.project_id != project_id
-        is_idea = _is_idea(mem)
-        # Cap non-project items per section
-        if is_global:
-            if is_idea and global_ideas_count >= _MAX_GLOBAL_IDEAS:
-                continue
-            if not is_idea and global_recent_count >= _MAX_GLOBAL_RECENT:
-                continue
+        if is_global and global_recent_count >= _MAX_GLOBAL_RECENT:
+            continue
         cost = mem.token_count or estimate_tokens(mem.content)
         if used_tokens + cost <= budget_tokens:
-            if is_idea:
-                ideas_section.append(mem.to_dict())
-                if is_global:
-                    global_ideas_count += 1
-            else:
-                recent_section.append(mem.to_dict())
-                if is_global:
-                    global_recent_count += 1
+            recent_section.append(mem.to_dict())
+            if is_global:
+                global_recent_count += 1
             seen_ids.add(mem.id)
             used_tokens += cost
 
-    # --- Section 4: Relevant (fill remaining budget) ---
-    relevant_section: list[dict] = []
-    if project_id and used_tokens < budget_tokens:
-        relevant_raw = await list_memories(
-            pool, status=MemoryStatus.active, project_id=project_id, limit=50,
-        )
-        relevant_candidates = [
-            m for m in relevant_raw if m.id not in seen_ids
-        ]
-        for mem in relevant_candidates:
-            cost = mem.token_count or estimate_tokens(mem.content)
-            if used_tokens + cost <= budget_tokens:
-                relevant_section.append(mem.to_dict())
-                seen_ids.add(mem.id)
-                used_tokens += cost
+    # --- Section 4: Active issues (lightweight "what's broken" summary) ---
+    issues_raw = await _fetch_with_globals(
+        pool, project_id,
+        memory_type=MemoryType.issue, status=MemoryStatus.active, limit=20,
+    )
+    issue_candidates = [m for m in issues_raw if m.id not in seen_ids]
+    # Most recently created issues first
+    issue_candidates.sort(key=lambda m: m.created_at, reverse=True)
+
+    issue_items: list[dict] = []
+    for mem in issue_candidates:
+        cost = mem.token_count or estimate_tokens(mem.content)
+        if used_tokens + cost <= budget_tokens:
+            issue_items.append(mem.to_dict())
+            seen_ids.add(mem.id)
+            used_tokens += cost
 
     return {
         "pinned": pinned_section,
         "handoff": handoff_section,
         "preferences": preferences_section,
         "recent_work": recent_section,
-        "ideas": ideas_section,
-        "relevant": relevant_section,
+        "active_issues": {"count": len(issue_items), "items": issue_items},
         "total_tokens": used_tokens,
         "budget_tokens": budget_tokens,
         "budget_remaining": budget_tokens - used_tokens,
