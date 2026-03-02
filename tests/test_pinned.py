@@ -69,8 +69,8 @@ async def test_update_memory_pin_toggle(pool):
 # --- Primer ---
 
 
-async def test_primer_includes_pinned_section(pool):
-    """Pinned memories appear in the 'pinned' section of primer output."""
+async def test_primer_includes_pinned_in_rules(pool):
+    """Pinned memories appear in the 'rules' section of primer output."""
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
         content="Critical convention: always use snake_case",
@@ -84,50 +84,46 @@ async def test_primer_includes_pinned_section(pool):
         confidence=0.5,
     ))
 
-    result = await build_primer(pool, budget_tokens=4000)
-    assert len(result["pinned"]) == 1
-    assert "snake_case" in result["pinned"][0]["content"]
+    result = await build_primer(pool, budget_tokens=1500)
+    assert len(result["rules"]) == 1
+    assert "snake_case" in result["rules"][0]["content"]
 
 
 async def test_pinned_not_duplicated_in_other_sections(pool):
-    """A pinned preference doesn't appear in both pinned and preferences sections."""
+    """A pinned issue doesn't appear in both rules and issues sections."""
     await store_memory(pool, MemoryCreate(
-        type=MemoryType.preference,
-        content="User prefers dark mode",
+        type=MemoryType.issue,
+        content="Critical bug found",
         confidence=1.0,
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=1500)
     all_ids = (
-        [m["id"] for m in result["pinned"]]
-        + [m["id"] for m in result["preferences"]]
-        + [m["id"] for m in result["recent_work"]]
-        + [m["id"] for m in result["active_issues"]["items"]]
+        [m["id"] for m in result["rules"]]
+        + [m["id"] for m in result["handoff"]]
+        + [m["id"] for m in result["issues"]["items"]]
+        + [m["id"] for m in result["decisions"]]
     )
     assert len(all_ids) == len(set(all_ids)), "Pinned memory duplicated across sections"
 
 
 async def test_pinned_takes_priority_in_budget(pool):
-    """Pinned memories consume budget before other sections."""
-    # Create a pinned memory
+    """Pinned memories (rules) consume budget before other sections."""
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
         content="Critical convention pinned",
         pinned=True,
     ))
-    # Create a preference
     await store_memory(pool, MemoryCreate(
-        type=MemoryType.preference,
-        content="User prefers short responses",
+        type=MemoryType.decision,
+        content="Don't use mocks",
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=4000)
-    # Pinned should appear first, preferences second
-    assert len(result["pinned"]) == 1
-    assert "Critical convention pinned" in result["pinned"][0]["content"]
-    # Budget math should add up
+    result = await build_primer(pool, budget_tokens=1500)
+    assert len(result["rules"]) == 1
+    assert "Critical convention pinned" in result["rules"][0]["content"]
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
 
 

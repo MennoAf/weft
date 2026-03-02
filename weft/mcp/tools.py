@@ -353,10 +353,9 @@ async def weft_pin(
 async def weft_prime(
     ctx: Context,
     project_id: str | None = None,
-    budget_tokens: int = 4000,
-    recent_days: int = 7,
+    budget_tokens: int = 1500,
 ) -> dict:
-    """Session primer: assemble structured context with preferences, recent work, and relevant memories.
+    """Session primer: assemble structured context for session startup.
     If project_id is omitted, auto-detects from the client's working directory."""
     try:
         from weft.primer import build_primer
@@ -367,18 +366,16 @@ async def weft_prime(
             app.pool,
             project_id=resolved_project,
             budget_tokens=budget_tokens,
-            recent_days=recent_days,
         )
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_prime: %s", e)
         from weft.fallback import read_fallback
         content = read_fallback()
         return {
-            "pinned": [],
-            "handoff": [],
-            "preferences": [],
-            "recent_work": [{"content": content, "type": "fallback"}] if content else [],
-            "active_issues": {"count": 0, "items": []},
+            "rules": [],
+            "handoff": [{"content": content, "type": "fallback"}] if content else [],
+            "issues": {"count": 0, "items": []},
+            "decisions": [],
             "total_tokens": 0,
             "budget_tokens": budget_tokens,
             "budget_remaining": budget_tokens,

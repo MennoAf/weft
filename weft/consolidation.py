@@ -32,7 +32,7 @@ from weft.store import (
 logger = logging.getLogger(__name__)
 
 # Types that should never be decayed
-IMMORTAL_TYPES = frozenset({MemoryType.preference, MemoryType.user_model})
+IMMORTAL_TYPES = frozenset({MemoryType.preference, MemoryType.user_model, MemoryType.decision})
 
 
 @dataclass
