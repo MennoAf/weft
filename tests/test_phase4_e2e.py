@@ -135,21 +135,23 @@ async def test_feedback_loop_affects_relevance(pool, provider):
 
 
 async def test_session_priming_workflow(pool):
-    """Session priming: preferences first, recent work, budget respected."""
-    # Store a preference (immortal)
+    """Session priming: rules (pinned), decisions, budget respected."""
+    # Store a pinned rule
     await store_memory(pool, MemoryCreate(
         type=MemoryType.preference,
-        content="User prefers concise responses without emojis",
-        topic=["communication"],
+        content="Always use weft_remember, never flat-file memory",
+        topic=["workflow"],
         confidence=1.0,
+        pinned=True,
     ))
-    # Store recent facts
+    # Store a decision
     await store_memory(pool, MemoryCreate(
-        type=MemoryType.fact,
-        content="Working on memory consolidation pipeline",
-        topic=["weft"],
+        type=MemoryType.decision,
+        content="Don't suggest mocks — use real integration tests",
+        topic=["testing"],
         confidence=0.9,
     ))
+    # Store a regular fact (should NOT appear in primer)
     await store_memory(pool, MemoryCreate(
         type=MemoryType.architecture,
         content="Weft uses three-layer retrieval: vector, relevance, context",
@@ -157,11 +159,23 @@ async def test_session_priming_workflow(pool):
         confidence=0.85,
     ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=1500)
 
-    # Preferences should be populated
-    assert len(result["preferences"]) >= 1
-    assert any("concise responses" in p["content"] for p in result["preferences"])
+    # Pinned rule should be in rules
+    assert len(result["rules"]) >= 1
+    assert any("weft_remember" in r["content"] for r in result["rules"])
+
+    # Decision should be in decisions
+    assert len(result["decisions"]) >= 1
+
+    # Architecture fact should NOT be anywhere
+    all_contents = (
+        [m["content"] for m in result["rules"]]
+        + [m["content"] for m in result["handoff"]]
+        + [m["content"] for m in result["issues"]["items"]]
+        + [m["content"] for m in result["decisions"]]
+    )
+    assert not any("three-layer" in c for c in all_contents)
 
     # Budget should be respected
     assert result["total_tokens"] <= result["budget_tokens"]
@@ -170,7 +184,7 @@ async def test_session_priming_workflow(pool):
 
     # All expected keys present
     assert set(result.keys()) == {
-        "pinned", "handoff", "preferences", "recent_work", "active_issues",
+        "rules", "handoff", "issues", "decisions",
         "total_tokens", "budget_tokens", "budget_remaining",
     }
 
@@ -205,12 +219,8 @@ async def test_full_phase4_workflow(pool, provider):
     # 4. Prime session
     primer = await build_primer(pool, budget_tokens=2000)
     assert primer["total_tokens"] <= 2000
-    total_items = (
-        len(primer["preferences"])
-        + len(primer["recent_work"])
-        + primer["active_issues"]["count"]
-    )
-    assert total_items >= 1
+    # Budget invariant
+    assert primer["total_tokens"] + primer["budget_remaining"] == primer["budget_tokens"]
 
     # 5. Export
     exported_md = await export_memories(pool, format="md")

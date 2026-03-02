@@ -1,16 +1,18 @@
-"""Session primer — assemble structured context for session startup.
+"""Session primer — a tight briefing for session startup.
 
-Builds a payload with priority layers:
-0. Pinned memories (always included first)
-1. Last session handoff (most recent only — continuity)
-2. Preferences & user_model (immortal, always included)
-3. Recent work (accessed within N days, excluding ideas/aspirational items)
-4. Active issues (type=issue, lightweight summary of what's broken)
+The primer's job is: "what would be costly to get wrong in the first
+30 seconds?"  Every line should change how the agent behaves.  Reference
+material, historical summaries, and architecture facts belong in recall,
+fetched when the conversation makes them relevant.
+
+Sections (in priority order):
+0. Rules — pinned memories only (behavioral overrides)
+1. Handoff — most recent session handoff (continuity)
+2. Issues — active issues (what's broken right now)
+3. Decisions — closed/vetoed decisions (what NOT to suggest)
 """
 
 from __future__ import annotations
-
-from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
@@ -18,75 +20,8 @@ from weft.models import Memory, MemoryStatus, MemoryType
 from weft.store import list_memories
 from weft.tokens import estimate_tokens
 
-
-# Topics that signal aspirational/planned items rather than concrete work.
-# These are excluded from the primer — ideas are pull-not-push context.
-_IDEA_TOPICS = frozenset({"improvement", "idea", "issue-log", "backlog", "wishlist"})
-
-# Content markers that indicate a memory describes completed/resolved work.
-# These are excluded from the primer entirely — completed items aren't
-# actionable and waste budget that should go to live context.
-_COMPLETED_MARKERS = ("(DONE)", "(FIXED)", "Improvement (DONE)", "Bug (FIXED)",
-                      "Feedback (FIXED)")
-
-# When priming for a specific project, limit how many non-project items
-# can appear in each section. This prevents cross-project noise from
-# consuming budget that should go to project-relevant context.
-_MAX_GLOBAL_RECENT = 3
-_MAX_GLOBAL_PREFS = 3
-
-# Hard cap on items in recent_work section (independent of budget).
-# Prevents the section from growing unbounded even when budget allows it.
-_MAX_RECENT_ITEMS = 6
-
-# Access-count threshold above which a memory is considered "reference material"
-# and gets a novelty penalty in recent_work ranking.
-_REFERENCE_THRESHOLD = 5
-
-
-def _novelty_score(mem: Memory) -> float:
-    """Score a memory's novelty for recent_work ranking.
-
-    Higher = more novel (should rank first).  A memory accessed once recently
-    is more interesting than one accessed 14 times over two weeks — the latter
-    is stable reference material that belongs in recall, not the primer.
-
-    Score = accessed_at_timestamp - penalty_for_frequent_access
-
-    The penalty kicks in above _REFERENCE_THRESHOLD accesses and grows
-    logarithmically so it doesn't completely bury high-access memories
-    that were *also* very recently touched.
-    """
-    import math
-
-    ts = mem.accessed_at.timestamp()
-    excess = max(0, mem.access_count - _REFERENCE_THRESHOLD)
-    if excess == 0:
-        return ts
-    # Each doubling of excess accesses subtracts ~1 day worth of seconds.
-    # This means a memory with 10+ accesses needs to have been touched
-    # ~1-3 days more recently than a low-access memory to rank above it.
-    penalty = math.log2(1 + excess) * 86400  # 86400 = seconds in a day
-    return ts - penalty
-
-
-def _is_idea(mem: Memory) -> bool:
-    """Return True if the memory looks aspirational rather than concrete work."""
-    topics = {t.lower() for t in (mem.topic or [])}
-    return bool(topics & _IDEA_TOPICS)
-
-
-def _is_completed(mem: Memory) -> bool:
-    """Return True if the memory describes work that's already done/fixed."""
-    content = mem.content
-    topics = {t.lower() for t in (mem.topic or [])}
-    if any(marker in content for marker in _COMPLETED_MARKERS):
-        return True
-    if "done" in topics and "improvement" in topics:
-        return True
-    if "fixed" in topics:
-        return True
-    return False
+# Hard cap on decisions shown in primer.
+_MAX_DECISIONS = 5
 
 
 async def _fetch_with_globals(
@@ -100,21 +35,12 @@ async def _fetch_with_globals(
     (project_id=None) memories and merge them, deduplicating by id.
     """
     if project_id is None:
-        # No project filter — returns all memories regardless of project
         return await list_memories(pool, **kwargs)
 
-    # Fetch project-scoped memories
     project_mems = await list_memories(pool, project_id=project_id, **kwargs)
-
-    # Also fetch global memories (project_id IS NULL)
-    # list_memories only filters when project_id is not None,
-    # so we need a separate query for globals. We pass project_id=None
-    # but list_memories won't filter on it. Instead, we fetch all and
-    # filter client-side.
     all_mems = await list_memories(pool, **kwargs)
     global_mems = [m for m in all_mems if m.project_id is None]
 
-    # Merge and deduplicate
     seen: set[str] = set()
     merged: list[Memory] = []
     for m in project_mems + global_mems:
@@ -128,35 +54,34 @@ async def build_primer(
     pool: asyncpg.Pool,
     *,
     project_id: str | None = None,
-    budget_tokens: int = 4000,
-    recent_days: int = 7,
+    budget_tokens: int = 1500,
 ) -> dict:
-    """Assemble a structured context payload from memories.
+    """Assemble a tight session briefing from memories.
 
-    Sections are filled in priority order within the token budget:
-    0. pinned memories (always first)
-    1. last session handoff (continuity)
-    2. preferences + user_model (immortal)
-    3. recent work (concrete, non-aspirational)
-    4. active issues (what's broken right now)
+    Four sections, filled in priority order within the token budget:
+    0. rules — pinned memories (behavioral overrides, always first)
+    1. handoff — last session handoff (continuity)
+    2. issues — active issues (what's broken)
+    3. decisions — closed decisions (what NOT to suggest)
 
-    Returns a dict with sections and budget info.
+    Everything else (architecture, patterns, reference facts, preferences)
+    lives in recall — fetched on demand when the conversation needs it.
     """
     used_tokens = 0
     seen_ids: set[str] = set()
 
-    # --- Section 0: Pinned memories (highest priority) ---
+    # --- Section 0: Rules (pinned memories only) ---
     pinned_raw = await _fetch_with_globals(
         pool, project_id,
         status=MemoryStatus.active, pinned=True, limit=100,
     )
     pinned_raw.sort(key=lambda m: m.confidence, reverse=True)
 
-    pinned_section: list[dict] = []
+    rules_section: list[dict] = []
     for mem in pinned_raw:
         cost = mem.token_count or estimate_tokens(mem.content)
         if used_tokens + cost <= budget_tokens:
-            pinned_section.append(mem.to_dict())
+            rules_section.append(mem.to_dict())
             seen_ids.add(mem.id)
             used_tokens += cost
 
@@ -173,9 +98,7 @@ async def build_primer(
             topic="session-handoff", status=MemoryStatus.active, limit=5,
         )
         handoff_raw = [m for m in topic_raw if "Session Handoff" in m.content]
-    # Filter out already-seen (e.g., if a handoff was also pinned)
     handoff_candidates = [m for m in handoff_raw if m.id not in seen_ids]
-    # Take only the most recent handoff
     handoff_candidates.sort(key=lambda m: m.created_at, reverse=True)
 
     handoff_section: list[dict] = []
@@ -187,90 +110,12 @@ async def build_primer(
             seen_ids.add(mem.id)
             used_tokens += cost
 
-    # --- Section 2: Preferences & user_model (immortal) ---
-    prefs_raw = await _fetch_with_globals(
-        pool, project_id,
-        memory_type=MemoryType.preference, status=MemoryStatus.active,
-        limit=100,
-    )
-    user_models = await _fetch_with_globals(
-        pool, project_id,
-        memory_type=MemoryType.user_model, status=MemoryStatus.active,
-        limit=100,
-    )
-    immortals = sorted(
-        prefs_raw + user_models,
-        key=lambda m: (
-            # Project-scoped first when project_id is set
-            0 if project_id and m.project_id == project_id else 1,
-            -m.confidence,
-        ),
-    )
-
-    preferences_section: list[dict] = []
-    global_pref_count = 0
-    for mem in immortals:
-        if mem.id in seen_ids:
-            continue
-        # Cap non-project preferences when working in a specific project
-        is_global = project_id and mem.project_id != project_id
-        if is_global and global_pref_count >= _MAX_GLOBAL_PREFS:
-            continue
-        cost = mem.token_count or estimate_tokens(mem.content)
-        if used_tokens + cost <= budget_tokens:
-            preferences_section.append(mem.to_dict())
-            seen_ids.add(mem.id)
-            used_tokens += cost
-            if is_global:
-                global_pref_count += 1
-
-    # --- Section 3: Recent work (excludes ideas and completed items) ---
-    cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
-    recent_raw = await _fetch_with_globals(
-        pool, project_id,
-        status=MemoryStatus.active, limit=50,
-    )
-    # Filter to recently accessed, exclude already-seen, handoffs, issues,
-    # ideas (aspirational — pull not push), and completed items (DONE/FIXED).
-    recent_candidates = [
-        m for m in recent_raw
-        if m.id not in seen_ids and m.accessed_at >= cutoff
-        and m.type not in (MemoryType.handoff, MemoryType.issue)
-        and not _is_completed(m)
-        and not _is_idea(m)
-    ]
-    # Sort: project-scoped first, then by novelty score (penalizes
-    # frequently-accessed reference material in favor of genuinely recent work).
-    recent_candidates.sort(
-        key=lambda m: (
-            0 if project_id and m.project_id == project_id else 1,
-            -_novelty_score(m),
-        ),
-    )
-
-    recent_section: list[dict] = []
-    global_recent_count = 0
-    for mem in recent_candidates:
-        if len(recent_section) >= _MAX_RECENT_ITEMS:
-            break
-        is_global = project_id and mem.project_id != project_id
-        if is_global and global_recent_count >= _MAX_GLOBAL_RECENT:
-            continue
-        cost = mem.token_count or estimate_tokens(mem.content)
-        if used_tokens + cost <= budget_tokens:
-            recent_section.append(mem.to_dict())
-            if is_global:
-                global_recent_count += 1
-            seen_ids.add(mem.id)
-            used_tokens += cost
-
-    # --- Section 4: Active issues (lightweight "what's broken" summary) ---
+    # --- Section 2: Active issues ---
     issues_raw = await _fetch_with_globals(
         pool, project_id,
         memory_type=MemoryType.issue, status=MemoryStatus.active, limit=20,
     )
     issue_candidates = [m for m in issues_raw if m.id not in seen_ids]
-    # Most recently created issues first
     issue_candidates.sort(key=lambda m: m.created_at, reverse=True)
 
     issue_items: list[dict] = []
@@ -281,12 +126,35 @@ async def build_primer(
             seen_ids.add(mem.id)
             used_tokens += cost
 
+    # --- Section 3: Closed decisions (what NOT to suggest) ---
+    decisions_raw = await _fetch_with_globals(
+        pool, project_id,
+        memory_type=MemoryType.decision, status=MemoryStatus.active, limit=20,
+    )
+    decision_candidates = [m for m in decisions_raw if m.id not in seen_ids]
+    # Project-scoped first, then most recent
+    decision_candidates.sort(
+        key=lambda m: (
+            0 if project_id and m.project_id == project_id else 1,
+            -(m.created_at.timestamp()),
+        ),
+    )
+
+    decisions_section: list[dict] = []
+    for mem in decision_candidates:
+        if len(decisions_section) >= _MAX_DECISIONS:
+            break
+        cost = mem.token_count or estimate_tokens(mem.content)
+        if used_tokens + cost <= budget_tokens:
+            decisions_section.append(mem.to_dict())
+            seen_ids.add(mem.id)
+            used_tokens += cost
+
     return {
-        "pinned": pinned_section,
+        "rules": rules_section,
         "handoff": handoff_section,
-        "preferences": preferences_section,
-        "recent_work": recent_section,
-        "active_issues": {"count": len(issue_items), "items": issue_items},
+        "issues": {"count": len(issue_items), "items": issue_items},
+        "decisions": decisions_section,
         "total_tokens": used_tokens,
         "budget_tokens": budget_tokens,
         "budget_remaining": budget_tokens - used_tokens,
