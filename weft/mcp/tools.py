@@ -385,18 +385,33 @@ async def weft_prime(
     ctx: Context,
     project_id: str | None = None,
     budget_tokens: int = 1800,
+    query: str | None = None,
 ) -> dict:
     """Session primer: assemble structured context for session startup.
-    If project_id is omitted, auto-detects from the client's working directory."""
+    If project_id is omitted, auto-detects from the client's working directory.
+
+    query: optional intent/topic string to bias which decisions, issues, and
+    recent work are surfaced. When provided, those sections use semantic
+    similarity to rank more relevant memories higher."""
     try:
         from weft.primer import build_primer
 
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
+
+        # Compute query embedding if provided (best-effort).
+        query_vec: list[float] | None = None
+        if query and query.strip():
+            try:
+                query_vec = await app.embedding.embed(query.strip())
+            except Exception as exc:
+                logger.warning("Failed to embed primer query (non-fatal): %s", exc)
+
         return await build_primer(
             app.pool,
             project_id=resolved_project,
             budget_tokens=budget_tokens,
+            query_vec=query_vec,
         )
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_prime: %s", e)
