@@ -21,7 +21,7 @@ from weft.primer import (
     _newest_created_at,
     build_primer,
 )
-from weft.store import store_memory
+from weft.store import record_feedback, store_memory
 from weft.tokens import estimate_tokens
 
 
@@ -878,3 +878,85 @@ async def test_primer_decision_without_review_after(pool):
 
     assert len(result["decisions"]) == 1
     assert "review_due" not in result["decisions"][0]
+
+
+# --- Usefulness-score ranking ---
+
+
+async def test_primer_rules_usefulness_tiebreaker(pool):
+    """When two pinned rules have equal confidence, higher usefulness ranks first."""
+    m1 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Less useful rule",
+        confidence=0.9,
+        pinned=True,
+    ))
+    await asyncio.sleep(0.01)
+    m2 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="More useful rule",
+        confidence=0.9,
+        pinned=True,
+    ))
+
+    # Downgrade m1's usefulness
+    await record_feedback(pool, m1.id, helpful=False)
+    # Upgrade m2's usefulness
+    await record_feedback(pool, m2.id, helpful=True)
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    assert len(result["rules"]) == 2
+    assert result["rules"][0]["content"] == "More useful rule"
+    assert result["rules"][1]["content"] == "Less useful rule"
+
+
+async def test_primer_issues_ranked_by_usefulness(pool):
+    """Issues with higher usefulness_score rank before less useful ones."""
+    m1 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.issue,
+        content="Rarely confirmed issue",
+        confidence=0.8,
+    ))
+    await asyncio.sleep(0.01)
+    m2 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.issue,
+        content="Frequently confirmed issue",
+        confidence=0.8,
+    ))
+
+    # m1 gets negative feedback, m2 gets positive
+    await record_feedback(pool, m1.id, helpful=False)
+    await record_feedback(pool, m2.id, helpful=True)
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    items = result["issues"]["items"]
+    assert len(items) == 2
+    assert items[0]["content"] == "Frequently confirmed issue"
+    assert items[1]["content"] == "Rarely confirmed issue"
+
+
+async def test_primer_decisions_ranked_by_usefulness(pool):
+    """Decisions with higher usefulness_score rank before less useful ones (same scope)."""
+    m1 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="Rarely helpful decision",
+        confidence=0.9,
+    ))
+    await asyncio.sleep(0.01)
+    m2 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="Very helpful decision",
+        confidence=0.9,
+    ))
+
+    await record_feedback(pool, m1.id, helpful=False)
+    await record_feedback(pool, m2.id, helpful=True)
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    decisions = result["decisions"]
+    assert len(decisions) == 2
+    assert decisions[0]["content"] == "Very helpful decision"
+    assert decisions[1]["content"] == "Rarely helpful decision"
