@@ -6,10 +6,42 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType
-from weft.primer import build_primer
+from weft.models import Memory, MemoryCreate, MemorySource, MemoryStatus, MemoryType
+from weft.primer import _is_completed, build_primer
 from weft.store import store_memory
 from weft.tokens import estimate_tokens
+
+
+def _make_mem(content: str, topic: list[str] | None = None) -> Memory:
+    """Build a minimal Memory for unit-testing helper functions."""
+    now = datetime.now(timezone.utc)
+    return Memory(
+        id="weft-test", type=MemoryType.fact, topic=topic or [],
+        content=content, source=MemorySource.conversation, confidence=0.9,
+        token_count=10, created_at=now, updated_at=now, accessed_at=now,
+        access_count=1, project_id=None, agent_id=None, status=MemoryStatus.active,
+        pinned=False, usefulness_score=1, usefulness_count=0,
+    )
+
+
+class TestIsCompleted:
+    def test_done_marker(self):
+        assert _is_completed(_make_mem("Weft Improvement (DONE): Pinned memories")) is True
+
+    def test_fixed_marker(self):
+        assert _is_completed(_make_mem("Weft Bug (FIXED): stale pool")) is True
+
+    def test_fixed_topic(self):
+        assert _is_completed(_make_mem("Some bug was fixed", topic=["bug", "fixed"])) is True
+
+    def test_done_improvement_topic(self):
+        assert _is_completed(_make_mem("Auto-extract shipped", topic=["improvement", "done"])) is True
+
+    def test_live_item_not_completed(self):
+        assert _is_completed(_make_mem("Redis cache has 1 hour TTL")) is False
+
+    def test_open_idea_not_completed(self):
+        assert _is_completed(_make_mem("Inject memories at claim time", topic=["improvement"])) is False
 
 
 async def test_primer_empty_db(pool):
@@ -412,3 +444,97 @@ async def test_primer_project_scoped_recent_work_first(pool):
     # Project-scoped should come first
     assert work[0]["project_id"] == "weft"
     assert work[1]["project_id"] is None
+
+
+async def test_primer_completed_items_deprioritized(pool):
+    """Memories with DONE/FIXED markers sort after live items in recent_work."""
+    # Live item (no completion marker)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Redis cache has 1 hour TTL for memories",
+        topic=["weft", "caching"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+    ))
+    # Completed item
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Weft Bug (FIXED): Stale asyncpg connection pool with no auto-reconnect",
+        topic=["weft-feedback", "bug", "fixed"],
+        source=MemorySource.conversation,
+        confidence=0.95,
+    ))
+    # Another live item
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.architecture,
+        content="Weft uses pgvector for semantic search",
+        topic=["weft", "architecture"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    work = result["recent_work"]
+    assert len(work) == 3
+    # FIXED item should be last despite higher confidence
+    assert "(FIXED)" not in work[0]["content"]
+    assert "(FIXED)" not in work[1]["content"]
+    assert "(FIXED)" in work[2]["content"]
+
+
+async def test_primer_completed_ideas_deprioritized(pool):
+    """DONE improvements sort after open ideas in the ideas section."""
+    # Open idea
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.architecture,
+        content="Inject relevant Weft memories into task context at loom_claim time",
+        topic=["weft", "improvement"],
+        source=MemorySource.conversation,
+        confidence=0.8,
+    ))
+    # Completed idea
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.architecture,
+        content="Weft Improvement (DONE): Pinned memory tier shipped and tested",
+        topic=["weft", "improvement", "done"],
+        source=MemorySource.conversation,
+        confidence=0.7,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    ideas = result["ideas"]
+    assert len(ideas) == 2
+    # Open idea first, completed last
+    assert "(DONE)" not in ideas[0]["content"]
+    assert "(DONE)" in ideas[1]["content"]
+
+
+async def test_primer_completed_items_dropped_under_tight_budget(pool):
+    """Under tight budget, completed items are the first to be cut."""
+    # Live item (small)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Redis cache has 1 hour TTL",
+        topic=["caching"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+    ))
+    # Completed item (larger — should be cut under tight budget)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Weft Bug (FIXED): Stale asyncpg connection pool. After containers run for 47 hours the connection dies. Fix: added pool keepalive background task in server.py that pings every 5 minutes.",
+        topic=["bug", "fixed"],
+        source=MemorySource.conversation,
+        confidence=0.95,
+    ))
+
+    # Budget so tight only one item fits in recent_work
+    # (pinned/handoff/prefs sections are empty, so all budget goes to recent_work)
+    result = await build_primer(pool, budget_tokens=15)
+
+    work = result["recent_work"]
+    # Only the live item should fit; completed item sorted last and cut
+    assert len(work) == 1
+    assert "(FIXED)" not in work[0]["content"]

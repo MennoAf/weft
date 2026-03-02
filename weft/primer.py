@@ -23,11 +23,30 @@ from weft.tokens import estimate_tokens
 # Topics that signal aspirational/planned items rather than concrete work
 _IDEA_TOPICS = frozenset({"improvement", "idea", "issue-log", "backlog", "wishlist"})
 
+# Content markers that indicate a memory describes completed/resolved work.
+# These are deprioritized in the primer — sorted to the back so live items
+# get budget first.
+_COMPLETED_MARKERS = ("(DONE)", "(FIXED)", "Improvement (DONE)", "Bug (FIXED)",
+                      "Feedback (FIXED)")
+
 
 def _is_idea(mem: Memory) -> bool:
     """Return True if the memory looks aspirational rather than concrete work."""
     topics = {t.lower() for t in (mem.topic or [])}
     return bool(topics & _IDEA_TOPICS)
+
+
+def _is_completed(mem: Memory) -> bool:
+    """Return True if the memory describes work that's already done/fixed."""
+    content = mem.content
+    topics = {t.lower() for t in (mem.topic or [])}
+    if any(marker in content for marker in _COMPLETED_MARKERS):
+        return True
+    if "done" in topics and "improvement" in topics:
+        return True
+    if "fixed" in topics:
+        return True
+    return False
 
 
 async def _fetch_with_globals(
@@ -166,9 +185,11 @@ async def build_primer(
         if m.id not in seen_ids and m.accessed_at >= cutoff
         and m.type != MemoryType.handoff
     ]
-    # Sort: project-scoped first (when project_id is set), then by accessed_at
+    # Sort: completed items last, then project-scoped first, then by accessed_at.
+    # This ensures live/active items get budget before stale DONE/FIXED items.
     recent_candidates.sort(
         key=lambda m: (
+            1 if _is_completed(m) else 0,
             0 if project_id and m.project_id == project_id else 1,
             -(m.accessed_at.timestamp()),
         ),
