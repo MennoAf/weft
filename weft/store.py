@@ -325,29 +325,31 @@ async def record_feedback(
     new_score = alpha * signal + (1 - alpha) * old_score
     where signal = 1.0 for helpful, 0.0 for not helpful.
     """
-    row = await pool.fetchrow(
-        "SELECT usefulness_score, usefulness_count FROM memories WHERE id = $1",
-        memory_id,
-    )
-    if row is None:
-        raise ValueError(f"Memory {memory_id} not found")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT usefulness_score, usefulness_count FROM memories WHERE id = $1 FOR UPDATE",
+                memory_id,
+            )
+            if row is None:
+                raise ValueError(f"Memory {memory_id} not found")
 
-    old_score = float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0
-    signal = 1.0 if helpful else 0.0
-    new_score = alpha * signal + (1 - alpha) * old_score
-    new_score = max(0.0, min(1.0, new_score))
-    new_count = (row["usefulness_count"] or 0) + 1
+            old_score = float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0
+            signal = 1.0 if helpful else 0.0
+            new_score = alpha * signal + (1 - alpha) * old_score
+            new_score = max(0.0, min(1.0, new_score))
+            new_count = (row["usefulness_count"] or 0) + 1
 
-    await pool.execute(
-        """
-        UPDATE memories
-        SET usefulness_score = $1, usefulness_count = $2, updated_at = now()
-        WHERE id = $3
-        """,
-        new_score,
-        new_count,
-        memory_id,
-    )
+            await conn.execute(
+                """
+                UPDATE memories
+                SET usefulness_score = $1, usefulness_count = $2, updated_at = now()
+                WHERE id = $3
+                """,
+                new_score,
+                new_count,
+                memory_id,
+            )
 
     return {
         "memory_id": memory_id,

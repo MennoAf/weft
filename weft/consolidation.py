@@ -221,10 +221,24 @@ async def find_duplicates(
                     keep, archive = other, mem
 
                 if not dry_run:
-                    await add_relationship(
-                        pool, keep.id, archive.id, RelationType.supersedes,
-                    )
-                    await update_memory(pool, archive.id, status=MemoryStatus.archived)
+                    async with pool.acquire() as conn:
+                        async with conn.transaction():
+                            await conn.execute(
+                                """
+                                INSERT INTO memory_relationships
+                                    (source_id, target_id, relation, created_at)
+                                VALUES ($1, $2, $3, now())
+                                ON CONFLICT (source_id, target_id, relation) DO NOTHING
+                                """,
+                                keep.id,
+                                archive.id,
+                                RelationType.supersedes.value,
+                            )
+                            await conn.execute(
+                                "UPDATE memories SET status = $1, updated_at = now() WHERE id = $2",
+                                MemoryStatus.archived.value,
+                                archive.id,
+                            )
 
                 merged.append((keep.id, archive.id))
                 seen_archived.add(archive.id)
