@@ -7,7 +7,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from weft.models import Memory, MemoryCreate, MemorySource, MemoryStatus, MemoryType
-from weft.primer import _is_completed, build_primer
+from weft.primer import (
+    _MAX_GLOBAL_IDEAS,
+    _MAX_GLOBAL_PREFS,
+    _MAX_GLOBAL_RECENT,
+    _is_completed,
+    build_primer,
+)
 from weft.store import store_memory
 from weft.tokens import estimate_tokens
 
@@ -538,3 +544,176 @@ async def test_primer_completed_items_dropped_under_tight_budget(pool):
     # Only the live item should fit; completed item sorted last and cut
     assert len(work) == 1
     assert "(FIXED)" not in work[0]["content"]
+
+
+# --- Cross-project cap tests ---
+
+
+async def test_primer_caps_global_recent_work(pool):
+    """When project_id is set, non-project items in recent_work are capped."""
+    import asyncio
+
+    # Create more global items than the cap
+    for i in range(_MAX_GLOBAL_RECENT + 3):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.fact,
+            content=f"Global fact number {i} about general patterns",
+            topic=["patterns"],
+            source=MemorySource.conversation,
+            confidence=0.8,
+            project_id=None,
+        ))
+        await asyncio.sleep(0.005)
+
+    # Create project-scoped items (should all appear)
+    for i in range(3):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.fact,
+            content=f"Weft-specific fact {i} about architecture",
+            topic=["architecture"],
+            source=MemorySource.conversation,
+            confidence=0.8,
+            project_id="weft",
+        ))
+
+    result = await build_primer(pool, project_id="weft", budget_tokens=4000)
+
+    work = result["recent_work"]
+    project_items = [m for m in work if m["project_id"] == "weft"]
+    global_items = [m for m in work if m["project_id"] is None]
+
+    # All project items should appear
+    assert len(project_items) == 3
+    # Global items capped at _MAX_GLOBAL_RECENT
+    assert len(global_items) <= _MAX_GLOBAL_RECENT
+
+
+async def test_primer_caps_global_ideas(pool):
+    """When project_id is set, non-project items in ideas are capped."""
+    import asyncio
+
+    # Create more global ideas than the cap
+    for i in range(_MAX_GLOBAL_IDEAS + 3):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.architecture,
+            content=f"Global improvement idea {i}",
+            topic=["improvement"],
+            source=MemorySource.conversation,
+            confidence=0.8,
+            project_id=None,
+        ))
+        await asyncio.sleep(0.005)
+
+    # Create project-scoped ideas (should all appear)
+    for i in range(2):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.architecture,
+            content=f"Weft improvement idea {i}",
+            topic=["improvement"],
+            source=MemorySource.conversation,
+            confidence=0.8,
+            project_id="weft",
+        ))
+
+    result = await build_primer(pool, project_id="weft", budget_tokens=4000)
+
+    ideas = result["ideas"]
+    project_ideas = [m for m in ideas if m["project_id"] == "weft"]
+    global_ideas = [m for m in ideas if m["project_id"] is None]
+
+    assert len(project_ideas) == 2
+    assert len(global_ideas) <= _MAX_GLOBAL_IDEAS
+
+
+async def test_primer_caps_global_preferences(pool):
+    """When project_id is set, non-project preferences are capped."""
+    import asyncio
+
+    # Create more global preferences than the cap
+    for i in range(_MAX_GLOBAL_PREFS + 3):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.preference,
+            content=f"Global preference {i} about coding style",
+            topic=["coding"],
+            source=MemorySource.conversation,
+            confidence=0.9,
+            project_id=None,
+        ))
+        await asyncio.sleep(0.005)
+
+    # Create project-scoped preferences (should all appear)
+    for i in range(2):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.preference,
+            content=f"Weft preference {i} about embeddings",
+            topic=["embeddings"],
+            source=MemorySource.conversation,
+            confidence=0.9,
+            project_id="weft",
+        ))
+
+    result = await build_primer(pool, project_id="weft", budget_tokens=4000)
+
+    prefs = result["preferences"]
+    project_prefs = [m for m in prefs if m["project_id"] == "weft"]
+    global_prefs = [m for m in prefs if m["project_id"] is None]
+
+    assert len(project_prefs) == 2
+    assert len(global_prefs) <= _MAX_GLOBAL_PREFS
+
+
+async def test_primer_no_caps_without_project_id(pool):
+    """Without project_id, no global caps are applied."""
+    import asyncio
+
+    # Create many global items
+    for i in range(_MAX_GLOBAL_RECENT + 5):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.fact,
+            content=f"Global fact {i} about various topics",
+            topic=["various"],
+            source=MemorySource.conversation,
+            confidence=0.8,
+            project_id=None,
+        ))
+        await asyncio.sleep(0.005)
+
+    # No project_id — all items should appear (budget permitting)
+    result = await build_primer(pool, budget_tokens=4000)
+
+    work = result["recent_work"]
+    # More than the cap should be present since no project filter
+    assert len(work) > _MAX_GLOBAL_RECENT
+
+
+async def test_primer_preferences_project_scoped_first(pool):
+    """Project-scoped preferences sort before globals in preferences section."""
+    import asyncio
+
+    # Global preference (high confidence)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Global: always use pytest for testing",
+        topic=["testing"],
+        source=MemorySource.conversation,
+        confidence=1.0,
+        project_id=None,
+    ))
+    await asyncio.sleep(0.005)
+    # Project preference (lower confidence but should appear first)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Weft: use fastembed as default embedding provider",
+        topic=["embeddings"],
+        source=MemorySource.conversation,
+        confidence=0.9,
+        project_id="weft",
+    ))
+
+    result = await build_primer(pool, project_id="weft", budget_tokens=4000)
+
+    prefs = result["preferences"]
+    assert len(prefs) == 2
+    # Project preference first despite lower confidence
+    assert prefs[0]["project_id"] == "weft"
+    assert prefs[1]["project_id"] is None
