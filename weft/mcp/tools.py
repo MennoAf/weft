@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 from fastmcp import Context
@@ -51,6 +53,24 @@ def _coerce_list(value: str | list | None) -> list | None:
         except (json.JSONDecodeError, TypeError):
             pass
     return value  # let Pydantic raise if still wrong
+
+
+_RELATIVE_DATE_RE = re.compile(r"^(\d+)\s*(d|days?|w|weeks?|m|months?)$", re.IGNORECASE)
+
+_UNIT_DAYS = {"d": 1, "day": 1, "days": 1, "w": 7, "week": 7, "weeks": 7, "m": 30, "month": 30, "months": 30}
+
+
+def _parse_review_after(value: str | None) -> datetime | None:
+    """Parse a review_after value: ISO timestamp or relative like '30d', '2w', '3m'."""
+    if value is None:
+        return None
+    match = _RELATIVE_DATE_RE.match(value.strip())
+    if match:
+        amount, unit = int(match.group(1)), match.group(2).lower()
+        days = amount * _UNIT_DAYS[unit]
+        return datetime.now(timezone.utc) + timedelta(days=days)
+    # Try ISO format
+    return datetime.fromisoformat(value)
 
 
 async def _detect_project_id(ctx: Context) -> str | None:
@@ -109,9 +129,14 @@ async def weft_remember(
     agent_id: str | None = None,
     check_contradictions: bool = True,
     pinned: bool = False,
+    review_after: str | None = None,
 ) -> dict:
     """Store a new memory with type, topics, content, confidence, and source.
-    If project_id is omitted, auto-detects from the client's working directory."""
+    If project_id is omitted, auto-detects from the client's working directory.
+
+    review_after: optional lifecycle date. Accepts ISO timestamp or relative
+    durations like '30d', '2w', '3m'. Memories past their review_after date
+    are flagged in the primer so the agent can confirm, revise, or archive them."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -124,6 +149,7 @@ async def weft_remember(
             project_id=resolved_project,
             agent_id=agent_id,
             pinned=pinned,
+            review_after=_parse_review_after(review_after),
         )
         embedding = await app.embedding.embed(content)
         memory = await store_memory(app.pool, create, embedding=embedding)
@@ -248,8 +274,12 @@ async def weft_revise(
     new_confidence: float | None = None,
     new_topic: list[str] | None = None,
     new_type: str | None = None,
+    review_after: str | None = None,
 ) -> dict:
-    """Update a memory's content, creating a new version that supersedes the old one."""
+    """Update a memory's content, creating a new version that supersedes the old one.
+
+    review_after: optional lifecycle date for the new version. Accepts ISO
+    timestamp or relative durations like '30d', '2w', '3m'."""
     try:
         from weft.models import MemoryType as _MT
         from weft.revise import revise_memory
@@ -261,6 +291,7 @@ async def weft_revise(
             app.pool, memory_id, new_content,
             embedding=embedding, new_confidence=new_confidence,
             new_topic=_coerce_list(new_topic), new_type=resolved_type,
+            review_after=_parse_review_after(review_after),
         )
         await app.cache.set_memory(new)
         await app.cache.invalidate_memory(old.id)
@@ -353,7 +384,7 @@ async def weft_pin(
 async def weft_prime(
     ctx: Context,
     project_id: str | None = None,
-    budget_tokens: int = 1500,
+    budget_tokens: int = 1800,
 ) -> dict:
     """Session primer: assemble structured context for session startup.
     If project_id is omitted, auto-detects from the client's working directory."""
@@ -375,6 +406,7 @@ async def weft_prime(
             "grounding": None,
             "rules": [],
             "handoff": [{"content": content, "type": "fallback"}] if content else [],
+            "recent_work": [],
             "issues": {"count": 0, "items": []},
             "decisions": [],
             "total_tokens": 0,
@@ -382,6 +414,7 @@ async def weft_prime(
             "budget_remaining": budget_tokens,
             "excluded": 0,
             "degraded": True,
+            "section_tokens": {},
         }
 
 

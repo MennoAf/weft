@@ -46,6 +46,18 @@ _MAX_RECENT_WORK = 3
 _GROUNDING_TOPIC = "project-grounding"
 
 
+def _annotate_review_after(entry: dict, now: datetime) -> dict:
+    """Add review_after / review_due fields to a memory dict if applicable."""
+    ra = entry.get("review_after")
+    if ra is None:
+        return entry
+    if isinstance(ra, str):
+        ra = datetime.fromisoformat(ra)
+    entry["review_after"] = ra.isoformat()
+    entry["review_due"] = ra <= now
+    return entry
+
+
 def _newest_created_at(memories: list[dict], now: datetime) -> float | None:
     """Return age_hours of the most recently created memory, or None if empty."""
     if not memories:
@@ -166,7 +178,7 @@ async def build_primer(
             used_tokens + cost <= budget_tokens
             and section_used + cost <= _CAP_RULES
         ):
-            rules_section.append(mem.to_dict())
+            rules_section.append(_annotate_review_after(mem.to_dict(), now))
             seen_ids.add(mem.id)
             used_tokens += cost
             section_used += cost
@@ -285,7 +297,7 @@ async def build_primer(
             used_tokens + cost <= budget_tokens
             and section_used + cost <= _CAP_DECISIONS
         ):
-            decisions_section.append(mem.to_dict())
+            decisions_section.append(_annotate_review_after(mem.to_dict(), now))
             seen_ids.add(mem.id)
             used_tokens += cost
             section_used += cost

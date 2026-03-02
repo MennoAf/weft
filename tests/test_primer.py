@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -789,3 +790,91 @@ async def test_primer_section_caps_dont_block_other_sections(pool):
 
     assert result["section_tokens"]["rules"] <= _CAP_RULES
     assert len(result["decisions"]) == 1
+
+
+# --- review_after lifecycle flagging ---
+
+
+async def test_primer_rule_with_overdue_review_after(pool):
+    """A pinned rule past its review_after date is flagged with review_due=True."""
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Old rule that needs review",
+        confidence=1.0,
+        pinned=True,
+        review_after=past,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["rules"]) == 1
+    rule = result["rules"][0]
+    assert rule["review_due"] is True
+    assert "review_after" in rule
+
+
+async def test_primer_rule_with_future_review_after(pool):
+    """A pinned rule with future review_after shows the date but review_due=False."""
+    future = datetime.now(timezone.utc) + timedelta(days=30)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Fresh rule with future review",
+        confidence=1.0,
+        pinned=True,
+        review_after=future,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["rules"]) == 1
+    rule = result["rules"][0]
+    assert rule["review_due"] is False
+    assert "review_after" in rule
+
+
+async def test_primer_rule_without_review_after(pool):
+    """A pinned rule with no review_after has no review_due field."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Rule with no lifecycle date",
+        confidence=1.0,
+        pinned=True,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["rules"]) == 1
+    rule = result["rules"][0]
+    assert "review_due" not in rule
+
+
+async def test_primer_decision_with_overdue_review_after(pool):
+    """A decision past its review_after date is flagged with review_due=True."""
+    past = datetime.now(timezone.utc) - timedelta(days=7)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="Old decision that should be reviewed",
+        confidence=0.9,
+        review_after=past,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["decisions"]) == 1
+    decision = result["decisions"][0]
+    assert decision["review_due"] is True
+
+
+async def test_primer_decision_without_review_after(pool):
+    """A decision with no review_after has no review_due field."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="Decision with no lifecycle date",
+        confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["decisions"]) == 1
+    assert "review_due" not in result["decisions"][0]

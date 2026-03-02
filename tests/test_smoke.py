@@ -196,3 +196,48 @@ class TestCoerceList:
         # A JSON string that parses to non-list passes through
         result = _coerce_list('"just a string"')
         assert result == '"just a string"'
+
+
+class TestParseReviewAfter:
+    """Parse review_after: ISO timestamps and relative durations."""
+
+    def test_none_returns_none(self):
+        from weft.mcp.tools import _parse_review_after
+        assert _parse_review_after(None) is None
+
+    def test_relative_days(self):
+        from weft.mcp.tools import _parse_review_after
+        from datetime import datetime, timezone
+        result = _parse_review_after("30d")
+        assert result is not None
+        # Should be ~30 days from now
+        delta = (result - datetime.now(timezone.utc)).total_seconds()
+        assert 29 * 86400 < delta < 31 * 86400
+
+    def test_relative_weeks(self):
+        from weft.mcp.tools import _parse_review_after
+        from datetime import datetime, timezone
+        result = _parse_review_after("2w")
+        assert result is not None
+        delta = (result - datetime.now(timezone.utc)).total_seconds()
+        assert 13 * 86400 < delta < 15 * 86400
+
+    def test_relative_months(self):
+        from weft.mcp.tools import _parse_review_after
+        from datetime import datetime, timezone
+        result = _parse_review_after("3m")
+        assert result is not None
+        delta = (result - datetime.now(timezone.utc)).total_seconds()
+        assert 89 * 86400 < delta < 91 * 86400
+
+    def test_relative_with_words(self):
+        from weft.mcp.tools import _parse_review_after
+        result = _parse_review_after("7 days")
+        assert result is not None
+
+    def test_iso_timestamp(self):
+        from weft.mcp.tools import _parse_review_after
+        result = _parse_review_after("2026-06-01T00:00:00+00:00")
+        assert result is not None
+        assert result.year == 2026
+        assert result.month == 6

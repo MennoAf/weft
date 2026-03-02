@@ -9,6 +9,8 @@ Revision workflow:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import asyncpg
 
 from weft.models import (
@@ -25,6 +27,8 @@ from weft.store import (
     update_memory,
 )
 
+_UNSET = object()
+
 
 async def revise_memory(
     pool: asyncpg.Pool,
@@ -35,6 +39,7 @@ async def revise_memory(
     new_confidence: float | None = None,
     new_topic: list[str] | None = None,
     new_type: MemoryType | None = None,
+    review_after: datetime | None = _UNSET,
 ) -> tuple[Memory, Memory]:
     """Create a new version of a memory, superseding the old one.
 
@@ -46,6 +51,7 @@ async def revise_memory(
         raise ValueError(f"Memory {memory_id} not found")
 
     # Create the new version, inheriting metadata from the old one
+    resolved_review = old.review_after if review_after is _UNSET else review_after
     create = MemoryCreate(
         type=new_type if new_type is not None else old.type,
         content=new_content,
@@ -54,6 +60,7 @@ async def revise_memory(
         confidence=new_confidence if new_confidence is not None else old.confidence,
         project_id=old.project_id,
         agent_id=old.agent_id,
+        review_after=resolved_review,
     )
     new = await store_memory(pool, create, embedding=embedding)
 
