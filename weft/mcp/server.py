@@ -17,6 +17,7 @@ from weft.config import WeftConfig, load_config
 from weft.db.migrations import run_migrations
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
+from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,14 @@ async def lifespan(server: FastMCP):
 
     # Embedding provider
     embedding = get_provider(config.embedding.provider, model_name=config.embedding.model)
+
+    # Seed memories on fresh installs (best-effort, never blocks startup)
+    try:
+        seeded = await seed_memories(pool, embedding)
+        if seeded:
+            logger.info("Seeded %d starter memories", seeded)
+    except Exception as exc:
+        logger.warning("Seed bootstrapping failed (non-fatal): %s", exc)
 
     ctx = AppContext(pool=pool, cache=cache, embedding=embedding, config=config)
 

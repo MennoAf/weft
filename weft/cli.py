@@ -316,6 +316,31 @@ def recall(query: str, limit: int, topic: str | None):
         console.print(f"   [dim]topics: {topics} | id: {m.id}[/dim]\n")
 
 
+@cli.command()
+@click.option("--force", is_flag=True, help="Seed even if memories already exist")
+def seed(force: bool):
+    """Load starter memories into the store."""
+
+    async def _seed():
+        import asyncpg
+
+        from weft.embeddings import get_provider
+        from weft.seed import seed_memories
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model)
+        count = await seed_memories(pool, provider, force=force)
+        await pool.close()
+        return count
+
+    count = asyncio.run(_seed())
+    if count:
+        click.echo(f"Seeded {count} memories.")
+    else:
+        click.echo("No memories seeded (store already populated or no seeds found).")
+
+
 @cli.group()
 def config():
     """View and modify Weft configuration."""
