@@ -25,6 +25,8 @@ from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
+_UNSET = object()  # sentinel: distinguish "not provided" from explicit None
+
 
 async def store_memory(
     pool: asyncpg.Pool,
@@ -217,6 +219,7 @@ async def update_memory(
     topic: list[str] | None = None,
     embedding: list[float] | None = None,
     pinned: bool | None = None,
+    project_id: str | None = _UNSET,
 ) -> Memory | None:
     """Update mutable fields of a memory. Returns updated Memory or None."""
     sets = ["updated_at = now()"]
@@ -254,6 +257,11 @@ async def update_memory(
     if pinned is not None:
         sets.append(f"pinned = ${idx}")
         params.append(pinned)
+        idx += 1
+
+    if project_id is not _UNSET:
+        sets.append(f"project_id = ${idx}")
+        params.append(project_id)
         idx += 1
 
     set_clause = ", ".join(sets)
