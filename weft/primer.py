@@ -29,6 +29,13 @@ _IDEA_TOPICS = frozenset({"improvement", "idea", "issue-log", "backlog", "wishli
 _COMPLETED_MARKERS = ("(DONE)", "(FIXED)", "Improvement (DONE)", "Bug (FIXED)",
                       "Feedback (FIXED)")
 
+# When priming for a specific project, limit how many non-project items
+# can appear in each section. This prevents cross-project noise from
+# consuming budget that should go to project-relevant context.
+_MAX_GLOBAL_RECENT = 3
+_MAX_GLOBAL_IDEAS = 2
+_MAX_GLOBAL_PREFS = 3
+
 
 def _is_idea(mem: Memory) -> bool:
     """Return True if the memory looks aspirational rather than concrete work."""
@@ -159,18 +166,29 @@ async def build_primer(
     )
     immortals = sorted(
         prefs_raw + user_models,
-        key=lambda m: m.confidence, reverse=True,
+        key=lambda m: (
+            # Project-scoped first when project_id is set
+            0 if project_id and m.project_id == project_id else 1,
+            -m.confidence,
+        ),
     )
 
     preferences_section: list[dict] = []
+    global_pref_count = 0
     for mem in immortals:
         if mem.id in seen_ids:
+            continue
+        # Cap non-project preferences when working in a specific project
+        is_global = project_id and mem.project_id != project_id
+        if is_global and global_pref_count >= _MAX_GLOBAL_PREFS:
             continue
         cost = mem.token_count or estimate_tokens(mem.content)
         if used_tokens + cost <= budget_tokens:
             preferences_section.append(mem.to_dict())
             seen_ids.add(mem.id)
             used_tokens += cost
+            if is_global:
+                global_pref_count += 1
 
     # --- Section 3: Recent work + ideas ---
     cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
@@ -195,16 +213,30 @@ async def build_primer(
         ),
     )
 
-    # Split into concrete work vs aspirational ideas
+    # Split into concrete work vs aspirational ideas, capping globals per section
     recent_section: list[dict] = []
     ideas_section: list[dict] = []
+    global_recent_count = 0
+    global_ideas_count = 0
     for mem in recent_candidates:
+        is_global = project_id and mem.project_id != project_id
+        is_idea = _is_idea(mem)
+        # Cap non-project items per section
+        if is_global:
+            if is_idea and global_ideas_count >= _MAX_GLOBAL_IDEAS:
+                continue
+            if not is_idea and global_recent_count >= _MAX_GLOBAL_RECENT:
+                continue
         cost = mem.token_count or estimate_tokens(mem.content)
         if used_tokens + cost <= budget_tokens:
-            if _is_idea(mem):
+            if is_idea:
                 ideas_section.append(mem.to_dict())
+                if is_global:
+                    global_ideas_count += 1
             else:
                 recent_section.append(mem.to_dict())
+                if is_global:
+                    global_recent_count += 1
             seen_ids.add(mem.id)
             used_tokens += cost
 
