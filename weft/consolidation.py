@@ -63,13 +63,14 @@ class ConsolidationReport:
     duplicates_merged: list[tuple[str, str]] = field(default_factory=list)
     contradictions_flagged: list[tuple[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    skipped: bool = False
 
     @property
     def total_actions(self) -> int:
         return len(self.decayed) + len(self.duplicates_merged) + len(self.contradictions_flagged)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "decayed_count": len(self.decayed),
             "decayed": self.decayed,
             "duplicates_merged_count": len(self.duplicates_merged),
@@ -84,6 +85,9 @@ class ConsolidationReport:
             "total_actions": self.total_actions,
             "errors": self.errors,
         }
+        if self.skipped:
+            d["skipped"] = True
+        return d
 
 
 # --- Decay Scoring ---
@@ -482,6 +486,9 @@ def _content_conflicts(content_a: str, content_b: str) -> bool:
 
 # --- Orchestrator ---
 
+# Advisory lock ID for serializing consolidation runs across processes
+_CONSOLIDATION_LOCK_ID = 839272  # distinct from migration lock (839271)
+
 
 async def consolidate(
     pool: asyncpg.Pool,
@@ -492,35 +499,50 @@ async def consolidate(
     """Run the full consolidation pipeline.
 
     Order: decay → dedup → contradiction detection.
+    Uses a Postgres advisory lock to prevent concurrent runs.
     Returns a ConsolidationReport summarizing all actions taken.
     """
     cfg = config or ConsolidationConfig()
     report = ConsolidationReport()
 
-    try:
-        report.decayed = await run_decay(pool, config=cfg.decay, dry_run=dry_run)
-    except Exception as e:
-        report.errors.append(f"Decay failed: {e}")
-        logger.exception("Decay subsystem failed")
-
-    try:
-        report.duplicates_merged = await find_duplicates(
-            pool, threshold=cfg.duplicate_threshold, dry_run=dry_run,
+    async with pool.acquire() as lock_conn:
+        locked = await lock_conn.fetchval(
+            "SELECT pg_try_advisory_lock($1)", _CONSOLIDATION_LOCK_ID,
         )
-    except Exception as e:
-        report.errors.append(f"Duplicate detection failed: {e}")
-        logger.exception("Duplicate detection subsystem failed")
+        if not locked:
+            logger.info("Consolidation already running, skipping")
+            report.skipped = True
+            return report
 
-    try:
-        report.contradictions_flagged = await find_contradictions(
-            pool,
-            sim_min=cfg.contradiction_similarity_min,
-            sim_max=cfg.contradiction_similarity_max,
-            dry_run=dry_run,
-        )
-    except Exception as e:
-        report.errors.append(f"Contradiction detection failed: {e}")
-        logger.exception("Contradiction detection subsystem failed")
+        try:
+            try:
+                report.decayed = await run_decay(pool, config=cfg.decay, dry_run=dry_run)
+            except Exception as e:
+                report.errors.append(f"Decay failed: {e}")
+                logger.exception("Decay subsystem failed")
+
+            try:
+                report.duplicates_merged = await find_duplicates(
+                    pool, threshold=cfg.duplicate_threshold, dry_run=dry_run,
+                )
+            except Exception as e:
+                report.errors.append(f"Duplicate detection failed: {e}")
+                logger.exception("Duplicate detection subsystem failed")
+
+            try:
+                report.contradictions_flagged = await find_contradictions(
+                    pool,
+                    sim_min=cfg.contradiction_similarity_min,
+                    sim_max=cfg.contradiction_similarity_max,
+                    dry_run=dry_run,
+                )
+            except Exception as e:
+                report.errors.append(f"Contradiction detection failed: {e}")
+                logger.exception("Contradiction detection subsystem failed")
+        finally:
+            await lock_conn.execute(
+                "SELECT pg_advisory_unlock($1)", _CONSOLIDATION_LOCK_ID,
+            )
 
     logger.info(
         "Consolidation complete: %d decayed, %d merged, %d contradictions",
