@@ -168,7 +168,7 @@ async def build_primer(
     section_tokens["grounding"] = section_used
 
     # Section 1: Rules (pinned memories only)
-    pinned_raw.sort(key=lambda m: (m.confidence, m.created_at.timestamp()), reverse=True)
+    pinned_raw.sort(key=lambda m: (m.confidence, m.usefulness_score, m.created_at.timestamp()), reverse=True)
 
     rules_section: list[dict] = []
     section_used = 0
@@ -259,7 +259,7 @@ async def build_primer(
 
     # Section 4: Active issues
     issue_candidates = [m for m in issues_raw if m.id not in seen_ids]
-    issue_candidates.sort(key=lambda m: m.created_at, reverse=True)
+    issue_candidates.sort(key=lambda m: (m.usefulness_score, m.created_at.timestamp()), reverse=True)
 
     issue_items: list[dict] = []
     section_used = 0
@@ -282,6 +282,7 @@ async def build_primer(
     decision_candidates.sort(
         key=lambda m: (
             0 if project_id and m.project_id == project_id else 1,
+            -m.usefulness_score,
             -(m.created_at.timestamp()),
         ),
     )
