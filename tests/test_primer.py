@@ -7,7 +7,19 @@ import asyncio
 import pytest
 
 from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType
-from weft.primer import _GROUNDING_TOPIC, _MAX_DECISIONS, _newest_created_at, build_primer
+from weft.primer import (
+    _CAP_DECISIONS,
+    _CAP_GROUNDING,
+    _CAP_HANDOFF,
+    _CAP_ISSUES,
+    _CAP_RECENT_WORK,
+    _CAP_RULES,
+    _GROUNDING_TOPIC,
+    _MAX_DECISIONS,
+    _MAX_RECENT_WORK,
+    _newest_created_at,
+    build_primer,
+)
 from weft.store import store_memory
 from weft.tokens import estimate_tokens
 
@@ -17,34 +29,40 @@ from weft.tokens import estimate_tokens
 
 async def test_primer_empty_db(pool):
     """No memories -> all sections empty, budget_remaining = budget_tokens."""
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1800)
 
     assert result["grounding"] is None
     assert result["rules"] == []
     assert result["handoff"] == []
+    assert result["recent_work"] == []
     assert result["issues"] == {"count": 0, "items": []}
     assert result["decisions"] == []
     assert result["total_tokens"] == 0
-    assert result["budget_tokens"] == 1500
-    assert result["budget_remaining"] == 1500
+    assert result["budget_tokens"] == 1800
+    assert result["budget_remaining"] == 1800
     assert result["excluded"] == 0
     assert result["freshness_hours"] is None
+    assert result["section_tokens"] == {
+        "grounding": 0, "rules": 0, "handoff": 0,
+        "recent_work": 0, "issues": 0, "decisions": 0,
+    }
 
 
 async def test_primer_return_structure(pool):
     """Verify all expected keys are present in the return dict."""
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1800)
 
     expected_keys = {
-        "grounding", "rules", "handoff", "issues", "decisions",
+        "grounding", "rules", "handoff", "recent_work", "issues", "decisions",
         "total_tokens", "budget_tokens", "budget_remaining", "excluded",
-        "freshness_hours",
+        "freshness_hours", "section_tokens",
     }
     assert set(result.keys()) == expected_keys
 
     assert result["grounding"] is None or isinstance(result["grounding"], str)
     assert isinstance(result["rules"], list)
     assert isinstance(result["handoff"], list)
+    assert isinstance(result["recent_work"], list)
     assert isinstance(result["issues"], dict)
     assert isinstance(result["issues"]["count"], int)
     assert isinstance(result["issues"]["items"], list)
@@ -54,6 +72,7 @@ async def test_primer_return_structure(pool):
     assert isinstance(result["budget_remaining"], int)
     assert isinstance(result["excluded"], int)
     assert result["freshness_hours"] is None or isinstance(result["freshness_hours"], float)
+    assert isinstance(result["section_tokens"], dict)
 
     # Budget invariant
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
@@ -110,11 +129,12 @@ async def test_primer_unpinned_preferences_not_in_primer(pool):
         pinned=False,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1800)
 
     all_contents = (
         [m["content"] for m in result["rules"]]
         + [m["content"] for m in result["handoff"]]
+        + [m["summary"] for m in result["recent_work"]]
         + [m["content"] for m in result["issues"]["items"]]
         + [m["content"] for m in result["decisions"]]
     )
@@ -145,6 +165,7 @@ async def test_primer_unpinned_facts_not_in_primer(pool):
     all_contents = (
         [m["content"] for m in result["rules"]]
         + [m["content"] for m in result["handoff"]]
+        + [m["summary"] for m in result["recent_work"]]
         + [m["content"] for m in result["issues"]["items"]]
         + [m["content"] for m in result["decisions"]]
     )
@@ -376,11 +397,12 @@ async def test_primer_no_duplicates_across_sections(pool):
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1800)
 
     all_ids = (
         [m["id"] for m in result["rules"]]
         + [m["id"] for m in result["handoff"]]
+        + [m["id"] for m in result["recent_work"]]
         + [m["id"] for m in result["issues"]["items"]]
         + [m["id"] for m in result["decisions"]]
     )
@@ -423,10 +445,10 @@ async def test_primer_project_scoping(pool):
     assert not any("orchestrator" in c for c in rule_contents)
 
 
-async def test_primer_default_budget_is_1500(pool):
-    """Default budget is 1500 tokens, not 4000."""
+async def test_primer_default_budget_is_1800(pool):
+    """Default budget is 1800 tokens."""
     result = await build_primer(pool)
-    assert result["budget_tokens"] == 1500
+    assert result["budget_tokens"] == 1800
 
 
 # --- Grounding section ---
@@ -583,7 +605,187 @@ async def test_primer_freshness_hours_reflects_newest(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1800)
 
     assert result["freshness_hours"] is not None
     assert result["freshness_hours"] < 1.0
+
+
+# --- Recent work (milestones) ---
+
+
+async def test_primer_recent_work_empty_when_no_milestones(pool):
+    """recent_work is empty when no milestone memories exist."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["recent_work"] == []
+    assert result["section_tokens"]["recent_work"] == 0
+
+
+async def test_primer_recent_work_surfaces_milestones(pool):
+    """Milestone memories appear in the recent_work section."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone,
+        content="Shipped primer optimization (319 tests)",
+        topic=["loom-abc123"],
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["recent_work"]) == 1
+    entry = result["recent_work"][0]
+    assert entry["summary"] == "Shipped primer optimization (319 tests)"
+    assert entry["age_hours"] < 1.0
+    assert "loom-abc123" in entry["refs"]
+    assert "id" in entry
+
+
+async def test_primer_recent_work_max_items(pool):
+    """recent_work is capped at _MAX_RECENT_WORK items."""
+    for i in range(_MAX_RECENT_WORK + 2):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.milestone,
+            content=f"Milestone {i}",
+            topic=[f"task-{i}"],
+            confidence=1.0,
+        ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["recent_work"]) <= _MAX_RECENT_WORK
+
+
+async def test_primer_recent_work_most_recent_first(pool):
+    """recent_work entries are ordered by most recent first."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone,
+        content="Older milestone",
+        confidence=1.0,
+    ))
+    await asyncio.sleep(0.01)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone,
+        content="Newer milestone",
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert len(result["recent_work"]) == 2
+    assert result["recent_work"][0]["summary"] == "Newer milestone"
+    assert result["recent_work"][1]["summary"] == "Older milestone"
+
+
+async def test_primer_recent_work_respects_section_cap(pool):
+    """recent_work section respects its token cap."""
+    # Create a milestone that's very long — should hit the cap
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone,
+        content="Big milestone: " + "x" * 1000,
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["section_tokens"]["recent_work"] <= _CAP_RECENT_WORK
+
+
+async def test_primer_recent_work_not_in_other_sections(pool):
+    """Milestones only appear in recent_work, not in other sections."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone,
+        content="A completed milestone",
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    # Should be in recent_work
+    assert len(result["recent_work"]) == 1
+    # Should NOT be in rules, handoff, issues, or decisions
+    other_contents = (
+        [m["content"] for m in result["rules"]]
+        + [m["content"] for m in result["handoff"]]
+        + [m["content"] for m in result["issues"]["items"]]
+        + [m["content"] for m in result["decisions"]]
+    )
+    assert not any("completed milestone" in c for c in other_contents)
+
+
+# --- Per-section token caps ---
+
+
+async def test_primer_section_tokens_in_response(pool):
+    """section_tokens dict is always present with all section keys."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert "section_tokens" in result
+    expected_sections = {"grounding", "rules", "handoff", "recent_work", "issues", "decisions"}
+    assert set(result["section_tokens"].keys()) == expected_sections
+
+
+async def test_primer_rules_section_cap(pool):
+    """Rules section respects its per-section cap even with budget remaining."""
+    for i in range(20):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.preference,
+            content=f"Rule {i}: " + "x" * 50,
+            confidence=0.9,
+            pinned=True,
+        ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    assert result["section_tokens"]["rules"] <= _CAP_RULES
+
+
+async def test_primer_issues_section_cap(pool):
+    """Issues section respects its per-section cap."""
+    for i in range(20):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.issue,
+            content=f"Issue {i}: " + "y" * 50,
+            confidence=0.9,
+        ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    assert result["section_tokens"]["issues"] <= _CAP_ISSUES
+
+
+async def test_primer_decisions_section_cap(pool):
+    """Decisions section respects its per-section cap."""
+    for i in range(10):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.decision,
+            content=f"Decision {i}: " + "z" * 50,
+            confidence=0.9,
+        ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    assert result["section_tokens"]["decisions"] <= _CAP_DECISIONS
+
+
+async def test_primer_section_caps_dont_block_other_sections(pool):
+    """Hitting one section's cap doesn't prevent other sections from filling."""
+    # Fill rules to its cap
+    for i in range(20):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.preference,
+            content=f"Rule {i}: " + "x" * 50,
+            confidence=0.9,
+            pinned=True,
+        ))
+    # Add a decision — should still fit
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="A decision that should still appear",
+        confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    assert result["section_tokens"]["rules"] <= _CAP_RULES
+    assert len(result["decisions"]) == 1

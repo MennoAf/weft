@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from weft.models import MemoryCreate, MemoryStatus, MemoryType, MemorySource, RelationType
@@ -202,3 +204,94 @@ async def test_stats(pool):
     assert stats["by_type"]["fact"] == 1
     assert stats["by_type"]["pattern"] == 1
     assert "x" in stats["top_topics"]
+
+
+# --- Milestone type ---
+
+
+async def test_store_milestone_type(pool):
+    """Store and retrieve a milestone memory."""
+    create = MemoryCreate(
+        type=MemoryType.milestone,
+        content="Shipped primer optimization (319 tests)",
+        topic=["loom-abc123"],
+        confidence=1.0,
+    )
+    mem = await store_memory(pool, create)
+    assert mem.type == MemoryType.milestone
+
+    fetched = await get_memory(pool, mem.id)
+    assert fetched is not None
+    assert fetched.type == MemoryType.milestone
+    assert fetched.content == "Shipped primer optimization (319 tests)"
+
+
+async def test_list_milestones(pool):
+    """List memories filtered by milestone type."""
+    await store_memory(pool, MemoryCreate(type=MemoryType.milestone, content="m1"))
+    await store_memory(pool, MemoryCreate(type=MemoryType.milestone, content="m2"))
+    await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="not a milestone"))
+
+    milestones = await list_memories(pool, memory_type=MemoryType.milestone)
+    assert len(milestones) == 2
+    assert all(m.type == MemoryType.milestone for m in milestones)
+
+
+# --- review_after field ---
+
+
+async def test_store_with_review_after(pool):
+    """Store a memory with review_after set and verify round-trip."""
+    review_date = datetime.now(timezone.utc) + timedelta(days=30)
+    create = MemoryCreate(
+        type=MemoryType.decision,
+        content="Don't suggest mocks",
+        confidence=0.9,
+        review_after=review_date,
+    )
+    mem = await store_memory(pool, create)
+    assert mem.review_after is not None
+
+    fetched = await get_memory(pool, mem.id)
+    assert fetched is not None
+    assert fetched.review_after is not None
+    # Compare within 1 second tolerance (DB might truncate microseconds)
+    assert abs((fetched.review_after - review_date).total_seconds()) < 1
+
+
+async def test_store_without_review_after(pool):
+    """review_after defaults to None when not provided."""
+    create = MemoryCreate(type=MemoryType.fact, content="No review date")
+    mem = await store_memory(pool, create)
+    assert mem.review_after is None
+
+    fetched = await get_memory(pool, mem.id)
+    assert fetched is not None
+    assert fetched.review_after is None
+
+
+async def test_update_review_after(pool):
+    """Update a memory's review_after field."""
+    create = MemoryCreate(type=MemoryType.decision, content="Some decision")
+    mem = await store_memory(pool, create)
+    assert mem.review_after is None
+
+    review_date = datetime.now(timezone.utc) + timedelta(days=14)
+    updated = await update_memory(pool, mem.id, review_after=review_date)
+    assert updated is not None
+    assert updated.review_after is not None
+    assert abs((updated.review_after - review_date).total_seconds()) < 1
+
+
+async def test_clear_review_after(pool):
+    """Set review_after back to None."""
+    review_date = datetime.now(timezone.utc) + timedelta(days=30)
+    create = MemoryCreate(
+        type=MemoryType.decision, content="Temp decision", review_after=review_date,
+    )
+    mem = await store_memory(pool, create)
+    assert mem.review_after is not None
+
+    updated = await update_memory(pool, mem.id, review_after=None)
+    assert updated is not None
+    assert updated.review_after is None

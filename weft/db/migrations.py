@@ -87,6 +87,13 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories (pinned) WHERE pinned = TRUE;
         """,
     ),
+    (
+        6,
+        "Add review_after column to memories",
+        """
+        ALTER TABLE memories ADD COLUMN IF NOT EXISTS review_after TIMESTAMPTZ;
+        """,
+    ),
 ]
 
 
