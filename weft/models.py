@@ -29,6 +29,7 @@ class MemorySource(str, Enum):
     code = "code"
     documentation = "documentation"
     inference = "inference"
+    seed = "seed"
 
 
 class MemoryStatus(str, Enum):

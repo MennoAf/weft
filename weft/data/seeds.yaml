@@ -1,0 +1,91 @@
+# Weft seed memories — loaded on first startup when the memory store is empty.
+# These are real memories that participate in the full lifecycle (decay, feedback, etc.).
+# All seeds are global (project_id: null) so they apply across all projects.
+
+- content: >
+    Use weft_remember to store knowledge that should persist across sessions.
+    Choose the right memory type: 'preference' for user/workflow preferences,
+    'fact' for project facts, 'pattern' for code patterns, 'decision' for
+    architectural decisions, 'solution' for problem fixes. Set confidence
+    based on certainty: 0.9-1.0 for stated preferences, 0.7-0.9 for verified
+    facts, 0.6-0.8 for observed patterns.
+  type: fact
+  topic: [weft-usage, memory-types]
+  confidence: 0.9
+  pinned: true
+  source: seed
+
+- content: >
+    Use weft_learn after completing significant work to capture gotchas,
+    patterns, and fixes discovered during the task. Pass task_id to link
+    learnings to a specific Loom task. weft_learn auto-extracts and stores
+    memories — no manual weft_remember calls needed afterward.
+  type: fact
+  topic: [weft-usage, weft-learn]
+  confidence: 0.9
+  pinned: true
+  source: seed
+
+- content: >
+    Call weft_handoff before ending a session to preserve continuity. Include:
+    summary (what was accomplished), in_progress (partially done work),
+    next_steps (what to do next and why), open_questions (unresolved decisions).
+    The next session's weft_prime surfaces the most recent handoff prominently.
+  type: fact
+  topic: [weft-usage, session-handoff]
+  confidence: 0.9
+  pinned: true
+  source: seed
+
+- content: >
+    Call weft_prime at the start of every session to load relevant context.
+    It returns: grounding (project description), rules (pinned preferences),
+    recent handoff, recent work milestones, open issues, and key decisions —
+    all within a configurable token budget.
+  type: fact
+  topic: [weft-usage, primer]
+  confidence: 0.9
+  pinned: true
+  source: seed
+
+- content: >
+    After recalling memories with weft_recall or weft_context, call
+    weft_feedback(memory_id, helpful=true/false) to rate whether each memory
+    was useful. This adjusts the usefulness score so helpful memories rank
+    higher in future sessions.
+  type: fact
+  topic: [weft-usage, feedback]
+  confidence: 0.9
+  pinned: false
+  source: seed
+
+- content: >
+    Use lowercase, hyphenated topics when storing memories: 'postgres-config',
+    'testing-patterns', 'api-design'. Be specific — prefer 'redis-caching'
+    over 'database'. Reuse existing topics when possible.
+  type: fact
+  topic: [weft-usage, topic-conventions]
+  confidence: 0.9
+  pinned: false
+  source: seed
+
+- content: >
+    Store user preferences globally (project_id=null) so they are visible
+    from all projects. Store project-specific facts with the project_id set.
+    When in doubt, store globally — better to have a memory available
+    everywhere than to lose it.
+  type: fact
+  topic: [weft-usage, project-scoping]
+  confidence: 0.9
+  pinned: false
+  source: seed
+
+- content: >
+    Pin memories with pinned=true for rules and preferences that should
+    always appear in the primer regardless of recency or access frequency.
+    Pinned memories are immune to decay during consolidation.
+  type: fact
+  topic: [weft-usage, pinning]
+  confidence: 0.9
+  pinned: false
+  source: seed
