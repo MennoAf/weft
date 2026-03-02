@@ -21,6 +21,7 @@ class MemoryType(str, Enum):
     handoff = "handoff"
     issue = "issue"
     decision = "decision"
+    milestone = "milestone"
 
 
 class MemorySource(str, Enum):
@@ -71,6 +72,7 @@ class Memory(BaseModel):
     pinned: bool = False
     usefulness_score: float = Field(default=1.0, ge=0.0, le=1.0)
     usefulness_count: int = 0
+    review_after: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""
@@ -103,6 +105,7 @@ class MemoryCreate(BaseModel):
     project_id: str | None = None
     agent_id: str | None = None
     pinned: bool = False
+    review_after: datetime | None = None
 
 
 class MemoryRecall(BaseModel):

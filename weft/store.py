@@ -45,11 +45,13 @@ async def store_memory(
         INSERT INTO memories (
             id, type, topic, content, source, confidence,
             token_count, created_at, updated_at, accessed_at,
-            access_count, project_id, agent_id, embedding, status, pinned
+            access_count, project_id, agent_id, embedding, status, pinned,
+            review_after
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
-            0, $9, $10, $11, 'active', $12
+            0, $9, $10, $11, 'active', $12,
+            $13
         )
         """,
         memory_id,
@@ -64,6 +66,7 @@ async def store_memory(
         create.agent_id,
         embedding_str,
         create.pinned,
+        create.review_after,
     )
 
     return Memory(
@@ -82,6 +85,7 @@ async def store_memory(
         agent_id=create.agent_id,
         status=MemoryStatus.active,
         pinned=create.pinned,
+        review_after=create.review_after,
     )
 
 
@@ -221,6 +225,7 @@ async def update_memory(
     embedding: list[float] | None = None,
     pinned: bool | None = None,
     project_id: str | None = _UNSET,
+    review_after: datetime | None = _UNSET,
 ) -> Memory | None:
     """Update mutable fields of a memory. Returns updated Memory or None."""
     sets = ["updated_at = now()"]
@@ -268,6 +273,11 @@ async def update_memory(
     if project_id is not _UNSET:
         sets.append(f"project_id = ${idx}")
         params.append(project_id)
+        idx += 1
+
+    if review_after is not _UNSET:
+        sets.append(f"review_after = ${idx}")
+        params.append(review_after)
         idx += 1
 
     set_clause = ", ".join(sets)
@@ -490,4 +500,5 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         pinned=bool(row["pinned"]) if row.get("pinned") is not None else False,
         usefulness_score=float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0,
         usefulness_count=row["usefulness_count"] if row["usefulness_count"] is not None else 0,
+        review_after=row["review_after"] if row.get("review_after") is not None else None,
     )
