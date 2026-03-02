@@ -8,7 +8,7 @@ from weft.context import _deduplicate_by_topic, _pack_by_budget, build_context
 from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemoryRecall, MemorySource, MemoryType
 from weft.relevance import ScoredMemory, score_memory
-from weft.store import store_memory
+from weft.store import record_feedback, store_memory
 
 
 # --- Unit tests for helpers ---
@@ -208,3 +208,47 @@ async def test_build_context_memories_sorted_by_relevance(context_pool):
 
     scores = [m["relevance_score"] for m in result["memories"]]
     assert scores == sorted(scores, reverse=True)
+
+
+async def test_build_context_pinned_sorted_by_usefulness(pool):
+    """Pinned memories should be sorted by usefulness_score descending before packing."""
+    provider = get_provider("fastembed")
+
+    # Create 3 pinned memories with large token counts so budget can only fit 2
+    for content in ["pinned rule A", "pinned rule B", "pinned rule C"]:
+        create = MemoryCreate(
+            type=MemoryType.preference,
+            content=content,
+            topic=["rules"],
+            source=MemorySource.conversation,
+            confidence=0.9,
+            pinned=True,
+        )
+        await store_memory(pool, create, embedding=await provider.embed(content))
+
+    # Give different usefulness to each via feedback
+    from weft.store import list_memories
+    pinned = await list_memories(pool, pinned=True, limit=10)
+    assert len(pinned) == 3
+
+    # Make "B" the most useful, "C" middle, "A" least useful
+    for mem in pinned:
+        if "rule A" in mem.content:
+            for _ in range(5):
+                await record_feedback(pool, mem.id, helpful=False)
+        elif "rule B" in mem.content:
+            for _ in range(5):
+                await record_feedback(pool, mem.id, helpful=True)
+        # C stays at default (0.7)
+
+    emb = await provider.embed("project rules")
+    # Budget just big enough for 2 pinned memories
+    token_cost = pinned[0].token_count or 1
+    tight_budget = token_cost * 2 + 1
+
+    result = await build_context(pool, emb, budget_tokens=tight_budget)
+    pinned_contents = [m["content"] for m in result["memories"] if m.get("pinned")]
+
+    # B (highest usefulness) should be included; A (lowest) should be dropped
+    assert any("rule B" in c for c in pinned_contents), "High-usefulness pinned memory B should be included"
+    assert not any("rule A" in c for c in pinned_contents), "Low-usefulness pinned memory A should be dropped"
