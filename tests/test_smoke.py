@@ -30,6 +30,27 @@ async def test_pgvector_enabled(pool):
     assert version is not None
 
 
+async def test_hnsw_index_exists(pool):
+    """Verify HNSW index was created on embedding column by migration 7."""
+    index = await pool.fetchrow(
+        "SELECT indexname, indexdef FROM pg_indexes "
+        "WHERE tablename = 'memories' AND indexname = 'idx_memories_embedding_hnsw'"
+    )
+    assert index is not None
+    assert "hnsw" in index["indexdef"].lower()
+    assert "vector_cosine_ops" in index["indexdef"]
+
+
+async def test_embedding_column_has_dimensions(pool):
+    """Verify embedding column was typed to vector(384) by migration 7."""
+    udt = await pool.fetchval(
+        "SELECT format_type(atttypid, atttypmod) "
+        "FROM pg_attribute "
+        "WHERE attrelid = 'memories'::regclass AND attname = 'embedding'"
+    )
+    assert udt == "vector(384)"
+
+
 async def test_redis_connects(redis_conn):
     """Verify Redis connection works."""
     await redis_conn.set("test_key", "test_value")
