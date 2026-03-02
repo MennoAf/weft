@@ -247,16 +247,20 @@ async def weft_revise(
     new_content: str,
     new_confidence: float | None = None,
     new_topic: list[str] | None = None,
+    new_type: str | None = None,
 ) -> dict:
     """Update a memory's content, creating a new version that supersedes the old one."""
     try:
+        from weft.models import MemoryType as _MT
         from weft.revise import revise_memory
 
+        resolved_type = _MT(new_type) if new_type else None
         app: AppContext = ctx.request_context.lifespan_context
         embedding = await app.embedding.embed(new_content)
         new, old = await revise_memory(
             app.pool, memory_id, new_content,
-            embedding=embedding, new_confidence=new_confidence, new_topic=_coerce_list(new_topic),
+            embedding=embedding, new_confidence=new_confidence,
+            new_topic=_coerce_list(new_topic), new_type=resolved_type,
         )
         await app.cache.set_memory(new)
         await app.cache.invalidate_memory(old.id)

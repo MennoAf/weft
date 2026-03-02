@@ -216,6 +216,7 @@ async def update_memory(
     content: str | None = None,
     confidence: float | None = None,
     status: MemoryStatus | None = None,
+    memory_type: MemoryType | None = None,
     topic: list[str] | None = None,
     embedding: list[float] | None = None,
     pinned: bool | None = None,
@@ -237,6 +238,11 @@ async def update_memory(
     if confidence is not None:
         sets.append(f"confidence = ${idx}")
         params.append(confidence)
+        idx += 1
+
+    if memory_type is not None:
+        sets.append(f"type = ${idx}")
+        params.append(memory_type.value)
         idx += 1
 
     if status is not None:

@@ -92,6 +92,23 @@ async def test_update_memory(pool):
     assert updated.updated_at > mem.updated_at
 
 
+async def test_update_memory_type(pool):
+    """Update memory type via update_memory."""
+    mem = await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="## Session Handoff\n\n**Summary:** mistyped",
+    ))
+    assert mem.type == MemoryType.fact
+
+    updated = await update_memory(pool, mem.id, memory_type=MemoryType.handoff)
+    assert updated is not None
+    assert updated.type == MemoryType.handoff
+
+    # Verify via list filter
+    handoffs = await list_memories(pool, memory_type=MemoryType.handoff)
+    assert any(m.id == mem.id for m in handoffs)
+
+
 async def test_soft_delete(pool):
     """Soft-delete archives the memory."""
     mem = await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="to delete"))

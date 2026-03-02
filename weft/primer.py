@@ -105,6 +105,14 @@ async def build_primer(
         pool, project_id,
         memory_type=MemoryType.handoff, status=MemoryStatus.active, limit=5,
     )
+    # Fallback: if no typed handoffs found, check for topic "session-handoff"
+    # (handles memories created before the handoff type existed or mistyped)
+    if not handoff_raw:
+        topic_raw = await _fetch_with_globals(
+            pool, project_id,
+            topic="session-handoff", status=MemoryStatus.active, limit=5,
+        )
+        handoff_raw = [m for m in topic_raw if "Session Handoff" in m.content]
     # Filter out already-seen (e.g., if a handoff was also pinned)
     handoff_candidates = [m for m in handoff_raw if m.id not in seen_ids]
     # Take only the most recent handoff

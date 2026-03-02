@@ -122,6 +122,29 @@ async def test_revise_nonexistent_raises():
     pass
 
 
+async def test_revise_with_new_type(original_memory):
+    """Revise can change the memory type."""
+    pool, old, provider = original_memory
+    assert old.type == MemoryType.fact
+
+    emb = await provider.embed("retyped to handoff")
+    new, _ = await revise_memory(
+        pool, old.id, "## Session Handoff\n\n**Summary:** retyped",
+        embedding=emb, new_type=MemoryType.handoff,
+    )
+    assert new.type == MemoryType.handoff
+    assert new.id != old.id
+
+
+async def test_revise_without_new_type_inherits(original_memory):
+    """Revise without new_type inherits the original type."""
+    pool, old, provider = original_memory
+    emb = await provider.embed("same type update")
+
+    new, _ = await revise_memory(pool, old.id, "same type update", embedding=emb)
+    assert new.type == old.type
+
+
 @pytest.mark.asyncio
 async def test_revise_nonexistent(pool):
     """Revising a nonexistent memory should raise ValueError."""
