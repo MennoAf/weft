@@ -372,6 +372,7 @@ async def weft_prime(
         from weft.fallback import read_fallback
         content = read_fallback()
         return {
+            "grounding": None,
             "rules": [],
             "handoff": [{"content": content, "type": "fallback"}] if content else [],
             "issues": {"count": 0, "items": []},
@@ -379,6 +380,7 @@ async def weft_prime(
             "total_tokens": 0,
             "budget_tokens": budget_tokens,
             "budget_remaining": budget_tokens,
+            "excluded": 0,
             "degraded": True,
         }
 

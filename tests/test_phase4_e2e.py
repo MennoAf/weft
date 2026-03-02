@@ -184,8 +184,8 @@ async def test_session_priming_workflow(pool):
 
     # All expected keys present
     assert set(result.keys()) == {
-        "rules", "handoff", "issues", "decisions",
-        "total_tokens", "budget_tokens", "budget_remaining",
+        "grounding", "rules", "handoff", "issues", "decisions",
+        "total_tokens", "budget_tokens", "budget_remaining", "excluded",
     }
 
 
