@@ -493,12 +493,36 @@ async def weft_learn(
             await app.cache.set_memory(memory)
             stored.append(memory.to_dict())
 
+        # Auto-create a milestone when task_id is provided so primer's
+        # recent_work section shows completed task breadcrumbs.
+        milestone_dict: dict | None = None
+        if task_id:
+            # Build a concise milestone from the first ~100 words of content
+            words = content.split()
+            summary = " ".join(words[:100]) + ("..." if len(words) > 100 else "")
+            milestone_create = MemoryCreate(
+                type=MemoryType.milestone,
+                content=summary,
+                topic=[f"task:{task_id}"],
+                source=MemorySource.conversation,
+                confidence=0.9,
+                project_id=resolved_project,
+                agent_id=agent_id,
+            )
+            ms_embedding = await app.embedding.embed(summary)
+            milestone = await store_memory(
+                app.pool, milestone_create, embedding=ms_embedding,
+            )
+            await app.cache.set_memory(milestone)
+            milestone_dict = milestone.to_dict()
+
         await app.cache.invalidate_stats()
         return {
             "candidates_found": len(candidates),
             "stored": len(stored),
             "memories": stored,
             "task_id": task_id,
+            "milestone": milestone_dict,
         }
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_learn", e)

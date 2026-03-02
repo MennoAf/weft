@@ -94,6 +94,17 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ALTER TABLE memories ADD COLUMN IF NOT EXISTS review_after TIMESTAMPTZ;
         """,
     ),
+    (
+        7,
+        "Set embedding dimension and add HNSW index for vector search",
+        """
+        ALTER TABLE memories ALTER COLUMN embedding TYPE vector(384);
+
+        CREATE INDEX IF NOT EXISTS idx_memories_embedding_hnsw
+        ON memories USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+        """,
+    ),
 ]
 
 
