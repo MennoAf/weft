@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -695,3 +696,58 @@ class TestConsolidationReport:
         assert d["contradictions_flagged_count"] == 1
         assert d["errors"] == ["Something went wrong"]
         assert d["total_actions"] == 4
+
+
+# ---------------------------------------------------------------------------
+# 5. Advisory lock
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidationLock:
+    """Tests for advisory-lock-based consolidation serialization."""
+
+    async def test_lock_released_after_consolidation(self, pool):
+        """Advisory lock should be released after consolidation completes."""
+        from weft.consolidation import _CONSOLIDATION_LOCK_ID
+
+        await consolidate(pool, dry_run=True)
+
+        # Lock should be available now
+        async with pool.acquire() as conn:
+            locked = await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", _CONSOLIDATION_LOCK_ID,
+            )
+            assert locked, "Advisory lock should be available after consolidation"
+            await conn.execute(
+                "SELECT pg_advisory_unlock($1)", _CONSOLIDATION_LOCK_ID,
+            )
+
+    async def test_concurrent_consolidation_skips(self, pool):
+        """A second concurrent consolidation should return skipped=True."""
+        from weft.consolidation import _CONSOLIDATION_LOCK_ID
+
+        # Hold the lock manually
+        async with pool.acquire() as lock_conn:
+            await lock_conn.execute(
+                "SELECT pg_advisory_lock($1)", _CONSOLIDATION_LOCK_ID,
+            )
+            try:
+                # Try to consolidate while lock is held
+                report = await consolidate(pool, dry_run=True)
+                assert report.skipped is True
+                assert report.total_actions == 0
+                assert report.to_dict()["skipped"] is True
+            finally:
+                await lock_conn.execute(
+                    "SELECT pg_advisory_unlock($1)", _CONSOLIDATION_LOCK_ID,
+                )
+
+    async def test_concurrent_consolidation_no_conflict(self, pool):
+        """Two concurrent consolidation calls should not raise."""
+        results = await asyncio.gather(
+            consolidate(pool, dry_run=True),
+            consolidate(pool, dry_run=True),
+        )
+        # One should run, the other should be skipped
+        skipped_count = sum(1 for r in results if r.skipped)
+        assert skipped_count >= 1, "At least one concurrent run should be skipped"
