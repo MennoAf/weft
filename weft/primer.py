@@ -35,6 +35,40 @@ _COMPLETED_MARKERS = ("(DONE)", "(FIXED)", "Improvement (DONE)", "Bug (FIXED)",
 _MAX_GLOBAL_RECENT = 3
 _MAX_GLOBAL_PREFS = 3
 
+# Hard cap on items in recent_work section (independent of budget).
+# Prevents the section from growing unbounded even when budget allows it.
+_MAX_RECENT_ITEMS = 6
+
+# Access-count threshold above which a memory is considered "reference material"
+# and gets a novelty penalty in recent_work ranking.
+_REFERENCE_THRESHOLD = 5
+
+
+def _novelty_score(mem: Memory) -> float:
+    """Score a memory's novelty for recent_work ranking.
+
+    Higher = more novel (should rank first).  A memory accessed once recently
+    is more interesting than one accessed 14 times over two weeks — the latter
+    is stable reference material that belongs in recall, not the primer.
+
+    Score = accessed_at_timestamp - penalty_for_frequent_access
+
+    The penalty kicks in above _REFERENCE_THRESHOLD accesses and grows
+    logarithmically so it doesn't completely bury high-access memories
+    that were *also* very recently touched.
+    """
+    import math
+
+    ts = mem.accessed_at.timestamp()
+    excess = max(0, mem.access_count - _REFERENCE_THRESHOLD)
+    if excess == 0:
+        return ts
+    # Each doubling of excess accesses subtracts ~1 day worth of seconds.
+    # This means a memory with 10+ accesses needs to have been touched
+    # ~1-3 days more recently than a low-access memory to rank above it.
+    penalty = math.log2(1 + excess) * 86400  # 86400 = seconds in a day
+    return ts - penalty
+
 
 def _is_idea(mem: Memory) -> bool:
     """Return True if the memory looks aspirational rather than concrete work."""
@@ -205,17 +239,20 @@ async def build_primer(
         and not _is_completed(m)
         and not _is_idea(m)
     ]
-    # Sort: project-scoped first, then by accessed_at.
+    # Sort: project-scoped first, then by novelty score (penalizes
+    # frequently-accessed reference material in favor of genuinely recent work).
     recent_candidates.sort(
         key=lambda m: (
             0 if project_id and m.project_id == project_id else 1,
-            -(m.accessed_at.timestamp()),
+            -_novelty_score(m),
         ),
     )
 
     recent_section: list[dict] = []
     global_recent_count = 0
     for mem in recent_candidates:
+        if len(recent_section) >= _MAX_RECENT_ITEMS:
+            break
         is_global = project_id and mem.project_id != project_id
         if is_global and global_recent_count >= _MAX_GLOBAL_RECENT:
             continue
