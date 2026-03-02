@@ -70,9 +70,9 @@ async def pool():
     dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
     p = await asyncpg.create_pool(dsn, min_size=2, max_size=5)
     await run_migrations(p)
-    # Clean data in FK-safe order
-    await p.execute("DELETE FROM memory_relationships")
-    await p.execute("DELETE FROM memories")
+    # TRUNCATE resets tables and HNSW index state cleanly (DELETE leaves
+    # dead tuples in the index which can cause approximate search to miss rows)
+    await p.execute("TRUNCATE memory_relationships, memories")
     yield p
     await p.close()
 
