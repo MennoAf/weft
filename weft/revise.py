@@ -9,23 +9,19 @@ Revision workflow:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import asyncpg
 
 from weft.models import (
     Memory,
-    MemoryCreate,
     MemoryStatus,
     MemoryType,
     RelationType,
+    _weft_id,
 )
-from weft.store import (
-    add_relationship,
-    get_memory,
-    store_memory,
-    update_memory,
-)
+from weft.store import _vec_to_pgvector, get_memory
+from weft.tokens import estimate_tokens
 
 _UNSET = object()
 
@@ -50,24 +46,85 @@ async def revise_memory(
     if old is None:
         raise ValueError(f"Memory {memory_id} not found")
 
-    # Create the new version, inheriting metadata from the old one
+    # Prepare all data before opening the transaction
     resolved_review = old.review_after if review_after is _UNSET else review_after
-    create = MemoryCreate(
-        type=new_type if new_type is not None else old.type,
+    resolved_type = new_type if new_type is not None else old.type
+    resolved_topic = new_topic if new_topic is not None else old.topic
+    resolved_confidence = new_confidence if new_confidence is not None else old.confidence
+    new_id = _weft_id()
+    now = datetime.now(timezone.utc)
+    token_count = estimate_tokens(new_content)
+    embedding_str = _vec_to_pgvector(embedding) if embedding else None
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Insert new memory
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    id, type, topic, content, source, confidence,
+                    token_count, created_at, updated_at, accessed_at,
+                    access_count, project_id, agent_id, embedding, status, pinned,
+                    review_after
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    $7, $8, $8, $8,
+                    0, $9, $10, $11, 'active', false,
+                    $12
+                )
+                """,
+                new_id,
+                resolved_type.value,
+                resolved_topic,
+                new_content,
+                old.source.value,
+                resolved_confidence,
+                token_count,
+                now,
+                old.project_id,
+                old.agent_id,
+                embedding_str,
+                resolved_review,
+            )
+
+            # 2. Link: new supersedes old
+            await conn.execute(
+                """
+                INSERT INTO memory_relationships (source_id, target_id, relation, created_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (source_id, target_id, relation) DO NOTHING
+                """,
+                new_id,
+                old.id,
+                RelationType.supersedes.value,
+                now,
+            )
+
+            # 3. Archive the old memory
+            await conn.execute(
+                "UPDATE memories SET status = 'archived', updated_at = now() WHERE id = $1",
+                old.id,
+            )
+
+    new = Memory(
+        id=new_id,
+        type=resolved_type,
+        topic=resolved_topic,
         content=new_content,
-        topic=new_topic if new_topic is not None else old.topic,
         source=old.source,
-        confidence=new_confidence if new_confidence is not None else old.confidence,
+        confidence=resolved_confidence,
+        token_count=token_count,
+        created_at=now,
+        updated_at=now,
+        accessed_at=now,
+        access_count=0,
         project_id=old.project_id,
         agent_id=old.agent_id,
+        status=MemoryStatus.active,
+        pinned=False,
         review_after=resolved_review,
     )
-    new = await store_memory(pool, create, embedding=embedding)
 
-    # Link: new supersedes old
-    await add_relationship(pool, new.id, old.id, RelationType.supersedes)
-
-    # Archive the old memory
-    archived_old = await update_memory(pool, old.id, status=MemoryStatus.archived)
-
-    return new, archived_old or old
+    return new, Memory(
+        **{**old.model_dump(), "status": MemoryStatus.archived, "updated_at": now},
+    )
