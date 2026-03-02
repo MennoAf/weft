@@ -333,6 +333,57 @@ async def test_primer_surfaces_most_recent_handoff(pool):
     assert not any("Session Handoff" in c for c in work_contents)
 
 
+async def test_primer_handoff_fallback_by_topic(pool):
+    """Handoff stored as wrong type but with topic 'session-handoff' still surfaces."""
+    # Simulate pre-handoff-type memory: stored as fact with session-handoff topic
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="## Session Handoff\n\n**Summary:** Mistyped handoff from old server",
+        topic=["session-handoff"],
+        source=MemorySource.conversation,
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    # Should appear in handoff section via fallback
+    assert len(result["handoff"]) == 1
+    assert "Mistyped handoff" in result["handoff"][0]["content"]
+
+    # Should NOT also appear in recent_work
+    work_contents = [m["content"] for m in result["recent_work"]]
+    assert not any("Session Handoff" in c for c in work_contents)
+
+
+async def test_primer_handoff_typed_takes_priority_over_fallback(pool):
+    """When both typed handoff and topic-based exist, typed one wins."""
+    import asyncio
+
+    # Mistyped handoff (older)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="## Session Handoff\n\n**Summary:** Old mistyped one",
+        topic=["session-handoff"],
+        source=MemorySource.conversation,
+        confidence=1.0,
+    ))
+    await asyncio.sleep(0.01)
+    # Properly typed handoff (newer)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Properly typed one",
+        topic=["session-handoff"],
+        source=MemorySource.conversation,
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000)
+
+    # Typed handoff should win — fallback not triggered
+    assert len(result["handoff"]) == 1
+    assert "Properly typed one" in result["handoff"][0]["content"]
+
+
 async def test_primer_project_scoped_recent_work_first(pool):
     """When project_id is set, project-scoped memories appear before globals in recent_work."""
     # Global memory (created first, so it's older)

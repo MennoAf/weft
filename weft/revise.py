@@ -15,6 +15,7 @@ from weft.models import (
     Memory,
     MemoryCreate,
     MemoryStatus,
+    MemoryType,
     RelationType,
 )
 from weft.store import (
@@ -33,6 +34,7 @@ async def revise_memory(
     embedding: list[float] | None = None,
     new_confidence: float | None = None,
     new_topic: list[str] | None = None,
+    new_type: MemoryType | None = None,
 ) -> tuple[Memory, Memory]:
     """Create a new version of a memory, superseding the old one.
 
@@ -45,7 +47,7 @@ async def revise_memory(
 
     # Create the new version, inheriting metadata from the old one
     create = MemoryCreate(
-        type=old.type,
+        type=new_type if new_type is not None else old.type,
         content=new_content,
         topic=new_topic if new_topic is not None else old.topic,
         source=old.source,
