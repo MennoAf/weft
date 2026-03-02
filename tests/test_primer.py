@@ -15,9 +15,12 @@ from weft.primer import (
     _CAP_ISSUES,
     _CAP_RECENT_WORK,
     _CAP_RULES,
+    _COLD_START_THRESHOLD,
     _GROUNDING_TOPIC,
     _MAX_DECISIONS,
     _MAX_RECENT_WORK,
+    _ONBOARDING_TEXT,
+    _SECTION_HINTS,
     _newest_created_at,
     build_primer,
 )
@@ -29,7 +32,8 @@ from weft.tokens import estimate_tokens
 
 
 async def test_primer_empty_db(pool):
-    """No memories -> all sections empty, budget_remaining = budget_tokens."""
+    """No memories -> all sections empty, budget_remaining = budget_tokens,
+    all hints present, onboarding shown (cold start)."""
     result = await build_primer(pool, budget_tokens=1800)
 
     assert result["grounding"] is None
@@ -47,6 +51,9 @@ async def test_primer_empty_db(pool):
         "grounding": 0, "rules": 0, "handoff": 0,
         "recent_work": 0, "issues": 0, "decisions": 0,
     }
+    # Empty DB = all hints + onboarding
+    assert set(result["hints"].keys()) == {"rules", "handoff", "recent_work", "issues", "decisions"}
+    assert result["onboarding"] is not None
 
 
 async def test_primer_return_structure(pool):
@@ -56,7 +63,7 @@ async def test_primer_return_structure(pool):
     expected_keys = {
         "grounding", "rules", "handoff", "recent_work", "issues", "decisions",
         "total_tokens", "budget_tokens", "budget_remaining", "excluded",
-        "freshness_hours", "section_tokens",
+        "freshness_hours", "section_tokens", "hints", "onboarding",
     }
     assert set(result.keys()) == expected_keys
 
@@ -74,6 +81,8 @@ async def test_primer_return_structure(pool):
     assert isinstance(result["excluded"], int)
     assert result["freshness_hours"] is None or isinstance(result["freshness_hours"], float)
     assert isinstance(result["section_tokens"], dict)
+    assert isinstance(result["hints"], dict)
+    assert result["onboarding"] is None or isinstance(result["onboarding"], str)
 
     # Budget invariant
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
@@ -960,3 +969,190 @@ async def test_primer_decisions_ranked_by_usefulness(pool):
     assert len(decisions) == 2
     assert decisions[0]["content"] == "Very helpful decision"
     assert decisions[1]["content"] == "Rarely helpful decision"
+
+
+# --- Empty-section hints ---
+
+
+async def test_primer_hints_all_present_when_empty(pool):
+    """All five section hints appear when database is empty."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    hints = result["hints"]
+    assert "rules" in hints
+    assert "handoff" in hints
+    assert "recent_work" in hints
+    assert "issues" in hints
+    assert "decisions" in hints
+    # Each hint should mention the relevant tool
+    assert "weft_remember" in hints["rules"]
+    assert "weft_handoff" in hints["handoff"]
+    assert "weft_learn" in hints["recent_work"]
+    assert "weft_remember" in hints["issues"]
+    assert "weft_remember" in hints["decisions"]
+
+
+async def test_primer_hints_disappear_when_populated(pool):
+    """Hints for populated sections are absent; hints for empty sections remain."""
+    # Populate rules and decisions
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Always use weft_remember",
+        confidence=1.0,
+        pinned=True,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="Don't split store.py",
+        confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    hints = result["hints"]
+    # Populated sections have no hint
+    assert "rules" not in hints
+    assert "decisions" not in hints
+    # Empty sections still have hints
+    assert "handoff" in hints
+    assert "recent_work" in hints
+    assert "issues" in hints
+
+
+async def test_primer_no_hints_when_all_populated(pool):
+    """Hints dict is empty when all sections have content."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference, content="A rule",
+        confidence=1.0, pinned=True,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Some work",
+        topic=["session-handoff"], confidence=1.0,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone, content="Did a thing",
+        confidence=1.0,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.issue, content="A bug", confidence=0.8,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision, content="A choice", confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["hints"] == {}
+
+
+async def test_primer_hint_text_matches_constants(pool):
+    """Empty-section hint text matches the _SECTION_HINTS constants exactly."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    for section_name, expected_hint in _SECTION_HINTS.items():
+        assert result["hints"][section_name] == expected_hint
+
+
+# --- Cold-start onboarding ---
+
+
+async def test_primer_onboarding_on_cold_start(pool):
+    """Onboarding text appears when DB is empty (classic cold start)."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["onboarding"] is not None
+    assert result["onboarding"] == _ONBOARDING_TEXT
+    # Check key tool names are mentioned
+    assert "weft_remember" in result["onboarding"]
+    assert "weft_recall" in result["onboarding"]
+    assert "weft_learn" in result["onboarding"]
+    assert "weft_handoff" in result["onboarding"]
+    assert "weft_feedback" in result["onboarding"]
+
+
+async def test_primer_onboarding_absent_with_handoff(pool):
+    """Onboarding disappears as soon as a handoff exists (agent has prior session)."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** First session done",
+        topic=["session-handoff"],
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["onboarding"] is None
+
+
+async def test_primer_onboarding_absent_with_many_memories(pool):
+    """Onboarding disappears when enough memories exist even without a handoff."""
+    # Create enough items to exceed _COLD_START_THRESHOLD
+    for i in range(_COLD_START_THRESHOLD + 1):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.decision,
+            content=f"Decision {i}: an established choice",
+            confidence=0.9,
+        ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["onboarding"] is None
+
+
+async def test_primer_onboarding_with_few_memories_no_handoff(pool):
+    """Onboarding still shows with <= threshold items and no handoff."""
+    # Add exactly threshold items (should still be cold start)
+    for i in range(_COLD_START_THRESHOLD):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.decision,
+            content=f"Decision {i}: early choice",
+            confidence=0.9,
+        ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["onboarding"] is not None
+
+
+async def test_primer_onboarding_token_budget(pool):
+    """Onboarding text stays within ~200 token budget (proxy: < 250 words)."""
+    word_count = len(_ONBOARDING_TEXT.split())
+    assert word_count < 250, f"Onboarding text is {word_count} words, should be < 250"
+    assert word_count > 20, f"Onboarding text is only {word_count} words, seems too short"
+
+
+async def test_primer_cold_start_has_both_hints_and_onboarding(pool):
+    """On cold start, both hints and onboarding are present simultaneously."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["onboarding"] is not None
+    assert len(result["hints"]) == 5  # all five sections empty
+
+
+async def test_primer_established_agent_has_neither(pool):
+    """An established agent (handoff + populated sections) sees neither hints nor onboarding."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference, content="A rule",
+        confidence=1.0, pinned=True,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Returning agent",
+        topic=["session-handoff"], confidence=1.0,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone, content="Did work",
+        confidence=1.0,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.issue, content="A bug", confidence=0.8,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision, content="A choice", confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["onboarding"] is None
+    assert result["hints"] == {}
