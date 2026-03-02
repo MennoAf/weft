@@ -15,6 +15,8 @@ Sections (in priority order):
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timezone
 
 import asyncpg
@@ -23,6 +25,8 @@ from weft.models import Memory, MemoryStatus, MemoryType
 from weft.store import list_memories
 from weft.tokens import estimate_tokens
 
+logger = logging.getLogger(__name__)
+
 # Hard cap on decisions shown in primer.
 _MAX_DECISIONS = 5
 
@@ -30,30 +34,18 @@ _MAX_DECISIONS = 5
 _GROUNDING_TOPIC = "project-grounding"
 
 
-async def _fetch_with_globals(
-    pool: asyncpg.Pool,
-    project_id: str | None,
-    **kwargs,
-) -> list[Memory]:
-    """Fetch memories matching filters, including global memories when project-scoped.
-
-    When project_id is given, we fetch both project-specific and global
-    (project_id=None) memories and merge them, deduplicating by id.
-    """
-    if project_id is None:
-        return await list_memories(pool, **kwargs)
-
-    project_mems = await list_memories(pool, project_id=project_id, **kwargs)
-    all_mems = await list_memories(pool, **kwargs)
-    global_mems = [m for m in all_mems if m.project_id is None]
-
-    seen: set[str] = set()
-    merged: list[Memory] = []
-    for m in project_mems + global_mems:
-        if m.id not in seen:
-            seen.add(m.id)
-            merged.append(m)
-    return merged
+def _newest_created_at(memories: list[dict], now: datetime) -> float | None:
+    """Return age_hours of the most recently created memory, or None if empty."""
+    if not memories:
+        return None
+    timestamps = []
+    for m in memories:
+        ts = m["created_at"]
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts)
+        timestamps.append(ts)
+    newest = max(timestamps)
+    return round((now - newest).total_seconds() / 3600, 1)
 
 
 async def build_primer(
@@ -73,35 +65,74 @@ async def build_primer(
 
     Everything else (architecture, patterns, reference facts, preferences)
     lives in recall — fetched on demand when the conversation needs it.
+
+    All section fetches run in parallel via asyncio.gather, then budget
+    packing happens sequentially in priority order.
     """
-    used_tokens = 0
-    seen_ids: set[str] = set()
-    excluded = 0
     now = datetime.now(timezone.utc)
 
-    # --- Section 0: Project grounding (one-liner) ---
-    grounding_line: str | None = None
-    if project_id is not None:
-        grounding_raw = await list_memories(
+    # list_memories already handles `project_id = $X OR project_id IS NULL`
+    # when project_id is provided, so a single call per section suffices.
+    _pid = {"project_id": project_id} if project_id else {}
+
+    # --- Fetch all sections in parallel ---
+    async def _empty() -> list[Memory]:
+        return []
+
+    grounding_coro = (
+        list_memories(
             pool, project_id=project_id,
             topic=_GROUNDING_TOPIC, status=MemoryStatus.active, limit=1,
         )
-        if grounding_raw:
-            mem = grounding_raw[0]
-            cost = mem.token_count or estimate_tokens(mem.content)
-            if used_tokens + cost <= budget_tokens:
-                grounding_line = mem.content
-                seen_ids.add(mem.id)
-                used_tokens += cost
-            else:
-                excluded += 1
-
-    # --- Section 1: Rules (pinned memories only) ---
-    pinned_raw = await _fetch_with_globals(
-        pool, project_id,
-        status=MemoryStatus.active, pinned=True, limit=100,
+        if project_id
+        else _empty()
     )
-    pinned_raw.sort(key=lambda m: m.confidence, reverse=True)
+
+    pinned_coro = list_memories(
+        pool, status=MemoryStatus.active, pinned=True, limit=100, **_pid,
+    )
+    handoff_coro = list_memories(
+        pool, memory_type=MemoryType.handoff, status=MemoryStatus.active,
+        limit=5, **_pid,
+    )
+    issues_coro = list_memories(
+        pool, memory_type=MemoryType.issue, status=MemoryStatus.active,
+        limit=20, **_pid,
+    )
+    decisions_coro = list_memories(
+        pool, memory_type=MemoryType.decision, status=MemoryStatus.active,
+        limit=20, **_pid,
+    )
+
+    (
+        grounding_raw,
+        pinned_raw,
+        handoff_raw,
+        issues_raw,
+        decisions_raw,
+    ) = await asyncio.gather(
+        grounding_coro, pinned_coro, handoff_coro, issues_coro, decisions_coro,
+    )
+
+    # --- Budget packing (sequential, in priority order) ---
+    used_tokens = 0
+    seen_ids: set[str] = set()
+    excluded = 0
+
+    # Section 0: Project grounding (one-liner)
+    grounding_line: str | None = None
+    if grounding_raw:
+        mem = grounding_raw[0]
+        cost = mem.token_count or estimate_tokens(mem.content)
+        if used_tokens + cost <= budget_tokens:
+            grounding_line = mem.content
+            seen_ids.add(mem.id)
+            used_tokens += cost
+        else:
+            excluded += 1
+
+    # Section 1: Rules (pinned memories only)
+    pinned_raw.sort(key=lambda m: (m.confidence, m.created_at.timestamp()), reverse=True)
 
     rules_section: list[dict] = []
     for mem in pinned_raw:
@@ -113,20 +144,21 @@ async def build_primer(
         else:
             excluded += 1
 
-    # --- Section 2: Last session handoff (most recent only) ---
-    handoff_raw = await _fetch_with_globals(
-        pool, project_id,
-        memory_type=MemoryType.handoff, status=MemoryStatus.active, limit=5,
-    )
-    # Fallback: if no typed handoffs found, check for topic "session-handoff"
-    # (handles memories created before the handoff type existed or mistyped)
-    if not handoff_raw:
-        topic_raw = await _fetch_with_globals(
-            pool, project_id,
-            topic="session-handoff", status=MemoryStatus.active, limit=5,
-        )
-        handoff_raw = [m for m in topic_raw if "Session Handoff" in m.content]
+    # Section 2: Last session handoff (most recent only)
     handoff_candidates = [m for m in handoff_raw if m.id not in seen_ids]
+    if not handoff_candidates:
+        # Fallback: check for topic "session-handoff" (handles pre-typed-handoff memories).
+        # DEPRECATED: this fallback will be removed in a future version.
+        topic_raw = await list_memories(
+            pool, topic="session-handoff", status=MemoryStatus.active,
+            limit=5, **_pid,
+        )
+        handoff_candidates = [m for m in topic_raw if m.id not in seen_ids]
+        if handoff_candidates:
+            logger.warning(
+                "Handoff found via topic fallback — re-store with type=handoff "
+                "to silence this warning (fallback will be removed in v0.3)",
+            )
     handoff_candidates.sort(key=lambda m: m.created_at, reverse=True)
 
     handoff_section: list[dict] = []
@@ -143,11 +175,7 @@ async def build_primer(
         else:
             excluded += 1
 
-    # --- Section 3: Active issues ---
-    issues_raw = await _fetch_with_globals(
-        pool, project_id,
-        memory_type=MemoryType.issue, status=MemoryStatus.active, limit=20,
-    )
+    # Section 3: Active issues
     issue_candidates = [m for m in issues_raw if m.id not in seen_ids]
     issue_candidates.sort(key=lambda m: m.created_at, reverse=True)
 
@@ -161,13 +189,8 @@ async def build_primer(
         else:
             excluded += 1
 
-    # --- Section 4: Closed decisions (what NOT to suggest) ---
-    decisions_raw = await _fetch_with_globals(
-        pool, project_id,
-        memory_type=MemoryType.decision, status=MemoryStatus.active, limit=20,
-    )
+    # Section 4: Closed decisions (what NOT to suggest)
     decision_candidates = [m for m in decisions_raw if m.id not in seen_ids]
-    # Project-scoped first, then most recent
     decision_candidates.sort(
         key=lambda m: (
             0 if project_id and m.project_id == project_id else 1,
@@ -176,9 +199,9 @@ async def build_primer(
     )
 
     decisions_section: list[dict] = []
-    for mem in decision_candidates:
+    for i, mem in enumerate(decision_candidates):
         if len(decisions_section) >= _MAX_DECISIONS:
-            excluded += len(decision_candidates) - _MAX_DECISIONS
+            excluded += len(decision_candidates) - i
             break
         cost = mem.token_count or estimate_tokens(mem.content)
         if used_tokens + cost <= budget_tokens:
@@ -187,6 +210,12 @@ async def build_primer(
             used_tokens += cost
         else:
             excluded += 1
+
+    # Collect all included memories for freshness calculation
+    all_included: list[dict] = (
+        rules_section + handoff_section + issue_items + decisions_section
+    )
+    freshness_hours = _newest_created_at(all_included, now)
 
     return {
         "grounding": grounding_line,
@@ -198,4 +227,5 @@ async def build_primer(
         "budget_tokens": budget_tokens,
         "budget_remaining": budget_tokens - used_tokens,
         "excluded": excluded,
+        "freshness_hours": freshness_hours,
     }
