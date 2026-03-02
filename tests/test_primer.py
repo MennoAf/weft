@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType
-from weft.primer import _GROUNDING_TOPIC, _MAX_DECISIONS, build_primer
+from weft.primer import _GROUNDING_TOPIC, _MAX_DECISIONS, _newest_created_at, build_primer
 from weft.store import store_memory
 from weft.tokens import estimate_tokens
 
@@ -28,6 +28,7 @@ async def test_primer_empty_db(pool):
     assert result["budget_tokens"] == 1500
     assert result["budget_remaining"] == 1500
     assert result["excluded"] == 0
+    assert result["freshness_hours"] is None
 
 
 async def test_primer_return_structure(pool):
@@ -37,6 +38,7 @@ async def test_primer_return_structure(pool):
     expected_keys = {
         "grounding", "rules", "handoff", "issues", "decisions",
         "total_tokens", "budget_tokens", "budget_remaining", "excluded",
+        "freshness_hours",
     }
     assert set(result.keys()) == expected_keys
 
@@ -51,6 +53,7 @@ async def test_primer_return_structure(pool):
     assert isinstance(result["budget_tokens"], int)
     assert isinstance(result["budget_remaining"], int)
     assert isinstance(result["excluded"], int)
+    assert result["freshness_hours"] is None or isinstance(result["freshness_hours"], float)
 
     # Budget invariant
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
@@ -538,3 +541,49 @@ async def test_primer_handoff_has_age_hours(pool):
     assert "age_hours" in result["handoff"][0]
     # Just created, should be very recent
     assert result["handoff"][0]["age_hours"] < 1.0
+
+
+# --- Freshness indicator ---
+
+
+async def test_primer_freshness_hours_with_memories(pool):
+    """freshness_hours reflects the age of the newest included memory."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="A pinned rule for freshness test",
+        confidence=1.0,
+        pinned=True,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    assert result["freshness_hours"] is not None
+    # Just created, should be very recent
+    assert result["freshness_hours"] < 1.0
+
+
+async def test_primer_freshness_hours_none_when_empty(pool):
+    """freshness_hours is None when no memories are included."""
+    result = await build_primer(pool, budget_tokens=1500)
+
+    assert result["freshness_hours"] is None
+
+
+async def test_primer_freshness_hours_reflects_newest(pool):
+    """freshness_hours should reflect the most recently created memory, not the oldest."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="Old decision",
+        confidence=0.9,
+    ))
+    await asyncio.sleep(0.01)
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="New decision",
+        confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    assert result["freshness_hours"] is not None
+    assert result["freshness_hours"] < 1.0
