@@ -83,11 +83,12 @@ async def build_context(
             "budget_tokens": int,
         }
     """
-    # 0. Load pinned memories first (always included)
+    # 0. Load pinned memories first (always included, highest usefulness first)
     pinned_mems = await list_memories(
         pool, status=MemoryStatus.active, pinned=True,
         project_id=project_id, limit=100,
     )
+    pinned_mems.sort(key=lambda m: m.usefulness_score, reverse=True)
     pinned_packed: list[dict] = []
     pinned_ids: set[str] = set()
     pinned_tokens = 0

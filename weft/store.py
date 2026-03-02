@@ -302,15 +302,30 @@ async def delete_memory(pool: asyncpg.Pool, memory_id: str, *, hard: bool = Fals
     return result.split()[-1] != "0"
 
 
-async def touch_memory(pool: asyncpg.Pool, memory_id: str) -> None:
-    """Update accessed_at and increment access_count."""
+async def touch_memory(
+    pool: asyncpg.Pool,
+    memory_id: str,
+    *,
+    implicit_alpha: float = 0.05,
+) -> None:
+    """Update accessed_at, increment access_count, and apply mild usefulness bump.
+
+    The implicit bump treats retrieval as weak positive evidence of usefulness.
+    Uses EMA with a small alpha (default 0.05) — much weaker than explicit
+    feedback (alpha=0.3) so it takes many accesses to move the needle.
+
+    Formula: new_score = (1 - alpha) * old_score + alpha * 1.0
+    """
     await pool.execute(
         """
         UPDATE memories
-        SET accessed_at = now(), access_count = access_count + 1
+        SET accessed_at = now(),
+            access_count = access_count + 1,
+            usefulness_score = LEAST(1.0, (1.0 - $2) * usefulness_score + $2)
         WHERE id = $1
         """,
         memory_id,
+        implicit_alpha,
     )
 
 

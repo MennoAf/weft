@@ -22,6 +22,7 @@ class RelevanceWeights:
     recency_half_life_days: float = 30.0
     frequency_boost_max: float = 0.2
     frequency_boost_scale: int = 10
+    usefulness_floor: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,12 @@ class ScoredMemory:
         d = self.memory.to_dict()
         d["similarity"] = round(self.similarity, 4)
         d["relevance_score"] = round(self.score, 4)
+        d["factors"] = {
+            "confidence": round(self.confidence_factor, 4),
+            "recency": round(self.recency_factor, 4),
+            "frequency": round(self.frequency_factor, 4),
+            "usefulness": round(self.usefulness_factor, 4),
+        }
         return d
 
 
@@ -89,13 +96,15 @@ def frequency_factor(
     return 1.0 + (boost_max * raw)
 
 
-def usefulness_factor(usefulness_score: float) -> float:
-    """Usefulness feedback factor. Range [0.5, 1.0].
+def usefulness_factor(usefulness_score: float, *, floor: float = 0.5) -> float:
+    """Usefulness feedback factor. Range [floor, 1.0].
 
-    Maps usefulness_score (0.0-1.0) to a factor that modestly penalizes
-    low-usefulness memories without being too aggressive.
+    Maps usefulness_score (0.0-1.0) to a factor that penalizes
+    low-usefulness memories. The floor controls the minimum factor
+    (default 0.5 = worst memories get halved, not zeroed).
     """
-    return 0.5 + 0.5 * max(0.0, min(1.0, usefulness_score))
+    clamped = max(0.0, min(1.0, usefulness_score))
+    return floor + (1.0 - floor) * clamped
 
 
 def score_memory(
@@ -119,7 +128,7 @@ def score_memory(
         boost_max=w.frequency_boost_max,
         boost_scale=w.frequency_boost_scale,
     )
-    uf = usefulness_factor(mem.usefulness_score)
+    uf = usefulness_factor(mem.usefulness_score, floor=w.usefulness_floor)
 
     final = recall.similarity * cf * rf * ff * uf
 

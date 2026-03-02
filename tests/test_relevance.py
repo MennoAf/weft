@@ -27,6 +27,7 @@ def _make_memory(
     access_count: int = 0,
     content: str = "test memory",
     topic: list[str] | None = None,
+    usefulness_score: float = 1.0,
 ) -> Memory:
     return Memory(
         id="weft-test0001",
@@ -37,6 +38,7 @@ def _make_memory(
         confidence=confidence,
         accessed_at=accessed_at or NOW,
         access_count=access_count,
+        usefulness_score=usefulness_score,
         status=MemoryStatus.active,
     )
 
@@ -212,6 +214,33 @@ def test_rank_custom_weights():
     assert fast_decay[0].score < default_ranked[0].score
 
 
+def test_score_custom_usefulness_floor():
+    """Custom usefulness_floor in RelevanceWeights should affect scoring."""
+    recall = _make_recall(similarity=0.8, confidence=0.9, usefulness_score=0.0)
+
+    # Default floor=0.5: usefulness_factor(0.0) = 0.5
+    default_scored = score_memory(recall, now=NOW)
+    assert default_scored.usefulness_factor == pytest.approx(0.5)
+
+    # Floor=0.0: usefulness_factor(0.0) = 0.0
+    zero_floor = score_memory(
+        recall,
+        weights=RelevanceWeights(usefulness_floor=0.0),
+        now=NOW,
+    )
+    assert zero_floor.usefulness_factor == pytest.approx(0.0)
+    assert zero_floor.score < default_scored.score
+
+    # Floor=0.8: usefulness_factor(0.0) = 0.8
+    high_floor = score_memory(
+        recall,
+        weights=RelevanceWeights(usefulness_floor=0.8),
+        now=NOW,
+    )
+    assert high_floor.usefulness_factor == pytest.approx(0.8)
+    assert high_floor.score > default_scored.score
+
+
 def test_scored_memory_to_dict():
     recall = _make_recall(similarity=0.85, confidence=0.9)
     scored = score_memory(recall, now=NOW)
@@ -219,3 +248,8 @@ def test_scored_memory_to_dict():
     assert d["similarity"] == 0.85
     assert "relevance_score" in d
     assert d["type"] == "fact"
+    # Factor breakdowns exposed
+    assert "factors" in d
+    assert set(d["factors"].keys()) == {"confidence", "recency", "frequency", "usefulness"}
+    assert d["factors"]["confidence"] == pytest.approx(0.9)
+    assert d["factors"]["usefulness"] == pytest.approx(1.0)  # explicit 1.0 in helper
