@@ -402,6 +402,8 @@ async def weft_prime(
         logger.warning("Database unavailable in weft_prime: %s", e)
         from weft.fallback import read_fallback
         content = read_fallback()
+        from weft.primer import _ONBOARDING_TEXT, _SECTION_HINTS
+
         return {
             "grounding": None,
             "rules": [],
@@ -415,6 +417,8 @@ async def weft_prime(
             "excluded": 0,
             "degraded": True,
             "section_tokens": {},
+            "hints": dict(_SECTION_HINTS),
+            "onboarding": _ONBOARDING_TEXT,
         }
 
 

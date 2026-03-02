@@ -45,6 +45,52 @@ _MAX_RECENT_WORK = 3
 # Topic used to identify project grounding memories.
 _GROUNDING_TOPIC = "project-grounding"
 
+# Cold-start threshold: if total primer items <= this AND no handoff, show onboarding.
+_COLD_START_THRESHOLD = 2
+
+# Hints shown when a primer section is empty (disappear once populated).
+_SECTION_HINTS: dict[str, str] = {
+    "rules": (
+        "No rules stored. Use weft_remember(type='rule', pinned=True) "
+        "for persistent instructions (e.g., 'always use pytest')."
+    ),
+    "handoff": (
+        "No session handoff found. Use weft_handoff(summary=...) "
+        "before ending sessions to preserve continuity."
+    ),
+    "recent_work": (
+        "No recent milestones. weft_learn(content=..., task_id=...) "
+        "auto-creates milestones after task completion."
+    ),
+    "issues": (
+        "No open issues. Use weft_remember(type='issue') to track "
+        "bugs or blockers discovered during work."
+    ),
+    "decisions": (
+        "No decisions recorded. Use weft_remember(type='decision') "
+        "for architectural choices that shouldn't be re-proposed."
+    ),
+}
+
+# Compact onboarding guide for agents seeing Weft for the first time (~180 tokens).
+_ONBOARDING_TEXT = """\
+Welcome to Weft — persistent memory for AI agents.
+
+Key tools:
+- weft_remember(content, type, confidence) — store knowledge \
+(types: fact, decision, preference, pattern, architecture, solution, issue, rule)
+- weft_recall(query) — semantic search across all memories
+- weft_learn(content) — capture lessons after completing work (auto-extracts and stores)
+- weft_handoff(summary, next_steps, ...) — preserve session context for the next agent
+- weft_feedback(memory_id, helpful) — rate memories to improve future ranking
+- weft_context(query, budget_tokens) — budget-aware retrieval for mid-session use
+
+Tips for getting started:
+- Store decisions with type='decision' so they appear in future primers and aren't re-debated
+- Pin important rules with pinned=True — they always appear in the primer
+- Call weft_handoff before ending sessions — the next primer surfaces it prominently
+- After completing tasks, call weft_learn to capture gotchas and patterns automatically"""
+
 
 def _annotate_review_after(entry: dict, now: datetime) -> dict:
     """Add review_after / review_due fields to a memory dict if applicable."""
@@ -312,6 +358,31 @@ async def build_primer(
     )
     freshness_hours = _newest_created_at(all_included, now)
 
+    # --- Onboarding: empty-section hints + cold-start detection ---
+    hints: dict[str, str] = {}
+    if not rules_section:
+        hints["rules"] = _SECTION_HINTS["rules"]
+    if not handoff_section:
+        hints["handoff"] = _SECTION_HINTS["handoff"]
+    if not recent_work_section:
+        hints["recent_work"] = _SECTION_HINTS["recent_work"]
+    if not issue_items:
+        hints["issues"] = _SECTION_HINTS["issues"]
+    if not decisions_section:
+        hints["decisions"] = _SECTION_HINTS["decisions"]
+
+    # Cold-start: no handoff AND very few memories → show onboarding guide.
+    total_items = (
+        len(rules_section) + len(handoff_section)
+        + len(recent_work_section) + len(issue_items)
+        + len(decisions_section)
+    )
+    onboarding: str | None = (
+        _ONBOARDING_TEXT
+        if not handoff_section and total_items <= _COLD_START_THRESHOLD
+        else None
+    )
+
     return {
         "grounding": grounding_line,
         "rules": rules_section,
@@ -325,4 +396,6 @@ async def build_primer(
         "excluded": excluded,
         "freshness_hours": freshness_hours,
         "section_tokens": section_tokens,
+        "hints": hints,
+        "onboarding": onboarding,
     }
