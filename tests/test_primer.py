@@ -297,11 +297,11 @@ async def test_primer_return_structure(pool):
 
 async def test_primer_splits_ideas_from_recent_work(pool):
     """Memories with idea/improvement topics go to ideas section, not recent_work."""
-    # Concrete work
+    # Concrete work (live, not completed)
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
-        content="Fixed stale connection pool bug",
-        topic=["postgres", "bug", "fixed"],
+        content="Connection pool uses keepalive pings every 5 minutes",
+        topic=["postgres", "infrastructure"],
         source=MemorySource.conversation,
         confidence=0.9,
     ))
@@ -326,7 +326,7 @@ async def test_primer_splits_ideas_from_recent_work(pool):
 
     # Concrete work in recent_work
     work_contents = [m["content"] for m in result["recent_work"]]
-    assert any("connection pool" in c for c in work_contents)
+    assert any("keepalive" in c for c in work_contents)
 
     # Ideas in ideas section
     idea_contents = [m["content"] for m in result["ideas"]]
@@ -452,8 +452,8 @@ async def test_primer_project_scoped_recent_work_first(pool):
     assert work[1]["project_id"] is None
 
 
-async def test_primer_completed_items_deprioritized(pool):
-    """Memories with DONE/FIXED markers sort after live items in recent_work."""
+async def test_primer_completed_items_excluded(pool):
+    """Memories with DONE/FIXED markers are excluded from recent_work entirely."""
     # Live item (no completion marker)
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
@@ -462,7 +462,7 @@ async def test_primer_completed_items_deprioritized(pool):
         source=MemorySource.conversation,
         confidence=0.9,
     ))
-    # Completed item
+    # Completed item — should not appear
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
         content="Weft Bug (FIXED): Stale asyncpg connection pool with no auto-reconnect",
@@ -482,15 +482,14 @@ async def test_primer_completed_items_deprioritized(pool):
     result = await build_primer(pool, budget_tokens=4000)
 
     work = result["recent_work"]
-    assert len(work) == 3
-    # FIXED item should be last despite higher confidence
-    assert "(FIXED)" not in work[0]["content"]
-    assert "(FIXED)" not in work[1]["content"]
-    assert "(FIXED)" in work[2]["content"]
+    # Only the 2 live items — completed item excluded entirely
+    assert len(work) == 2
+    for item in work:
+        assert "(FIXED)" not in item["content"]
 
 
-async def test_primer_completed_ideas_deprioritized(pool):
-    """DONE improvements sort after open ideas in the ideas section."""
+async def test_primer_completed_ideas_excluded(pool):
+    """DONE improvements are excluded from the ideas section entirely."""
     # Open idea
     await store_memory(pool, MemoryCreate(
         type=MemoryType.architecture,
@@ -499,7 +498,7 @@ async def test_primer_completed_ideas_deprioritized(pool):
         source=MemorySource.conversation,
         confidence=0.8,
     ))
-    # Completed idea
+    # Completed idea — should not appear
     await store_memory(pool, MemoryCreate(
         type=MemoryType.architecture,
         content="Weft Improvement (DONE): Pinned memory tier shipped and tested",
@@ -511,14 +510,13 @@ async def test_primer_completed_ideas_deprioritized(pool):
     result = await build_primer(pool, budget_tokens=4000)
 
     ideas = result["ideas"]
-    assert len(ideas) == 2
-    # Open idea first, completed last
+    # Only the open idea — completed one excluded
+    assert len(ideas) == 1
     assert "(DONE)" not in ideas[0]["content"]
-    assert "(DONE)" in ideas[1]["content"]
 
 
-async def test_primer_completed_items_dropped_under_tight_budget(pool):
-    """Under tight budget, completed items are the first to be cut."""
+async def test_primer_completed_items_excluded_regardless_of_budget(pool):
+    """Completed items are excluded even when budget is generous."""
     # Live item (small)
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
@@ -527,7 +525,7 @@ async def test_primer_completed_items_dropped_under_tight_budget(pool):
         source=MemorySource.conversation,
         confidence=0.9,
     ))
-    # Completed item (larger — should be cut under tight budget)
+    # Completed item — excluded regardless of budget
     await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
         content="Weft Bug (FIXED): Stale asyncpg connection pool. After containers run for 47 hours the connection dies. Fix: added pool keepalive background task in server.py that pings every 5 minutes.",
@@ -536,12 +534,10 @@ async def test_primer_completed_items_dropped_under_tight_budget(pool):
         confidence=0.95,
     ))
 
-    # Budget so tight only one item fits in recent_work
-    # (pinned/handoff/prefs sections are empty, so all budget goes to recent_work)
-    result = await build_primer(pool, budget_tokens=15)
+    # Generous budget — completed items still excluded
+    result = await build_primer(pool, budget_tokens=4000)
 
     work = result["recent_work"]
-    # Only the live item should fit; completed item sorted last and cut
     assert len(work) == 1
     assert "(FIXED)" not in work[0]["content"]
 

@@ -24,8 +24,8 @@ from weft.tokens import estimate_tokens
 _IDEA_TOPICS = frozenset({"improvement", "idea", "issue-log", "backlog", "wishlist"})
 
 # Content markers that indicate a memory describes completed/resolved work.
-# These are deprioritized in the primer — sorted to the back so live items
-# get budget first.
+# These are excluded from the primer entirely — completed items aren't
+# actionable and waste budget that should go to live context.
 _COMPLETED_MARKERS = ("(DONE)", "(FIXED)", "Improvement (DONE)", "Bug (FIXED)",
                       "Feedback (FIXED)")
 
@@ -196,18 +196,17 @@ async def build_primer(
         pool, project_id,
         status=MemoryStatus.active, limit=50,
     )
-    # Filter to recently accessed, exclude already-seen and handoffs
-    # (handoffs have their own section)
+    # Filter to recently accessed, exclude already-seen, handoffs, and
+    # completed items (DONE/FIXED — these are historical, not actionable).
     recent_candidates = [
         m for m in recent_raw
         if m.id not in seen_ids and m.accessed_at >= cutoff
         and m.type != MemoryType.handoff
+        and not _is_completed(m)
     ]
-    # Sort: completed items last, then project-scoped first, then by accessed_at.
-    # This ensures live/active items get budget before stale DONE/FIXED items.
+    # Sort: project-scoped first, then by accessed_at.
     recent_candidates.sort(
         key=lambda m: (
-            1 if _is_completed(m) else 0,
             0 if project_id and m.project_id == project_id else 1,
             -(m.accessed_at.timestamp()),
         ),
