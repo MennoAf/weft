@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType
-from weft.primer import _MAX_DECISIONS, build_primer
+from weft.primer import _GROUNDING_TOPIC, _MAX_DECISIONS, build_primer
 from weft.store import store_memory
 from weft.tokens import estimate_tokens
 
@@ -19,6 +19,7 @@ async def test_primer_empty_db(pool):
     """No memories -> all sections empty, budget_remaining = budget_tokens."""
     result = await build_primer(pool, budget_tokens=1500)
 
+    assert result["grounding"] is None
     assert result["rules"] == []
     assert result["handoff"] == []
     assert result["issues"] == {"count": 0, "items": []}
@@ -26,6 +27,7 @@ async def test_primer_empty_db(pool):
     assert result["total_tokens"] == 0
     assert result["budget_tokens"] == 1500
     assert result["budget_remaining"] == 1500
+    assert result["excluded"] == 0
 
 
 async def test_primer_return_structure(pool):
@@ -33,11 +35,12 @@ async def test_primer_return_structure(pool):
     result = await build_primer(pool, budget_tokens=1500)
 
     expected_keys = {
-        "rules", "handoff", "issues", "decisions",
-        "total_tokens", "budget_tokens", "budget_remaining",
+        "grounding", "rules", "handoff", "issues", "decisions",
+        "total_tokens", "budget_tokens", "budget_remaining", "excluded",
     }
     assert set(result.keys()) == expected_keys
 
+    assert result["grounding"] is None or isinstance(result["grounding"], str)
     assert isinstance(result["rules"], list)
     assert isinstance(result["handoff"], list)
     assert isinstance(result["issues"], dict)
@@ -47,6 +50,7 @@ async def test_primer_return_structure(pool):
     assert isinstance(result["total_tokens"], int)
     assert isinstance(result["budget_tokens"], int)
     assert isinstance(result["budget_remaining"], int)
+    assert isinstance(result["excluded"], int)
 
     # Budget invariant
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
@@ -420,3 +424,117 @@ async def test_primer_default_budget_is_1500(pool):
     """Default budget is 1500 tokens, not 4000."""
     result = await build_primer(pool)
     assert result["budget_tokens"] == 1500
+
+
+# --- Grounding section ---
+
+
+async def test_primer_grounding_with_project(pool):
+    """Project grounding shows up when project_id is set and memory exists."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Weft: Python MCP server for persistent agent memory, using asyncpg + pgvector",
+        topic=[_GROUNDING_TOPIC],
+        confidence=1.0,
+        project_id="weft",
+    ))
+
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+
+    assert result["grounding"] is not None
+    assert "Python MCP server" in result["grounding"]
+
+
+async def test_primer_grounding_none_without_project(pool):
+    """Without project_id, grounding is always None."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Some grounding text",
+        topic=[_GROUNDING_TOPIC],
+        confidence=1.0,
+        project_id="weft",
+    ))
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    assert result["grounding"] is None
+
+
+async def test_primer_grounding_none_when_no_memory(pool):
+    """With project_id but no grounding memory, grounding is None."""
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+
+    assert result["grounding"] is None
+
+
+async def test_primer_grounding_not_cross_project(pool):
+    """Grounding from a different project doesn't leak in."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact,
+        content="Loom: task orchestration system",
+        topic=[_GROUNDING_TOPIC],
+        confidence=1.0,
+        project_id="loom",
+    ))
+
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+
+    assert result["grounding"] is None
+
+
+# --- Excluded count ---
+
+
+async def test_primer_excluded_count_when_budget_full(pool):
+    """Excluded count reflects memories that didn't fit in budget."""
+    # Create a pinned rule that fills most of the budget
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="A rule: " + "x" * 300,
+        confidence=1.0,
+        pinned=True,
+    ))
+    # Create a decision that won't fit
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision,
+        content="A decision: " + "y" * 300,
+        confidence=0.9,
+    ))
+
+    result = await build_primer(pool, budget_tokens=100)
+
+    assert result["excluded"] >= 1
+
+
+async def test_primer_excluded_zero_when_all_fit(pool):
+    """Excluded is 0 when everything fits in budget."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference,
+        content="Short rule",
+        confidence=1.0,
+        pinned=True,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    assert result["excluded"] == 0
+
+
+# --- Handoff age ---
+
+
+async def test_primer_handoff_has_age_hours(pool):
+    """Handoff entries include an age_hours field."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Just finished some work",
+        topic=["session-handoff"],
+        confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1500)
+
+    assert len(result["handoff"]) == 1
+    assert "age_hours" in result["handoff"][0]
+    # Just created, should be very recent
+    assert result["handoff"][0]["age_hours"] < 1.0
