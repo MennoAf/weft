@@ -356,12 +356,17 @@ def ingest(path: str | None, project_id: str, depth: str):
         import asyncpg
         from anthropic import AsyncAnthropic
 
+        from weft.embeddings import get_provider
         from weft.ingest import run_ingest
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
         client = AsyncAnthropic()
-        result = await run_ingest(target, project_id, depth=depth, pool=pool, client=client)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model)
+        result = await run_ingest(
+            target, project_id, depth=depth, pool=pool, client=client,
+            embedding_provider=provider,
+        )
         await pool.close()
         return result
 
