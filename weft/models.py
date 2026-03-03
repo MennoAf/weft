@@ -30,6 +30,7 @@ class MemorySource(str, Enum):
     documentation = "documentation"
     inference = "inference"
     seed = "seed"
+    ingest = "ingest"
 
 
 class MemoryStatus(str, Enum):

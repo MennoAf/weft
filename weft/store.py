@@ -293,6 +293,131 @@ async def update_memory(
     return _row_to_memory(row) if row else None
 
 
+async def upsert_by_topic(
+    pool: asyncpg.Pool,
+    *,
+    topic: list[str],
+    project_id: str | None,
+    content: str,
+    memory_type: MemoryType,
+    source: MemorySource,
+    confidence: float,
+    review_after: datetime | None = None,
+    embedding: list[float] | None = None,
+) -> Memory:
+    """Find a memory by exact topic array + project_id match; update or create.
+
+    Uses a transaction to ensure atomicity. If a matching active memory exists,
+    updates its content, confidence, updated_at, and optionally embedding.
+    Otherwise creates a new memory with all provided fields.
+
+    Returns the updated or newly created Memory.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Look for an existing active memory with exact topic match
+            if project_id is not None:
+                existing = await conn.fetchrow(
+                    """
+                    SELECT * FROM memories
+                    WHERE topic @> $1 AND topic <@ $1
+                      AND project_id = $2
+                      AND status = 'active'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    topic,
+                    project_id,
+                )
+            else:
+                existing = await conn.fetchrow(
+                    """
+                    SELECT * FROM memories
+                    WHERE topic @> $1 AND topic <@ $1
+                      AND project_id IS NULL
+                      AND status = 'active'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    topic,
+                )
+
+            if existing:
+                # Update the existing memory
+                sets = ["content = $1", "confidence = $2", "updated_at = now()"]
+                params: list = [content, confidence]
+                idx = 3
+
+                sets.append(f"token_count = ${idx}")
+                params.append(estimate_tokens(content))
+                idx += 1
+
+                if embedding is not None:
+                    sets.append(f"embedding = ${idx}")
+                    params.append(_vec_to_pgvector(embedding))
+                    idx += 1
+
+                set_clause = ", ".join(sets)
+                params.append(existing["id"])
+
+                row = await conn.fetchrow(
+                    f"UPDATE memories SET {set_clause} WHERE id = ${idx} RETURNING *",
+                    *params,
+                )
+                return _row_to_memory(row)
+
+            # Create a new memory
+            memory_id = _weft_id()
+            now = datetime.now(timezone.utc)
+            token_count = estimate_tokens(content)
+            embedding_str = _vec_to_pgvector(embedding) if embedding else None
+
+            await conn.execute(
+                """
+                INSERT INTO memories (
+                    id, type, topic, content, source, confidence,
+                    token_count, created_at, updated_at, accessed_at,
+                    access_count, project_id, embedding, status,
+                    pinned, review_after
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    $7, $8, $8, $8,
+                    0, $9, $10, 'active',
+                    false, $11
+                )
+                """,
+                memory_id,
+                memory_type.value,
+                topic,
+                content,
+                source.value,
+                confidence,
+                token_count,
+                now,
+                project_id,
+                embedding_str,
+                review_after,
+            )
+
+            return Memory(
+                id=memory_id,
+                type=memory_type,
+                topic=topic,
+                content=content,
+                source=source,
+                confidence=confidence,
+                token_count=token_count,
+                created_at=now,
+                updated_at=now,
+                accessed_at=now,
+                access_count=0,
+                project_id=project_id,
+                status=MemoryStatus.active,
+                pinned=False,
+                review_after=review_after,
+            )
+
+
 async def delete_memory(pool: asyncpg.Pool, memory_id: str, *, hard: bool = False) -> bool:
     """Delete a memory. Soft-delete (archive) by default, hard-delete if specified."""
     if hard:

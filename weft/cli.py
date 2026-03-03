@@ -341,6 +341,39 @@ def seed(force: bool):
         click.echo("No memories seeded (store already populated or no seeds found).")
 
 
+@cli.command()
+@click.argument("path", default=None, required=False, type=click.Path())
+@click.option("--project-id", required=True, help="Project ID to associate ingested memories with")
+@click.option("--depth", default="full", type=click.Choice(["architecture", "full"]), help="Ingestion depth")
+def ingest(path: str | None, project_id: str, depth: str):
+    """Ingest a codebase directory into Weft as memories."""
+    target = Path(path) if path else Path.cwd()
+    if not target.is_dir():
+        click.echo(f"Error: {target} is not a directory.", err=True)
+        sys.exit(1)
+
+    async def _ingest():
+        import asyncpg
+        from anthropic import AsyncAnthropic
+
+        from weft.ingest import run_ingest
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        client = AsyncAnthropic()
+        result = await run_ingest(target, project_id, depth=depth, pool=pool, client=client)
+        await pool.close()
+        return result
+
+    result = asyncio.run(_ingest())
+    click.echo(f"\nIngest complete for {target}")
+    click.echo(f"  Project: {project_id}")
+    click.echo(f"  Depth: {depth}")
+    click.echo(f"  Files discovered: {result['files_discovered']}")
+    click.echo(f"  Files summarized: {result['files_summarized']}")
+    click.echo(f"  Architecture stored: {result['architecture_stored']}")
+
+
 @cli.group()
 def config():
     """View and modify Weft configuration."""
