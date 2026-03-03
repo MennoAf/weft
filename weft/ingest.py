@@ -11,6 +11,7 @@ from pathlib import Path
 import asyncpg
 from anthropic import AsyncAnthropic
 
+from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemorySource, MemoryType
 from weft.store import upsert_by_topic
 
@@ -225,6 +226,7 @@ async def run_ingest(
     depth: str = "full",
     pool: asyncpg.Pool,
     client: AsyncAnthropic,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> dict:
     """Orchestrate the full codebase ingestion pipeline.
 
@@ -286,6 +288,13 @@ async def run_ingest(
     overview = await generate_architecture_overview(tree, summaries, client)
 
     # 6. Store architecture overview
+    arch_embedding = None
+    if embedding_provider:
+        try:
+            arch_embedding = await embedding_provider.embed(overview)
+        except Exception as exc:
+            logger.warning("Failed to embed architecture overview: %s", exc)
+
     await upsert_by_topic(
         pool,
         topic=["codebase-map", project_id],
@@ -294,11 +303,19 @@ async def run_ingest(
         memory_type=MemoryType.architecture,
         source=MemorySource.ingest,
         confidence=0.7,
+        embedding=arch_embedding,
     )
 
     # 7. Store each file summary
     review_at = datetime.now(timezone.utc) + timedelta(days=30)
     for rel, summary in summaries.items():
+        file_embedding = None
+        if embedding_provider:
+            try:
+                file_embedding = await embedding_provider.embed(summary)
+            except Exception as exc:
+                logger.warning("Failed to embed summary for %s: %s", rel, exc)
+
         await upsert_by_topic(
             pool,
             topic=[f"file:{rel}", project_id],
@@ -308,6 +325,7 @@ async def run_ingest(
             source=MemorySource.ingest,
             confidence=0.7,
             review_after=review_at,
+            embedding=file_embedding,
         )
 
     # 8. Return summary
