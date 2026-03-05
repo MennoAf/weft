@@ -15,3 +15,5 @@ build/
 # Internal planning docs
 PLAN.md
 loom_suggestions.md
+.env
+.env.*
