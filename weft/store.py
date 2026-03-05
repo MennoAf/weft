@@ -104,11 +104,17 @@ async def list_memories(
     memory_type: MemoryType | None = None,
     topic: str | None = None,
     project_id: str | None = None,
+    agent_id: str | None = None,
     pinned: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Memory]:
-    """List memories with optional filters."""
+    """List memories with optional filters.
+
+    Scoping: pass project_id and/or agent_id to narrow results.
+    Each axis uses OR-NULL logic (matches the value OR global memories).
+    Omit both for brain-wide (unscoped) queries.
+    """
     conditions = []
     params: list = []
     idx = 1
@@ -131,6 +137,11 @@ async def list_memories(
     if project_id is not None:
         conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
+        idx += 1
+
+    if agent_id is not None:
+        conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
+        params.append(agent_id)
         idx += 1
 
     if pinned is not None:
@@ -160,8 +171,14 @@ async def search_by_vector(
     memory_type: MemoryType | None = None,
     topic: str | None = None,
     project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> list[MemoryRecall]:
-    """Search memories by vector similarity (cosine distance)."""
+    """Search memories by vector similarity (cosine distance).
+
+    Scoping: pass project_id and/or agent_id to narrow results.
+    Each axis uses OR-NULL logic (matches the value OR global memories).
+    Omit both for brain-wide (unscoped) queries.
+    """
     conditions = ["embedding IS NOT NULL"]
     params: list = []
     idx = 1
@@ -193,6 +210,11 @@ async def search_by_vector(
     if project_id is not None:
         conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
+        idx += 1
+
+    if agent_id is not None:
+        conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
+        params.append(agent_id)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions)
