@@ -128,6 +128,7 @@ async def build_primer(
     pool: asyncpg.Pool,
     *,
     project_id: str | None = None,
+    agent_id: str | None = None,
     budget_tokens: int = 1800,
     query_vec: list[float] | None = None,
 ) -> dict:
@@ -157,7 +158,12 @@ async def build_primer(
 
     # list_memories already handles `project_id = $X OR project_id IS NULL`
     # when project_id is provided, so a single call per section suffices.
-    _pid = {"project_id": project_id} if project_id else {}
+    # Same OR-NULL pattern applies to agent_id.
+    _scope: dict[str, str] = {}
+    if project_id:
+        _scope["project_id"] = project_id
+    if agent_id:
+        _scope["agent_id"] = agent_id
 
     # --- Fetch all sections in parallel ---
     async def _empty() -> list:
@@ -173,11 +179,11 @@ async def build_primer(
     )
 
     pinned_coro = list_memories(
-        pool, status=MemoryStatus.active, pinned=True, limit=100, **_pid,
+        pool, status=MemoryStatus.active, pinned=True, limit=100, **_scope,
     )
     handoff_coro = list_memories(
         pool, memory_type=MemoryType.handoff, status=MemoryStatus.active,
-        limit=5, **_pid,
+        limit=5, **_scope,
     )
 
     # Biased sections: use search_by_vector when query_vec is available.
@@ -185,30 +191,30 @@ async def build_primer(
         milestone_coro = search_by_vector(
             pool, query_vec,
             memory_type=MemoryType.milestone, status=MemoryStatus.active,
-            limit=10, threshold=_QUERY_SIMILARITY_THRESHOLD, **_pid,
+            limit=10, threshold=_QUERY_SIMILARITY_THRESHOLD, **_scope,
         )
         issues_coro = search_by_vector(
             pool, query_vec,
             memory_type=MemoryType.issue, status=MemoryStatus.active,
-            limit=20, threshold=_QUERY_SIMILARITY_THRESHOLD, **_pid,
+            limit=20, threshold=_QUERY_SIMILARITY_THRESHOLD, **_scope,
         )
         decisions_coro = search_by_vector(
             pool, query_vec,
             memory_type=MemoryType.decision, status=MemoryStatus.active,
-            limit=20, threshold=_QUERY_SIMILARITY_THRESHOLD, **_pid,
+            limit=20, threshold=_QUERY_SIMILARITY_THRESHOLD, **_scope,
         )
     else:
         milestone_coro = list_memories(
             pool, memory_type=MemoryType.milestone, status=MemoryStatus.active,
-            limit=10, **_pid,
+            limit=10, **_scope,
         )
         issues_coro = list_memories(
             pool, memory_type=MemoryType.issue, status=MemoryStatus.active,
-            limit=20, **_pid,
+            limit=20, **_scope,
         )
         decisions_coro = list_memories(
             pool, memory_type=MemoryType.decision, status=MemoryStatus.active,
-            limit=20, **_pid,
+            limit=20, **_scope,
         )
 
     (
@@ -282,7 +288,7 @@ async def build_primer(
         # DEPRECATED: this fallback will be removed in a future version.
         topic_raw = await list_memories(
             pool, topic="session-handoff", status=MemoryStatus.active,
-            limit=5, **_pid,
+            limit=5, **_scope,
         )
         handoff_candidates = [m for m in topic_raw if m.id not in seen_ids]
         if handoff_candidates:

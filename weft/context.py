@@ -71,6 +71,7 @@ async def build_context(
     memory_type: MemoryType | None = None,
     topic: str | None = None,
     project_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict:
     """Build a context-optimized set of memories within a token budget.
 
@@ -86,7 +87,7 @@ async def build_context(
     # 0. Load pinned memories first (always included, highest usefulness first)
     pinned_mems = await list_memories(
         pool, status=MemoryStatus.active, pinned=True,
-        project_id=project_id, limit=100,
+        project_id=project_id, agent_id=agent_id, limit=100,
     )
     pinned_mems.sort(key=lambda m: m.usefulness_score, reverse=True)
     pinned_packed: list[dict] = []
@@ -111,6 +112,7 @@ async def build_context(
         memory_type=memory_type,
         topic=topic,
         project_id=project_id,
+        agent_id=agent_id,
     )
 
     # Filter out already-included pinned memories

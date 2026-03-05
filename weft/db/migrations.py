@@ -118,6 +118,13 @@ MIGRATIONS: list[tuple[int, str, str]] = [
           AND (usefulness_count = 0 OR usefulness_count IS NULL);
         """,
     ),
+    (
+        9,
+        "Add index on agent_id for scoped queries",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories (agent_id);
+        """,
+    ),
 ]
 
 

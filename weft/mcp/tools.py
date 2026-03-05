@@ -176,6 +176,7 @@ async def weft_recall(
     type: str | None = None,
     status: str | None = None,
     project_id: str | None = None,
+    agent_id: str | None = None,
     limit: int = 10,
     threshold: float = 0.3,
 ) -> dict:
@@ -194,6 +195,7 @@ async def weft_recall(
             memory_type=memory_type,
             topic=topic,
             project_id=project_id,
+            agent_id=agent_id,
         )
         # Touch accessed memories
         for r in results:
@@ -233,6 +235,7 @@ async def weft_context(
     topic: str | None = None,
     type: str | None = None,
     project_id: str | None = None,
+    agent_id: str | None = None,
     max_per_topic: int = 3,
 ) -> dict:
     """Budget-aware context loading: best memories for a situation within N tokens."""
@@ -246,6 +249,7 @@ async def weft_context(
             app.pool, embedding,
             budget_tokens=budget_tokens, max_per_topic=max_per_topic,
             memory_type=memory_type, topic=topic, project_id=project_id,
+            agent_id=agent_id,
         )
         # Touch the memories that made it into context
         for mem_dict in result["memories"]:
@@ -384,6 +388,7 @@ async def weft_pin(
 async def weft_prime(
     ctx: Context,
     project_id: str | None = None,
+    agent_id: str | None = None,
     budget_tokens: int = 1800,
     query: str | None = None,
 ) -> dict:
@@ -410,6 +415,7 @@ async def weft_prime(
         return await build_primer(
             app.pool,
             project_id=resolved_project,
+            agent_id=agent_id,
             budget_tokens=budget_tokens,
             query_vec=query_vec,
         )
