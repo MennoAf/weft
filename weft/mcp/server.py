@@ -1,4 +1,4 @@
-"""Weft MCP server — FastMCP with stdio transport."""
+"""Weft MCP server — FastMCP with stdio/HTTP transport."""
 
 from __future__ import annotations
 
@@ -11,12 +11,16 @@ from pathlib import Path
 import asyncpg
 import redis.asyncio as aioredis
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from weft.cache import Cache
 from weft.config import WeftConfig, load_config
+from weft.db.connection import create_pool
 from weft.db.migrations import run_migrations
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
+from weft.mcp.auth import get_auth_provider
 from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
@@ -76,7 +80,6 @@ async def _connect_with_retry(
 
 async def _pool_keepalive(ctx: AppContext) -> None:
     """Periodically ping the pool; recreate it if connections are stale."""
-    dsn = ctx.config.database.url
     while True:
         await asyncio.sleep(_KEEPALIVE_INTERVAL)
         try:
@@ -86,11 +89,7 @@ async def _pool_keepalive(ctx: AppContext) -> None:
             logger.warning("Pool health check failed: %s — recreating pool", exc)
             old_pool = ctx.pool
             try:
-                new_pool = await asyncpg.create_pool(
-                    dsn,
-                    min_size=ctx.config.database.pool_min_size,
-                    max_size=ctx.config.database.pool_max_size,
-                )
+                new_pool = await create_pool(ctx.config)
                 ctx.pool = new_pool
                 logger.info("Pool recreated successfully")
             except Exception as create_exc:
@@ -155,13 +154,8 @@ async def lifespan(server: FastMCP):
     logging.basicConfig(level=getattr(logging, config.log_level))
 
     # Database (with retry)
-    dsn = config.database.url
     pool = await _connect_with_retry(
-        lambda: asyncpg.create_pool(
-            dsn,
-            min_size=config.database.pool_min_size,
-            max_size=config.database.pool_max_size,
-        ),
+        lambda: create_pool(config),
         "Postgres",
     )
     await run_migrations(pool)
@@ -190,6 +184,7 @@ async def lifespan(server: FastMCP):
         logger.warning("Seed bootstrapping failed (non-fatal): %s", exc)
 
     ctx = AppContext(pool=pool, cache=cache, embedding=embedding, config=config)
+    _app_ctx_ref.ctx = ctx
 
     # Start background tasks
     ctx._keepalive_task = asyncio.create_task(_pool_keepalive(ctx))
@@ -199,6 +194,7 @@ async def lifespan(server: FastMCP):
     try:
         yield ctx
     finally:
+        _app_ctx_ref.ctx = None
         for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task):
             task.cancel()
             try:
@@ -209,4 +205,31 @@ async def lifespan(server: FastMCP):
         await r.aclose()
 
 
-mcp = FastMCP("weft", lifespan=lifespan)
+class _AppCtxRef:
+    """Module-level holder for the AppContext, set during lifespan."""
+    ctx: AppContext | None = None
+
+
+_app_ctx_ref = _AppCtxRef()
+
+_config = load_config()
+_auth = get_auth_provider(_config.api_key, _config.is_production)
+mcp = FastMCP("weft", lifespan=lifespan, auth=_auth)
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request: Request) -> JSONResponse:
+    """Health check endpoint — unauthenticated, used by Fly.io."""
+    ctx = _app_ctx_ref.ctx
+    if ctx is None:
+        return JSONResponse(
+            {"status": "unhealthy", "error": "server starting up"},
+            status_code=503,
+        )
+    try:
+        async with ctx.pool.acquire(timeout=3.0) as conn:
+            await conn.fetchval("SELECT 1")
+        return JSONResponse({"status": "ok"})
+    except Exception as exc:
+        logger.warning("Health check failed: %s", exc)
+        return JSONResponse({"status": "unhealthy", "error": str(exc)}, status_code=503)

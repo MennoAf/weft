@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tomllib
+from enum import Enum
 from pathlib import Path
+from urllib.parse import quote
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+# Load .env file (no-op if missing). Must happen before any os.environ reads.
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +25,14 @@ CONFIG_PATH = Path.home() / ".weft" / "config.toml"
 # Keys listed here are the recognised "dotted" TOML keys that
 # ``weft config set`` accepts (e.g. "database.url").
 _KEY_MAP: dict[str, tuple[str, str]] = {
+    "env": ("", "env"),
     "project_name": ("", "project_name"),
+    "api_key": ("", "api_key"),
     "log_level": ("", "log_level"),
     "database.url": ("database", "url"),
     "database.pool_min_size": ("database", "pool_min_size"),
     "database.pool_max_size": ("database", "pool_max_size"),
+    "database.statement_cache_size": ("database", "statement_cache_size"),
     "redis.url": ("redis", "url"),
     "embedding.provider": ("embedding", "provider"),
     "embedding.model": ("embedding", "model"),
@@ -37,10 +47,16 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
 }
 
 
+class WeftEnv(str, Enum):
+    local = "local"
+    production = "production"
+
+
 class DatabaseConfig(BaseModel):
     url: str = "postgresql://weft:weft_local@localhost:5433/weft"
     pool_min_size: int = 2
     pool_max_size: int = 10
+    statement_cache_size: int | None = None  # Set to 0 for pgbouncer/Supabase pooler
 
 
 class RedisConfig(BaseModel):
@@ -67,13 +83,19 @@ class DecayConfig(BaseModel):
 
 
 class WeftConfig(BaseModel):
+    env: WeftEnv = WeftEnv.local
     project_name: str = "default"
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     decay: DecayConfig = Field(default_factory=DecayConfig)
+    api_key: str | None = None
     log_level: str = "INFO"
+
+    @property
+    def is_production(self) -> bool:
+        return self.env == WeftEnv.production
 
 
 # --- TOML config file helpers ---
@@ -249,6 +271,26 @@ def _flatten_yaml(data: dict) -> dict:
     return flat
 
 
+# --- DSN helpers ---
+
+
+def _encode_dsn_password(dsn: str) -> str:
+    """URL-encode the password portion of a PostgreSQL DSN.
+
+    Handles passwords with special characters (/, :, ;, etc.) that break
+    standard URL parsing. Only modifies the password; leaves the rest intact.
+    """
+    m = re.match(r"^(postgresql://[^:]+:)(.+)(@.+)$", dsn)
+    if not m:
+        return dsn
+    prefix, password, suffix = m.groups()
+    # Already encoded if it contains %XX sequences
+    if "%" in password:
+        return dsn
+    encoded = quote(password, safe="")
+    return f"{prefix}{encoded}{suffix}"
+
+
 # --- Main loader ---
 
 
@@ -277,8 +319,9 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         _apply_toml_to_config(toml_data, config)
 
     # Layer 4: env var overrides (highest precedence)
-    if url := os.environ.get("WEFT_DATABASE_URL"):
-        config.database.url = url
+    # DATABASE_URL is the standard convention (Fly.io, Supabase, etc.)
+    if url := os.environ.get("WEFT_DATABASE_URL") or os.environ.get("DATABASE_URL"):
+        config.database.url = _encode_dsn_password(url)
     if url := os.environ.get("WEFT_REDIS_URL"):
         config.redis.url = url
     if provider := os.environ.get("WEFT_EMBEDDING_PROVIDER"):
@@ -287,5 +330,9 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.embedding.model = model
     if level := os.environ.get("WEFT_LOG_LEVEL"):
         config.log_level = level
+    if env := os.environ.get("WEFT_ENV"):
+        config.env = WeftEnv(env)
+    if api_key := os.environ.get("WEFT_API_KEY"):
+        config.api_key = api_key
 
     return config
