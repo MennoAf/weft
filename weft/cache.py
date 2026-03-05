@@ -127,6 +127,37 @@ class Cache:
             logger.debug("Failed to flush cache", exc_info=True)
 
 
+class NullCache:
+    """No-op cache used when Redis is not available."""
+
+    async def get_memory(self, memory_id: str) -> Memory | None:
+        return None
+
+    async def set_memory(self, memory: Memory) -> None:
+        pass
+
+    async def invalidate_memory(self, memory_id: str) -> None:
+        pass
+
+    async def get_embedding(self, text: str, provider: str) -> list[float] | None:
+        return None
+
+    async def set_embedding(self, text: str, provider: str, embedding: list[float]) -> None:
+        pass
+
+    async def get_stats(self) -> dict | None:
+        return None
+
+    async def set_stats(self, stats: dict) -> None:
+        pass
+
+    async def invalidate_stats(self) -> None:
+        pass
+
+    async def flush_all(self) -> None:
+        pass
+
+
 def _hash_text(text: str) -> str:
     """Simple hash for cache keys. Not cryptographic."""
     import hashlib
