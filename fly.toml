@@ -6,6 +6,7 @@ primary_region = "iad"
 [env]
   WEFT_ENV = "production"
   WEFT_TRANSPORT = "streamable-http"
+  WEFT_REDIS_URL = ""
   PORT = "8000"
 
 [http_service]

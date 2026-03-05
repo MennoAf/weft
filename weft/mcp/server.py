@@ -14,7 +14,7 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from weft.cache import Cache
+from weft.cache import Cache, NullCache
 from weft.config import WeftConfig, load_config
 from weft.db.connection import create_pool
 from weft.db.migrations import run_migrations
@@ -39,7 +39,7 @@ _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
 @dataclass
 class AppContext:
     pool: asyncpg.Pool
-    cache: Cache
+    cache: Cache | NullCache
     embedding: EmbeddingProvider
     config: WeftConfig
     _keepalive_task: asyncio.Task | None = field(default=None, repr=False)
@@ -163,14 +163,26 @@ async def lifespan(server: FastMCP):
     # Export fallback snapshot
     await _write_fallback_snapshot(pool)
 
-    # Redis (with retry)
-    async def _connect_redis():
-        r = aioredis.from_url(config.redis.url, decode_responses=True)
-        await r.ping()
-        return r
+    # Redis (optional — use NullCache if not configured)
+    r: aioredis.Redis | None = None
+    cache: Cache | NullCache
+    _redis_url = config.redis.url
+    if _redis_url:
+        try:
+            async def _connect_redis():
+                client = aioredis.from_url(_redis_url, decode_responses=True)
+                await client.ping()
+                return client
 
-    r = await _connect_with_retry(_connect_redis, "Redis")
-    cache = Cache(r)
+            r = await _connect_with_retry(_connect_redis, "Redis")
+            cache = Cache(r)
+        except Exception as exc:
+            logger.warning("Redis unavailable, using NullCache: %s", exc)
+            r = None
+            cache = NullCache()
+    else:
+        logger.info("No Redis URL configured, using NullCache")
+        cache = NullCache()
 
     # Embedding provider
     embedding = get_provider(config.embedding.provider, model_name=config.embedding.model)
@@ -188,7 +200,7 @@ async def lifespan(server: FastMCP):
 
     # Start background tasks
     ctx._keepalive_task = asyncio.create_task(_pool_keepalive(ctx))
-    _redis_task = asyncio.create_task(_redis_keepalive(ctx))
+    _redis_task = asyncio.create_task(_redis_keepalive(ctx)) if r else None
     ctx._fallback_task = asyncio.create_task(_refresh_fallback(ctx))
 
     try:
@@ -196,13 +208,15 @@ async def lifespan(server: FastMCP):
     finally:
         _app_ctx_ref.ctx = None
         for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task):
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         await pool.close()
-        await r.aclose()
+        if r is not None:
+            await r.aclose()
 
 
 class _AppCtxRef:

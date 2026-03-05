@@ -14,7 +14,6 @@ fly launch --no-deploy
 # Set secrets (never put these in fly.toml)
 fly secrets set DATABASE_URL="postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
 fly secrets set WEFT_API_KEY="your-secret-api-key"
-fly secrets set ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
 ### Supabase Connection Notes
@@ -46,9 +45,9 @@ curl https://weft-mcp.fly.dev/healthz
 |---------------------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | — | Supabase Postgres connection string |
 | `WEFT_API_KEY` | Yes (prod) | — | Bearer token for MCP client auth |
-| `ANTHROPIC_API_KEY` | Yes | — | For embedding generation |
 | `WEFT_ENV` | No | `production` | `local` or `production` |
 | `WEFT_TRANSPORT` | No | `streamable-http` | `stdio`, `sse`, or `streamable-http` |
+| `WEFT_REDIS_URL` | No | `""` (disabled) | Redis URL for caching (optional, uses NullCache if empty) |
 | `PORT` | No | `8000` | HTTP port |
 
 ## Connecting MCP Clients
