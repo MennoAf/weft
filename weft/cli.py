@@ -387,10 +387,10 @@ def backup(output_file: str | None):
     from weft.backup import backup_all, verify_backup
 
     async def _backup():
-        import asyncpg
+        from weft.db.connection import create_pool
 
         config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        pool = await create_pool(config)
         data = await backup_all(pool)
         await pool.close()
         return data
@@ -448,11 +448,11 @@ def restore(file: str, dry_run: bool, no_skip_duplicates: bool):
     click.echo(f"  With embeddings: {report['memories_with_embeddings']}")
 
     async def _restore():
-        import asyncpg
+        from weft.db.connection import create_pool
         from weft.db.migrations import run_migrations
 
         config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        pool = await create_pool(config)
         await run_migrations(pool)
         result = await restore_all(
             pool, data,

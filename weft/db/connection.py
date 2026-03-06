@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ssl
+
 import asyncpg
 
 from weft.config import WeftConfig
@@ -19,4 +21,10 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
     }
     if config.database.statement_cache_size is not None:
         kwargs["statement_cache_size"] = config.database.statement_cache_size
+    # Enable SSL for Supabase and other cloud Postgres providers
+    if "supabase.co" in dsn or "sslmode=require" in dsn:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        kwargs["ssl"] = ctx
     return await asyncpg.create_pool(dsn, **kwargs)
