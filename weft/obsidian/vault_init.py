@@ -13,7 +13,10 @@ VAULT_DIRS = [
     "wktw/meetings",
     "wktw/ideas",
     "wktw/finances",
+    "wktw/finances/income",
+    "wktw/finances/expenses",
     "wktw/operations",
+    "tools",
     "recipes",
     "media",
     "writing/ideas",
@@ -153,6 +156,55 @@ status: idea
 published_url:
 tags: []
 ---
+
+""",
+    "templates/Tool Note.md": """\
+---
+name: "{{title}}"
+description:
+readme:
+created_by_me:
+category:
+development_status:
+is_public:
+tags: []
+---
+## What Is The Core Function
+
+
+## Known Integrations
+
+
+## Notes
+""",
+    "templates/WKTW Income.md": """\
+---
+created: {{date}}
+client:
+amount:
+date_received:
+invoice_id:
+category: income
+tags:
+  - wktw/finances
+---
+
+## Notes
+
+""",
+    "templates/WKTW Expense.md": """\
+---
+created: {{date}}
+vendor:
+amount:
+date_paid:
+category:
+recurring:
+tags:
+  - wktw/finances
+---
+
+## Notes
 
 """,
 }
