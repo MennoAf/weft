@@ -67,6 +67,20 @@ class TestResolveMapping:
         m = resolve_folder_mapping("writing/ideas/concept.md")
         assert "creative" in m.topics
 
+    def test_tools(self):
+        m = resolve_folder_mapping("tools/weft.md")
+        assert "tools" in m.topics
+
+    def test_finances_income(self):
+        m = resolve_folder_mapping("wktw/finances/income/jan-2026.md")
+        assert "finances" in m.topics
+        assert "income" in m.topics
+
+    def test_finances_expenses(self):
+        m = resolve_folder_mapping("wktw/finances/expenses/api-credits.md")
+        assert "finances" in m.topics
+        assert "expenses" in m.topics
+
     def test_unknown_folder_defaults(self):
         m = resolve_folder_mapping("random/stuff.md")
         assert m.memory_type == MemoryType.fact
@@ -359,6 +373,101 @@ class TestSyncVault:
         assert alice.type == MemoryType.user_model
         assert "contacts" in alice.topic
         assert "Company: Acme" in alice.content
+
+    @pytest.mark.asyncio
+    async def test_tool_note_content(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "tools").mkdir()
+        (vault / "tools" / "weft.md").write_text(
+            "---\nname: Weft\ndescription: Persistent memory\n"
+            "created_by_me: true\nis_public: true\ncategory: ai-tooling\n"
+            "development_status: active\n---\n\n## What Is The Core Function\nMemory storage."
+        )
+
+        pool = _mock_pool()
+        hs = HashStore(tmp_path / "hashes.json")
+        stored = []
+
+        async def capture(pool, create, embedding=None):
+            stored.append(create)
+            m = MagicMock()
+            m.id = f"weft-{len(stored)}"
+            return m
+
+        with patch("weft.obsidian.sync.store_memory", side_effect=capture):
+            await sync_vault(vault, pool, hash_store=hs)
+
+        tool = stored[0]
+        assert "tools" in tool.topic
+        assert "Description: Persistent memory" in tool.content
+        assert "Created by me: yes" in tool.content
+        assert "Public: yes" in tool.content
+        assert "Category: ai-tooling" in tool.content
+
+    @pytest.mark.asyncio
+    async def test_finance_income_content(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "wktw" / "finances" / "income").mkdir(parents=True)
+        (vault / "wktw" / "finances" / "income" / "jan-payment.md").write_text(
+            "---\nclient: Birdy Grey\namount: 2500\n"
+            "date_received: 2026-01-15\ninvoice_id: INV-001\n"
+            "category: income\n---\n\n## Notes\nFirst payment."
+        )
+
+        pool = _mock_pool()
+        hs = HashStore(tmp_path / "hashes.json")
+        stored = []
+
+        async def capture(pool, create, embedding=None):
+            stored.append(create)
+            m = MagicMock()
+            m.id = f"weft-{len(stored)}"
+            return m
+
+        with patch("weft.obsidian.sync.store_memory", side_effect=capture):
+            await sync_vault(vault, pool, hash_store=hs)
+
+        inc = stored[0]
+        assert "finances" in inc.topic
+        assert "income" in inc.topic
+        assert "Client: Birdy Grey" in inc.content
+        assert "Amount: 2500" in inc.content
+        assert "Date Received: 2026-01-15" in inc.content
+        assert "Invoice Id: INV-001" in inc.content
+
+    @pytest.mark.asyncio
+    async def test_finance_expense_content(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "wktw" / "finances" / "expenses").mkdir(parents=True)
+        (vault / "wktw" / "finances" / "expenses" / "api-credits.md").write_text(
+            "---\nvendor: Anthropic\namount: 150.00\n"
+            "date_paid: 2026-02-01\ncategory: api-credits\n"
+            "recurring: monthly\n---\n\n## Notes\nClaude API usage."
+        )
+
+        pool = _mock_pool()
+        hs = HashStore(tmp_path / "hashes.json")
+        stored = []
+
+        async def capture(pool, create, embedding=None):
+            stored.append(create)
+            m = MagicMock()
+            m.id = f"weft-{len(stored)}"
+            return m
+
+        with patch("weft.obsidian.sync.store_memory", side_effect=capture):
+            await sync_vault(vault, pool, hash_store=hs)
+
+        exp = stored[0]
+        assert "finances" in exp.topic
+        assert "expenses" in exp.topic
+        assert "Vendor: Anthropic" in exp.content
+        assert "Amount: 150.0" in exp.content
+        assert "Category: api-credits" in exp.content
+        assert "Recurring: monthly" in exp.content
 
     @pytest.mark.asyncio
     async def test_frontmatter_type_override(self, tmp_path):

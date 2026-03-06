@@ -314,6 +314,31 @@ def _build_content(title, section, parsed, mapping):
         if fm.get("type"):
             meta_parts.append(f"Media type: {fm['type']}")
 
+    # Tool-specific fields
+    if "tools" in mapping.topics:
+        for key in ("description", "category", "development_status", "readme"):
+            if fm.get(key):
+                meta_parts.append(
+                    f"{key.replace('_', ' ').title()}: {fm[key]}"
+                )
+        if fm.get("created_by_me") is True:
+            meta_parts.append("Created by me: yes")
+        elif fm.get("created_by_me") is False:
+            meta_parts.append("Created by me: no")
+        if fm.get("is_public") is True:
+            meta_parts.append("Public: yes")
+        elif fm.get("is_public") is False:
+            meta_parts.append("Public: no")
+
+    # Finance-specific fields (income & expenses)
+    if "finances" in mapping.topics:
+        for key in ("client", "vendor", "amount", "date_received", "date_paid",
+                     "invoice_id", "category", "recurring"):
+            if fm.get(key) is not None:
+                meta_parts.append(
+                    f"{key.replace('_', ' ').title()}: {fm[key]}"
+                )
+
     if meta_parts:
         text += "\n\n" + "\n".join(meta_parts)
 
