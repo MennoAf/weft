@@ -36,17 +36,44 @@ jobs:
 
       - name: Run backup
         env:
-          # Use BACKUP_DATABASE_URL (pooler, port 6543) if set, otherwise fall back to DATABASE_URL
-          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL || secrets.DATABASE_URL }}
+          PGHOST: ${{ secrets.BACKUP_PGHOST }}
+          PGPORT: ${{ secrets.BACKUP_PGPORT }}
+          PGUSER: ${{ secrets.BACKUP_PGUSER }}
+          PGPASSWORD: ${{ secrets.BACKUP_PGPASSWORD }}
+          PGDATABASE: ${{ secrets.BACKUP_PGDATABASE }}
         run: |
-          # Debug: show masked connection info (host and port only)
-          python3 -c "
-          import os, re
-          url = os.environ.get('DATABASE_URL', '')
-          m = re.search(r'@([^/]+)', url)
-          print(f'Connecting to: {m.group(1) if m else \"(could not parse host)\"}')
+          echo "Connecting to: $PGHOST:$PGPORT/$PGDATABASE"
+          uv run python -c "
+          import asyncio, ssl, asyncpg, json
+          from weft.backup import backup_all, verify_backup
+          from pathlib import Path
+          import os
+
+          async def run():
+              ctx = ssl.create_default_context()
+              ctx.check_hostname = False
+              ctx.verify_mode = ssl.CERT_NONE
+              pool = await asyncpg.create_pool(
+                  host=os.environ['PGHOST'],
+                  port=int(os.environ['PGPORT']),
+                  user=os.environ['PGUSER'],
+                  password=os.environ['PGPASSWORD'],
+                  database=os.environ['PGDATABASE'],
+                  ssl=ctx,
+                  min_size=1, max_size=2,
+                  statement_cache_size=0,
+              )
+              data = await backup_all(pool)
+              await pool.close()
+              report = verify_backup(data)
+              if not report['valid']:
+                  for issue in report['issues']:
+                      print(f'WARNING: {issue}')
+              Path('${{ env.BACKUP_FILE }}').write_text(json.dumps(data, indent=2))
+              print(f'Backup complete: {data[\"memory_count\"]} memories, {data[\"relationship_count\"]} relationships')
+
+          asyncio.run(run())
           "
-          uv run weft backup -o "$BACKUP_FILE"
 
       - name: Validate backup
         run: |
