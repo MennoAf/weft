@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -377,6 +378,102 @@ def ingest(path: str | None, project_id: str, depth: str):
     click.echo(f"  Files discovered: {result['files_discovered']}")
     click.echo(f"  Files summarized: {result['files_summarized']}")
     click.echo(f"  Architecture stored: {result['architecture_stored']}")
+
+
+@cli.command()
+@click.option("--output", "-o", "output_file", default=None, type=click.Path(), help="Write to file (default: weft-backup-<timestamp>.json)")
+def backup(output_file: str | None):
+    """Create a full backup of all memories, relationships, and embeddings."""
+    from weft.backup import backup_all, verify_backup
+
+    async def _backup():
+        import asyncpg
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        data = await backup_all(pool)
+        await pool.close()
+        return data
+
+    data = asyncio.run(_backup())
+
+    # Verify before writing
+    report = verify_backup(data)
+    if not report["valid"]:
+        click.echo("WARNING: Backup verification found issues:", err=True)
+        for issue in report["issues"]:
+            click.echo(f"  - {issue}", err=True)
+
+    if not output_file:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_file = f"weft-backup-{ts}.json"
+
+    Path(output_file).write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    click.echo(f"Backup written to {output_file}")
+    click.echo(f"  Memories: {data['memory_count']}")
+    click.echo(f"  Relationships: {data['relationship_count']}")
+    click.echo(f"  With embeddings: {report['memories_with_embeddings']}")
+    click.echo(f"  Checksum: {data['checksum'][:16]}...")
+
+
+@cli.command()
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--dry-run", is_flag=True, help="Show what would be restored without writing")
+@click.option("--no-skip-duplicates", is_flag=True, help="Fail on duplicate IDs instead of skipping")
+def restore(file: str, dry_run: bool, no_skip_duplicates: bool):
+    """Restore memories and relationships from a backup file."""
+    from weft.backup import restore_all, verify_backup
+
+    # Load and verify
+    raw = Path(file).read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        click.echo(f"Error: Invalid JSON in {file}: {e}", err=True)
+        sys.exit(1)
+
+    report = verify_backup(data)
+    if not report["valid"]:
+        click.echo("Backup verification failed:", err=True)
+        for issue in report["issues"]:
+            click.echo(f"  - {issue}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Backup file: {file}")
+    click.echo(f"  Version: {data.get('version')}")
+    click.echo(f"  Exported: {data.get('exported_at')}")
+    click.echo(f"  Memories: {report['memory_count']}")
+    click.echo(f"  Relationships: {report['relationship_count']}")
+    click.echo(f"  With embeddings: {report['memories_with_embeddings']}")
+
+    async def _restore():
+        import asyncpg
+        from weft.db.migrations import run_migrations
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        await run_migrations(pool)
+        result = await restore_all(
+            pool, data,
+            dry_run=dry_run,
+            skip_duplicates=not no_skip_duplicates,
+        )
+        await pool.close()
+        return result
+
+    result = asyncio.run(_restore())
+
+    prefix = "(dry run) " if dry_run else ""
+    click.echo(f"\n{prefix}Restore Report:")
+    click.echo(f"  Memories restored: {result['memories_restored']}")
+    click.echo(f"  Memories skipped: {result['memories_skipped']}")
+    click.echo(f"  Relationships restored: {result['relationships_restored']}")
+    click.echo(f"  Relationships skipped: {result['relationships_skipped']}")
+    if result["errors"]:
+        click.echo(f"  Errors: {len(result['errors'])}")
+        for err in result["errors"]:
+            click.echo(f"    - {err}")
 
 
 @cli.group()
