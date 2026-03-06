@@ -322,8 +322,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
     # DATABASE_URL is the standard convention (Fly.io, Supabase, etc.)
     if url := os.environ.get("WEFT_DATABASE_URL") or os.environ.get("DATABASE_URL"):
         config.database.url = _encode_dsn_password(url)
-    if url := os.environ.get("WEFT_REDIS_URL"):
-        config.redis.url = url
+    if "WEFT_REDIS_URL" in os.environ:
+        config.redis.url = os.environ["WEFT_REDIS_URL"]
     if provider := os.environ.get("WEFT_EMBEDDING_PROVIDER"):
         config.embedding.provider = provider
     if model := os.environ.get("WEFT_EMBEDDING_MODEL"):
