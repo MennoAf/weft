@@ -477,6 +477,71 @@ def restore(file: str, dry_run: bool, no_skip_duplicates: bool):
 
 
 @cli.group()
+def obsidian():
+    """Obsidian vault sync commands."""
+    pass
+
+
+@obsidian.command(name="init")
+@click.argument("vault_path", type=click.Path())
+def obsidian_init(vault_path: str):
+    """Create vault folder structure and frontmatter templates."""
+    from weft.obsidian.vault_init import init_vault
+
+    result = init_vault(Path(vault_path))
+    click.echo(f"Initialized vault at {result['vault_path']}")
+    click.echo(f"  Directories created: {result['dirs_created']}/{result['total_dirs']}")
+    click.echo(f"  Templates created: {result['templates_created']}/{result['total_templates']}")
+    click.echo("\nOpen this folder in Obsidian to start using it.")
+    click.echo("Templates are in the templates/ folder — configure Obsidian to use them.")
+
+
+@obsidian.command(name="sync")
+@click.argument("vault_path", type=click.Path(exists=True))
+@click.option("--hash-store", "hash_store_path", default=None, type=click.Path(), help="Path to hash store JSON file")
+@click.option("--dry-run", is_flag=True, help="Show what would be synced without storing")
+def obsidian_sync(vault_path: str, hash_store_path: str | None, dry_run: bool):
+    """Sync an Obsidian vault into Weft memories."""
+    from weft.obsidian.hash_store import HashStore
+    from weft.obsidian.sync import discover_vault_files, sync_vault
+
+    target = Path(vault_path)
+
+    if dry_run:
+        files = discover_vault_files(target)
+        click.echo(f"Found {len(files)} markdown files in {target}")
+        for f in files:
+            click.echo(f"  {f}")
+        return
+
+    async def _sync():
+        import asyncpg
+
+        from weft.embeddings import get_provider
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model)
+
+        hs = None
+        if hash_store_path:
+            hs = HashStore(Path(hash_store_path))
+
+        result = await sync_vault(target, pool, provider, hash_store=hs)
+        await pool.close()
+        return result
+
+    result = asyncio.run(_sync())
+    click.echo(f"\nSync complete for {target}")
+    click.echo(f"  Files found: {result.files_found}")
+    click.echo(f"  Files synced: {result.files_synced}")
+    click.echo(f"  Files skipped (unchanged): {result.files_skipped}")
+    click.echo(f"  Files errored: {result.files_errored}")
+    click.echo(f"  Memories created: {result.memories_created}")
+    click.echo(f"  Memories archived: {result.memories_archived}")
+
+
+@cli.group()
 def config():
     """View and modify Weft configuration."""
     pass
