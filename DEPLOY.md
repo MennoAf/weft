@@ -89,11 +89,17 @@ A GitHub Actions workflow runs every 12 hours to export a full JSON backup (memo
 
 ### Setup
 
-Add the `DATABASE_URL` repository secret:
+Add the Supabase pooler connection secrets (use the pooler endpoint from Supabase Dashboard → Settings → Database → Connection pooling):
 
 ```bash
-gh secret set DATABASE_URL --body "postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
+echo 'aws-0-REGION.pooler.supabase.com' | gh secret set BACKUP_PGHOST
+echo '6543' | gh secret set BACKUP_PGPORT
+echo 'postgres.YOUR_PROJECT_REF' | gh secret set BACKUP_PGUSER
+echo 'YOUR_PASSWORD' | gh secret set BACKUP_PGPASSWORD
+echo 'postgres' | gh secret set BACKUP_PGDATABASE
 ```
+
+Using separate secrets avoids URL-parsing issues with special characters in passwords.
 
 ### How it works
 
