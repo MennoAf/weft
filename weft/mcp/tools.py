@@ -642,3 +642,118 @@ async def weft_handoff(
         return {"id": memory.id, "project_id": resolved_project, "stored": True}
     except _DB_ERRORS as e:
         return _db_error_response("weft_handoff", e)
+
+
+# ── Skills ──────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def weft_weekly_recap(
+    ctx: Context,
+    days: int = 7,
+    project_id: str | None = None,
+) -> dict:
+    """Weekly recap: memories from the last N days grouped by type and topic.
+
+    Returns decisions, issues, milestones, top topics, and recent activity.
+    Use this to generate status updates, standup notes, or session summaries."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        from weft.skills import weekly_recap
+
+        return await weekly_recap(app.pool, days=days, project_id=resolved_project)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_weekly_recap", e)
+
+
+@mcp.tool()
+async def weft_search_all(
+    ctx: Context,
+    query: str | None = None,
+    topic: str | None = None,
+    memory_type: str | None = None,
+    days: int | None = None,
+    limit: int = 20,
+) -> dict:
+    """Cross-project brain-wide search combining semantic and filter queries.
+
+    At least one filter is required. Searches across ALL projects (not scoped).
+    Use for finding information that spans projects or when you don't know
+    which project something belongs to."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.skills import search_all
+
+        return await search_all(
+            app.pool, app.embedding,
+            query=query, topic=topic, memory_type=memory_type,
+            days=days, limit=limit,
+        )
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_search_all", e)
+
+
+@mcp.tool()
+async def weft_project_status(
+    ctx: Context,
+    project_id: str | None = None,
+    days: int = 30,
+) -> dict:
+    """Project status: memories for a project weighted by importance.
+
+    Prioritizes decisions, issues, and milestones. Includes recent activity.
+    Use to get a quick overview of where a project stands."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        if not resolved_project:
+            return {"error": "project_id required — pass explicitly or run from a project directory"}
+        from weft.skills import project_status
+
+        return await project_status(app.pool, project_id=resolved_project, days=days)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_project_status", e)
+
+
+@mcp.tool()
+async def weft_meal_plan(
+    ctx: Context,
+    lissy_approved: bool | None = None,
+    cuisine: str | None = None,
+    tag: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Query recipe memories for meal planning.
+
+    Filter by Lissy-approved, cuisine type, or tags. Returns full recipe
+    content for planning meals."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.skills import meal_plan
+
+        return await meal_plan(
+            app.pool, lissy_approved=lissy_approved,
+            cuisine=cuisine, tag=tag, limit=limit,
+        )
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_meal_plan", e)
+
+
+@mcp.tool()
+async def weft_up_next(
+    ctx: Context,
+    days: int = 7,
+    include_no_date: bool = False,
+) -> dict:
+    """Upcoming tasks: open tasks due in the next N days from Obsidian notes.
+
+    Returns overdue tasks and tasks due soon, sorted by date and priority.
+    Tasks come from Obsidian checkbox items with Tasks plugin emoji dates."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.skills import up_next
+
+        return await up_next(app.pool, days=days, include_no_date=include_no_date)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_up_next", e)

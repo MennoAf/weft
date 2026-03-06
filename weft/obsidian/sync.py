@@ -223,6 +223,49 @@ async def _sync_file(
         memory_ids.append(memory.id)
         result.memories_created += 1
 
+    # Store open tasks as individual memories for weft_up_next
+    open_tasks = [t for t in parsed.tasks if not t.done and not t.cancelled]
+    for task in open_tasks:
+        task_content = f"Task: {task.description}"
+        task_meta = [f"Source: {rel_path}"]
+        if task.due:
+            task_meta.append(f"Due: {task.due}")
+        if task.scheduled:
+            task_meta.append(f"Scheduled: {task.scheduled}")
+        if task.start:
+            task_meta.append(f"Start: {task.start}")
+        if task.priority:
+            task_meta.append(f"Priority: {task.priority}")
+        if task.recurrence:
+            task_meta.append(f"Recurrence: {task.recurrence}")
+        task_content += "\n" + "\n".join(task_meta)
+
+        task_topics = ["obsidian", "tasks", f"file:{rel_path}"]
+        if task.due:
+            task_topics.append(f"due:{task.due}")
+        if task.priority:
+            task_topics.append(f"priority:{task.priority}")
+        task_topics.extend(parsed.tags)
+        task_topics = list(dict.fromkeys(task_topics))
+
+        task_embedding = None
+        if embedding_provider:
+            try:
+                task_embedding = await embedding_provider.embed(task_content)
+            except Exception as exc:
+                logger.warning("Failed to embed task: %s", exc)
+
+        task_create = MemoryCreate(
+            type=MemoryType.fact,
+            content=task_content,
+            topic=task_topics,
+            source=MemorySource.ingest,
+            confidence=0.9,
+        )
+        task_mem = await store_memory(pool, task_create, embedding=task_embedding)
+        memory_ids.append(task_mem.id)
+        result.memories_created += 1
+
     hash_store.update(rel_path, content_hash, memory_ids)
     return True
 
