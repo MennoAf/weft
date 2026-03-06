@@ -21,6 +21,9 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
     }
     if config.database.statement_cache_size is not None:
         kwargs["statement_cache_size"] = config.database.statement_cache_size
+    # Supabase pooler (port 6543) requires statement_cache_size=0 for pgBouncer
+    elif ":6543/" in dsn:
+        kwargs["statement_cache_size"] = 0
     # Enable SSL for Supabase and other cloud Postgres providers
     if "supabase.co" in dsn or "sslmode=require" in dsn:
         ctx = ssl.create_default_context()

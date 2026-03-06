@@ -36,7 +36,8 @@ jobs:
 
       - name: Run backup
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Use BACKUP_DATABASE_URL (pooler, port 6543) if set, otherwise fall back to DATABASE_URL
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL || secrets.DATABASE_URL }}
         run: uv run weft backup -o "$BACKUP_FILE"
 
       - name: Validate backup
