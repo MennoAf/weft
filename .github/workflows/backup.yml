@@ -42,7 +42,6 @@ jobs:
           PGPASSWORD: ${{ secrets.BACKUP_PGPASSWORD }}
           PGDATABASE: ${{ secrets.BACKUP_PGDATABASE }}
         run: |
-          echo "Connecting to: $PGHOST:$PGPORT/$PGDATABASE"
           uv run python -c "
           import asyncio, ssl, asyncpg, json
           from weft.backup import backup_all, verify_backup
