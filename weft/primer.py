@@ -8,7 +8,7 @@ fetched when the conversation makes them relevant.
 Sections (in priority order, each with a per-section token cap):
 0. Grounding — one-line project description (50 tokens)
 1. Rules — pinned memories only (100 tokens)
-2. Handoff — most recent session handoff (500 tokens)
+2. Handoff — most recent session handoff (800 tokens, truncated if needed)
 3. Recent work — milestone breadcrumbs from last 72h (150 tokens)
 4. Issues — active issues (200 tokens)
 5. Decisions — closed/vetoed decisions (250 tokens)
@@ -24,7 +24,7 @@ import asyncpg
 
 from weft.models import Memory, MemoryRecall, MemoryStatus, MemoryType
 from weft.store import list_memories, search_by_vector
-from weft.tokens import estimate_tokens
+from weft.tokens import estimate_tokens, truncate_to_token_budget
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ _MAX_DECISIONS = 5
 # Per-section token caps.
 _CAP_GROUNDING = 50
 _CAP_RULES = 100
-_CAP_HANDOFF = 500
+_CAP_HANDOFF = 800
 _CAP_RECENT_WORK = 150
 _CAP_ISSUES = 200
 _CAP_DECISIONS = 250
@@ -303,11 +303,14 @@ async def build_primer(
     if handoff_candidates:
         mem = handoff_candidates[0]
         cost = mem.token_count or estimate_tokens(mem.content)
-        if (
-            used_tokens + cost <= budget_tokens
-            and cost <= _CAP_HANDOFF
-        ):
+        content = mem.content
+        # Truncate oversized handoffs instead of dropping them.
+        cap = min(_CAP_HANDOFF, budget_tokens - used_tokens)
+        if cost > cap and cap > 0:
+            content, cost = truncate_to_token_budget(content, cap)
+        if used_tokens + cost <= budget_tokens and cap > 0:
             entry = mem.to_dict()
+            entry["content"] = content
             age_hours = (now - mem.created_at).total_seconds() / 3600
             entry["age_hours"] = round(age_hours, 1)
             handoff_section.append(entry)
