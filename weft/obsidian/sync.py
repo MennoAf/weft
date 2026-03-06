@@ -274,6 +274,25 @@ def _build_content(title, section, parsed, mapping):
     if meta_parts:
         text += "\n\n" + "\n".join(meta_parts)
 
+    # Append open tasks summary
+    open_tasks = [t for t in parsed.tasks if not t.done and not t.cancelled]
+    if open_tasks:
+        task_lines = []
+        for t in open_tasks:
+            line = f"- [ ] {t.description}"
+            if t.due:
+                line += f" (due: {t.due})"
+            if t.scheduled:
+                line += f" (scheduled: {t.scheduled})"
+            if t.start:
+                line += f" (start: {t.start})"
+            if t.priority:
+                line += f" [{t.priority} priority]"
+            if t.recurrence:
+                line += f" (repeats: {t.recurrence})"
+            task_lines.append(line)
+        text += "\n\nOpen tasks:\n" + "\n".join(task_lines)
+
     return text
 
 
