@@ -12,6 +12,23 @@ from dateutil.parser import parse as parse_date
 
 
 @dataclass
+class Task:
+    """An Obsidian task extracted from a markdown checkbox."""
+
+    description: str
+    done: bool = False
+    cancelled: bool = False
+    due: str | None = None
+    scheduled: str | None = None
+    start: str | None = None
+    created: str | None = None
+    done_date: str | None = None
+    cancelled_date: str | None = None
+    priority: str | None = None  # highest, high, medium, low, lowest
+    recurrence: str | None = None
+
+
+@dataclass
 class ParsedNote:
     """Result of parsing an Obsidian markdown note."""
 
@@ -24,6 +41,7 @@ class ParsedNote:
     wikilinks: list[dict] = field(default_factory=list)
     embeds: list[dict] = field(default_factory=list)
     callout_types: list[str] = field(default_factory=list)
+    tasks: list[Task] = field(default_factory=list)
     date: str | None = None
     aliases: list[str] = field(default_factory=list)
 
@@ -44,6 +62,23 @@ _EMBED_RE = re.compile(r"!\[\[([^\]]+)\]\]")
 _INLINE_TAG_RE = re.compile(r"(?:^|\s)#([a-zA-Z][\w/-]*)", re.MULTILINE)
 _CALLOUT_RE = re.compile(r"^>\s*\[!(\w+)\]", re.MULTILINE)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+
+# Obsidian Tasks plugin emoji signifiers
+_TASK_RE = re.compile(r"^-\s+\[([ xX-])\]\s+(.+)$", re.MULTILINE)
+_TASK_DUE_RE = re.compile(r"📅\s*(\d{4}-\d{2}-\d{2})")
+_TASK_SCHEDULED_RE = re.compile(r"⏳\s*(\d{4}-\d{2}-\d{2})")
+_TASK_START_RE = re.compile(r"🛫\s*(\d{4}-\d{2}-\d{2})")
+_TASK_CREATED_RE = re.compile(r"➕\s*(\d{4}-\d{2}-\d{2})")
+_TASK_DONE_RE = re.compile(r"✅\s*(\d{4}-\d{2}-\d{2})")
+_TASK_CANCELLED_RE = re.compile(r"❌\s*(\d{4}-\d{2}-\d{2})")
+_TASK_RECURRENCE_RE = re.compile(r"🔁\s*(.+?)(?=\s*[📅⏳🛫➕✅❌⏫⏬🔼🔽🔺🏁🆔⛔]|$)")
+_TASK_PRIORITY_MAP = {
+    "🔺": "highest",
+    "⏫": "high",
+    "🔼": "medium",
+    "🔽": "low",
+    "⏬": "lowest",
+}
 
 _DATE_KEYS = ("date", "created", "updated", "modified")
 
@@ -116,6 +151,69 @@ def extract_callout_types(text: str) -> list[str]:
     return sorted(set(m.lower() for m in _CALLOUT_RE.findall(text)))
 
 
+def extract_tasks(text: str) -> list[Task]:
+    """Extract Obsidian Tasks plugin checkboxes with emoji metadata."""
+    tasks: list[Task] = []
+    for m in _TASK_RE.finditer(text):
+        marker = m.group(1)
+        raw = m.group(2).strip()
+
+        # Strip #task tag if present (Tasks plugin convention)
+        desc = re.sub(r"#task\b\s*", "", raw)
+
+        # Extract emoji fields and remove them from description
+        due = _extract_and_strip(_TASK_DUE_RE, desc)
+        desc = due[1]
+        scheduled = _extract_and_strip(_TASK_SCHEDULED_RE, desc)
+        desc = scheduled[1]
+        start = _extract_and_strip(_TASK_START_RE, desc)
+        desc = start[1]
+        created = _extract_and_strip(_TASK_CREATED_RE, desc)
+        desc = created[1]
+        done_date = _extract_and_strip(_TASK_DONE_RE, desc)
+        desc = done_date[1]
+        cancelled_date = _extract_and_strip(_TASK_CANCELLED_RE, desc)
+        desc = cancelled_date[1]
+        recurrence = _extract_and_strip(_TASK_RECURRENCE_RE, desc)
+        desc = recurrence[1]
+
+        # Priority
+        priority = None
+        for emoji, level in _TASK_PRIORITY_MAP.items():
+            if emoji in desc:
+                priority = level
+                desc = desc.replace(emoji, "")
+                break
+
+        # Clean up leftover whitespace
+        desc = " ".join(desc.split()).strip()
+
+        tasks.append(Task(
+            description=desc,
+            done=marker in ("x", "X"),
+            cancelled=marker == "-",
+            due=due[0],
+            scheduled=scheduled[0],
+            start=start[0],
+            created=created[0],
+            done_date=done_date[0],
+            cancelled_date=cancelled_date[0],
+            priority=priority,
+            recurrence=recurrence[0],
+        ))
+    return tasks
+
+
+def _extract_and_strip(
+    pattern: re.Pattern, text: str
+) -> tuple[str | None, str]:
+    """Extract first match value and return (value, cleaned_text)."""
+    m = pattern.search(text)
+    if m:
+        return m.group(1).strip(), pattern.sub("", text, count=1)
+    return None, text
+
+
 def parse_note(content: str) -> ParsedNote:
     """Parse an Obsidian markdown note into structured data."""
     try:
@@ -147,6 +245,7 @@ def parse_note(content: str) -> ParsedNote:
     body, wikilinks = extract_wikilinks(body)
     inline_tags = extract_inline_tags(body)
     callout_types = extract_callout_types(body)
+    tasks = extract_tasks(body)
 
     all_tags = sorted(set(fm_tags + inline_tags))
 
@@ -160,6 +259,7 @@ def parse_note(content: str) -> ParsedNote:
         wikilinks=wikilinks,
         embeds=embeds,
         callout_types=callout_types,
+        tasks=tasks,
         date=date,
         aliases=aliases,
     )

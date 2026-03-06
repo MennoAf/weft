@@ -5,10 +5,12 @@ import pytest
 from weft.obsidian.parser import (
     ParsedNote,
     Section,
+    Task,
     extract_callout_types,
     extract_date,
     extract_embeds,
     extract_inline_tags,
+    extract_tasks,
     extract_wikilinks,
     normalize_tag,
     parse_note,
@@ -276,6 +278,121 @@ Met at PyCon. Very knowledgeable about async Python.
         result = parse_note(content)
         assert result.frontmatter["name"] == "Alice Smith"
         assert result.frontmatter["company"] == "Acme Corp"
+
+
+class TestExtractTasks:
+    def test_simple_open_task(self):
+        tasks = extract_tasks("- [ ] Buy groceries")
+        assert len(tasks) == 1
+        assert tasks[0].description == "Buy groceries"
+        assert tasks[0].done is False
+
+    def test_completed_task(self):
+        tasks = extract_tasks("- [x] Buy groceries")
+        assert len(tasks) == 1
+        assert tasks[0].done is True
+
+    def test_cancelled_task(self):
+        tasks = extract_tasks("- [-] Buy groceries")
+        assert len(tasks) == 1
+        assert tasks[0].cancelled is True
+
+    def test_due_date(self):
+        tasks = extract_tasks("- [ ] Buy groceries 📅 2026-03-10")
+        assert tasks[0].due == "2026-03-10"
+        assert "📅" not in tasks[0].description
+
+    def test_scheduled_date(self):
+        tasks = extract_tasks("- [ ] Review PR ⏳ 2026-03-08")
+        assert tasks[0].scheduled == "2026-03-08"
+
+    def test_start_date(self):
+        tasks = extract_tasks("- [ ] Start project 🛫 2026-03-07")
+        assert tasks[0].start == "2026-03-07"
+
+    def test_created_date(self):
+        tasks = extract_tasks("- [ ] New idea ➕ 2026-03-06")
+        assert tasks[0].created == "2026-03-06"
+
+    def test_done_date(self):
+        tasks = extract_tasks("- [x] Finished task ✅ 2026-03-05")
+        assert tasks[0].done_date == "2026-03-05"
+
+    def test_cancelled_date(self):
+        tasks = extract_tasks("- [-] Dropped task ❌ 2026-03-04")
+        assert tasks[0].cancelled_date == "2026-03-04"
+
+    def test_priority_highest(self):
+        tasks = extract_tasks("- [ ] Urgent thing 🔺")
+        assert tasks[0].priority == "highest"
+
+    def test_priority_high(self):
+        tasks = extract_tasks("- [ ] Important thing ⏫")
+        assert tasks[0].priority == "high"
+
+    def test_priority_medium(self):
+        tasks = extract_tasks("- [ ] Normal thing 🔼")
+        assert tasks[0].priority == "medium"
+
+    def test_priority_low(self):
+        tasks = extract_tasks("- [ ] Minor thing 🔽")
+        assert tasks[0].priority == "low"
+
+    def test_priority_lowest(self):
+        tasks = extract_tasks("- [ ] Someday thing ⏬")
+        assert tasks[0].priority == "lowest"
+
+    def test_recurrence(self):
+        tasks = extract_tasks("- [ ] Water plants 🔁 every week")
+        assert tasks[0].recurrence == "every week"
+
+    def test_multiple_fields(self):
+        tasks = extract_tasks(
+            "- [ ] #task Submit report ⏫ 📅 2026-03-10 ⏳ 2026-03-08 ➕ 2026-03-01"
+        )
+        assert len(tasks) == 1
+        t = tasks[0]
+        assert t.description == "Submit report"
+        assert t.priority == "high"
+        assert t.due == "2026-03-10"
+        assert t.scheduled == "2026-03-08"
+        assert t.created == "2026-03-01"
+
+    def test_multiple_tasks(self):
+        text = "- [ ] Task one\n- [x] Task two\n- [ ] Task three"
+        tasks = extract_tasks(text)
+        assert len(tasks) == 3
+        assert tasks[1].done is True
+
+    def test_no_tasks(self):
+        assert extract_tasks("Just regular text\n\nNo checkboxes here") == []
+
+    def test_strips_task_tag(self):
+        tasks = extract_tasks("- [ ] #task Buy milk")
+        assert tasks[0].description == "Buy milk"
+
+    def test_task_in_parsed_note(self):
+        content = """\
+---
+title: Shopping
+---
+
+## Groceries
+- [ ] Milk 📅 2026-03-10
+- [ ] Eggs
+- [x] Bread ✅ 2026-03-05
+
+## Hardware
+- [ ] Nails ⏫
+"""
+        result = parse_note(content)
+        assert len(result.tasks) == 4
+        open_tasks = [t for t in result.tasks if not t.done]
+        assert len(open_tasks) == 3
+        milk = next(t for t in result.tasks if "Milk" in t.description)
+        assert milk.due == "2026-03-10"
+        nails = next(t for t in result.tasks if "Nails" in t.description)
+        assert nails.priority == "high"
 
 
 class TestSplitByHeadings:
