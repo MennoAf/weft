@@ -82,3 +82,23 @@ fly scale memory 1024
 # Rotate a secret (triggers rolling restart)
 fly secrets set WEFT_API_KEY="new-key-value"
 ```
+
+## Automated Backups
+
+A GitHub Actions workflow runs every 12 hours to export a full JSON backup (memories, embeddings, relationships) from Supabase.
+
+### Setup
+
+Add the `DATABASE_URL` repository secret:
+
+```bash
+gh secret set DATABASE_URL --body "postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
+```
+
+### How it works
+
+- **Schedule**: Every 12 hours (00:15 and 12:15 UTC)
+- **Artifacts**: Each backup is stored as a GitHub Actions artifact with 90-day retention
+- **Validation**: Workflow fails if the backup is empty or contains 0 memories
+- **Manual trigger**: Run from the Actions tab; optionally commit to a `backups` branch for git-based durability
+- **Restore**: Download the artifact, then `weft restore weft-backup.json`
