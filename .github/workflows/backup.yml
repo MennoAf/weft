@@ -2,8 +2,8 @@ name: Scheduled Weft Backup
 
 on:
   schedule:
-    # Every 12 hours at :15 past to avoid top-of-hour congestion
-    - cron: "15 0,12 * * *"
+    # Every 4 hours at :15 past to avoid top-of-hour congestion
+    - cron: "15 */4 * * *"
   workflow_dispatch:
     inputs:
       commit_to_branch:
