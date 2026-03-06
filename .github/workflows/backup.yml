@@ -38,7 +38,15 @@ jobs:
         env:
           # Use BACKUP_DATABASE_URL (pooler, port 6543) if set, otherwise fall back to DATABASE_URL
           DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL || secrets.DATABASE_URL }}
-        run: uv run weft backup -o "$BACKUP_FILE"
+        run: |
+          # Debug: show masked connection info (host and port only)
+          python3 -c "
+          import os, re
+          url = os.environ.get('DATABASE_URL', '')
+          m = re.search(r'@([^/]+)', url)
+          print(f'Connecting to: {m.group(1) if m else \"(could not parse host)\"}')
+          "
+          uv run weft backup -o "$BACKUP_FILE"
 
       - name: Validate backup
         run: |
