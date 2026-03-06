@@ -16,6 +16,7 @@ Current agent memory is a flat markdown file with no structure, no retrieval bey
 - **Token-budget context assembly** so sessions start with the right 5% of knowledge
 - **Feedback loop** that adjusts relevance based on whether memories were actually helpful
 - **Post-task learning** that captures gotchas and patterns from completed work
+- **Obsidian vault sync** that ingests personal notes, tasks, recipes, contacts, and more
 - **Fallback resilience** so agents still have memory access when infrastructure is down
 
 ## Installation
@@ -111,7 +112,22 @@ weft import ~/.claude/memory/MEMORY.md
 weft import MEMORY.md --project-id my-project
 ```
 
-### 4. Query memories
+### 4. Sync an Obsidian vault (optional)
+
+```bash
+# Create a vault with Weft-optimized folder structure and templates
+weft obsidian init ~/Documents/MyVault
+
+# Sync vault contents into Weft as memories
+weft obsidian sync ~/Documents/MyVault
+
+# Preview what would be synced
+weft obsidian sync ~/Documents/MyVault --dry-run
+```
+
+See the [Obsidian Integration](#obsidian-integration) section for details on vault structure and supported features.
+
+### 5. Query memories
 
 ```bash
 # Semantic search from the CLI
@@ -121,7 +137,7 @@ weft recall "database configuration patterns"
 weft status
 ```
 
-### 5. Add Weft instructions to your CLAUDE.md
+### 6. Add Weft instructions to your CLAUDE.md
 
 Add the following to your project's `CLAUDE.md` so the agent knows how to use Weft:
 
@@ -156,6 +172,10 @@ See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all to
 │  store  relevance  context  primer               │
 │  consolidation  importer  exporter               │
 │  extract  fallback  revise                       │
+├──────────────────────────────────────────────────┤
+│              Ingestion                           │
+│  Obsidian vault sync (parser, hash store)        │
+│  Codebase ingest (file summaries, architecture)  │
 ├──────────────────────────────────────────────────┤
 │              Infrastructure                      │
 │  PostgreSQL + pgvector  │  Redis cache           │
@@ -327,19 +347,80 @@ Return memory statistics: total count, breakdown by type/topic/status, recently 
 
 *No parameters.*
 
+## Obsidian Integration
+
+Weft can sync an Obsidian vault into memories, making your personal notes, tasks, contacts, recipes, and more available to AI agents via semantic search.
+
+### Vault structure
+
+`weft obsidian init` creates an opinionated folder structure with frontmatter templates:
+
+```
+vault/
+  inbox/              Quick capture (lower confidence)
+  notes/              Reminders, misc notes
+  journal/daily/      Daily notes
+  people/             Contacts (stored as user_model type)
+  wktw/               Side business
+    clients/
+    meetings/
+    ideas/
+    finances/
+    operations/
+  recipes/            Meals (with lissy_approved field)
+  media/              Book/show/movie reviews
+  writing/
+    ideas/            Creative writing concepts
+    blog/             Blog posts and drafts
+  assets/             Images, attachments (ignored)
+  templates/          Frontmatter templates (ignored)
+```
+
+Folders map to Weft memory types and topics automatically. Frontmatter `type:` and `confidence:` fields override the defaults.
+
+### Obsidian Tasks plugin
+
+Weft parses [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) checkboxes with full emoji support:
+
+| Emoji | Field |
+|-------|-------|
+| 📅 | Due date |
+| ⏳ | Scheduled date |
+| 🛫 | Start date |
+| ➕ | Created date |
+| ✅ | Done date |
+| ❌ | Cancelled date |
+| 🔁 | Recurrence |
+| 🔺 ⏫ 🔼 🔽 ⏬ | Priority (highest to lowest) |
+
+Open tasks are included in the memory content with their dates and priority, making them available for summary prompts and planning.
+
+### Sync behavior
+
+- **Hash-based change detection** — re-running sync skips unchanged files
+- **Modified files** — old memories archived, new ones created
+- **Deleted files** — memories archived on next sync
+- **Large files** — split by heading hierarchy (falls back to paragraphs)
+- **Frontmatter** — wikilinks, tags, dates, and type-specific fields (recipes, contacts, media) are extracted and included in memory content
+
 ## CLI Reference
 
 ```
-weft mcp                 Start the MCP server (stdio transport)
-weft up                  Start Postgres + Redis, run migrations
-weft down                Stop containers
-weft status              Show memory statistics
-weft recall QUERY        Semantic search (--limit, --topic)
-weft import FILE         Import MEMORY.md (--dry-run, --project-id)
-weft export              Export memories (--format md|json, --type, --topic, --status, --output)
-weft consolidate         Run decay/dedup/contradiction pipeline (--dry-run)
-weft config show         Display current configuration
-weft config set KEY VAL  Persist a config value to ~/.weft/config.toml
+weft mcp                       Start the MCP server (stdio transport)
+weft up                        Start Postgres + Redis, run migrations
+weft down                      Stop containers
+weft status                    Show memory statistics
+weft recall QUERY              Semantic search (--limit, --topic)
+weft import FILE               Import MEMORY.md (--dry-run, --project-id)
+weft export                    Export memories (--format md|json, --type, --topic, --status, --output)
+weft ingest PATH               Ingest a codebase as memories (--project-id, --depth)
+weft consolidate               Run decay/dedup/contradiction pipeline (--dry-run)
+weft backup                    Create full backup (--output)
+weft restore FILE              Restore from backup (--dry-run)
+weft obsidian init VAULT_PATH  Create vault folder structure and templates
+weft obsidian sync VAULT_PATH  Sync vault into Weft memories (--dry-run, --hash-store)
+weft config show               Display current configuration
+weft config set KEY VAL        Persist a config value to ~/.weft/config.toml
 ```
 
 ## Configuration
@@ -407,7 +488,7 @@ Both services include health checks. Data is persisted in named Docker volumes (
 
 ```bash
 uv sync                        # Install dependencies
-uv run pytest tests/ -v        # Run all tests (285 tests)
+uv run pytest tests/ -v        # Run all tests (561 tests)
 uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
