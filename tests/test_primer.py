@@ -50,9 +50,10 @@ async def test_primer_empty_db(pool):
     assert result["freshness_hours"] is None
     assert result["section_tokens"] == {
         "grounding": 0, "rules": 0, "behaviors": 0, "handoff": 0,
-        "recent_work": 0, "issues": 0, "decisions": 0,
+        "recent_work": 0, "issues": 0, "decisions": 0, "entities": 0,
     }
     assert result["behaviors"] == []
+    assert result["entities"] == []
     # Empty DB = all hints + onboarding
     assert set(result["hints"].keys()) == {"rules", "behaviors", "handoff", "recent_work", "issues", "decisions"}
     assert result["onboarding"] is not None
@@ -64,7 +65,7 @@ async def test_primer_return_structure(pool):
 
     expected_keys = {
         "grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions",
-        "total_tokens", "budget_tokens", "budget_remaining", "excluded",
+        "entities", "total_tokens", "budget_tokens", "budget_remaining", "excluded",
         "freshness_hours", "section_tokens", "hints", "onboarding",
     }
     assert set(result.keys()) == expected_keys
@@ -733,7 +734,7 @@ async def test_primer_section_tokens_in_response(pool):
     result = await build_primer(pool, budget_tokens=1800)
 
     assert "section_tokens" in result
-    expected_sections = {"grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions"}
+    expected_sections = {"grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions", "entities"}
     assert set(result["section_tokens"].keys()) == expected_sections
 
 
