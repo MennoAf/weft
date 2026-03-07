@@ -410,9 +410,9 @@ async def weft_prime(
     """Session primer: assemble structured context for session startup.
     If project_id is omitted, auto-detects from the client's working directory.
 
-    query: optional intent/topic string to bias which decisions, issues, and
-    recent work are surfaced. When provided, those sections use semantic
-    similarity to rank more relevant memories higher."""
+    query: optional intent/topic string to bias which behaviors, decisions,
+    issues, and recent work are surfaced. When provided, those sections use
+    semantic similarity to rank more relevant items higher."""
     try:
         from weft.primer import build_primer
 
@@ -443,6 +443,7 @@ async def weft_prime(
         return {
             "grounding": None,
             "rules": [],
+            "behaviors": [],
             "handoff": [{"content": content, "type": "fallback"}] if content else [],
             "recent_work": [],
             "issues": {"count": 0, "items": []},
