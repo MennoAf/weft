@@ -208,7 +208,7 @@ async def test_restore_roundtrip(pool):
     assert data["memory_count"] == 3
 
     # Wipe the database
-    await pool.execute("TRUNCATE memory_relationships, memories")
+    await pool.execute("TRUNCATE episode_memories, memory_relationships, episodes, memories CASCADE")
 
     # Verify it's empty
     count = await pool.fetchval("SELECT COUNT(*) FROM memories")
@@ -247,7 +247,7 @@ async def test_restore_preserves_embeddings(pool):
     """Verify embeddings survive the roundtrip."""
     await _seed_test_data(pool)
     data = await backup_all(pool)
-    await pool.execute("TRUNCATE memory_relationships, memories")
+    await pool.execute("TRUNCATE episode_memories, memory_relationships, episodes, memories CASCADE")
 
     await restore_all(pool, data)
 
@@ -282,7 +282,7 @@ async def test_restore_dry_run(pool):
     """Dry run should report what would happen without modifying the DB."""
     await _seed_test_data(pool)
     data = await backup_all(pool)
-    await pool.execute("TRUNCATE memory_relationships, memories")
+    await pool.execute("TRUNCATE episode_memories, memory_relationships, episodes, memories CASCADE")
 
     report = await restore_all(pool, data, dry_run=True)
     assert report["memories_restored"] == 3
@@ -325,7 +325,7 @@ async def test_backup_restore_json_serialization(pool):
     assert report["valid"] is True
 
     # Restore from deserialized data
-    await pool.execute("TRUNCATE memory_relationships, memories")
+    await pool.execute("TRUNCATE episode_memories, memory_relationships, episodes, memories CASCADE")
     result = await restore_all(pool, restored_data)
     assert result["memories_restored"] == 3
     assert result["errors"] == []
@@ -341,7 +341,7 @@ async def test_restore_without_embeddings(pool):
     for m in data["memories"]:
         m["embedding"] = None
 
-    await pool.execute("TRUNCATE memory_relationships, memories")
+    await pool.execute("TRUNCATE episode_memories, memory_relationships, episodes, memories CASCADE")
     report = await restore_all(pool, data)
     assert report["memories_restored"] == 3
     assert report["errors"] == []
