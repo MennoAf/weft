@@ -23,6 +23,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "python-frontmatter>=1.1.0",
     "python-dateutil>=2.9.0",
+    "slack-sdk>=3.30.0",
 ]
 
 [project.scripts]

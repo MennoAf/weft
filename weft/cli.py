@@ -542,6 +542,56 @@ def obsidian_sync(vault_path: str, hash_store_path: str | None, dry_run: bool):
 
 
 @cli.group()
+def slack():
+    """Slack channel sync commands."""
+    pass
+
+
+@slack.command(name="sync")
+@click.option("--token", "bot_token", envvar="SLACK_BOT_TOKEN", required=True, help="Slack bot token (or set SLACK_BOT_TOKEN)")
+@click.option("--limit", "limit_per_channel", default=200, help="Max messages per channel")
+@click.option("--state-file", "state_path", default=None, type=click.Path(), help="Path to sync state JSON file")
+def slack_sync(bot_token: str, limit_per_channel: int, state_path: str | None):
+    """Sync Slack channel history into Weft memories."""
+    from weft.slack.hash_store import SlackSyncState
+    from weft.slack.sync import sync_slack_sdk
+
+    async def _sync():
+        import asyncpg
+
+        from weft.embeddings import get_provider
+
+        cfg = load_config()
+        pool = await asyncpg.create_pool(cfg.database.url, min_size=1, max_size=2)
+        provider = get_provider(cfg.embedding.provider, model_name=cfg.embedding.model)
+
+        ss = None
+        if state_path:
+            ss = SlackSyncState(Path(state_path))
+
+        result = await sync_slack_sdk(
+            pool,
+            bot_token,
+            provider,
+            sync_state=ss,
+            limit_per_channel=limit_per_channel,
+        )
+        await pool.close()
+        return result
+
+    result = asyncio.run(_sync())
+    click.echo("\nSlack sync complete")
+    click.echo(f"  Channels synced: {result.channels_synced}")
+    click.echo(f"  Messages found: {result.messages_found}")
+    click.echo(f"  Messages synced: {result.messages_synced}")
+    click.echo(f"  Messages skipped (unchanged): {result.messages_skipped}")
+    click.echo(f"  Messages updated: {result.messages_updated}")
+    click.echo(f"  Messages errored: {result.messages_errored}")
+    click.echo(f"  Memories created: {result.memories_created}")
+    click.echo(f"  Memories archived: {result.memories_archived}")
+
+
+@cli.group()
 def config():
     """View and modify Weft configuration."""
     pass

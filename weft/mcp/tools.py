@@ -757,3 +757,119 @@ async def weft_up_next(
         return await up_next(app.pool, days=days, include_no_date=include_no_date)
     except _DB_ERRORS as e:
         return _db_error_response("weft_up_next", e)
+
+
+@mcp.tool()
+async def weft_slack_sync(
+    ctx: Context,
+    channel_ids: list[str] | None = None,
+    channel_names: list[str] | None = None,
+    limit_per_channel: int = 50,
+    bot_token: str | None = None,
+) -> dict:
+    """Sync Slack channel history into Weft memories.
+
+    Two modes:
+    1. With bot_token: uses slack_sdk directly (for CLI/cron).
+    2. Without bot_token: caller must pre-fetch messages using Slack MCP
+       tools and pass via channel_ids. This tool fetches what it can
+       and stores the results.
+
+    If bot_token is provided, syncs all non-excluded channels automatically.
+    Otherwise, provide channel_ids or channel_names to target specific channels.
+    """
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+
+        if bot_token:
+            # SDK mode — fully automated
+            from weft.slack.sync import sync_slack_sdk
+
+            result = await sync_slack_sdk(
+                app.pool,
+                bot_token,
+                app.embedding_provider,
+                limit_per_channel=limit_per_channel,
+            )
+            return {
+                "mode": "sdk",
+                "channels_synced": result.channels_synced,
+                "messages_found": result.messages_found,
+                "messages_synced": result.messages_synced,
+                "messages_skipped": result.messages_skipped,
+                "messages_updated": result.messages_updated,
+                "memories_created": result.memories_created,
+                "memories_archived": result.memories_archived,
+            }
+        else:
+            # Return instructions for MCP-based sync workflow
+            channel_ids = _coerce_list(channel_ids)
+            channel_names = _coerce_list(channel_names)
+            return {
+                "mode": "mcp_assisted",
+                "instructions": (
+                    "To sync Slack channels without a bot token, use the Slack MCP "
+                    "tools to read channel history, then call weft_slack_ingest with "
+                    "the fetched messages. Steps:\n"
+                    "1. slack_search_channels to find channel IDs\n"
+                    "2. slack_read_channel for each channel\n"
+                    "3. slack_read_thread for threaded messages\n"
+                    "4. weft_slack_ingest with the collected data"
+                ),
+                "channel_ids": channel_ids,
+                "channel_names": channel_names,
+            }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_slack_sync", e)
+
+
+@mcp.tool()
+async def weft_slack_ingest(
+    ctx: Context,
+    channel_id: str,
+    channel_name: str,
+    messages: list[dict],
+    threads: dict | None = None,
+    user_names: dict | None = None,
+) -> dict:
+    """Ingest pre-fetched Slack messages into Weft memories.
+
+    Use this after reading channel history via Slack MCP tools.
+    Pass raw message objects from slack_read_channel and thread
+    replies from slack_read_thread.
+
+    Args:
+        channel_id: The Slack channel ID (e.g. C0A8VD15M5X)
+        channel_name: The channel name (e.g. 'general')
+        messages: List of raw Slack message dicts from channel history
+        threads: Optional {thread_ts: [reply_dicts]} for threaded messages
+        user_names: Optional {user_id: display_name} mapping
+    """
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.slack.sync import ChannelInfo, sync_slack_messages
+
+        channel = ChannelInfo(id=channel_id, name=channel_name)
+        messages = _coerce_list(messages) or []
+        if isinstance(threads, str):
+            threads = json.loads(threads)
+
+        result = await sync_slack_messages(
+            app.pool,
+            channels=[channel],
+            messages_by_channel={channel_id: messages},
+            embedding_provider=app.embedding_provider,
+            threads_by_channel={channel_id: threads} if threads else None,
+            user_names=user_names,
+        )
+        return {
+            "channel": channel_name,
+            "messages_found": result.messages_found,
+            "messages_synced": result.messages_synced,
+            "messages_skipped": result.messages_skipped,
+            "memories_created": result.memories_created,
+        }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_slack_ingest", e)
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_slack_ingest", e)
