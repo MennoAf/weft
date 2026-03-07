@@ -18,15 +18,28 @@ from weft.behaviors import (
     store_behavior,
     touch_behavior,
 )
+from weft.episodes import (
+    add_memory_to_episode,
+    close_episode,
+    create_episode,
+    get_episode,
+    get_episode_memories,
+    list_episodes,
+    timeline_query,
+)
 from weft.models import (
     BehaviorCreate,
     BehaviorScope,
+    EpisodeCreate,
+    EpisodeStatus,
+    EpisodeWithMemories,
     MemoryCreate,
     MemorySource,
     MemoryStatus,
     MemoryType,
     RelationType,
 )
+from weft.tokens import estimate_tokens
 from weft.store import (
     add_relationship,
     delete_memory,
@@ -655,7 +668,38 @@ async def weft_handoff(
         memory = await store_memory(app.pool, create, embedding=embedding)
         await app.cache.set_memory(memory)
         await app.cache.invalidate_stats()
-        return {"id": memory.id, "project_id": resolved_project, "stored": True}
+
+        # Auto-episode: close open episodes and create a new one
+        closed_ids = []
+        new_episode_id = None
+        try:
+            open_eps = await list_episodes(
+                app.pool, project_id=resolved_project,
+                status=EpisodeStatus.open, limit=10,
+            )
+            for ep in open_eps:
+                closed = await close_episode(app.pool, ep.id, summary=summary)
+                if closed:
+                    await add_memory_to_episode(app.pool, ep.id, memory.id)
+                    closed_ids.append(ep.id)
+
+            new_ep = await create_episode(app.pool, EpisodeCreate(
+                title=f"Session after: {summary[:80]}",
+                project_id=resolved_project,
+                agent_id=agent_id,
+            ))
+            await add_memory_to_episode(app.pool, new_ep.id, memory.id)
+            new_episode_id = new_ep.id
+        except Exception as exc:
+            logger.warning("Auto-episode failed during handoff: %s", exc)
+
+        return {
+            "id": memory.id,
+            "project_id": resolved_project,
+            "stored": True,
+            "episodes_closed": closed_ids,
+            "episode_opened": new_episode_id,
+        }
     except _DB_ERRORS as e:
         return _db_error_response("weft_handoff", e)
 
@@ -1006,3 +1050,152 @@ async def weft_behavior_list(
         return _input_error_response("weft_behavior_list", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_behavior_list", e)
+
+
+# --- Episode tools ---
+
+
+@mcp.tool()
+async def weft_episode_create(
+    ctx: Context,
+    title: str,
+    summary: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Create a new open episode — a time-bounded grouping of memories.
+
+    Episodes track causal sequences of decisions, actions, and learnings.
+    If project_id is omitted, auto-detects from the client's working directory."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        ep = await create_episode(app.pool, EpisodeCreate(
+            title=title,
+            summary=summary,
+            project_id=resolved_project,
+            agent_id=agent_id,
+        ))
+        return ep.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_episode_create", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_episode_create", e)
+
+
+@mcp.tool()
+async def weft_episode_add(
+    ctx: Context,
+    episode_id: str,
+    memory_id: str,
+    position: int | None = None,
+) -> dict:
+    """Link a memory to an episode. Idempotent — linking the same memory twice is a no-op.
+
+    If position is omitted, auto-assigns the next sequential position."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        created = await add_memory_to_episode(
+            app.pool, episode_id, memory_id, position=position,
+        )
+        return {
+            "episode_id": episode_id,
+            "memory_id": memory_id,
+            "created": created,
+        }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_episode_add", e)
+
+
+@mcp.tool()
+async def weft_episode_timeline(
+    ctx: Context,
+    start: str | None = None,
+    end: str | None = None,
+    hours: int = 24,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Find episodes overlapping a time range.
+
+    If start/end are omitted, defaults to the last N hours (default 24).
+    start/end accept ISO timestamps or relative values like '2d', '1w'.
+    If project_id is omitted, auto-detects from the client's working directory.
+    Open episodes (no end time) match any range after their start."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        now = datetime.now(timezone.utc)
+        if end is not None:
+            parsed_end = _parse_review_after(end) or now
+        else:
+            parsed_end = now
+        if start is not None:
+            parsed_start = _parse_review_after(start) or (now - timedelta(hours=hours))
+        else:
+            parsed_start = now - timedelta(hours=hours)
+
+        results = await timeline_query(
+            app.pool,
+            start=parsed_start,
+            end=parsed_end,
+            project_id=resolved_project,
+            agent_id=agent_id,
+            limit=limit,
+        )
+        return {
+            "start": parsed_start.isoformat(),
+            "end": parsed_end.isoformat(),
+            "count": len(results),
+            "episodes": [ep.to_dict() for ep in results],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_episode_timeline", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_episode_timeline", e)
+
+
+@mcp.tool()
+async def weft_episode_context(
+    ctx: Context,
+    episode_id: str,
+    budget_tokens: int = 2000,
+    include_episode: bool = True,
+) -> dict:
+    """Load an episode and its memories within a token budget.
+
+    Returns the episode metadata and as many linked memories as fit
+    within budget_tokens. Memories are returned in position order."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        ep = await get_episode(app.pool, episode_id)
+        if ep is None:
+            return {"error": f"Episode {episode_id} not found"}
+
+        memories = await get_episode_memories(app.pool, episode_id)
+
+        # Pack memories within token budget
+        budget = budget_tokens
+        if include_episode:
+            ep_text = f"{ep.title}: {ep.summary or ''}"
+            budget -= estimate_tokens(ep_text)
+
+        packed = []
+        total_tokens = 0
+        for mem in memories:
+            cost = estimate_tokens(mem.content)
+            if total_tokens + cost > budget:
+                break
+            packed.append(mem)
+            total_tokens += cost
+
+        ewm = EpisodeWithMemories(episode=ep, memories=packed)
+        result = ewm.to_dict()
+        result["tokens_used"] = total_tokens
+        result["tokens_budget"] = budget_tokens
+        result["memories_truncated"] = len(memories) - len(packed)
+        return result
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_episode_context", e)

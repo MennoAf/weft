@@ -168,6 +168,55 @@ class BehaviorMatch(BaseModel):
         return d
 
 
+class EpisodeStatus(str, Enum):
+    open = "open"
+    closed = "closed"
+
+
+class Episode(BaseModel):
+    """A time-bounded grouping of memories into a causal sequence."""
+
+    id: str = Field(default_factory=_weft_id)
+    title: str
+    summary: str | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
+    started_at: datetime = Field(default_factory=_now)
+    ended_at: datetime | None = None
+    status: EpisodeStatus = EpisodeStatus.open
+    token_count: int = 0
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        d = self.model_dump(mode="json")
+        d["status"] = self.status.value
+        return d
+
+
+class EpisodeCreate(BaseModel):
+    """Input model for creating an episode."""
+
+    title: str
+    summary: str | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
+
+
+class EpisodeWithMemories(BaseModel):
+    """An episode with its linked memories in order."""
+
+    episode: Episode
+    memories: list[Memory] = Field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self.episode.to_dict()
+        d["memories"] = [m.to_dict() for m in self.memories]
+        d["memory_count"] = len(self.memories)
+        return d
+
+
 class MemoryRecall(BaseModel):
     """Result from a recall/search operation."""
 
