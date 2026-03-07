@@ -8,10 +8,11 @@ fetched when the conversation makes them relevant.
 Sections (in priority order, each with a per-section token cap):
 0. Grounding — one-line project description (50 tokens)
 1. Rules — pinned memories only (100 tokens)
-2. Handoff — most recent session handoff (800 tokens, truncated if needed)
-3. Recent work — milestone breadcrumbs from last 72h (150 tokens)
-4. Issues — active issues (200 tokens)
-5. Decisions — closed/vetoed decisions (250 tokens)
+2. Behaviors — persistent agent rules and strategies (150 tokens)
+3. Handoff — most recent session handoff (800 tokens, truncated if needed)
+4. Recent work — milestone breadcrumbs from last 72h (150 tokens)
+5. Issues — active issues (200 tokens)
+6. Decisions — closed/vetoed decisions (250 tokens)
 """
 
 from __future__ import annotations
@@ -22,18 +23,21 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.behaviors import list_behaviors, match_behaviors
 from weft.models import Memory, MemoryRecall, MemoryStatus, MemoryType
 from weft.store import list_memories, search_by_vector
 from weft.tokens import estimate_tokens, truncate_to_token_budget
 
 logger = logging.getLogger(__name__)
 
-# Hard cap on decisions shown in primer.
+# Hard caps on items shown in primer sections.
 _MAX_DECISIONS = 5
+_MAX_BEHAVIORS = 5
 
 # Per-section token caps.
 _CAP_GROUNDING = 50
 _CAP_RULES = 100
+_CAP_BEHAVIORS = 150
 _CAP_HANDOFF = 800
 _CAP_RECENT_WORK = 150
 _CAP_ISSUES = 200
@@ -59,6 +63,10 @@ _SECTION_HINTS: dict[str, str] = {
     "rules": (
         "No rules stored. Use weft_remember(type='rule', pinned=True) "
         "for persistent instructions (e.g., 'always use pytest')."
+    ),
+    "behaviors": (
+        "No behavioral rules stored. Use weft_behavior_add(trigger_pattern, action) "
+        "to teach agents persistent strategies (e.g., 'when writing tests' → 'use pytest')."
     ),
     "handoff": (
         "No session handoff found. Use weft_handoff(summary=...) "
@@ -129,23 +137,24 @@ async def build_primer(
     *,
     project_id: str | None = None,
     agent_id: str | None = None,
-    budget_tokens: int = 1800,
+    budget_tokens: int = 2400,
     query_vec: list[float] | None = None,
 ) -> dict:
     """Assemble a tight session briefing from memories.
 
-    Six sections, filled in priority order within the token budget,
+    Seven sections, filled in priority order within the token budget,
     each with its own per-section cap:
     0. grounding — one-line project description (orientation)
     1. rules — pinned memories (behavioral overrides, always first)
-    2. handoff — last session handoff (continuity)
-    3. recent_work — milestone breadcrumbs (what was recently done)
-    4. issues — active issues (what's broken)
-    5. decisions — closed decisions (what NOT to suggest)
+    2. behaviors — persistent agent rules/strategies (how to act)
+    3. handoff — last session handoff (continuity)
+    4. recent_work — milestone breadcrumbs (what was recently done)
+    5. issues — active issues (what's broken)
+    6. decisions — closed decisions (what NOT to suggest)
 
-    When *query_vec* is provided, sections 3-5 (recent_work, issues,
-    decisions) use vector similarity search with blended re-ranking
-    instead of plain metadata queries.  Sections 0-2 are never biased.
+    When *query_vec* is provided, sections 2, 4-6 (behaviors, recent_work,
+    issues, decisions) use vector similarity search with blended re-ranking
+    instead of plain metadata queries.  Sections 0-1, 3 are never biased.
 
     Everything else (architecture, patterns, reference facts, preferences)
     lives in recall — fetched on demand when the conversation needs it.
@@ -181,6 +190,18 @@ async def build_primer(
     pinned_coro = list_memories(
         pool, status=MemoryStatus.active, pinned=True, limit=100, **_scope,
     )
+
+    # Behaviors: vector match when biased, otherwise top by priority.
+    if biased:
+        behaviors_coro = match_behaviors(
+            pool, query_vec, limit=_MAX_BEHAVIORS * 2,
+            threshold=_QUERY_SIMILARITY_THRESHOLD, **_scope,
+        )
+    else:
+        behaviors_coro = list_behaviors(
+            pool, enabled=True, limit=_MAX_BEHAVIORS * 2, **_scope,
+        )
+
     handoff_coro = list_memories(
         pool, memory_type=MemoryType.handoff, status=MemoryStatus.active,
         limit=5, **_scope,
@@ -220,12 +241,13 @@ async def build_primer(
     (
         grounding_raw,
         pinned_raw,
+        behaviors_raw,
         handoff_raw,
         biased_milestones_raw,
         biased_issues_raw,
         biased_decisions_raw,
     ) = await asyncio.gather(
-        grounding_coro, pinned_coro, handoff_coro,
+        grounding_coro, pinned_coro, behaviors_coro, handoff_coro,
         milestone_coro, issues_coro, decisions_coro,
     )
 
@@ -281,7 +303,40 @@ async def build_primer(
             excluded += 1
     section_tokens["rules"] = section_used
 
-    # Section 2: Last session handoff (most recent only)
+    # Section 2: Behaviors (persistent agent rules/strategies)
+    # behaviors_raw is either list[BehaviorMatch] (biased) or list[Behavior] (unbiased)
+    from weft.models import BehaviorMatch as _BM
+
+    behaviors_section: list[dict] = []
+    section_used = 0
+    for item in behaviors_raw:
+        if len(behaviors_section) >= _MAX_BEHAVIORS:
+            break
+        if isinstance(item, _BM):
+            beh = item.behavior
+        else:
+            beh = item
+        cost = beh.token_count or estimate_tokens(beh.trigger_pattern + " " + beh.action)
+        if (
+            used_tokens + cost <= budget_tokens
+            and section_used + cost <= _CAP_BEHAVIORS
+        ):
+            entry = {
+                "trigger": beh.trigger_pattern,
+                "action": beh.action,
+                "confidence": beh.confidence,
+                "priority": beh.priority,
+                "scope": beh.scope.value if hasattr(beh.scope, "value") else beh.scope,
+                "id": beh.id,
+            }
+            behaviors_section.append(entry)
+            used_tokens += cost
+            section_used += cost
+        else:
+            excluded += 1
+    section_tokens["behaviors"] = section_used
+
+    # Section 3: Last session handoff (most recent only)
     handoff_candidates = [m for m in handoff_raw if m.id not in seen_ids]
     if not handoff_candidates:
         # Fallback: check for topic "session-handoff" (handles pre-typed-handoff memories).
@@ -454,6 +509,8 @@ async def build_primer(
     hints: dict[str, str] = {}
     if not rules_section:
         hints["rules"] = _SECTION_HINTS["rules"]
+    if not behaviors_section:
+        hints["behaviors"] = _SECTION_HINTS["behaviors"]
     if not handoff_section:
         hints["handoff"] = _SECTION_HINTS["handoff"]
     if not recent_work_section:
@@ -465,7 +522,7 @@ async def build_primer(
 
     # Cold-start: no handoff AND very few memories → show onboarding guide.
     total_items = (
-        len(rules_section) + len(handoff_section)
+        len(rules_section) + len(behaviors_section) + len(handoff_section)
         + len(recent_work_section) + len(issue_items)
         + len(decisions_section)
     )
@@ -478,6 +535,7 @@ async def build_primer(
     return {
         "grounding": grounding_line,
         "rules": rules_section,
+        "behaviors": behaviors_section,
         "handoff": handoff_section,
         "recent_work": recent_work_section,
         "issues": {"count": len(issue_items), "items": issue_items},

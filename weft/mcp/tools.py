@@ -11,7 +11,22 @@ import asyncpg
 from fastmcp import Context
 
 from weft.mcp.server import AppContext, mcp
-from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType, RelationType
+from weft.behaviors import (
+    delete_behavior,
+    list_behaviors as list_behaviors_store,
+    match_behaviors,
+    store_behavior,
+    touch_behavior,
+)
+from weft.models import (
+    BehaviorCreate,
+    BehaviorScope,
+    MemoryCreate,
+    MemorySource,
+    MemoryStatus,
+    MemoryType,
+    RelationType,
+)
 from weft.store import (
     add_relationship,
     delete_memory,
@@ -389,7 +404,7 @@ async def weft_prime(
     ctx: Context,
     project_id: str | None = None,
     agent_id: str | None = None,
-    budget_tokens: int = 1800,
+    budget_tokens: int = 2400,
     query: str | None = None,
 ) -> dict:
     """Session primer: assemble structured context for session startup.
@@ -873,3 +888,120 @@ async def weft_slack_ingest(
         return _db_error_response("weft_slack_ingest", e)
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_slack_ingest", e)
+
+
+# --- Behavior tools ---
+
+
+@mcp.tool()
+async def weft_behavior_add(
+    ctx: Context,
+    trigger_pattern: str,
+    action: str,
+    confidence: float = 0.7,
+    scope: str = "global",
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    priority: int = 0,
+) -> dict:
+    """Store a persistent behavioral rule for agents.
+    If project_id is omitted, auto-detects from the client's working directory.
+
+    trigger_pattern: describes WHEN this behavior should activate (embedded for semantic matching).
+    action: describes WHAT the agent should do when the trigger matches.
+    scope: 'global' (all projects), 'project' (specific project), or 'agent' (specific agent).
+    priority: higher values override lower-priority behaviors (default 0)."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        create = BehaviorCreate(
+            trigger_pattern=trigger_pattern,
+            action=action,
+            confidence=confidence,
+            scope=BehaviorScope(scope),
+            project_id=resolved_project,
+            agent_id=agent_id,
+            priority=priority,
+        )
+        embedding = await app.embedding.embed(trigger_pattern)
+        behavior = await store_behavior(app.pool, create, embedding=embedding)
+        return behavior.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_behavior_add", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_behavior_add", e)
+
+
+@mcp.tool()
+async def weft_behavior_match(
+    ctx: Context,
+    situation: str,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 5,
+    threshold: float = 0.3,
+) -> dict:
+    """Find behavioral rules that match a described situation.
+    If project_id is omitted, auto-detects from the client's working directory.
+
+    situation: free-text description of the current context or task.
+    Returns behaviors ranked by relevance (similarity * confidence * priority)."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        embedding = await app.embedding.embed(situation)
+        results = await match_behaviors(
+            app.pool,
+            embedding,
+            limit=limit,
+            threshold=threshold,
+            project_id=resolved_project,
+            agent_id=agent_id,
+        )
+        # Touch matched behaviors to track usage
+        for r in results:
+            await touch_behavior(app.pool, r.behavior.id)
+        return {
+            "situation": situation,
+            "count": len(results),
+            "behaviors": [r.to_dict() for r in results],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_behavior_match", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_behavior_match", e)
+
+
+@mcp.tool()
+async def weft_behavior_list(
+    ctx: Context,
+    scope: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    enabled: bool | None = True,
+    limit: int = 50,
+) -> dict:
+    """List stored behavioral rules with optional filters.
+    If project_id is omitted, auto-detects from the client's working directory.
+
+    Returns behaviors ordered by priority (highest first)."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        behavior_scope = BehaviorScope(scope) if scope else None
+        results = await list_behaviors_store(
+            app.pool,
+            scope=behavior_scope,
+            project_id=resolved_project,
+            agent_id=agent_id,
+            enabled=enabled,
+            limit=limit,
+        )
+        return {
+            "count": len(results),
+            "behaviors": [b.to_dict() for b in results],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_behavior_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_behavior_list", e)
