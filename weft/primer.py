@@ -13,6 +13,7 @@ Sections (in priority order, each with a per-section token cap):
 4. Recent work — milestone breadcrumbs from last 72h (150 tokens)
 5. Issues — active issues (200 tokens)
 6. Decisions — closed/vetoed decisions (250 tokens)
+7. Entities — known people, projects, tools for this project (150 tokens)
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from weft.behaviors import list_behaviors, match_behaviors
+from weft.entities import list_entities
 from weft.models import Memory, MemoryRecall, MemoryStatus, MemoryType
 from weft.store import list_memories, search_by_vector
 from weft.tokens import estimate_tokens, truncate_to_token_budget
@@ -33,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Hard caps on items shown in primer sections.
 _MAX_DECISIONS = 5
 _MAX_BEHAVIORS = 5
+_MAX_ENTITIES = 10
 
 # Per-section token caps.
 _CAP_GROUNDING = 50
@@ -42,6 +45,7 @@ _CAP_HANDOFF = 800
 _CAP_RECENT_WORK = 150
 _CAP_ISSUES = 200
 _CAP_DECISIONS = 250
+_CAP_ENTITIES = 150
 
 # Max milestone items in recent_work section.
 _MAX_RECENT_WORK = 3
@@ -238,6 +242,8 @@ async def build_primer(
             limit=20, **_scope,
         )
 
+    entities_coro = list_entities(pool, limit=_MAX_ENTITIES, **_scope)
+
     (
         grounding_raw,
         pinned_raw,
@@ -246,9 +252,10 @@ async def build_primer(
         biased_milestones_raw,
         biased_issues_raw,
         biased_decisions_raw,
+        entities_raw,
     ) = await asyncio.gather(
         grounding_coro, pinned_coro, behaviors_coro, handoff_coro,
-        milestone_coro, issues_coro, decisions_coro,
+        milestone_coro, issues_coro, decisions_coro, entities_coro,
     )
 
     # Unwrap MemoryRecall → (Memory, similarity) when biased, else (Memory, None).
@@ -499,6 +506,31 @@ async def build_primer(
             excluded += 1
     section_tokens["decisions"] = section_used
 
+    # Section 7: Entities (known people, projects, tools)
+    entities_section: list[dict] = []
+    section_used = 0
+    for ent in entities_raw:
+        if len(entities_section) >= _MAX_ENTITIES:
+            break
+        ent_text = ent.name + (f": {ent.description}" if ent.description else "")
+        cost = estimate_tokens(ent_text)
+        if (
+            used_tokens + cost <= budget_tokens
+            and section_used + cost <= _CAP_ENTITIES
+        ):
+            entities_section.append({
+                "name": ent.name,
+                "type": ent.entity_type.value,
+                "description": ent.description,
+                "mention_count": ent.mention_count,
+                "id": ent.id,
+            })
+            used_tokens += cost
+            section_used += cost
+        else:
+            excluded += 1
+    section_tokens["entities"] = section_used
+
     # Collect all included memories for freshness calculation
     all_included: list[dict] = (
         rules_section + handoff_section + issue_items + decisions_section
@@ -524,7 +556,7 @@ async def build_primer(
     total_items = (
         len(rules_section) + len(behaviors_section) + len(handoff_section)
         + len(recent_work_section) + len(issue_items)
-        + len(decisions_section)
+        + len(decisions_section) + len(entities_section)
     )
     onboarding: str | None = (
         _ONBOARDING_TEXT
@@ -540,6 +572,7 @@ async def build_primer(
         "recent_work": recent_work_section,
         "issues": {"count": len(issue_items), "items": issue_items},
         "decisions": decisions_section,
+        "entities": entities_section,
         "total_tokens": used_tokens,
         "budget_tokens": budget_tokens,
         "budget_remaining": budget_tokens - used_tokens,

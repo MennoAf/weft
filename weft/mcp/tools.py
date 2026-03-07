@@ -18,6 +18,13 @@ from weft.behaviors import (
     store_behavior,
     touch_behavior,
 )
+from weft.entities import (
+    get_entity,
+    get_entity_memories,
+    link_mention,
+    search_entities,
+    store_entity,
+)
 from weft.episodes import (
     add_memory_to_episode,
     close_episode,
@@ -30,6 +37,8 @@ from weft.episodes import (
 from weft.models import (
     BehaviorCreate,
     BehaviorScope,
+    EntityCreate,
+    EntityType,
     EpisodeCreate,
     EpisodeStatus,
     EpisodeWithMemories,
@@ -225,10 +234,20 @@ async def weft_recall(
             project_id=project_id,
             agent_id=agent_id,
         )
-        # Touch accessed memories
+        # Touch accessed memories and enrich with entities
+        enriched = []
         for r in results:
             await touch_memory(app.pool, r.memory.id)
-        return {"query": query, "count": len(results), "results": [r.to_dict() for r in results]}
+            d = r.to_dict()
+            try:
+                from weft.entities import get_memory_entities
+                ents = await get_memory_entities(app.pool, r.memory.id)
+                if ents:
+                    d["entities"] = [{"name": e.name, "type": e.entity_type.value} for e in ents]
+            except Exception:
+                pass
+            enriched.append(d)
+        return {"query": query, "count": len(results), "results": enriched}
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_recall", e)
     except _DB_ERRORS as e:
@@ -461,6 +480,7 @@ async def weft_prime(
             "recent_work": [],
             "issues": {"count": 0, "items": []},
             "decisions": [],
+            "entities": [],
             "total_tokens": 0,
             "budget_tokens": budget_tokens,
             "budget_remaining": budget_tokens,
@@ -1199,3 +1219,145 @@ async def weft_episode_context(
         return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_episode_context", e)
+
+
+# --- Entity tools ---
+
+
+@mcp.tool()
+async def weft_entity_create(
+    ctx: Context,
+    name: str,
+    entity_type: str = "concept",
+    aliases: list[str] | None = None,
+    description: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Create a first-class entity (person, project, company, tool, concept).
+
+    Entities group memories about a subject. Link memories via weft_entity_link.
+    If project_id is omitted, auto-detects from the client's working directory.
+
+    entity_type: 'person', 'project', 'company', 'tool', or 'concept'."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        aliases = _coerce_list(aliases) or []
+        embed_text = name + (f": {description}" if description else "")
+        embedding = await app.embedding.embed(embed_text)
+        ent = await store_entity(app.pool, EntityCreate(
+            name=name,
+            entity_type=EntityType(entity_type),
+            aliases=aliases,
+            description=description,
+            project_id=resolved_project,
+            agent_id=agent_id,
+        ), embedding=embedding)
+        return ent.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_entity_create", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_entity_create", e)
+
+
+@mcp.tool()
+async def weft_entity_link(
+    ctx: Context,
+    entity_id: str,
+    memory_id: str,
+) -> dict:
+    """Link a memory to an entity. Idempotent — linking twice is a no-op.
+
+    Increments the entity's mention count on first link."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        created = await link_mention(app.pool, entity_id, memory_id)
+        return {
+            "entity_id": entity_id,
+            "memory_id": memory_id,
+            "created": created,
+        }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_entity_link", e)
+
+
+@mcp.tool()
+async def weft_entity_search(
+    ctx: Context,
+    query: str,
+    entity_type: str | None = None,
+    project_id: str | None = None,
+    limit: int = 10,
+    threshold: float = 0.3,
+) -> dict:
+    """Search for entities by semantic similarity.
+
+    If project_id is omitted, auto-detects from the client's working directory.
+    Returns entities ranked by relevance to the query."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        embedding = await app.embedding.embed(query)
+        etype = EntityType(entity_type) if entity_type else None
+        results = await search_entities(
+            app.pool, embedding,
+            entity_type=etype,
+            project_id=resolved_project,
+            limit=limit,
+            threshold=threshold,
+        )
+        return {
+            "query": query,
+            "count": len(results),
+            "entities": [
+                {**ent.to_dict(), "similarity": round(sim, 4)}
+                for ent, sim in results
+            ],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_entity_search", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_entity_search", e)
+
+
+@mcp.tool()
+async def weft_entity_context(
+    ctx: Context,
+    entity_id: str,
+    budget_tokens: int = 2000,
+) -> dict:
+    """Load an entity and its linked memories within a token budget.
+
+    Returns the entity metadata and as many linked memories as fit
+    within budget_tokens. Memories ordered by mention time (newest first)."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        ent = await get_entity(app.pool, entity_id)
+        if ent is None:
+            return {"error": f"Entity {entity_id} not found"}
+
+        memories = await get_entity_memories(app.pool, entity_id)
+
+        # Reserve tokens for entity metadata
+        ent_text = f"{ent.name}: {ent.description or ''}"
+        budget = budget_tokens - estimate_tokens(ent_text)
+
+        packed = []
+        total_tokens = 0
+        for mem in memories:
+            cost = estimate_tokens(mem.content)
+            if total_tokens + cost > budget:
+                break
+            packed.append(mem)
+            total_tokens += cost
+
+        result = ent.to_dict()
+        result["memories"] = [m.to_dict() for m in packed]
+        result["memory_count"] = len(packed)
+        result["tokens_used"] = total_tokens
+        result["tokens_budget"] = budget_tokens
+        result["memories_truncated"] = len(memories) - len(packed)
+        return result
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_entity_context", e)

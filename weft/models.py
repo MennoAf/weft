@@ -168,6 +168,47 @@ class BehaviorMatch(BaseModel):
         return d
 
 
+class EntityType(str, Enum):
+    person = "person"
+    project = "project"
+    company = "company"
+    tool = "tool"
+    concept = "concept"
+
+
+class Entity(BaseModel):
+    """A first-class entity (person, project, company, tool, concept)."""
+
+    id: str = Field(default_factory=_weft_id)
+    name: str
+    entity_type: EntityType = EntityType.concept
+    aliases: list[str] = Field(default_factory=list)
+    description: str | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
+    status: str = "active"
+    mention_count: int = 0
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        d = self.model_dump(mode="json")
+        d["entity_type"] = self.entity_type.value
+        return d
+
+
+class EntityCreate(BaseModel):
+    """Input model for creating an entity."""
+
+    name: str
+    entity_type: EntityType = EntityType.concept
+    aliases: list[str] = Field(default_factory=list)
+    description: str | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
+
+
 class EpisodeStatus(str, Enum):
     open = "open"
     closed = "closed"
