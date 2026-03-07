@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType
+from weft.behaviors import store_behavior
+from weft.models import BehaviorCreate, MemoryCreate, MemorySource, MemoryStatus, MemoryType
 from weft.primer import (
     _CAP_DECISIONS,
     _CAP_GROUNDING,
@@ -48,11 +49,12 @@ async def test_primer_empty_db(pool):
     assert result["excluded"] == 0
     assert result["freshness_hours"] is None
     assert result["section_tokens"] == {
-        "grounding": 0, "rules": 0, "handoff": 0,
+        "grounding": 0, "rules": 0, "behaviors": 0, "handoff": 0,
         "recent_work": 0, "issues": 0, "decisions": 0,
     }
+    assert result["behaviors"] == []
     # Empty DB = all hints + onboarding
-    assert set(result["hints"].keys()) == {"rules", "handoff", "recent_work", "issues", "decisions"}
+    assert set(result["hints"].keys()) == {"rules", "behaviors", "handoff", "recent_work", "issues", "decisions"}
     assert result["onboarding"] is not None
 
 
@@ -61,7 +63,7 @@ async def test_primer_return_structure(pool):
     result = await build_primer(pool, budget_tokens=1800)
 
     expected_keys = {
-        "grounding", "rules", "handoff", "recent_work", "issues", "decisions",
+        "grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions",
         "total_tokens", "budget_tokens", "budget_remaining", "excluded",
         "freshness_hours", "section_tokens", "hints", "onboarding",
     }
@@ -455,10 +457,10 @@ async def test_primer_project_scoping(pool):
     assert not any("orchestrator" in c for c in rule_contents)
 
 
-async def test_primer_default_budget_is_1800(pool):
-    """Default budget is 1800 tokens."""
+async def test_primer_default_budget_is_2400(pool):
+    """Default budget is 2400 tokens."""
     result = await build_primer(pool)
-    assert result["budget_tokens"] == 1800
+    assert result["budget_tokens"] == 2400
 
 
 # --- Grounding section ---
@@ -731,7 +733,7 @@ async def test_primer_section_tokens_in_response(pool):
     result = await build_primer(pool, budget_tokens=1800)
 
     assert "section_tokens" in result
-    expected_sections = {"grounding", "rules", "handoff", "recent_work", "issues", "decisions"}
+    expected_sections = {"grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions"}
     assert set(result["section_tokens"].keys()) == expected_sections
 
 
@@ -1025,6 +1027,9 @@ async def test_primer_no_hints_when_all_populated(pool):
         type=MemoryType.preference, content="A rule",
         confidence=1.0, pinned=True,
     ))
+    await store_behavior(pool, BehaviorCreate(
+        trigger_pattern="when testing", action="use pytest",
+    ))
     await store_memory(pool, MemoryCreate(
         type=MemoryType.handoff,
         content="## Session Handoff\n\n**Summary:** Some work",
@@ -1127,7 +1132,7 @@ async def test_primer_cold_start_has_both_hints_and_onboarding(pool):
     result = await build_primer(pool, budget_tokens=1800)
 
     assert result["onboarding"] is not None
-    assert len(result["hints"]) == 5  # all five sections empty
+    assert len(result["hints"]) == 6  # all six sections empty
 
 
 async def test_primer_established_agent_has_neither(pool):
@@ -1135,6 +1140,9 @@ async def test_primer_established_agent_has_neither(pool):
     await store_memory(pool, MemoryCreate(
         type=MemoryType.preference, content="A rule",
         confidence=1.0, pinned=True,
+    ))
+    await store_behavior(pool, BehaviorCreate(
+        trigger_pattern="when testing", action="use pytest",
     ))
     await store_memory(pool, MemoryCreate(
         type=MemoryType.handoff,

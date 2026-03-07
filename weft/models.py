@@ -110,6 +110,64 @@ class MemoryCreate(BaseModel):
     review_after: datetime | None = None
 
 
+class BehaviorScope(str, Enum):
+    global_ = "global"
+    project = "project"
+    agent = "agent"
+
+
+class Behavior(BaseModel):
+    """A persistent behavioral rule — tells agents how to act, not what happened."""
+
+    id: str = Field(default_factory=_weft_id)
+    trigger_pattern: str
+    action: str
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    scope: BehaviorScope = BehaviorScope.global_
+    project_id: str | None = None
+    agent_id: str | None = None
+    user_id: str | None = None
+    priority: int = Field(default=0, description="Higher = stronger override")
+    enabled: bool = True
+    access_count: int = 0
+    token_count: int = 0
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+    status: str = "active"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        d = self.model_dump(mode="json")
+        d["scope"] = self.scope.value
+        return d
+
+
+class BehaviorCreate(BaseModel):
+    """Input model for creating a behavior."""
+
+    trigger_pattern: str
+    action: str
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    scope: BehaviorScope = BehaviorScope.global_
+    project_id: str | None = None
+    agent_id: str | None = None
+    user_id: str | None = None
+    priority: int = 0
+    enabled: bool = True
+
+
+class BehaviorMatch(BaseModel):
+    """Result from a behavior search operation."""
+
+    behavior: Behavior
+    similarity: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self.behavior.to_dict()
+        d["similarity"] = round(self.similarity, 4)
+        return d
+
+
 class MemoryRecall(BaseModel):
     """Result from a recall/search operation."""
 
