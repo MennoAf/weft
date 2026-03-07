@@ -804,7 +804,7 @@ async def weft_slack_sync(
             result = await sync_slack_sdk(
                 app.pool,
                 bot_token,
-                app.embedding_provider,
+                app.embedding,
                 limit_per_channel=limit_per_channel,
             )
             return {
@@ -874,7 +874,7 @@ async def weft_slack_ingest(
             app.pool,
             channels=[channel],
             messages_by_channel={channel_id: messages},
-            embedding_provider=app.embedding_provider,
+            embedding_provider=app.embedding,
             threads_by_channel={channel_id: threads} if threads else None,
             user_names=user_names,
         )
