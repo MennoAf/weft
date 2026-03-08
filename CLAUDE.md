@@ -11,6 +11,11 @@ This project uses Loom for orchestration. When Loom MCP tools are available, **a
 - To break down an existing epic: `loom_decompose(epic_id="loom-xxx")`
 - Review the proposed graph with the user, then call with `confirm=False` to write it
 
+### Session startup (Loom):
+1. `loom_inbox(agent_id="weft")` → check for messages from other agents
+2. `loom_status` → see project state
+3. `loom_ready` → see claimable tasks
+
 ### Task workflow:
 - `loom_ready` → see available tasks
 - `loom_claim` → claim a task before starting work
@@ -18,6 +23,15 @@ This project uses Loom for orchestration. When Loom MCP tools are available, **a
 - `loom_done` → mark complete with output
 - `loom_fail` → mark failed with reason
 - `loom_status` → project overview or task detail
+
+### Daemon / orchestration:
+The Loom daemon runs `loom_orchestrate_tick` on a loop — it expires stale claims, retries failed tasks, escalates stuck work, and auto-closes completed epics. It does NOT require "workflow definitions" — it works with any project that has tasks.
+
+To run the daemon: `uv run python -m loom daemon start` (in a separate terminal)
+Or use `/loop 5m loom_orchestrate_tick` in Claude Code for manual looping.
+
+If sub-epics need decomposition before tasks can be claimed:
+- `loom_decompose(epic_id="<epic-id>", force_leaf=True)` → review → `loom_confirm(proposal_id="...")`
 
 ### Recovery after context compaction:
 If your context was compacted and you lost track of in-progress work:
