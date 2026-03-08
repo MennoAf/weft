@@ -362,7 +362,12 @@ def ingest(path: str | None, project_id: str, depth: str):
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        client = AsyncAnthropic()
+        # Use WEFT_API_KEY / config.api_key if ANTHROPIC_API_KEY isn't set
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or config.api_key
+        if not api_key:
+            click.echo("Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.", err=True)
+            sys.exit(1)
+        client = AsyncAnthropic(api_key=api_key)
         provider = get_provider(config.embedding.provider, model_name=config.embedding.model)
         result = await run_ingest(
             target, project_id, depth=depth, pool=pool, client=client,
