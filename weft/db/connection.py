@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import ssl
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 import asyncpg
 
+from weft.auth import current_user_id
 from weft.config import WeftConfig
+
+logger = logging.getLogger(__name__)
 
 
 async def create_pool(config: WeftConfig) -> asyncpg.Pool:
@@ -31,3 +37,55 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
         ctx.verify_mode = ssl.CERT_NONE
         kwargs["ssl"] = ctx
     return await asyncpg.create_pool(dsn, **kwargs)
+
+
+async def set_user_context(conn: asyncpg.Connection) -> None:
+    """Set ``app.user_id`` on a connection from the current contextvar.
+
+    Issues ``SET LOCAL app.user_id = ...`` when a user_id is present.
+    SET LOCAL is transaction-scoped, so the setting is automatically
+    cleared when the transaction ends — no pool leakage.
+
+    When user_id is None (unauthenticated), no SET LOCAL is issued,
+    meaning ``current_setting('app.user_id', true)`` returns NULL.
+    RLS policies then show only global (user_id IS NULL) rows.
+    """
+    user_id = current_user_id.get()
+    if user_id is not None:
+        # SET is a utility command — doesn't support $1 parameterization.
+        # Sanitize by rejecting non-UUID-safe characters.
+        if not user_id.replace("-", "").isalnum():
+            logger.warning("Rejecting suspicious user_id: %r", user_id)
+            return
+        await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
+
+
+@asynccontextmanager
+async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
+    """Acquire a connection with user identity context.
+
+    Wraps ``pool.acquire()`` and issues ``SET LOCAL app.user_id``
+    inside a transaction when a user is authenticated. This is the
+    preferred way to get a connection for user-scoped operations.
+
+    Usage::
+
+        async with acquire(pool) as conn:
+            rows = await conn.fetch("SELECT * FROM memories")
+            # RLS automatically filters by the current user
+    """
+    async with pool.acquire() as conn:
+        user_id = current_user_id.get()
+        if user_id is not None:
+            # SET LOCAL requires a transaction context.
+            async with conn.transaction():
+                # SET is a utility command — doesn't support $1 parameterization.
+                # Sanitize by rejecting non-UUID-safe characters.
+                if not user_id.replace("-", "").isalnum():
+                    logger.warning("Rejecting suspicious user_id: %r", user_id)
+                    yield conn
+                else:
+                    await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
+                    yield conn
+        else:
+            yield conn
