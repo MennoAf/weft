@@ -15,7 +15,10 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 # Load .env file (no-op if missing). Must happen before any os.environ reads.
+# Search order: cwd .env (default), then ~/.weft/.env as fallback.
+# This ensures the CLI works when run from outside the Weft source tree.
 load_dotenv()
+load_dotenv(Path.home() / ".weft" / ".env")
 
 logger = logging.getLogger(__name__)
 
