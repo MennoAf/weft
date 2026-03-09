@@ -11,9 +11,12 @@ from pathlib import Path
 import asyncpg
 import redis.asyncio as aioredis
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from weft.auth import current_user_id, extract_user_id_from_header
 from weft.cache import Cache, NullCache
 from weft.config import WeftConfig, load_config
 from weft.db.connection import create_pool
@@ -34,6 +37,28 @@ _FALLBACK_REFRESH_INTERVAL = 1800  # 30 minutes
 # Startup retry config
 _STARTUP_MAX_RETRIES = 5
 _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
+
+
+class UserIdentityMiddleware(BaseHTTPMiddleware):
+    """Extract user identity from Authorization header and set contextvar.
+
+    Graceful degradation: missing, invalid, or expired tokens are silently
+    ignored — the request proceeds with current_user_id=None (global-only
+    visibility under RLS).
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        auth_header = request.headers.get("authorization")
+        user_id = extract_user_id_from_header(auth_header)
+        token = current_user_id.set(user_id)
+        try:
+            return await call_next(request)
+        finally:
+            current_user_id.reset(token)
+
+
+# Starlette Middleware descriptor for passing to FastMCP http_app / run()
+user_identity_middleware = Middleware(UserIdentityMiddleware)
 
 
 @dataclass
