@@ -23,10 +23,6 @@ RUN uv sync --no-dev --frozen
 COPY weft/ weft/
 RUN uv sync --no-dev --frozen
 
-# Pre-download the fastembed model so cold starts don't download it at runtime
-ENV FASTEMBED_CACHE_PATH=/app/.cache/fastembed
-RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
-
 # Make everything accessible to appuser
 RUN chown -R appuser:appuser /app
 
