@@ -616,8 +616,10 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
         from weft.embeddings import get_provider
         from weft.store import _vec_to_pgvector
 
+        from weft.db.connection import create_pool
+
         config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        pool = await create_pool(config)
         provider = get_provider(
             config.embedding.provider,
             model_name=config.embedding.model,
