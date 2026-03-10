@@ -67,9 +67,9 @@ class RedisConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    provider: str = "fastembed"
-    model: str = "BAAI/bge-small-en-v1.5"
-    dimensions: int = 384
+    provider: str = "openai"
+    model: str = "text-embedding-3-small"
+    dimensions: int = 768
     batch_size: int = 64
 
 

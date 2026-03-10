@@ -6,6 +6,9 @@ from __future__ import annotations
 class GoogleEmbeddingProvider:
     """Google text-embedding-004 provider. Not yet implemented."""
 
+    def __init__(self, **_kwargs):
+        pass
+
     @property
     def dimensions(self) -> int:
         return 768

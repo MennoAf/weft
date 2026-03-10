@@ -165,7 +165,7 @@ def test_unpinned_memory_decays_normally():
 
 async def test_dedup_keeps_pinned_memory(pool):
     """When a pinned and unpinned memory are duplicates, the pinned one is kept."""
-    embedding = [0.1] * 384  # same embedding = near-duplicate
+    embedding = [0.1] * 768  # same embedding = near-duplicate
 
     pinned = await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,

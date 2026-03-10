@@ -6,6 +6,9 @@ from __future__ import annotations
 class AnthropicEmbeddingProvider:
     """Anthropic embedding provider. Anthropic has not released an embedding API yet."""
 
+    def __init__(self, **_kwargs):
+        pass
+
     @property
     def dimensions(self) -> int:
         return 0

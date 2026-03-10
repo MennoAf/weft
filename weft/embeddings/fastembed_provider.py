@@ -11,7 +11,7 @@ from fastembed import TextEmbedding
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
-DEFAULT_DIMENSIONS = 384
+DEFAULT_DIMENSIONS = 768
 
 
 @lru_cache(maxsize=1)
@@ -22,11 +22,18 @@ def _get_model(model_name: str) -> TextEmbedding:
 
 
 class FastEmbedProvider:
-    """Local embedding provider using FastEmbed (ONNX runtime)."""
+    """Local embedding provider using FastEmbed (ONNX runtime).
 
-    def __init__(self, model_name: str = DEFAULT_MODEL):
+    If ``dimensions`` exceeds the model's native output (384), vectors are
+    zero-padded so they fit wider pgvector columns without a schema change.
+    Cosine similarity is unaffected because the extra zeros contribute nothing
+    to dot-product or magnitude.
+    """
+
+    def __init__(self, model_name: str = DEFAULT_MODEL, dimensions: int = DEFAULT_DIMENSIONS, **_kwargs):
         self._model_name = model_name
-        self._dimensions = DEFAULT_DIMENSIONS
+        self._native_dimensions = DEFAULT_DIMENSIONS
+        self._dimensions = max(dimensions, DEFAULT_DIMENSIONS)
 
     @property
     def dimensions(self) -> int:
@@ -50,12 +57,18 @@ class FastEmbedProvider:
         result = await loop.run_in_executor(None, self._embed_batch_sync, texts)
         return result
 
+    def _pad(self, vec: list[float]) -> list[float]:
+        """Zero-pad vector if target dimensions exceed native model output."""
+        if self._dimensions > len(vec):
+            return vec + [0.0] * (self._dimensions - len(vec))
+        return vec
+
     def _embed_sync(self, text: str) -> list[float]:
         model = _get_model(self._model_name)
         embeddings = list(model.embed([text]))
-        return embeddings[0].tolist()
+        return self._pad(embeddings[0].tolist())
 
     def _embed_batch_sync(self, texts: list[str]) -> list[list[float]]:
         model = _get_model(self._model_name)
         embeddings = list(model.embed(texts))
-        return [e.tolist() for e in embeddings]
+        return [self._pad(e.tolist()) for e in embeddings]

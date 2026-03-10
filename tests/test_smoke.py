@@ -42,13 +42,13 @@ async def test_hnsw_index_exists(pool):
 
 
 async def test_embedding_column_has_dimensions(pool):
-    """Verify embedding column was typed to vector(384) by migration 7."""
+    """Verify embedding column was typed to vector(768) by migration 7."""
     udt = await pool.fetchval(
         "SELECT format_type(atttypid, atttypmod) "
         "FROM pg_attribute "
         "WHERE attrelid = 'memories'::regclass AND attname = 'embedding'"
     )
-    assert udt == "vector(384)"
+    assert udt == "vector(768)"
 
 
 async def test_redis_connects(redis_conn):
@@ -64,7 +64,7 @@ async def test_embedding_provider():
 
     provider = get_provider("fastembed")
     vec = await provider.embed("test embedding")
-    assert len(vec) == 384
+    assert len(vec) == 768
     assert all(isinstance(v, float) for v in vec)
 
 

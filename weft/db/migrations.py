@@ -245,6 +245,40 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_entities_user ON entities (user_id);
         """,
     ),
+    (
+        14,
+        "Widen embedding columns from vector(384) to vector(768) for OpenAI provider",
+        """
+        -- Drop existing HNSW indexes (cannot ALTER type with index present)
+        DROP INDEX IF EXISTS idx_memories_embedding_hnsw;
+        DROP INDEX IF EXISTS idx_behaviors_embedding_hnsw;
+        DROP INDEX IF EXISTS idx_entities_embedding_hnsw;
+
+        -- Null out existing embeddings (384-dim vectors can't be cast to 768-dim;
+        -- run `weft re-embed` after this migration to regenerate)
+        UPDATE memories SET embedding = NULL WHERE embedding IS NOT NULL;
+        UPDATE behaviors SET embedding = NULL WHERE embedding IS NOT NULL;
+        UPDATE entities SET embedding = NULL WHERE embedding IS NOT NULL;
+
+        -- Widen columns: 384 → 768 (Matryoshka-truncated OpenAI embeddings)
+        ALTER TABLE memories ALTER COLUMN embedding TYPE vector(768);
+        ALTER TABLE behaviors ALTER COLUMN embedding TYPE vector(768);
+        ALTER TABLE entities ALTER COLUMN embedding TYPE vector(768);
+
+        -- Recreate HNSW indexes at new dimension
+        CREATE INDEX idx_memories_embedding_hnsw
+        ON memories USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+        CREATE INDEX idx_behaviors_embedding_hnsw
+        ON behaviors USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+
+        CREATE INDEX idx_entities_embedding_hnsw
+        ON entities USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64);
+        """,
+    ),
 ]
 
 
@@ -280,23 +314,27 @@ async def run_migrations(pool: asyncpg.Pool) -> list[int]:
         # Acquire session-level advisory lock (blocks until available)
         await lock_conn.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_ID)
         try:
-            # Run all migrations (idempotent DDL — CREATE IF NOT EXISTS, etc.)
+            existing = await _get_applied_versions(pool)
+
             for version, description, sql in sorted(MIGRATIONS, key=lambda m: m[0]):
+                if version in existing:
+                    continue
                 async with lock_conn.transaction():
                     await lock_conn.execute(sql)
+                applied.append(version)
+                logger.info("Applied migration %d: %s", version, description)
 
-            # Track which ones were newly applied
-            existing = await _get_applied_versions(pool)
-            for version, description, _ in MIGRATIONS:
-                if version not in existing:
-                    await lock_conn.execute(
-                        "INSERT INTO schema_migrations (version, description) "
-                        "VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                        version,
-                        description,
-                    )
-                    applied.append(version)
-                    logger.info("Applied migration %d: %s", version, description)
+            # Record newly applied migrations (schema_migrations table
+            # exists after migration 3 runs)
+            if applied:
+                for version, description, _ in MIGRATIONS:
+                    if version not in existing:
+                        await lock_conn.execute(
+                            "INSERT INTO schema_migrations (version, description) "
+                            "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                            version,
+                            description,
+                        )
         finally:
             await lock_conn.execute(
                 "SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_ID,

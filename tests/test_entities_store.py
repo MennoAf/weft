@@ -63,7 +63,7 @@ async def test_store_entity_full(pool):
 
 
 async def test_store_entity_with_embedding(pool):
-    embedding = [0.1] * 384
+    embedding = [0.1] * 768
     ent = await store_entity(
         pool,
         EntityCreate(name="Embedded entity"),
@@ -161,7 +161,7 @@ async def test_list_entities_excludes_archived(pool):
 
 
 async def test_search_entities_by_vector(pool):
-    embedding = [0.5] * 384
+    embedding = [0.5] * 768
     ent = await store_entity(
         pool,
         EntityCreate(name="Searchable"),
@@ -176,7 +176,7 @@ async def test_search_entities_by_vector(pool):
 
 
 async def test_search_entities_respects_threshold(pool):
-    embedding = [0.5] * 384
+    embedding = [0.5] * 768
     await store_entity(
         pool,
         EntityCreate(name="Far away"),
@@ -184,13 +184,13 @@ async def test_search_entities_respects_threshold(pool):
     )
 
     # Search with very different vector and high threshold
-    opposite = [-0.5] * 384
+    opposite = [-0.5] * 768
     results = await search_entities(pool, opposite, threshold=0.99)
     assert len(results) == 0
 
 
 async def test_search_entities_filters_by_type(pool):
-    embedding = [0.5] * 384
+    embedding = [0.5] * 768
     await store_entity(pool, EntityCreate(name="Alice", entity_type=EntityType.person), embedding=embedding)
     await store_entity(pool, EntityCreate(name="Redis", entity_type=EntityType.tool), embedding=embedding)
 
@@ -203,7 +203,7 @@ async def test_search_entities_filters_by_type(pool):
 
 
 async def test_search_entities_project_scoped(pool):
-    embedding = [0.5] * 384
+    embedding = [0.5] * 768
     await store_entity(pool, EntityCreate(name="global"), embedding=embedding)
     await store_entity(pool, EntityCreate(name="proj-1", project_id="proj-1"), embedding=embedding)
     await store_entity(pool, EntityCreate(name="proj-2", project_id="proj-2"), embedding=embedding)

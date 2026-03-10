@@ -19,13 +19,13 @@ from weft.models import BehaviorCreate, BehaviorScope
 # --- Helpers ---
 
 def _fake_embedding(seed: float = 0.1) -> list[float]:
-    """Generate a deterministic 384-dim embedding for testing."""
+    """Generate a deterministic 768-dim embedding for testing."""
     import math
-    return [math.sin(seed * (i + 1)) for i in range(384)]
+    return [math.sin(seed * (i + 1)) for i in range(768)]
 
 
 def _normalized_embedding(seed: float = 0.1) -> list[float]:
-    """Generate a normalized 384-dim embedding (unit vector)."""
+    """Generate a normalized 768-dim embedding (unit vector)."""
     raw = _fake_embedding(seed)
     norm = sum(x * x for x in raw) ** 0.5
     return [x / norm for x in raw]
