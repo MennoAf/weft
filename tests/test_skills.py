@@ -153,7 +153,7 @@ class TestSearchAll:
     async def test_semantic_search(self):
         pool = _mock_pool()
         embedding_provider = AsyncMock()
-        embedding_provider.embed = AsyncMock(return_value=[0.1] * 384)
+        embedding_provider.embed = AsyncMock(return_value=[0.1] * 768)
 
         # Mock search_by_vector via the pool — but search_all calls search_by_vector directly
         # We need to patch it

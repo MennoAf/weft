@@ -254,7 +254,7 @@ def import_cmd(file: str, dry_run: bool, project_id: str | None):
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        provider = get_provider(config.embedding.provider)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
         report = await import_memories(
             pool,
             provider,
@@ -294,7 +294,7 @@ def recall(query: str, limit: int, topic: str | None):
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        provider = get_provider(config.embedding.provider)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
         embedding = await provider.embed(query)
         results = await search_by_vector(pool, embedding, limit=limit, topic=topic)
         await pool.close()
@@ -330,7 +330,7 @@ def seed(force: bool):
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        provider = get_provider(config.embedding.provider, model_name=config.embedding.model)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
         count = await seed_memories(pool, provider, force=force)
         await pool.close()
         return count
@@ -368,7 +368,7 @@ def ingest(path: str | None, project_id: str, depth: str):
             click.echo("Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.", err=True)
             sys.exit(1)
         client = AsyncAnthropic(api_key=api_key)
-        provider = get_provider(config.embedding.provider, model_name=config.embedding.model)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
         result = await run_ingest(
             target, project_id, depth=depth, pool=pool, client=client,
             embedding_provider=provider,
@@ -526,7 +526,7 @@ def obsidian_sync(vault_path: str, hash_store_path: str | None, dry_run: bool):
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        provider = get_provider(config.embedding.provider, model_name=config.embedding.model)
+        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
 
         hs = None
         if hash_store_path:
@@ -568,7 +568,7 @@ def slack_sync(bot_token: str, limit_per_channel: int, state_path: str | None):
 
         cfg = load_config()
         pool = await asyncpg.create_pool(cfg.database.url, min_size=1, max_size=2)
-        provider = get_provider(cfg.embedding.provider, model_name=cfg.embedding.model)
+        provider = get_provider(cfg.embedding.provider, model_name=cfg.embedding.model, dimensions=cfg.embedding.dimensions)
 
         ss = None
         if state_path:
@@ -594,6 +594,115 @@ def slack_sync(bot_token: str, limit_per_channel: int, state_path: str | None):
     click.echo(f"  Messages errored: {result.messages_errored}")
     click.echo(f"  Memories created: {result.memories_created}")
     click.echo(f"  Memories archived: {result.memories_archived}")
+
+
+@cli.command(name="re-embed")
+@click.option("--batch-size", default=64, help="Number of memories to embed per batch")
+@click.option("--dry-run", is_flag=True, help="Show counts without re-embedding")
+@click.option("--table", "tables", multiple=True, default=("memories", "behaviors", "entities"),
+              help="Tables to re-embed (default: all three)")
+def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
+    """Re-embed all memories/behaviors/entities with the current embedding provider.
+
+    Use after switching embedding providers or dimensions.
+    """
+    from rich.console import Console
+
+    console = Console()
+
+    async def _re_embed():
+        import asyncpg
+
+        from weft.embeddings import get_provider
+        from weft.store import _vec_to_pgvector
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        provider = get_provider(
+            config.embedding.provider,
+            model_name=config.embedding.model,
+            dimensions=config.embedding.dimensions,
+        )
+
+        # Run migrations first to ensure schema is up to date
+        from weft.db.migrations import run_migrations
+        applied = await run_migrations(pool)
+        if applied:
+            console.print(f"Applied {len(applied)} pending migration(s)")
+
+        console.print(f"Provider: [bold]{provider.provider_name}[/bold] ({provider.dimensions} dims)")
+
+        # Table → content column mapping
+        table_content_col = {
+            "memories": "content",
+            "behaviors": "action",
+            "entities": "description",
+        }
+
+        total_updated = 0
+
+        for table in tables:
+            content_col = table_content_col.get(table)
+            if not content_col:
+                console.print(f"[red]Unknown table: {table}[/red]")
+                continue
+
+            # Check table exists
+            exists = await pool.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+                table,
+            )
+            if not exists:
+                console.print(f"\n[dim]{table}[/dim]: table does not exist, skipping")
+                continue
+
+            # Count rows
+            count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+            console.print(f"\n[bold]{table}[/bold]: {count} rows")
+
+            if count == 0 or dry_run:
+                continue
+
+            # Fetch all rows with content
+            if table == "entities":
+                # entities may have NULL description
+                rows = await pool.fetch(
+                    f"SELECT id, {content_col} FROM {table} WHERE {content_col} IS NOT NULL"  # noqa: S608
+                )
+            else:
+                rows = await pool.fetch(f"SELECT id, {content_col} FROM {table}")  # noqa: S608
+
+            # Process in batches
+            updated = 0
+            for i in range(0, len(rows), batch_size):
+                batch = rows[i:i + batch_size]
+                texts = [r[content_col] for r in batch]
+                ids = [r["id"] for r in batch]
+
+                embeddings = await provider.embed_batch(texts)
+
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        for row_id, emb in zip(ids, embeddings):
+                            await conn.execute(
+                                f"UPDATE {table} SET embedding = $1 WHERE id = $2",  # noqa: S608
+                                _vec_to_pgvector(emb),
+                                row_id,
+                            )
+                updated += len(batch)
+                console.print(f"  {updated}/{len(rows)} rows updated", end="\r")
+
+            console.print(f"  {updated}/{len(rows)} rows updated")
+            total_updated += updated
+
+        await pool.close()
+        return total_updated
+
+    total = asyncio.run(_re_embed())
+    if dry_run:
+        console.print("\n[dim](dry run — no changes made)[/dim]")
+    else:
+        console.print(f"\n[bold]Re-embedded {total} rows.[/bold]")
 
 
 @cli.group()

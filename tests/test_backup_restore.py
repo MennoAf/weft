@@ -15,7 +15,7 @@ from weft.models import RelationType
 # --- Helpers ---
 
 
-async def _seed_test_data(pool, embedding_dim=384):
+async def _seed_test_data(pool, embedding_dim=768):
     """Insert a few memories with embeddings and relationships for testing."""
     embed_a = [0.1] * embedding_dim
     embed_b = [0.2] * embedding_dim
@@ -92,7 +92,7 @@ async def test_backup_includes_embeddings(pool):
 
     for m in data["memories"]:
         assert m["embedding"] is not None
-        assert len(m["embedding"]) == 384
+        assert len(m["embedding"]) == 768
         assert all(isinstance(v, float) for v in m["embedding"])
 
 

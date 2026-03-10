@@ -210,7 +210,11 @@ async def lifespan(server: FastMCP):
         cache = NullCache()
 
     # Embedding provider
-    embedding = get_provider(config.embedding.provider, model_name=config.embedding.model)
+    embedding = get_provider(
+        config.embedding.provider,
+        model_name=config.embedding.model,
+        dimensions=config.embedding.dimensions,
+    )
 
     # Seed memories on fresh installs (best-effort, never blocks startup)
     try:
