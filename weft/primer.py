@@ -26,9 +26,13 @@ import asyncpg
 
 from weft.behaviors import list_behaviors, match_behaviors
 from weft.entities import list_entities
-from weft.models import Memory, MemoryRecall, MemoryStatus, MemoryType
+from weft.models import Memory, MemoryRecall, MemorySource, MemoryStatus, MemoryType
 from weft.store import list_memories, search_by_vector
 from weft.tokens import estimate_tokens, truncate_to_token_budget
+
+# Overhead tokens per memory dict entry (id, type, timestamps, metadata fields).
+# Accounts for JSON keys and values that to_dict() adds beyond content.
+_DICT_OVERHEAD_TOKENS = 40
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +112,20 @@ Tips for getting started:
 - Pin important rules with pinned=True — they always appear in the primer
 - Call weft_handoff before ending sessions — the next primer surfaces it prominently
 - After completing tasks, call weft_learn to capture gotchas and patterns automatically"""
+
+
+def _is_unscoped_ingest(mem: Memory, project_id: str | None) -> bool:
+    """True when *mem* is a global ingested record that shouldn't appear in a
+    project-scoped primer.  Intentional globals (conversation, agent, seed,
+    etc.) are allowed through; only bulk-ingested data (source=ingest) with
+    no project_id is filtered out."""
+    if not project_id:
+        return False  # no project filter → everything is fine
+    if mem.project_id is not None:
+        return False  # memory belongs to a project → fine
+    return mem.source == MemorySource.ingest or (
+        isinstance(mem.source, str) and mem.source == "ingest"
+    )
 
 
 def _annotate_review_after(entry: dict, now: datetime) -> dict:
@@ -297,12 +315,21 @@ async def build_primer(
     rules_section: list[dict] = []
     section_used = 0
     for mem in pinned_raw:
-        cost = mem.token_count or estimate_tokens(mem.content)
+        cost = (mem.token_count or estimate_tokens(mem.content)) + _DICT_OVERHEAD_TOKENS
         if (
             used_tokens + cost <= budget_tokens
             and section_used + cost <= _CAP_RULES
         ):
-            rules_section.append(_annotate_review_after(mem.to_dict(), now))
+            entry = {
+                "id": mem.id,
+                "type": mem.type.value,
+                "content": mem.content,
+                "confidence": mem.confidence,
+                "pinned": mem.pinned,
+                "created_at": mem.created_at.isoformat() if mem.created_at else None,
+                "review_after": mem.review_after,
+            }
+            rules_section.append(_annotate_review_after(entry, now))
             seen_ids.add(mem.id)
             used_tokens += cost
             section_used += cost
@@ -364,17 +391,24 @@ async def build_primer(
     section_used = 0
     if handoff_candidates:
         mem = handoff_candidates[0]
-        cost = mem.token_count or estimate_tokens(mem.content)
+        # Always re-estimate from content — stored token_count may be stale.
+        cost = estimate_tokens(mem.content) + _DICT_OVERHEAD_TOKENS
         content = mem.content
         # Truncate oversized handoffs instead of dropping them.
         cap = min(_CAP_HANDOFF, budget_tokens - used_tokens)
         if cost > cap and cap > 0:
             content, cost = truncate_to_token_budget(content, cap)
+            cost += _DICT_OVERHEAD_TOKENS
         if used_tokens + cost <= budget_tokens and cap > 0:
-            entry = mem.to_dict()
-            entry["content"] = content
             age_hours = (now - mem.created_at).total_seconds() / 3600
-            entry["age_hours"] = round(age_hours, 1)
+            entry = {
+                "id": mem.id,
+                "type": mem.type.value,
+                "content": content,
+                "confidence": mem.confidence,
+                "created_at": mem.created_at.isoformat() if mem.created_at else None,
+                "age_hours": round(age_hours, 1),
+            }
             handoff_section.append(entry)
             seen_ids.add(mem.id)
             used_tokens += cost
@@ -385,9 +419,12 @@ async def build_primer(
 
     # Section 3: Recent work (milestones from last 72h)
     cutoff = now.timestamp() - (72 * 3600)
+    # Same ingest filter as issues/decisions.
     milestone_candidates = [
         (m, sim) for m, sim in milestone_raw
-        if m.id not in seen_ids and m.created_at.timestamp() > cutoff
+        if m.id not in seen_ids
+        and m.created_at.timestamp() > cutoff
+        and not _is_unscoped_ingest(m, project_id)
     ]
     if biased:
         # Blend similarity with recency (newer = higher score).
@@ -434,7 +471,15 @@ async def build_primer(
     section_tokens["recent_work"] = section_used
 
     # Section 4: Active issues
-    issue_candidates = [(m, sim) for m, sim in issues_raw if m.id not in seen_ids]
+    # Filter out unscoped ingested memories when project-scoped — prevents
+    # bulk-ingested data (e.g. Slack messages with project_id=None) from
+    # flooding the primer.  Intentional globals (conversation, agent, etc.)
+    # still surface everywhere.
+    issue_candidates = [
+        (m, sim) for m, sim in issues_raw
+        if m.id not in seen_ids
+        and not _is_unscoped_ingest(m, project_id)
+    ]
     if biased:
         issue_candidates.sort(
             key=lambda pair: (
@@ -452,12 +497,18 @@ async def build_primer(
     issue_items: list[dict] = []
     section_used = 0
     for mem, _sim in issue_candidates:
-        cost = mem.token_count or estimate_tokens(mem.content)
+        cost = (mem.token_count or estimate_tokens(mem.content)) + _DICT_OVERHEAD_TOKENS
         if (
             used_tokens + cost <= budget_tokens
             and section_used + cost <= _CAP_ISSUES
         ):
-            issue_items.append(mem.to_dict())
+            issue_items.append({
+                "id": mem.id,
+                "type": mem.type.value,
+                "content": mem.content,
+                "confidence": mem.confidence,
+                "created_at": mem.created_at.isoformat() if mem.created_at else None,
+            })
             seen_ids.add(mem.id)
             used_tokens += cost
             section_used += cost
@@ -466,7 +517,12 @@ async def build_primer(
     section_tokens["issues"] = section_used
 
     # Section 5: Closed decisions (what NOT to suggest)
-    decision_candidates = [(m, sim) for m, sim in decisions_raw if m.id not in seen_ids]
+    # Same ingest filter as issues.
+    decision_candidates = [
+        (m, sim) for m, sim in decisions_raw
+        if m.id not in seen_ids
+        and not _is_unscoped_ingest(m, project_id)
+    ]
     if biased:
         decision_candidates.sort(
             key=lambda pair: (
@@ -493,12 +549,21 @@ async def build_primer(
         if len(decisions_section) >= _MAX_DECISIONS:
             excluded += len(decision_candidates) - i
             break
-        cost = mem.token_count or estimate_tokens(mem.content)
+        cost = (mem.token_count or estimate_tokens(mem.content)) + _DICT_OVERHEAD_TOKENS
         if (
             used_tokens + cost <= budget_tokens
             and section_used + cost <= _CAP_DECISIONS
         ):
-            decisions_section.append(_annotate_review_after(mem.to_dict(), now))
+            entry = {
+                "id": mem.id,
+                "type": mem.type.value,
+                "content": mem.content,
+                "confidence": mem.confidence,
+                "project_id": mem.project_id,
+                "created_at": mem.created_at.isoformat() if mem.created_at else None,
+                "review_after": mem.review_after,
+            }
+            decisions_section.append(_annotate_review_after(entry, now))
             seen_ids.add(mem.id)
             used_tokens += cost
             section_used += cost

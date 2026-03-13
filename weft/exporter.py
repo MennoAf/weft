@@ -18,6 +18,7 @@ async def export_memories(
     memory_type: str | None = None,
     topic: str | None = None,
     status: str = "active",
+    project_id: str | None = None,
 ) -> str:
     """Export memories as markdown or JSON string.
 
@@ -27,6 +28,7 @@ async def export_memories(
         memory_type: Filter by memory type (e.g. "fact", "preference").
         topic: Filter by topic tag.
         status: Filter by status (default "active").
+        project_id: Scope export to a specific project (includes global memories).
 
     Returns:
         Formatted string of exported memories.
@@ -45,6 +47,7 @@ async def export_memories(
             status=status_enum,
             memory_type=type_enum,
             topic=topic,
+            project_id=project_id,
             limit=batch_size,
             offset=offset,
         )
