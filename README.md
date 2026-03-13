@@ -179,7 +179,7 @@ See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all to
 ├──────────────────────────────────────────────────┤
 │              Infrastructure                      │
 │  PostgreSQL + pgvector  │  Redis cache           │
-│  fastembed (local, no API key needed)            │
+│  Embeddings: fastembed (local) or OpenAI         │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -234,11 +234,12 @@ Session primer: assemble structured context for session startup. Returns priorit
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `project_id` | `str` | `null` | Scope to project |
-| `budget_tokens` | `int` | `4000` | Token budget |
-| `recent_days` | `int` | `7` | How far back to look for recent work |
+| `project_id` | `str` | `null` | Scope to project (auto-detected from working directory if omitted) |
+| `agent_id` | `str` | `null` | Scope to agent |
+| `budget_tokens` | `int` | `2400` | Token budget for the assembled context |
+| `query` | `str` | `null` | Optional intent string to bias which items are surfaced |
 
-Returns `{ pinned, handoff, preferences, recent_work, ideas, relevant, total_tokens, budget_tokens, budget_remaining }`.
+Returns `{ grounding, rules, behaviors, handoff, recent_work, issues, decisions, entities, total_tokens, budget_tokens, budget_remaining, excluded, freshness_hours, section_tokens, hints }`.
 
 ### weft_revise
 
@@ -480,15 +481,15 @@ Both services include health checks. Data is persisted in named Docker volumes (
 
 | Provider | Install | Notes |
 |----------|---------|-------|
-| `fastembed` | Included | Local inference, no API key needed. Default: `BAAI/bge-small-en-v1.5` (384d) |
-| `openai` | `pip install openai` | Requires `OPENAI_API_KEY` |
+| `fastembed` | Included | Local inference, no API key needed. Default: `BAAI/bge-small-en-v1.5` (384d). Best for getting started. |
+| `openai` | Included | Requires `OPENAI_API_KEY`. Default: `text-embedding-3-small` (768d). Recommended for production. |
 | `google` | `pip install google-generativeai` | Requires `GOOGLE_API_KEY` |
 
 ## Development
 
 ```bash
 uv sync                        # Install dependencies
-uv run pytest tests/ -v        # Run all tests (561 tests)
+uv run pytest tests/ -v        # Run all tests (835 tests)
 uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
