@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 from fastmcp import Context
 
+from weft.correlation import set_correlation_id
 from weft.mcp.server import AppContext, mcp
 from weft.behaviors import (
     delete_behavior,
@@ -176,6 +177,8 @@ async def weft_remember(
     durations like '30d', '2w', '3m'. Memories past their review_after date
     are flagged in the primer so the agent can confirm, revise, or archive them."""
     try:
+        cid = set_correlation_id()
+        logger.debug("weft_remember start [%s]", cid)
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
         create = MemoryCreate(
@@ -220,6 +223,8 @@ async def weft_recall(
 ) -> dict:
     """Retrieve memories by semantic query, topic filter, type filter, status filter, or combination."""
     try:
+        cid = set_correlation_id()
+        logger.debug("weft_recall start [%s] query=%r", cid, query[:50])
         app: AppContext = ctx.request_context.lifespan_context
         memory_type = MemoryType(type) if type else None
         memory_status = MemoryStatus(status) if status else MemoryStatus.active
@@ -288,6 +293,8 @@ async def weft_context(
 ) -> dict:
     """Budget-aware context loading: best memories for a situation within N tokens."""
     try:
+        cid = set_correlation_id()
+        logger.debug("weft_context start [%s] budget=%d", cid, budget_tokens)
         from weft.context import build_context
 
         app: AppContext = ctx.request_context.lifespan_context
@@ -387,6 +394,8 @@ async def weft_relate(
 async def weft_consolidate(ctx: Context, dry_run: bool = False) -> dict:
     """Run consolidation: decay stale memories, merge duplicates, flag contradictions."""
     try:
+        cid = set_correlation_id()
+        logger.debug("weft_consolidate start [%s] dry_run=%s", cid, dry_run)
         from weft.consolidation import consolidate
         app: AppContext = ctx.request_context.lifespan_context
         report = await consolidate(app.pool, dry_run=dry_run)
@@ -446,6 +455,8 @@ async def weft_prime(
     issues, and recent work are surfaced. When provided, those sections use
     semantic similarity to rank more relevant items higher."""
     try:
+        cid = set_correlation_id()
+        logger.debug("weft_prime start [%s] project=%s", cid, project_id)
         from weft.primer import build_primer
 
         app: AppContext = ctx.request_context.lifespan_context

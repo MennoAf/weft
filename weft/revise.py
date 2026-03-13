@@ -20,7 +20,7 @@ from weft.models import (
     RelationType,
     _weft_id,
 )
-from weft.store import _vec_to_pgvector, get_memory
+from weft.store import get_memory
 from weft.tokens import estimate_tokens
 
 _UNSET = object()
@@ -54,8 +54,6 @@ async def revise_memory(
     new_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(new_content)
-    embedding_str = _vec_to_pgvector(embedding) if embedding else None
-
     async with pool.acquire() as conn:
         async with conn.transaction():
             # 1. Insert new memory
@@ -69,7 +67,7 @@ async def revise_memory(
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $8, $8,
-                    0, $9, $10, $11, 'active', false,
+                    0, $9, $10, $11::vector, 'active', false,
                     $12
                 )
                 """,
@@ -83,7 +81,7 @@ async def revise_memory(
                 now,
                 old.project_id,
                 old.agent_id,
-                embedding_str,
+                embedding,
                 resolved_review,
             )
 

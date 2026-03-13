@@ -14,12 +14,12 @@ from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from weft.auth import current_user_id, extract_user_id_from_header
 from weft.cache import Cache, NullCache
 from weft.config import WeftConfig, load_config
-from weft.db.connection import create_pool
+from weft.db.connection import create_pool, register_pgvector_codec
 from weft.db.migrations import run_migrations
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
@@ -175,8 +175,15 @@ async def _write_fallback_snapshot(pool: asyncpg.Pool) -> None:
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     """Initialize database, Redis, and embedding provider."""
+    from weft.correlation import CorrelationFilter
+
     config = load_config()
-    logging.basicConfig(level=getattr(logging, config.log_level))
+    logging.basicConfig(
+        level=getattr(logging, config.log_level),
+        format="%(asctime)s %(levelname)s [%(correlation_id)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    logging.getLogger().addFilter(CorrelationFilter())
 
     # Database (with retry)
     pool = await _connect_with_retry(
@@ -184,6 +191,7 @@ async def lifespan(server: FastMCP):
         "Postgres",
     )
     await run_migrations(pool)
+    await register_pgvector_codec(pool)
 
     # Export fallback snapshot
     await _write_fallback_snapshot(pool)
@@ -199,7 +207,7 @@ async def lifespan(server: FastMCP):
                 await client.ping()
                 return client
 
-            r = await _connect_with_retry(_connect_redis, "Redis")
+            r = await _connect_with_retry(_connect_redis, "Redis", max_retries=1, base_delay=0.5)
             cache = Cache(r)
         except Exception as exc:
             logger.warning("Redis unavailable, using NullCache: %s", exc)
@@ -209,12 +217,25 @@ async def lifespan(server: FastMCP):
         logger.info("No Redis URL configured, using NullCache")
         cache = NullCache()
 
-    # Embedding provider
+    # Embedding provider (validate eagerly to catch config errors at startup)
     embedding = get_provider(
         config.embedding.provider,
         model_name=config.embedding.model,
         dimensions=config.embedding.dimensions,
     )
+    try:
+        test_vec = await embedding.embed("startup validation")
+        logger.info(
+            "Embedding provider %s validated (%d dims)",
+            embedding.provider_name, len(test_vec),
+        )
+    except Exception as exc:
+        logger.error(
+            "Embedding provider %s failed validation: %s. "
+            "Check API keys and model configuration.",
+            embedding.provider_name, exc,
+        )
+        raise
 
     # Seed memories on fresh installs (best-effort, never blocks startup)
     try:
@@ -276,3 +297,11 @@ async def healthz(request: Request) -> JSONResponse:
     except Exception as exc:
         logger.warning("Health check failed: %s", exc)
         return JSONResponse({"status": "unhealthy", "error": str(exc)}, status_code=503)
+
+
+@mcp.custom_route("/mcp/", methods=["GET", "POST", "DELETE"])
+async def mcp_trailing_slash(request: Request) -> Response:
+    """Redirect /mcp/ → /mcp with correct scheme behind TLS-terminating proxies."""
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    url = request.url.replace(scheme=scheme, path="/mcp")
+    return Response(status_code=307, headers={"Location": str(url)})

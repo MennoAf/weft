@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from weft.models import Entity, EntityCreate, EntityType, _weft_id
-from weft.store import _row_to_memory, _vec_to_pgvector
+from weft.store import _row_to_memory
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,6 @@ async def store_entity(
     """Store a new entity. Returns the created Entity."""
     entity_id = _weft_id()
     now = datetime.now(timezone.utc)
-
-    emb_str = _vec_to_pgvector(embedding) if embedding else None
 
     await pool.execute(
         """
@@ -45,7 +43,7 @@ async def store_entity(
         create.project_id,
         create.agent_id,
         now,
-        emb_str,
+        embedding,
     )
 
     return Entity(
@@ -128,10 +126,8 @@ async def search_entities(
     threshold: float = 0.3,
 ) -> list[tuple[Entity, float]]:
     """Search entities by vector similarity. Returns (entity, similarity) tuples."""
-    emb_str = _vec_to_pgvector(embedding)
-
     conditions = ["status = 'active'", "embedding IS NOT NULL"]
-    params: list = [emb_str]
+    params: list = [embedding]
     idx = 2
 
     if entity_type is not None:

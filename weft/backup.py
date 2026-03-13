@@ -21,22 +21,15 @@ logger = logging.getLogger(__name__)
 BACKUP_VERSION = "1.0"
 
 
-def _parse_pgvector(val: str) -> list[float]:
-    """Parse a pgvector string like '[0.1,0.2,0.3]' into a list of floats."""
-    return [float(x) for x in val.strip("[]").split(",")]
-
-
 async def backup_all(pool: asyncpg.Pool) -> dict:
     """Export all memories, relationships, and metadata as a dict.
 
     The returned dict is fully self-contained and can be serialized to JSON.
     Embeddings are included as float lists so restore doesn't need re-embedding.
     """
-    # Fetch all memories with embeddings as text
     rows = await pool.fetch(
         """
-        SELECT *,
-               embedding::text AS embedding_text
+        SELECT *
         FROM memories
         ORDER BY created_at ASC
         """
@@ -63,11 +56,8 @@ async def backup_all(pool: asyncpg.Pool) -> dict:
             "usefulness_score": float(row["usefulness_score"]) if row["usefulness_score"] is not None else 0.7,
             "usefulness_count": row["usefulness_count"] if row["usefulness_count"] is not None else 0,
             "review_after": row["review_after"].isoformat() if row.get("review_after") else None,
+            "embedding": row["embedding"],  # decoded to list[float] by pgvector codec
         }
-        if row["embedding_text"]:
-            m["embedding"] = _parse_pgvector(row["embedding_text"])
-        else:
-            m["embedding"] = None
         memories.append(m)
 
     # Fetch all relationships
@@ -102,11 +92,6 @@ async def backup_all(pool: asyncpg.Pool) -> dict:
         "memories": memories,
         "relationships": relationships,
     }
-
-
-def _vec_to_pgvector(vec: list[float]) -> str:
-    """Convert a list of floats to pgvector string format."""
-    return "[" + ",".join(str(v) for v in vec) + "]"
 
 
 async def restore_all(
@@ -194,7 +179,7 @@ async def restore_all(
                     continue
 
                 try:
-                    embedding_str = _vec_to_pgvector(m["embedding"]) if m.get("embedding") else None
+                    embedding = m.get("embedding")
 
                     await conn.execute(
                         """
@@ -206,7 +191,7 @@ async def restore_all(
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6,
                             $7, $8, $9, $10,
-                            $11, $12, $13, $14, $15,
+                            $11, $12, $13, $14::vector, $15,
                             $16, $17, $18, $19
                         )
                         ON CONFLICT (id) DO NOTHING
@@ -224,7 +209,7 @@ async def restore_all(
                         m.get("access_count", 0),
                         m.get("project_id"),
                         m.get("agent_id"),
-                        embedding_str,
+                        embedding,
                         m.get("status", "active"),
                         m.get("pinned", False),
                         m.get("usefulness_score", 0.7),

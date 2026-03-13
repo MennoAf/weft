@@ -29,8 +29,6 @@ async def store_behavior(
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.trigger_pattern + " " + create.action)
 
-    embedding_str = _vec_to_pgvector(embedding) if embedding else None
-
     await pool.execute(
         """
         INSERT INTO behaviors (
@@ -42,7 +40,7 @@ async def store_behavior(
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9, $10,
             0, $11, $12, $12,
-            $13, 'active'
+            $13::vector, 'active'
         )
         """,
         behavior_id,
@@ -57,7 +55,7 @@ async def store_behavior(
         create.enabled,
         token_count,
         now,
-        embedding_str,
+        embedding,
     )
 
     return Behavior(
@@ -161,8 +159,7 @@ async def match_behaviors(
     params: list = []
     idx = 1
 
-    embedding_str = _vec_to_pgvector(embedding)
-    params.append(embedding_str)
+    params.append(embedding)
     idx += 1  # $1 = embedding
 
     # Similarity threshold
@@ -294,8 +291,8 @@ async def update_behavior(
         idx += 1
 
     if embedding is not None:
-        sets.append(f"embedding = ${idx}")
-        params.append(_vec_to_pgvector(embedding))
+        sets.append(f"embedding = ${idx}::vector")
+        params.append(embedding)
         idx += 1
 
     set_clause = ", ".join(sets)
@@ -339,10 +336,6 @@ async def touch_behavior(pool: asyncpg.Pool, behavior_id: str) -> None:
 
 
 # --- Helpers ---
-
-def _vec_to_pgvector(vec: list[float]) -> str:
-    """Convert a list of floats to pgvector string format."""
-    return "[" + ",".join(str(v) for v in vec) + "]"
 
 
 def _row_to_behavior(row: asyncpg.Record) -> Behavior:

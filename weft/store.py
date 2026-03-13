@@ -38,8 +38,6 @@ async def store_memory(
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.content)
 
-    embedding_str = _vec_to_pgvector(embedding) if embedding else None
-
     await pool.execute(
         """
         INSERT INTO memories (
@@ -50,7 +48,7 @@ async def store_memory(
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
-            0, $9, $10, $11, 'active', $12,
+            0, $9, $10, $11::vector, 'active', $12,
             $13
         )
         """,
@@ -64,7 +62,7 @@ async def store_memory(
         now,
         create.project_id,
         create.agent_id,
-        embedding_str,
+        embedding,
         create.pinned,
         create.review_after,
     )
@@ -183,8 +181,7 @@ async def search_by_vector(
     params: list = []
     idx = 1
 
-    embedding_str = _vec_to_pgvector(embedding)
-    params.append(embedding_str)
+    params.append(embedding)
     idx += 1  # $1 = embedding
 
     # Similarity threshold in SQL so the DB handles filtering atomically
@@ -286,8 +283,8 @@ async def update_memory(
         idx += 1
 
     if embedding is not None:
-        sets.append(f"embedding = ${idx}")
-        params.append(_vec_to_pgvector(embedding))
+        sets.append(f"embedding = ${idx}::vector")
+        params.append(embedding)
         idx += 1
 
     if pinned is not None:
@@ -375,8 +372,8 @@ async def upsert_by_topic(
                 idx += 1
 
                 if embedding is not None:
-                    sets.append(f"embedding = ${idx}")
-                    params.append(_vec_to_pgvector(embedding))
+                    sets.append(f"embedding = ${idx}::vector")
+                    params.append(embedding)
                     idx += 1
 
                 set_clause = ", ".join(sets)
@@ -392,8 +389,6 @@ async def upsert_by_topic(
             memory_id = _weft_id()
             now = datetime.now(timezone.utc)
             token_count = estimate_tokens(content)
-            embedding_str = _vec_to_pgvector(embedding) if embedding else None
-
             await conn.execute(
                 """
                 INSERT INTO memories (
@@ -404,7 +399,7 @@ async def upsert_by_topic(
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $8, $8,
-                    0, $9, $10, 'active',
+                    0, $9, $10::vector, 'active',
                     false, $11
                 )
                 """,
@@ -417,7 +412,7 @@ async def upsert_by_topic(
                 token_count,
                 now,
                 project_id,
-                embedding_str,
+                embedding,
                 review_after,
             )
 
@@ -640,11 +635,6 @@ async def get_stats(pool: asyncpg.Pool) -> dict:
 
 
 # --- Helpers ---
-
-
-def _vec_to_pgvector(vec: list[float]) -> str:
-    """Convert a list of floats to pgvector string format."""
-    return "[" + ",".join(str(v) for v in vec) + "]"
 
 
 def _row_to_memory(row: asyncpg.Record) -> Memory:
