@@ -25,7 +25,7 @@ from weft.primer import (
     _newest_created_at,
     build_primer,
 )
-from weft.store import record_feedback, store_memory
+from weft.store import list_memories, record_feedback, store_memory
 from weft.tokens import estimate_tokens
 
 
@@ -576,6 +576,84 @@ async def test_primer_handoff_has_age_hours(pool):
     assert "age_hours" in result["handoff"][0]
     # Just created, should be very recent
     assert result["handoff"][0]["age_hours"] < 1.0
+
+
+# --- Handoff auto-prune (store-level pattern) ---
+
+
+async def test_handoff_prune_archives_old_handoffs(pool):
+    """Simulates weft_handoff auto-prune: archiving previous handoffs leaves
+    only the newest one active, and the primer surfaces it correctly."""
+    from weft.store import update_memory
+
+    ids = []
+    for i in range(5):
+        m = await store_memory(pool, MemoryCreate(
+            type=MemoryType.handoff,
+            content=f"## Session Handoff\n\n**Summary:** Session {i}",
+            topic=["session-handoff"],
+            confidence=1.0,
+            project_id="test-proj",
+        ))
+        ids.append(m.id)
+        await asyncio.sleep(0.01)
+
+    newest_id = ids[-1]
+
+    # Archive all except the newest (mimics auto-prune in weft_handoff)
+    prev = await list_memories(
+        pool, memory_type=MemoryType.handoff,
+        status=MemoryStatus.active, project_id="test-proj", limit=100,
+    )
+    archived = 0
+    for old in prev:
+        if old.id != newest_id:
+            await update_memory(pool, old.id, status=MemoryStatus.archived)
+            archived += 1
+
+    assert archived == 4
+
+    # Only the newest handoff should appear in the primer
+    result = await build_primer(pool, project_id="test-proj", budget_tokens=1500)
+    assert len(result["handoff"]) == 1
+    assert "Session 4" in result["handoff"][0]["content"]
+
+
+async def test_handoff_prune_scoped_to_project(pool):
+    """Auto-prune only archives handoffs for the same project."""
+    from weft.store import update_memory
+
+    # Store handoffs for two different projects
+    proj_a = await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Project A old",
+        topic=["session-handoff"], confidence=1.0, project_id="proj-a",
+    ))
+    await asyncio.sleep(0.01)
+    proj_a_new = await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Project A new",
+        topic=["session-handoff"], confidence=1.0, project_id="proj-a",
+    ))
+    proj_b = await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Project B",
+        topic=["session-handoff"], confidence=1.0, project_id="proj-b",
+    ))
+
+    # Prune only proj-a handoffs (mimics scoped auto-prune)
+    prev = await list_memories(
+        pool, memory_type=MemoryType.handoff,
+        status=MemoryStatus.active, project_id="proj-a", limit=100,
+    )
+    for old in prev:
+        if old.id != proj_a_new.id:
+            await update_memory(pool, old.id, status=MemoryStatus.archived)
+
+    # proj-b handoff should be untouched
+    result_b = await build_primer(pool, project_id="proj-b", budget_tokens=1500)
+    assert len(result_b["handoff"]) == 1
+    assert "Project B" in result_b["handoff"][0]["content"]
 
 
 # --- Freshness indicator ---
