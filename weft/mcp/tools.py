@@ -482,12 +482,21 @@ async def weft_prime(
         from weft.fallback import read_fallback
         content = read_fallback()
         from weft.primer import _ONBOARDING_TEXT, _SECTION_HINTS
+        from weft.tokens import estimate_tokens, truncate_to_token_budget
+
+        # Truncate fallback content to budget — raw exports can be huge.
+        handoff_section: list[dict] = []
+        if content:
+            cost = estimate_tokens(content)
+            if cost > budget_tokens:
+                content, cost = truncate_to_token_budget(content, budget_tokens)
+            handoff_section = [{"content": content, "type": "fallback"}]
 
         return {
             "grounding": None,
             "rules": [],
             "behaviors": [],
-            "handoff": [{"content": content, "type": "fallback"}] if content else [],
+            "handoff": handoff_section,
             "recent_work": [],
             "issues": {"count": 0, "items": []},
             "decisions": [],

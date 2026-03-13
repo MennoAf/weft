@@ -294,3 +294,26 @@ class TestDbFallback:
 
         result = await weft_prime(ctx)
         assert result.get("degraded") is True
+
+    async def test_prime_fallback_truncates_oversized_export(self, app, tmp_path):
+        """Fallback path must truncate huge exported files to stay within budget."""
+        from unittest.mock import patch
+
+        from weft.mcp.tools import weft_prime
+
+        # Create a massive fallback file (~200K chars)
+        huge_content = "This is a very long memory. " * 10_000
+        fallback_file = tmp_path / "weft_export.md"
+        fallback_file.write_text(huge_content)
+
+        await app.pool.close()
+        ctx = _make_ctx(app)
+
+        with patch("weft.fallback.read_fallback", return_value=huge_content):
+            result = await weft_prime(ctx, budget_tokens=2400)
+
+        assert result.get("degraded") is True
+        # Handoff should exist but be truncated, not the full 200K+ chars
+        if result["handoff"]:
+            handoff_content = result["handoff"][0]["content"]
+            assert len(handoff_content) < 20_000  # well under 200K+
