@@ -60,6 +60,7 @@ from weft.store import (
     search_by_vector,
     store_memory,
     touch_memory,
+    update_memory,
 )
 
 logger = logging.getLogger(__name__)
@@ -419,7 +420,6 @@ async def weft_pin(
 ) -> dict:
     """Pin or unpin a memory. Pinned memories are always included in prime and context calls."""
     try:
-        from weft.store import update_memory
 
         app: AppContext = ctx.request_context.lifespan_context
         updated = await update_memory(app.pool, memory_id, pinned=pinned)
@@ -689,6 +689,26 @@ async def weft_handoff(
         await app.cache.set_memory(memory)
         await app.cache.invalidate_stats()
 
+        # Auto-prune: archive previous handoffs for this project so they
+        # don't accumulate.  Only the most recent handoff matters.
+        pruned_count = 0
+        try:
+            prev = await list_memories(
+                app.pool,
+                memory_type=MemoryType.handoff,
+                status=MemoryStatus.active,
+                project_id=resolved_project,
+                limit=100,
+            )
+            for old in prev:
+                if old.id != memory.id:
+                    await update_memory(
+                        app.pool, old.id, status=MemoryStatus.archived,
+                    )
+                    pruned_count += 1
+        except Exception as exc:
+            logger.warning("Handoff auto-prune failed: %s", exc)
+
         # Auto-episode: close open episodes and create a new one
         closed_ids = []
         new_episode_id = None
@@ -717,6 +737,7 @@ async def weft_handoff(
             "id": memory.id,
             "project_id": resolved_project,
             "stored": True,
+            "previous_handoffs_archived": pruned_count,
             "episodes_closed": closed_ids,
             "episode_opened": new_episode_id,
         }
