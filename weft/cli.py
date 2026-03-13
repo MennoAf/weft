@@ -614,7 +614,6 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
         import asyncpg
 
         from weft.embeddings import get_provider
-        from weft.store import _vec_to_pgvector
 
         from weft.db.connection import create_pool
 
@@ -687,8 +686,8 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
                     async with conn.transaction():
                         for row_id, emb in zip(ids, embeddings):
                             await conn.execute(
-                                f"UPDATE {table} SET embedding = $1 WHERE id = $2",  # noqa: S608
-                                _vec_to_pgvector(emb),
+                                f"UPDATE {table} SET embedding = $1::vector WHERE id = $2",  # noqa: S608
+                                emb,
                                 row_id,
                             )
                 updated += len(batch)

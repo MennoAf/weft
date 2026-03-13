@@ -10,6 +10,7 @@ import redis.asyncio as aioredis
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
+from weft.db.connection import _pgvector_codec_init, register_pgvector_codec
 from weft.db.migrations import run_migrations
 
 # Module-level containers — started once, shared across all tests
@@ -68,8 +69,9 @@ def pytest_unconfigure(config):
 async def pool():
     """Function-scoped asyncpg pool — migrations + clean slate each test."""
     dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
-    p = await asyncpg.create_pool(dsn, min_size=2, max_size=5)
+    p = await asyncpg.create_pool(dsn, min_size=2, max_size=5, init=_pgvector_codec_init)
     await run_migrations(p)
+    await register_pgvector_codec(p)
     # TRUNCATE resets tables and HNSW index state cleanly (DELETE leaves
     # dead tuples in the index which can cause approximate search to miss rows)
     await p.execute("TRUNCATE entity_mentions, episode_memories, memory_relationships, entities, episodes, memories, behaviors CASCADE")

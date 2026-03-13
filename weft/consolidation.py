@@ -163,6 +163,23 @@ async def run_decay(
 # --- Near-Duplicate Detection ---
 
 
+async def _batch_fetch_embeddings(
+    pool: asyncpg.Pool,
+    *,
+    status: MemoryStatus = MemoryStatus.active,
+) -> dict[str, list[float]]:
+    """Batch-fetch all embeddings for memories with a given status.
+
+    Returns a dict mapping memory ID to its embedding vector.
+    Single query instead of N per-memory fetches.
+    """
+    rows = await pool.fetch(
+        "SELECT id, embedding FROM memories WHERE status = $1 AND embedding IS NOT NULL",
+        status.value,
+    )
+    return {row["id"]: row["embedding"] for row in rows}
+
+
 async def find_duplicates(
     pool: asyncpg.Pool,
     *,
@@ -181,21 +198,15 @@ async def find_duplicates(
     seen_archived: set[str] = set()
 
     memories = await list_memories(pool, status=MemoryStatus.active, limit=1000)
+    embedding_map = await _batch_fetch_embeddings(pool, status=MemoryStatus.active)
 
     for mem in memories:
         if mem.id in seen_archived:
             continue
 
-        # Get this memory's embedding from DB
-        row = await pool.fetchrow(
-            "SELECT embedding FROM memories WHERE id = $1 AND embedding IS NOT NULL",
-            mem.id,
-        )
-        if not row or not row["embedding"]:
+        embedding = embedding_map.get(mem.id)
+        if not embedding:
             continue
-
-        # Parse the stored vector string back to list[float]
-        embedding = _parse_pgvector(row["embedding"])
 
         # Search for similar memories
         from weft.models import MemoryRecall
@@ -275,16 +286,12 @@ async def find_contradictions(
     checked_pairs: set[tuple[str, str]] = set()
 
     memories = await list_memories(pool, status=MemoryStatus.active, limit=500)
+    embedding_map = await _batch_fetch_embeddings(pool, status=MemoryStatus.active)
 
     for mem in memories:
-        row = await pool.fetchrow(
-            "SELECT embedding FROM memories WHERE id = $1 AND embedding IS NOT NULL",
-            mem.id,
-        )
-        if not row or not row["embedding"]:
+        embedding = embedding_map.get(mem.id)
+        if not embedding:
             continue
-
-        embedding = _parse_pgvector(row["embedding"])
 
         similar = await search_by_vector(
             pool, embedding, limit=20, threshold=sim_min, status=MemoryStatus.active,
@@ -601,12 +608,3 @@ async def check_contradictions_on_store(
     return warnings
 
 
-# --- Helpers ---
-
-
-def _parse_pgvector(vec_str: str) -> list[float]:
-    """Parse pgvector string format '[1.0,2.0,3.0]' to list[float]."""
-    if isinstance(vec_str, (list, tuple)):
-        return list(vec_str)
-    cleaned = vec_str.strip("[]")
-    return [float(x) for x in cleaned.split(",")]
