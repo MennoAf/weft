@@ -1,10 +1,11 @@
-"""Tests for cross-project memory sharing and isolation.
+"""Tests for cross-project memory sharing, isolation, and cross-project search.
 
 Verifies that:
 - Global memories (project_id=None) are visible from any project query
 - Project-scoped memories are only visible within their own project
 - Cross-project queries correctly combine global + project-scoped results
 - build_context respects cross-project boundaries
+- search_cross_project returns memories from other projects with penalty
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import pytest
 from weft.context import build_context
 from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemorySource, MemoryType
-from weft.store import list_memories, search_by_vector, store_memory
+from weft.store import list_memories, search_by_vector, search_cross_project, store_memory
 
 
 # ---------------------------------------------------------------------------
@@ -277,3 +278,164 @@ async def test_weft_context_respects_cross_project(pool):
     assert "Project-beta architecture: serverless functions" in beta_contents
     assert "Project-alpha architecture: monolith with modules" not in beta_contents
     assert result_beta["count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 9: search_cross_project returns other projects' memories
+# ---------------------------------------------------------------------------
+
+
+async def test_search_cross_project_returns_other_projects(pool):
+    """search_cross_project from project-A should find project-B memories."""
+    await _store(
+        pool, "Project-A: uses FastAPI for the web layer",
+        project_id="project-a", with_embedding=True,
+    )
+    await _store(
+        pool, "Project-B: uses FastAPI for the API server",
+        project_id="project-b", with_embedding=True,
+    )
+
+    provider = _get_provider()
+    emb = await provider.embed("FastAPI web framework")
+
+    results = await search_cross_project(
+        pool, emb, exclude_project_id="project-a", limit=5,
+    )
+
+    # Should find project-B but NOT project-A
+    result_contents = {r.memory.content for r in results}
+    assert "Project-B: uses FastAPI for the API server" in result_contents
+    assert "Project-A: uses FastAPI for the web layer" not in result_contents
+
+
+# ---------------------------------------------------------------------------
+# Test 10: search_cross_project applies 0.8x penalty
+# ---------------------------------------------------------------------------
+
+
+async def test_search_cross_project_applies_penalty(pool):
+    """Cross-project results should have 0.8x penalized similarity scores."""
+    await _store(
+        pool, "Project-B: Redis is used for caching layer with TTL 300s",
+        project_id="project-b", with_embedding=True,
+    )
+
+    provider = _get_provider()
+    emb = await provider.embed("Redis caching layer")
+
+    # Get same-project result for comparison
+    same_results = await search_by_vector(pool, emb, limit=5)
+    cross_results = await search_cross_project(
+        pool, emb, exclude_project_id="project-a", limit=5,
+    )
+
+    if same_results and cross_results:
+        # Cross-project similarity should be < same-project similarity
+        # because of the 0.8x penalty
+        same_sim = same_results[0].similarity
+        cross_sim = cross_results[0].similarity
+        assert cross_sim < same_sim
+
+
+# ---------------------------------------------------------------------------
+# Test 11: search_cross_project excludes current project AND includes global
+# ---------------------------------------------------------------------------
+
+
+async def test_search_cross_project_includes_global(pool):
+    """Global memories (project_id=None) should appear in cross-project results."""
+    await _store(
+        pool, "Global: Python typing best practices for type safety",
+        project_id=None, with_embedding=True,
+    )
+    await _store(
+        pool, "Project-A: Python coding standards for our team",
+        project_id="project-a", with_embedding=True,
+    )
+
+    provider = _get_provider()
+    emb = await provider.embed("Python typing")
+
+    results = await search_cross_project(
+        pool, emb, exclude_project_id="project-a", limit=5,
+    )
+
+    result_contents = {r.memory.content for r in results}
+    assert "Global: Python typing best practices for type safety" in result_contents
+    assert "Project-A: Python coding standards for our team" not in result_contents
+
+
+# ---------------------------------------------------------------------------
+# Test 12: search_cross_project from global context (project_id=None)
+# ---------------------------------------------------------------------------
+
+
+async def test_search_cross_project_from_global_context(pool):
+    """When exclude_project_id=None, return only project-scoped memories."""
+    await _store(
+        pool, "Global: shared knowledge about databases",
+        project_id=None, with_embedding=True,
+    )
+    await _store(
+        pool, "Project-X: database migration tool preferences",
+        project_id="project-x", with_embedding=True,
+    )
+
+    provider = _get_provider()
+    emb = await provider.embed("database migration")
+
+    results = await search_cross_project(
+        pool, emb, exclude_project_id=None, limit=5,
+    )
+
+    result_contents = {r.memory.content for r in results}
+    # Global memories should NOT appear (would be self-matching)
+    assert "Global: shared knowledge about databases" not in result_contents
+    # Project-scoped memories SHOULD appear
+    assert "Project-X: database migration tool preferences" in result_contents
+
+
+# ---------------------------------------------------------------------------
+# Test 13: search_cross_project with no other projects returns empty
+# ---------------------------------------------------------------------------
+
+
+async def test_search_cross_project_single_project_empty(pool):
+    """When only one project exists, cross-project search returns empty."""
+    await _store(
+        pool, "Project-only: uses PostgreSQL for everything in the app",
+        project_id="project-only", with_embedding=True,
+    )
+
+    provider = _get_provider()
+    emb = await provider.embed("PostgreSQL database")
+
+    results = await search_cross_project(
+        pool, emb, exclude_project_id="project-only", limit=5,
+    )
+
+    assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Test 14: search_cross_project respects limit
+# ---------------------------------------------------------------------------
+
+
+async def test_search_cross_project_respects_limit(pool):
+    """Cross-project search should respect the limit parameter."""
+    for i in range(5):
+        await _store(
+            pool, f"Project-B: memory about testing pattern number {i}",
+            project_id="project-b", with_embedding=True,
+        )
+
+    provider = _get_provider()
+    emb = await provider.embed("testing patterns")
+
+    results = await search_cross_project(
+        pool, emb, exclude_project_id="project-a", limit=2,
+    )
+
+    assert len(results) <= 2

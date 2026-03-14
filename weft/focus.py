@@ -23,7 +23,7 @@ import asyncpg
 from weft.git_utils import get_recent_commits
 from weft.models import MemoryStatus, MemoryType
 from weft.session_tracking import get_session_memory_ids
-from weft.store import get_last_handoff_timestamp, get_memory_changes_since, list_memories, search_by_vector
+from weft.store import get_last_handoff_timestamp, get_memory_changes_since, list_memories, search_by_vector, search_cross_project
 from weft.tokens import estimate_tokens, truncate_to_token_budget
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class FocusResult:
 
     intent: str
     focused_memories: list[dict] = field(default_factory=list)
+    cross_project_memories: list[dict] = field(default_factory=list)
     last_session_summary: str | None = None
     git_changes: list[str] = field(default_factory=list)
     changes_since: dict | None = None
@@ -65,6 +66,15 @@ class FocusResult:
                 lines.append(f"- **[{mtype}]** ({mid}, {sim:.2f}) {content}")
             parts.append("\n".join(lines))
 
+        if self.cross_project_memories:
+            lines = ["## Cross-Project Insights"]
+            for mem in self.cross_project_memories:
+                proj = mem.get("source_project", "?")
+                content = mem.get("content", "")
+                sim = mem.get("similarity", 0)
+                lines.append(f"- [{proj}] ({sim:.2f}) {content[:120]}")
+            parts.append("\n".join(lines))
+
         if self.git_changes:
             lines = ["## Recent Changes"]
             for commit in self.git_changes:
@@ -81,6 +91,7 @@ class FocusResult:
         return {
             "intent": self.intent,
             "focused_memories": self.focused_memories,
+            "cross_project_memories": self.cross_project_memories,
             "last_session_summary": self.last_session_summary,
             "git_changes": self.git_changes,
             "changes_since": self.changes_since,
@@ -203,6 +214,31 @@ async def build_focus(
 
     except Exception as exc:
         logger.warning("Focus semantic search failed: %s", exc)
+
+    # --- Step 2b: Cross-project search ---
+    if project_id is not None:
+        try:
+            from weft.config import load_config
+            cfg = load_config()
+            if cfg.retrieval.cross_project_search:
+                main_ids = {m["id"] for m in result.focused_memories}
+                cross_results = await search_cross_project(
+                    pool, query_embedding,
+                    exclude_project_id=project_id,
+                    limit=cfg.retrieval.cross_project_limit,
+                    threshold=threshold,
+                    exclude_ids=list(main_ids),
+                )
+                for r in cross_results:
+                    result.cross_project_memories.append({
+                        "id": r.memory.id,
+                        "type": r.memory.type.value,
+                        "content": r.memory.content,
+                        "similarity": round(r.similarity, 3),
+                        "source_project": r.memory.project_id,
+                    })
+        except Exception as exc:
+            logger.warning("Focus cross-project search failed: %s", exc)
 
     # --- Step 3: Get recent git changes ---
     try:

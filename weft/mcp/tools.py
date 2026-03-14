@@ -62,6 +62,7 @@ from weft.store import (
     record_feedback,
     remove_relationship,
     search_by_vector,
+    search_cross_project,
     store_memory,
     touch_memory,
     update_memory,
@@ -308,6 +309,35 @@ async def weft_recall(
         if total_matches > len(results):
             response["total_matches"] = total_matches
             response["showing"] = f"Showing {len(results)} of {total_matches} matches"
+
+        # Cross-project search: surface relevant memories from other projects
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        if resolved_project is not None:
+            try:
+                from weft.config import load_config
+                cfg = load_config()
+                if cfg.retrieval.cross_project_search:
+                    main_ids = {r.memory.id for r in results}
+                    cross_results = await search_cross_project(
+                        app.pool, embedding,
+                        exclude_project_id=resolved_project,
+                        limit=cfg.retrieval.cross_project_limit,
+                        threshold=threshold,
+                        status=memory_status,
+                        memory_type=memory_type,
+                        exclude_ids=list(main_ids),
+                    )
+                    if cross_results:
+                        response["cross_project"] = [
+                            {
+                                **r.to_dict(),
+                                "source_project": r.memory.project_id,
+                            }
+                            for r in cross_results
+                        ]
+            except Exception as exc:
+                logger.warning("Cross-project search failed: %s", exc)
+
         return response
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_recall", e)

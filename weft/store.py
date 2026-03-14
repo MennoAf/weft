@@ -244,6 +244,89 @@ async def search_by_vector(
     return results
 
 
+_CROSS_PROJECT_PENALTY = 0.8
+
+
+async def search_cross_project(
+    pool: asyncpg.Pool,
+    embedding: list[float],
+    *,
+    exclude_project_id: str | None,
+    limit: int = 3,
+    threshold: float = 0.5,
+    status: MemoryStatus | None = MemoryStatus.active,
+    memory_type: MemoryType | None = None,
+    exclude_ids: list[str] | None = None,
+) -> list[MemoryRecall]:
+    """Search memories from OTHER projects (cross-project insights).
+
+    Returns memories NOT in exclude_project_id, with a 0.8x relevance penalty
+    applied to similarity scores so cross-project hits never outrank
+    same-project hits.
+
+    If exclude_project_id is None (global context), returns only project-scoped
+    memories (project_id IS NOT NULL) to avoid returning all globals.
+    """
+    conditions = ["embedding IS NOT NULL"]
+    params: list = []
+    idx = 1
+
+    params.append(embedding)
+    idx += 1  # $1 = embedding
+
+    # Similarity threshold
+    conditions.append(f"1 - (embedding <=> $1::vector) >= ${idx}")
+    params.append(threshold)
+    idx += 1
+
+    # Cross-project exclusion (NULL-safe)
+    if exclude_project_id is not None:
+        conditions.append(f"(project_id != ${idx} OR project_id IS NULL)")
+        params.append(exclude_project_id)
+        idx += 1
+    else:
+        # Global context: only show project-scoped memories
+        conditions.append("project_id IS NOT NULL")
+
+    if status:
+        conditions.append(f"status = ${idx}")
+        params.append(status.value)
+        idx += 1
+
+    if memory_type:
+        conditions.append(f"type = ${idx}")
+        params.append(memory_type.value)
+        idx += 1
+
+    if exclude_ids:
+        conditions.append(f"NOT (id = ANY(${idx}::text[]))")
+        params.append(exclude_ids)
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    query = f"""
+        SELECT *,
+               1 - (embedding <=> $1::vector) AS similarity
+        FROM memories
+        {where}
+        ORDER BY embedding <=> $1::vector
+        LIMIT ${idx}
+    """
+    params.append(limit)
+
+    rows = await pool.fetch(query, *params)
+
+    results = []
+    for row in rows:
+        memory = _row_to_memory(row)
+        # Apply 0.8x penalty for cross-project results
+        raw_sim = float(row["similarity"])
+        penalized_sim = raw_sim * _CROSS_PROJECT_PENALTY
+        results.append(MemoryRecall(memory=memory, similarity=penalized_sim))
+    return results
+
+
 async def count_by_vector(
     pool: asyncpg.Pool,
     embedding: list[float],
