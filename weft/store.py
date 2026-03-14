@@ -882,5 +882,6 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         pinned=bool(row["pinned"]) if row.get("pinned") is not None else False,
         usefulness_score=float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0,
         usefulness_count=row["usefulness_count"] if row["usefulness_count"] is not None else 0,
+        last_boosted_at=row.get("last_boosted_at"),
         review_after=row["review_after"] if row.get("review_after") is not None else None,
     )

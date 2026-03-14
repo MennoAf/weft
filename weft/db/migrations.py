@@ -309,6 +309,14 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ON memory_access_log (accessed_at);
         """,
     ),
+    (
+        17,
+        "Add last_boosted_at to memories for usefulness time decay",
+        """
+        ALTER TABLE memories ADD COLUMN IF NOT EXISTS
+            last_boosted_at TIMESTAMPTZ DEFAULT NULL;
+        """,
+    ),
 ]
 
 

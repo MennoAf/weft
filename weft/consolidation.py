@@ -62,6 +62,7 @@ class ConsolidationReport:
     decayed: list[str] = field(default_factory=list)
     duplicates_merged: list[tuple[str, str]] = field(default_factory=list)
     contradictions_flagged: list[tuple[str, str]] = field(default_factory=list)
+    access_logs_pruned: int = 0
     errors: list[str] = field(default_factory=list)
     skipped: bool = False
 
@@ -82,6 +83,7 @@ class ConsolidationReport:
                 {"memory_a": a, "memory_b": b}
                 for a, b in self.contradictions_flagged
             ],
+            "access_logs_pruned": self.access_logs_pruned,
             "total_actions": self.total_actions,
             "errors": self.errors,
         }
@@ -546,6 +548,15 @@ async def consolidate(
             except Exception as e:
                 report.errors.append(f"Contradiction detection failed: {e}")
                 logger.exception("Contradiction detection subsystem failed")
+
+            try:
+                from weft.session_tracking import prune_old_access_logs
+
+                if not dry_run:
+                    report.access_logs_pruned = await prune_old_access_logs(pool)
+            except Exception as e:
+                report.errors.append(f"Access log pruning failed: {e}")
+                logger.warning("Access log pruning failed: %s", e)
         finally:
             await lock_conn.execute(
                 "SELECT pg_advisory_unlock($1)", _CONSOLIDATION_LOCK_ID,

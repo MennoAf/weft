@@ -94,7 +94,8 @@ async def boost_session_memories(
             result = await conn.execute(
                 """
                 UPDATE memories m
-                SET usefulness_score = LEAST(m.usefulness_score + $1, $2)
+                SET usefulness_score = LEAST(m.usefulness_score + $1, $2),
+                    last_boosted_at = now()
                 FROM (
                     SELECT DISTINCT memory_id
                     FROM memory_access_log
@@ -117,6 +118,31 @@ async def boost_session_memories(
     except Exception as e:
         logger.warning("boost_session_memories failed: %s", e)
         return {"boosted": 0, "session_id": sid, "error": str(e)}
+
+
+async def prune_old_access_logs(
+    pool: asyncpg.Pool,
+    cutoff_days: int = 90,
+) -> int:
+    """Delete access log entries older than cutoff_days. Returns count deleted.
+
+    Safe to call from consolidation — logs failures without raising.
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=cutoff_days)
+        result = await pool.execute(
+            "DELETE FROM memory_access_log WHERE accessed_at < $1",
+            cutoff,
+        )
+        count = int(result.split()[-1])
+        if count > 0:
+            logger.info("Pruned %d access log entries older than %d days", count, cutoff_days)
+        return count
+    except Exception as e:
+        logger.warning("prune_old_access_logs failed: %s", e)
+        return 0
 
 
 async def get_session_memory_ids(

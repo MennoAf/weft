@@ -96,14 +96,35 @@ def frequency_factor(
     return 1.0 + (boost_max * raw)
 
 
-def usefulness_factor(usefulness_score: float, *, floor: float = 0.5) -> float:
-    """Usefulness feedback factor. Range [floor, 1.0].
+def usefulness_factor(
+    usefulness_score: float,
+    *,
+    floor: float = 0.5,
+    last_boosted_at: datetime | None = None,
+    now: datetime | None = None,
+    decay_half_life_days: float = 30.0,
+) -> float:
+    """Usefulness feedback factor with time decay. Range [floor, 1.0].
 
     Maps usefulness_score (0.0-1.0) to a factor that penalizes
-    low-usefulness memories. The floor controls the minimum factor
-    (default 0.5 = worst memories get halved, not zeroed).
+    low-usefulness memories. When last_boosted_at is provided, applies
+    exponential decay (30-day half-life, matching consolidation decay)
+    so stale boosts don't permanently dominate rankings.
+
+    The floor controls the minimum factor (default 0.5 = worst memories
+    get halved, not zeroed).
     """
     clamped = max(0.0, min(1.0, usefulness_score))
+
+    # Apply time decay if we know when the memory was last boosted
+    if last_boosted_at is not None and decay_half_life_days > 0:
+        now = now or datetime.now(timezone.utc)
+        if last_boosted_at.tzinfo is None:
+            last_boosted_at = last_boosted_at.replace(tzinfo=timezone.utc)
+        days_since = max(0.0, (now - last_boosted_at).total_seconds() / 86400)
+        decay = math.pow(0.5, days_since / decay_half_life_days)
+        clamped = clamped * decay
+
     return floor + (1.0 - floor) * clamped
 
 
@@ -128,7 +149,12 @@ def score_memory(
         boost_max=w.frequency_boost_max,
         boost_scale=w.frequency_boost_scale,
     )
-    uf = usefulness_factor(mem.usefulness_score, floor=w.usefulness_floor)
+    uf = usefulness_factor(
+        mem.usefulness_score,
+        floor=w.usefulness_floor,
+        last_boosted_at=getattr(mem, "last_boosted_at", None),
+        now=now,
+    )
 
     final = recall.similarity * cf * rf * ff * uf
 
