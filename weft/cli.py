@@ -357,6 +357,46 @@ def recall(query: str, limit: int, topic: str | None):
 
 
 @cli.command()
+@click.argument("intent")
+@click.option("--project", "-p", default=None, help="Project ID")
+@click.option("--exclude", "-e", multiple=True, help="Memory IDs to exclude (repeatable)")
+@click.option("--budget", "-b", default=1200, help="Token budget (default 1200)")
+def focus(intent: str, project: str | None, exclude: tuple[str, ...], budget: int):
+    """Post-intent re-prime — surface memories the primer missed."""
+    from rich.console import Console
+
+    async def _focus():
+        import asyncpg
+        from weft.db.connection import _pgvector_codec_init
+        from weft.embeddings import get_provider
+        from weft.focus import build_focus
+
+        config = load_config()
+        pool = await asyncpg.create_pool(
+            config.database.url, min_size=1, max_size=2, init=_pgvector_codec_init,
+        )
+        provider = get_provider(
+            config.embedding.provider,
+            model_name=config.embedding.model,
+            dimensions=config.embedding.dimensions,
+        )
+        result = await build_focus(
+            pool,
+            intent=intent,
+            embedding_fn=provider.embed,
+            project_id=project,
+            exclude_memory_ids=list(exclude),
+            budget_tokens=budget,
+        )
+        await pool.close()
+        return result
+
+    result = asyncio.run(_focus())
+    console = Console()
+    console.print(result.format())
+
+
+@cli.command()
 @click.option("--force", is_flag=True, help="Seed even if memories already exist")
 def seed(force: bool):
     """Load starter memories into the store."""
