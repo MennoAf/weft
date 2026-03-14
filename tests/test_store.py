@@ -9,8 +9,10 @@ import pytest
 from weft.models import MemoryCreate, MemoryStatus, MemoryType, MemorySource, RelationType
 from weft.store import (
     add_relationship,
+    count_by_vector,
     delete_memory,
     get_memory,
+    get_recent_writes,
     get_relationships,
     get_stats,
     list_memories,
@@ -204,6 +206,113 @@ async def test_stats(pool):
     assert stats["by_type"]["fact"] == 1
     assert stats["by_type"]["pattern"] == 1
     assert "x" in stats["top_topics"]
+
+
+# --- count_by_vector ---
+
+
+async def test_count_by_vector(pool):
+    """count_by_vector returns total matches above threshold without LIMIT."""
+    from weft.embeddings import get_provider
+
+    provider = get_provider("fastembed")
+
+    texts = [
+        "Python is a programming language",
+        "PostgreSQL is a relational database",
+        "Redis is an in-memory data store",
+        "JavaScript runs in the browser",
+        "MySQL is another database system",
+    ]
+
+    for text in texts:
+        emb = await provider.embed(text)
+        await store_memory(
+            pool,
+            MemoryCreate(type=MemoryType.fact, content=text, topic=["tech"]),
+            embedding=emb,
+        )
+
+    query_emb = await provider.embed("database management")
+
+    # Search with limit=2 should return 2 results
+    results = await search_by_vector(pool, query_emb, limit=2)
+    assert len(results) == 2
+
+    # Count should return total matches above threshold (more than 2)
+    total = await count_by_vector(pool, query_emb, threshold=0.0)
+    assert total >= len(results)
+    assert total == 5  # all memories match at threshold=0.0
+
+
+async def test_count_by_vector_with_threshold(pool):
+    """count_by_vector respects the similarity threshold."""
+    from weft.embeddings import get_provider
+
+    provider = get_provider("fastembed")
+
+    texts = [
+        "PostgreSQL is a relational database",
+        "The weather is sunny today",
+    ]
+    for text in texts:
+        emb = await provider.embed(text)
+        await store_memory(
+            pool,
+            MemoryCreate(type=MemoryType.fact, content=text),
+            embedding=emb,
+        )
+
+    query_emb = await provider.embed("database systems")
+    # High threshold should exclude the weather memory
+    total = await count_by_vector(pool, query_emb, threshold=0.5)
+    assert total <= 2  # at most both, but weather is unlikely above 0.5
+
+
+# --- get_recent_writes ---
+
+
+async def test_recent_writes(pool):
+    """get_recent_writes returns memories ordered by created_at DESC."""
+    m1 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact, content="first memory", source=MemorySource.conversation,
+    ))
+    m2 = await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision, content="second memory", source=MemorySource.code,
+    ))
+
+    writes = await get_recent_writes(pool, limit=10)
+    assert len(writes) >= 2
+    # Most recent first
+    assert writes[0]["id"] == m2.id
+    assert writes[1]["id"] == m1.id
+    # Provenance fields present
+    assert writes[0]["type"] == "decision"
+    assert writes[0]["source"] == "code"
+    assert writes[1]["source"] == "conversation"
+
+
+async def test_recent_writes_limit(pool):
+    """get_recent_writes respects limit."""
+    for i in range(5):
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.fact, content=f"memory {i}",
+        ))
+
+    writes = await get_recent_writes(pool, limit=3)
+    assert len(writes) == 3
+
+
+async def test_recent_writes_content_truncation(pool):
+    """get_recent_writes truncates long content."""
+    long_content = "x" * 200
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact, content=long_content,
+    ))
+
+    writes = await get_recent_writes(pool, limit=1)
+    assert len(writes[0]["content"]) == 83  # 80 chars + "..."
+    assert writes[0]["content"].endswith("...")
 
 
 # --- Milestone type ---

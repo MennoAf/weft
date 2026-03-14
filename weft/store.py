@@ -235,6 +235,97 @@ async def search_by_vector(
     return results
 
 
+async def count_by_vector(
+    pool: asyncpg.Pool,
+    embedding: list[float],
+    *,
+    threshold: float = 0.0,
+    status: MemoryStatus | None = MemoryStatus.active,
+    memory_type: MemoryType | None = None,
+    topic: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> int:
+    """Count total memories matching a vector search (same filters as search_by_vector, no LIMIT)."""
+    conditions = ["embedding IS NOT NULL"]
+    params: list = []
+    idx = 1
+
+    params.append(embedding)
+    idx += 1  # $1 = embedding
+
+    conditions.append(f"1 - (embedding <=> $1::vector) >= ${idx}")
+    params.append(threshold)
+    idx += 1
+
+    if status:
+        conditions.append(f"status = ${idx}")
+        params.append(status.value)
+        idx += 1
+
+    if memory_type:
+        conditions.append(f"type = ${idx}")
+        params.append(memory_type.value)
+        idx += 1
+
+    if topic:
+        conditions.append(f"${idx} = ANY(topic)")
+        params.append(topic)
+        idx += 1
+
+    if project_id is not None:
+        conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
+        params.append(project_id)
+        idx += 1
+
+    if agent_id is not None:
+        conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
+        params.append(agent_id)
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+    query = f"SELECT COUNT(*) FROM memories {where}"
+
+    return await pool.fetchval(query, *params)
+
+
+async def get_recent_writes(
+    pool: asyncpg.Pool,
+    *,
+    limit: int = 10,
+    project_id: str | None = None,
+) -> list[dict]:
+    """Return the most recently created memories with provenance info."""
+    if project_id is not None:
+        rows = await pool.fetch(
+            """SELECT id, type, content, source, agent_id, project_id, created_at
+               FROM memories
+               WHERE status = 'active' AND (project_id = $1 OR project_id IS NULL)
+               ORDER BY created_at DESC LIMIT $2""",
+            project_id, limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """SELECT id, type, content, source, agent_id, project_id, created_at
+               FROM memories
+               WHERE status = 'active'
+               ORDER BY created_at DESC LIMIT $1""",
+            limit,
+        )
+    return [
+        {
+            "id": r["id"],
+            "type": r["type"],
+            "content": r["content"][:80] + ("..." if len(r["content"]) > 80 else ""),
+            "source": r["source"],
+            "agent_id": r["agent_id"],
+            "project_id": r["project_id"],
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+
 async def update_memory(
     pool: asyncpg.Pool,
     memory_id: str,

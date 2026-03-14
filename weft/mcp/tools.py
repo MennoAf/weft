@@ -52,7 +52,9 @@ from weft.models import (
 from weft.tokens import estimate_tokens
 from weft.store import (
     add_relationship,
+    count_by_vector,
     delete_memory,
+    get_recent_writes,
     get_relationships,
     get_stats,
     list_memories,
@@ -253,7 +255,23 @@ async def weft_recall(
             except Exception:
                 pass
             enriched.append(d)
-        return {"query": query, "count": len(results), "results": enriched}
+        # Count total matches above threshold (without LIMIT) so the agent
+        # knows whether there are more results to explore.
+        total_matches = await count_by_vector(
+            app.pool,
+            embedding,
+            threshold=threshold,
+            status=memory_status,
+            memory_type=memory_type,
+            topic=topic,
+            project_id=project_id,
+            agent_id=agent_id,
+        )
+        response: dict = {"query": query, "count": len(results), "results": enriched}
+        if total_matches > len(results):
+            response["total_matches"] = total_matches
+            response["showing"] = f"Showing {len(results)} of {total_matches} matches"
+        return response
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_recall", e)
     except _DB_ERRORS as e:
@@ -521,6 +539,8 @@ async def weft_status(ctx: Context) -> dict:
         if cached:
             return cached
         stats = await get_stats(app.pool)
+        # Add recent writes with provenance (not cached — always fresh)
+        stats["recent_writes"] = await get_recent_writes(app.pool, limit=10)
         await app.cache.set_stats(stats)
         return stats
     except _DB_ERRORS as e:

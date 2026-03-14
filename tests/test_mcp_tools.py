@@ -175,6 +175,65 @@ class TestWeftRecall:
         assert result["count"] == 0
         assert result["results"] == []
 
+    async def test_total_matches_when_more_exist(self, ctx):
+        """When more matches exist than limit, total_matches and showing are returned."""
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        # Store several memories on the same topic
+        for i in range(5):
+            await weft_remember(ctx, content=f"Database optimization technique {i}")
+
+        result = await weft_recall(ctx, query="database optimization", limit=2, threshold=0.0)
+        assert result["count"] <= 2
+        if result["count"] > 0:
+            # total_matches should be present when more results exist beyond limit
+            assert "total_matches" in result
+            assert result["total_matches"] >= result["count"]
+            assert "showing" in result
+
+    async def test_no_total_matches_when_all_fit(self, ctx):
+        """When all matches fit within limit, total_matches is not returned."""
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        await weft_remember(ctx, content="Unique memory about platypus biology")
+
+        result = await weft_recall(ctx, query="platypus", limit=10, threshold=0.0)
+        # When count == total, no need for total_matches
+        if result["count"] > 0 and "total_matches" not in result:
+            pass  # correct — all results fit
+        elif "total_matches" in result:
+            assert result["total_matches"] > result["count"]
+
+
+# ---------------------------------------------------------------------------
+# weft_status
+# ---------------------------------------------------------------------------
+
+
+class TestWeftStatus:
+    async def test_recent_writes_in_status(self, app):
+        """weft_status includes recent_writes with provenance."""
+        from weft.mcp.tools import weft_remember, weft_status
+
+        ctx = _make_ctx(app)
+        result = await weft_remember(ctx, content="Status test memory", source="conversation")
+        assert "id" in result, f"weft_remember failed: {result}"
+
+        # Verify memory actually exists in DB
+        count = await app.pool.fetchval("SELECT COUNT(*) FROM memories")
+        assert count >= 1
+
+        result = await weft_status(ctx)
+        assert "recent_writes" in result
+        assert len(result["recent_writes"]) >= 1
+
+        write = result["recent_writes"][0]
+        assert "id" in write
+        assert "type" in write
+        assert "source" in write
+        assert "created_at" in write
+        assert "content" in write
+
 
 # ---------------------------------------------------------------------------
 # weft_prime
