@@ -259,6 +259,21 @@ class EpisodeWithMemories(BaseModel):
         return d
 
 
+class ContradictionWarning(BaseModel):
+    """A warning that a new memory may contradict an existing one."""
+
+    type: str = "contradiction"
+    memory_id: str
+    content_preview: str
+    similarity: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+    def to_text(self) -> str:
+        return f'Warning: This may contradict memory {self.memory_id}: "{self.content_preview}"'
+
+
 class MemoryRecall(BaseModel):
     """Result from a recall/search operation."""
 

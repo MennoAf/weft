@@ -48,7 +48,7 @@ async def test_contradicting_memories_auto_detected(pool, provider):
     check_contradictions_on_store should return warnings and create
     a contradicts relationship."""
     # Store a fact
-    content_a = "Weft uses Redis for caching"
+    content_a = "Weft uses Redis for caching frequently accessed data in the application layer"
     emb_a = await provider.embed(content_a)
     mem_a = await store_memory(
         pool,
@@ -62,7 +62,7 @@ async def test_contradicting_memories_auto_detected(pool, provider):
     )
 
     # Store a contradicting fact
-    content_b = "Weft does not use Redis for caching"
+    content_b = "Weft does not use Redis for caching frequently accessed data in the application layer"
     emb_b = await provider.embed(content_b)
     mem_b = await store_memory(
         pool,
