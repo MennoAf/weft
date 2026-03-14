@@ -608,3 +608,84 @@ async def check_contradictions_on_store(
     return warnings
 
 
+# --- Auto-consolidation scheduling ---
+
+_META_KEY = "last_consolidation_run"
+_DEFAULT_INTERVAL_HOURS = 24
+
+
+async def should_consolidate(
+    pool: asyncpg.Pool,
+    *,
+    interval_hours: int = _DEFAULT_INTERVAL_HOURS,
+) -> bool:
+    """Check if consolidation is due based on last run timestamp."""
+    from weft.store import get_metadata
+
+    meta = await get_metadata(pool, _META_KEY)
+    if meta is None:
+        return True  # Never run before
+    ran_at = meta.get("ran_at")
+    if not ran_at:
+        return True
+    last_run = datetime.fromisoformat(ran_at)
+    elapsed = (datetime.now(timezone.utc) - last_run).total_seconds() / 3600
+    return elapsed >= interval_hours
+
+
+async def record_consolidation_run(
+    pool: asyncpg.Pool,
+    *,
+    memories_processed: int = 0,
+    status: str = "completed",
+) -> None:
+    """Record that consolidation ran (optimistic — call before starting)."""
+    from weft.store import set_metadata
+
+    await set_metadata(pool, _META_KEY, {
+        "ran_at": datetime.now(timezone.utc).isoformat(),
+        "memories_processed": memories_processed,
+        "status": status,
+    })
+
+
+async def consolidate_if_due(
+    pool: asyncpg.Pool,
+    *,
+    interval_hours: int = _DEFAULT_INTERVAL_HOURS,
+    dry_run: bool = False,
+) -> dict:
+    """Run consolidation if it hasn't run within interval_hours.
+
+    Returns a summary dict. Safe to call from background tasks —
+    all exceptions are caught and logged.
+    """
+    try:
+        due = await should_consolidate(pool, interval_hours=interval_hours)
+        if not due:
+            return {"ran": False, "skipped_reason": "consolidation ran recently"}
+
+        # Optimistic write — prevents concurrent triggers from both firing
+        await record_consolidation_run(pool, status="running")
+
+        report = await consolidate(pool, dry_run=dry_run)
+
+        processed = len(report.decayed) + len(report.duplicates_merged) + len(report.contradictions_flagged)
+        await record_consolidation_run(pool, memories_processed=processed, status="completed")
+
+        logger.info(
+            "Auto-consolidation complete: %d decayed, %d merged, %d contradictions",
+            len(report.decayed), len(report.duplicates_merged), len(report.contradictions_flagged),
+        )
+        return {
+            "ran": True,
+            "decayed": len(report.decayed),
+            "duplicates_merged": len(report.duplicates_merged),
+            "contradictions_flagged": len(report.contradictions_flagged),
+            "errors": report.errors,
+        }
+    except Exception as e:
+        logger.warning("Auto-consolidation failed: %s", e)
+        return {"ran": False, "skipped_reason": f"error: {e}"}
+
+

@@ -74,7 +74,7 @@ async def pool():
     await register_pgvector_codec(p)
     # TRUNCATE resets tables and HNSW index state cleanly (DELETE leaves
     # dead tuples in the index which can cause approximate search to miss rows)
-    await p.execute("TRUNCATE entity_mentions, episode_memories, memory_relationships, entities, episodes, memories, behaviors CASCADE")
+    await p.execute("TRUNCATE entity_mentions, episode_memories, memory_relationships, entities, episodes, memories, behaviors, weft_metadata CASCADE")
     yield p
     await p.close()
 

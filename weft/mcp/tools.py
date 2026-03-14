@@ -488,13 +488,27 @@ async def weft_prime(
             except Exception as exc:
                 logger.warning("Failed to embed primer query (non-fatal): %s", exc)
 
-        return await build_primer(
+        result = await build_primer(
             app.pool,
             project_id=resolved_project,
             agent_id=agent_id,
             budget_tokens=budget_tokens,
             query_vec=query_vec,
         )
+
+        # Fire-and-forget: trigger auto-consolidation if due (>24h since last run).
+        # Never blocks the primer response; all exceptions are caught internally.
+        try:
+            import asyncio
+            from weft.consolidation import consolidate_if_due
+            asyncio.create_task(
+                consolidate_if_due(app.pool),
+                name="weft-auto-consolidation",
+            )
+        except Exception as exc:
+            logger.debug("Auto-consolidation scheduling skipped: %s", exc)
+
+        return result
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_prime: %s", e)
         from weft.fallback import read_fallback

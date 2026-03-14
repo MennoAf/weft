@@ -195,6 +195,45 @@ def consolidate(dry_run: bool):
             console.print(f"  - {err}")
 
 
+@cli.command(name="auto-consolidate")
+@click.option("--dry-run", is_flag=True, help="Check if due without running")
+@click.option("--force", is_flag=True, help="Run even if not due")
+def auto_consolidate(dry_run: bool, force: bool):
+    """Run consolidation if due (for cron/scheduled jobs)."""
+    import json as json_mod
+
+    async def _run():
+        import asyncpg
+        from weft.consolidation import consolidate_if_due, should_consolidate, consolidate, record_consolidation_run
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        try:
+            if dry_run:
+                due = await should_consolidate(pool)
+                return {"ran": False, "due": due, "dry_run": True}
+
+            if force:
+                await record_consolidation_run(pool, status="running")
+                report = await consolidate(pool)
+                processed = len(report.decayed) + len(report.duplicates_merged) + len(report.contradictions_flagged)
+                await record_consolidation_run(pool, memories_processed=processed, status="completed")
+                return {
+                    "ran": True, "forced": True,
+                    "decayed": len(report.decayed),
+                    "duplicates_merged": len(report.duplicates_merged),
+                    "contradictions_flagged": len(report.contradictions_flagged),
+                }
+
+            return await consolidate_if_due(pool)
+        finally:
+            await pool.close()
+
+    result = asyncio.run(_run())
+    click.echo(json_mod.dumps(result, indent=2))
+    raise SystemExit(0 if result.get("ran", False) or not result.get("due", True) else 0)
+
+
 @cli.command(name="export")
 @click.option("--format", "-f", "fmt", type=click.Choice(["md", "json"]), default="md", help="Output format")
 @click.option("--type", "-t", "memory_type", default=None, help="Filter by memory type")

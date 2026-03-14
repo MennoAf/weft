@@ -279,6 +279,17 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         WITH (m = 16, ef_construction = 64);
         """,
     ),
+    (
+        15,
+        "Add weft_metadata table for system-level key-value storage",
+        """
+        CREATE TABLE IF NOT EXISTS weft_metadata (
+            key TEXT PRIMARY KEY,
+            value JSONB NOT NULL DEFAULT '{}',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """,
+    ),
 ]
 
 
