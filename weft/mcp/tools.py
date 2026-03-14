@@ -595,6 +595,58 @@ async def weft_prime(
 
 
 @mcp.tool()
+async def weft_focus(
+    ctx: Context,
+    intent: str,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    budget_tokens: int = 1200,
+) -> dict:
+    """Post-intent re-prime: surface memories the generic primer missed.
+
+    Call after weft_prime when you know what you're working on. Focus builds
+    a compound query from your intent + last session context, excludes memories
+    already surfaced by prime, and returns a tight-budget supplement.
+
+    Unlike prime (broad session startup), focus is narrow and intent-driven.
+    Can be called multiple times as intent shifts mid-session.
+
+    intent: what you're focusing on (e.g., "implement session tracking")
+    budget_tokens: max tokens in result (default 1200, supplemental to prime)"""
+    try:
+        cid = set_correlation_id()
+        logger.debug("weft_focus start [%s] intent=%r", cid, intent[:50])
+        from weft.focus import build_focus
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        result = await build_focus(
+            app.pool,
+            intent=intent,
+            embedding_fn=app.embedding.embed,
+            project_id=resolved_project,
+            agent_id=agent_id,
+            budget_tokens=budget_tokens,
+        )
+
+        # Fire-and-forget: log focused memories for session tracking
+        import asyncio
+        focused_ids = [m["id"] for m in result.focused_memories]
+        if focused_ids:
+            asyncio.create_task(
+                log_memory_access(app.pool, focused_ids, "focus"),
+                name="weft-session-log-focus",
+            )
+
+        return result.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_focus", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_focus", e)
+
+
+@mcp.tool()
 async def weft_status(ctx: Context) -> dict:
     """Memory statistics: total, by topic, by type, by confidence, recently accessed."""
     try:

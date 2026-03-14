@@ -58,6 +58,7 @@ Weft is this project's persistent memory system. When the Weft MCP server is ava
 ### Session Startup
 - Call `weft_prime` at the start of every session to load relevant context (preferences, recent work, project-relevant memories)
 - Review the primer output before diving into work — it contains your accumulated knowledge about the user and project
+- Once you know what you're working on, call `weft_focus(intent="...")` to surface memories the primer missed — it's narrow, intent-driven, and excludes what prime already showed
 
 ### When to Remember
 

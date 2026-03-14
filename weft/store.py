@@ -170,12 +170,16 @@ async def search_by_vector(
     topic: str | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    exclude_ids: list[str] | None = None,
 ) -> list[MemoryRecall]:
     """Search memories by vector similarity (cosine distance).
 
     Scoping: pass project_id and/or agent_id to narrow results.
     Each axis uses OR-NULL logic (matches the value OR global memories).
     Omit both for brain-wide (unscoped) queries.
+
+    exclude_ids: memory IDs to exclude from results (e.g., already surfaced
+    by primer). Uses NOT id = ANY($N) for efficient filtering.
     """
     conditions = ["embedding IS NOT NULL"]
     params: list = []
@@ -212,6 +216,11 @@ async def search_by_vector(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if exclude_ids:
+        conditions.append(f"NOT (id = ANY(${idx}::text[]))")
+        params.append(exclude_ids)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions)
