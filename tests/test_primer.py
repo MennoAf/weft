@@ -65,8 +65,8 @@ async def test_primer_return_structure(pool):
 
     expected_keys = {
         "grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions",
-        "entities", "total_tokens", "budget_tokens", "budget_remaining", "excluded",
-        "freshness_hours", "section_tokens", "hints", "onboarding",
+        "entities", "changes_since", "total_tokens", "budget_tokens", "budget_remaining",
+        "excluded", "freshness_hours", "section_tokens", "hints", "onboarding",
     }
     assert set(result.keys()) == expected_keys
 

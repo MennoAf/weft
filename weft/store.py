@@ -768,6 +768,97 @@ async def set_metadata(pool: asyncpg.Pool, key: str, value: dict) -> None:
     )
 
 
+# --- Changes since ---
+
+
+async def get_last_handoff_timestamp(
+    pool: asyncpg.Pool,
+    project_id: str | None = None,
+) -> datetime | None:
+    """Return the created_at of the most recent handoff memory, or None.
+
+    Scoping: project_id=None queries global handoffs (project_id IS NULL).
+    A non-None project_id matches that exact project.
+    """
+    if project_id is not None:
+        row = await pool.fetchrow(
+            """
+            SELECT MAX(created_at) AS ts
+            FROM memories
+            WHERE type = 'handoff' AND status = 'active'
+              AND project_id = $1
+            """,
+            project_id,
+        )
+    else:
+        row = await pool.fetchrow(
+            """
+            SELECT MAX(created_at) AS ts
+            FROM memories
+            WHERE type = 'handoff' AND status = 'active'
+              AND project_id IS NULL
+            """,
+        )
+    return row["ts"] if row and row["ts"] else None
+
+
+async def get_memory_changes_since(
+    pool: asyncpg.Pool,
+    *,
+    since: datetime,
+    project_id: str | None = None,
+) -> dict:
+    """Count memory mutations since a timestamp using conditional aggregation.
+
+    Returns dict with keys: memories_created, memories_archived, memories_revised, since.
+    - created: active memories with created_at > since
+    - archived: archived memories with updated_at > since
+    - revised: active memories updated since the timestamp but created before it
+    """
+    if project_id is not None:
+        row = await pool.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE status = 'active' AND created_at > $1
+                ) AS memories_created,
+                COUNT(*) FILTER (
+                    WHERE status = 'archived' AND updated_at > $1
+                ) AS memories_archived,
+                COUNT(*) FILTER (
+                    WHERE status = 'active' AND updated_at > $1 AND created_at <= $1
+                ) AS memories_revised
+            FROM memories
+            WHERE project_id = $2
+            """,
+            since, project_id,
+        )
+    else:
+        row = await pool.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE status = 'active' AND created_at > $1
+                ) AS memories_created,
+                COUNT(*) FILTER (
+                    WHERE status = 'archived' AND updated_at > $1
+                ) AS memories_archived,
+                COUNT(*) FILTER (
+                    WHERE status = 'active' AND updated_at > $1 AND created_at <= $1
+                ) AS memories_revised
+            FROM memories
+            WHERE project_id IS NULL
+            """,
+            since,
+        )
+    return {
+        "memories_created": row["memories_created"],
+        "memories_archived": row["memories_archived"],
+        "memories_revised": row["memories_revised"],
+        "since": since.isoformat(),
+    }
+
+
 # --- Helpers ---
 
 
