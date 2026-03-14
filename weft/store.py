@@ -725,6 +725,40 @@ async def get_stats(pool: asyncpg.Pool) -> dict:
     }
 
 
+# --- Metadata (system-level key-value) ---
+
+
+async def get_metadata(pool: asyncpg.Pool, key: str) -> dict | None:
+    """Get a metadata value by key. Returns None if not found or table missing."""
+    try:
+        row = await pool.fetchrow(
+            "SELECT value FROM weft_metadata WHERE key = $1", key,
+        )
+        if row is None:
+            return None
+        val = row["value"]
+        # asyncpg returns JSONB as a string or dict depending on codec
+        if isinstance(val, str):
+            import json
+            return json.loads(val)
+        return dict(val)
+    except Exception:
+        # Table may not exist if migration hasn't run yet
+        return None
+
+
+async def set_metadata(pool: asyncpg.Pool, key: str, value: dict) -> None:
+    """Upsert a metadata value (idempotent)."""
+    import json
+    await pool.execute(
+        """INSERT INTO weft_metadata (key, value, updated_at)
+           VALUES ($1, $2::jsonb, NOW())
+           ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, updated_at = NOW()""",
+        key, json.dumps(value),
+    )
+
+
 # --- Helpers ---
 
 
