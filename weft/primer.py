@@ -12,6 +12,7 @@ Sections (in priority order, each with a per-section token cap):
 3. Handoff — most recent session handoff (800 tokens, truncated if needed)
 4. Recent work — milestone breadcrumbs from last 72h (150 tokens)
 5. Issues — active issues (200 tokens)
+5b. Anti-patterns — pitfalls to avoid (150 tokens)
 6. Decisions — closed/vetoed decisions (250 tokens)
 7. Entities — known people, projects, tools for this project (150 tokens)
 """
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 _MAX_DECISIONS = 5
 _MAX_BEHAVIORS = 5
 _MAX_ENTITIES = 10
+_MAX_ANTI_PATTERNS = 3
 
 # Per-section token caps.
 _CAP_GROUNDING = 50
@@ -49,6 +51,7 @@ _CAP_BEHAVIORS = 150
 _CAP_HANDOFF = 800
 _CAP_RECENT_WORK = 150
 _CAP_ISSUES = 200
+_CAP_ANTI_PATTERNS = 150
 _CAP_DECISIONS = 250
 _CAP_ENTITIES = 150
 _CAP_CHANGES_SINCE_COMMITS = 20
@@ -248,6 +251,11 @@ async def build_primer(
             memory_type=MemoryType.decision, status=MemoryStatus.active,
             limit=20, threshold=_QUERY_SIMILARITY_THRESHOLD, **_scope,
         )
+        anti_pattern_coro = search_by_vector(
+            pool, query_vec,
+            memory_type=MemoryType.anti_pattern, status=MemoryStatus.active,
+            limit=10, threshold=_QUERY_SIMILARITY_THRESHOLD, **_scope,
+        )
     else:
         milestone_coro = list_memories(
             pool, memory_type=MemoryType.milestone, status=MemoryStatus.active,
@@ -261,6 +269,10 @@ async def build_primer(
             pool, memory_type=MemoryType.decision, status=MemoryStatus.active,
             limit=20, **_scope,
         )
+        anti_pattern_coro = list_memories(
+            pool, memory_type=MemoryType.anti_pattern, status=MemoryStatus.active,
+            limit=10, **_scope,
+        )
 
     entities_coro = list_entities(pool, limit=_MAX_ENTITIES, **_scope)
 
@@ -272,10 +284,11 @@ async def build_primer(
         biased_milestones_raw,
         biased_issues_raw,
         biased_decisions_raw,
+        biased_anti_patterns_raw,
         entities_raw,
     ) = await asyncio.gather(
         grounding_coro, pinned_coro, behaviors_coro, handoff_coro,
-        milestone_coro, issues_coro, decisions_coro, entities_coro,
+        milestone_coro, issues_coro, decisions_coro, anti_pattern_coro, entities_coro,
     )
 
     # Unwrap MemoryRecall → (Memory, similarity) when biased, else (Memory, None).
@@ -289,6 +302,7 @@ async def build_primer(
     milestone_raw = _unwrap(biased_milestones_raw)
     issues_raw = _unwrap(biased_issues_raw)
     decisions_raw = _unwrap(biased_decisions_raw)
+    anti_pattern_raw = _unwrap(biased_anti_patterns_raw)
 
     # --- Budget packing (sequential, in priority order) ---
     used_tokens = 0
@@ -518,7 +532,52 @@ async def build_primer(
             excluded += 1
     section_tokens["issues"] = section_used
 
-    # Section 5: Closed decisions (what NOT to suggest)
+    # Section 5: Anti-patterns (pitfalls to avoid)
+    anti_pattern_candidates = [
+        (m, sim) for m, sim in anti_pattern_raw
+        if m.id not in seen_ids
+        and not _is_unscoped_ingest(m, project_id)
+    ]
+    if biased:
+        anti_pattern_candidates.sort(
+            key=lambda pair: (
+                _SIMILARITY_WEIGHT * (pair[1] or 0)
+                + (1 - _SIMILARITY_WEIGHT) * pair[0].usefulness_score
+            ),
+            reverse=True,
+        )
+    else:
+        anti_pattern_candidates.sort(
+            key=lambda pair: (pair[0].usefulness_score, pair[0].created_at.timestamp()),
+            reverse=True,
+        )
+
+    anti_patterns_section: list[dict] = []
+    section_used = 0
+    for i, (mem, _sim) in enumerate(anti_pattern_candidates):
+        if len(anti_patterns_section) >= _MAX_ANTI_PATTERNS:
+            excluded += len(anti_pattern_candidates) - i
+            break
+        cost = (mem.token_count or estimate_tokens(mem.content)) + _DICT_OVERHEAD_TOKENS
+        if (
+            used_tokens + cost <= budget_tokens
+            and section_used + cost <= _CAP_ANTI_PATTERNS
+        ):
+            anti_patterns_section.append({
+                "id": mem.id,
+                "type": mem.type.value,
+                "content": mem.content,
+                "confidence": mem.confidence,
+                "created_at": mem.created_at.isoformat() if mem.created_at else None,
+            })
+            seen_ids.add(mem.id)
+            used_tokens += cost
+            section_used += cost
+        else:
+            excluded += 1
+    section_tokens["anti_patterns"] = section_used
+
+    # Section 6: Closed decisions (what NOT to suggest)
     # Same ingest filter as issues.
     decision_candidates = [
         (m, sim) for m, sim in decisions_raw
@@ -617,7 +676,7 @@ async def build_primer(
 
     # Collect all included memories for freshness calculation
     all_included: list[dict] = (
-        rules_section + handoff_section + issue_items + decisions_section
+        rules_section + handoff_section + issue_items + anti_patterns_section + decisions_section
     )
     freshness_hours = _newest_created_at(all_included, now)
 
@@ -655,6 +714,7 @@ async def build_primer(
         "handoff": handoff_section,
         "recent_work": recent_work_section,
         "issues": {"count": len(issue_items), "items": issue_items},
+        "anti_patterns": anti_patterns_section,
         "decisions": decisions_section,
         "entities": entities_section,
         "changes_since": changes_since,

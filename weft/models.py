@@ -22,6 +22,7 @@ class MemoryType(str, Enum):
     issue = "issue"
     decision = "decision"
     milestone = "milestone"
+    anti_pattern = "anti_pattern"
 
 
 class MemorySource(str, Enum):
