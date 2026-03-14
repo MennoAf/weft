@@ -79,6 +79,8 @@ class RetrievalConfig(BaseModel):
     similarity_threshold: float = 0.5
     context_budget_tokens: int = 4000
     contradiction_check_on_write: bool = True
+    cross_project_search: bool = True
+    cross_project_limit: int = 3
 
 
 class DecayConfig(BaseModel):
