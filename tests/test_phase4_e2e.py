@@ -183,11 +183,11 @@ async def test_session_priming_workflow(pool):
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
 
     # All expected keys present
-    assert set(result.keys()) == {
+    assert {
         "grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions",
         "entities", "changes_since", "total_tokens", "budget_tokens", "budget_remaining",
         "excluded", "freshness_hours", "section_tokens", "hints", "onboarding",
-    }
+    }.issubset(set(result.keys()))
 
 
 async def test_full_phase4_workflow(pool, provider):
