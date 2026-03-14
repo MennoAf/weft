@@ -23,7 +23,7 @@ import asyncpg
 from weft.git_utils import get_recent_commits
 from weft.models import MemoryStatus, MemoryType
 from weft.session_tracking import get_session_memory_ids
-from weft.store import list_memories, search_by_vector
+from weft.store import get_last_handoff_timestamp, get_memory_changes_since, list_memories, search_by_vector
 from weft.tokens import estimate_tokens, truncate_to_token_budget
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ class FocusResult:
     focused_memories: list[dict] = field(default_factory=list)
     last_session_summary: str | None = None
     git_changes: list[str] = field(default_factory=list)
+    changes_since: dict | None = None
     total_tokens: int = 0
     budget_tokens: int = _DEFAULT_BUDGET
     excluded_count: int = 0
@@ -82,6 +83,7 @@ class FocusResult:
             "focused_memories": self.focused_memories,
             "last_session_summary": self.last_session_summary,
             "git_changes": self.git_changes,
+            "changes_since": self.changes_since,
             "total_tokens": self.total_tokens,
             "budget_tokens": self.budget_tokens,
             "excluded_count": self.excluded_count,
@@ -101,6 +103,7 @@ async def build_focus(
     repo_path: str | None = None,
     limit: int = 10,
     threshold: float = 0.3,
+    changes_since: dict | None = None,
 ) -> FocusResult:
     """Build a focused context supplement.
 
@@ -218,6 +221,21 @@ async def build_focus(
                 used += cost
     except Exception as exc:
         logger.warning("Focus git integration failed: %s", exc)
+
+    # --- Step 4: Changes since last session ---
+    if changes_since is not None:
+        result.changes_since = changes_since
+    else:
+        try:
+            handoff_ts = await get_last_handoff_timestamp(pool, project_id=project_id)
+            if handoff_ts is not None:
+                changes = await get_memory_changes_since(
+                    pool, since=handoff_ts, project_id=project_id,
+                )
+                changes["recent_commits"] = result.git_changes
+                result.changes_since = changes
+        except Exception as exc:
+            logger.warning("Focus changes_since failed: %s", exc)
 
     # --- Compute total tokens ---
     result.total_tokens = estimate_tokens(result.format())

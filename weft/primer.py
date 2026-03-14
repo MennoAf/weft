@@ -26,8 +26,9 @@ import asyncpg
 
 from weft.behaviors import list_behaviors, match_behaviors
 from weft.entities import list_entities
+from weft.git_utils import get_recent_commits
 from weft.models import Memory, MemoryRecall, MemorySource, MemoryStatus, MemoryType
-from weft.store import list_memories, search_by_vector
+from weft.store import get_last_handoff_timestamp, get_memory_changes_since, list_memories, search_by_vector
 from weft.tokens import estimate_tokens, truncate_to_token_budget
 
 # Overhead tokens per memory dict entry (id, type, timestamps, metadata fields).
@@ -596,6 +597,23 @@ async def build_primer(
             excluded += 1
     section_tokens["entities"] = section_used
 
+    # --- Changes since last session ---
+    changes_since: dict | None = None
+    try:
+        handoff_ts = await get_last_handoff_timestamp(pool, project_id=project_id)
+        if handoff_ts is not None:
+            changes = await get_memory_changes_since(
+                pool, since=handoff_ts, project_id=project_id,
+            )
+            try:
+                commits = await get_recent_commits(since=handoff_ts)
+            except Exception:
+                commits = []
+            changes["recent_commits"] = commits
+            changes_since = changes
+    except Exception as exc:
+        logger.warning("Failed to compute changes_since: %s", exc)
+
     # Collect all included memories for freshness calculation
     all_included: list[dict] = (
         rules_section + handoff_section + issue_items + decisions_section
@@ -638,6 +656,7 @@ async def build_primer(
         "issues": {"count": len(issue_items), "items": issue_items},
         "decisions": decisions_section,
         "entities": entities_section,
+        "changes_since": changes_since,
         "total_tokens": used_tokens,
         "budget_tokens": budget_tokens,
         "budget_remaining": budget_tokens - used_tokens,
