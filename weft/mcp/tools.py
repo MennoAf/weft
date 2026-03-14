@@ -50,6 +50,7 @@ from weft.models import (
     RelationType,
 )
 from weft.tokens import estimate_tokens
+from weft.session_tracking import boost_session_memories, log_memory_access
 from weft.store import (
     add_relationship,
     count_by_vector,
@@ -158,6 +159,22 @@ def _db_error_response(tool_name: str, error: Exception) -> dict:
     return {"error": "Database unavailable", "detail": detail, "degraded": True, "tool": tool_name}
 
 
+def _extract_primer_memory_ids(result: dict) -> list[str]:
+    """Extract memory IDs from all sections of a primer result."""
+    ids: list[str] = []
+    # Sections that contain memory dicts with "id" keys
+    for section in ("rules", "handoff", "recent_work", "decisions"):
+        for item in result.get(section, []):
+            if isinstance(item, dict) and "id" in item:
+                ids.append(item["id"])
+    # Issues have a nested structure
+    issues = result.get("issues", {})
+    for item in issues.get("items", []):
+        if isinstance(item, dict) and "id" in item:
+            ids.append(item["id"])
+    return ids
+
+
 @mcp.tool()
 async def weft_remember(
     ctx: Context,
@@ -255,6 +272,18 @@ async def weft_recall(
             except Exception:
                 pass
             enriched.append(d)
+        # Fire-and-forget: log session access for implicit usefulness signals
+        import asyncio
+        if results:
+            asyncio.create_task(
+                log_memory_access(
+                    app.pool,
+                    [r.memory.id for r in results],
+                    "recall",
+                ),
+                name="weft-session-log-recall",
+            )
+
         # Count total matches above threshold (without LIMIT) so the agent
         # knows whether there are more results to explore.
         total_matches = await count_by_vector(
@@ -327,6 +356,16 @@ async def weft_context(
         # Touch the memories that made it into context
         for mem_dict in result["memories"]:
             await touch_memory(app.pool, mem_dict["id"])
+
+        # Fire-and-forget: log session access for implicit usefulness signals
+        import asyncio
+        mem_ids = [m["id"] for m in result["memories"]]
+        if mem_ids:
+            asyncio.create_task(
+                log_memory_access(app.pool, mem_ids, "context"),
+                name="weft-session-log-context",
+            )
+
         return result
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_context", e)
@@ -508,6 +547,17 @@ async def weft_prime(
         except Exception as exc:
             logger.debug("Auto-consolidation scheduling skipped: %s", exc)
 
+        # Fire-and-forget: log session access for all memories in primer
+        try:
+            primer_mem_ids = _extract_primer_memory_ids(result)
+            if primer_mem_ids:
+                asyncio.create_task(
+                    log_memory_access(app.pool, primer_mem_ids, "prime"),
+                    name="weft-session-log-prime",
+                )
+        except Exception as exc:
+            logger.debug("Prime session logging skipped: %s", exc)
+
         return result
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_prime: %s", e)
@@ -645,12 +695,21 @@ async def weft_learn(
             milestone_dict = milestone.to_dict()
 
         await app.cache.invalidate_stats()
+
+        # Boost usefulness for memories accessed this session
+        session_boost: dict = {}
+        try:
+            session_boost = await boost_session_memories(app.pool)
+        except Exception as exc:
+            logger.warning("Session boost failed during learn: %s", exc)
+
         return {
             "candidates_found": len(candidates),
             "stored": len(stored),
             "memories": stored,
             "task_id": task_id,
             "milestone": milestone_dict,
+            "session_boost": session_boost,
         }
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_learn", e)
@@ -787,6 +846,13 @@ async def weft_handoff(
         except Exception as exc:
             logger.warning("Auto-episode failed during handoff: %s", exc)
 
+        # Boost usefulness for memories accessed this session
+        session_boost: dict = {}
+        try:
+            session_boost = await boost_session_memories(app.pool)
+        except Exception as exc:
+            logger.warning("Session boost failed during handoff: %s", exc)
+
         return {
             "id": memory.id,
             "project_id": resolved_project,
@@ -794,6 +860,7 @@ async def weft_handoff(
             "previous_handoffs_archived": pruned_count,
             "episodes_closed": closed_ids,
             "episode_opened": new_episode_id,
+            "session_boost": session_boost,
         }
     except _DB_ERRORS as e:
         return _db_error_response("weft_handoff", e)
