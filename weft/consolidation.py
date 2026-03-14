@@ -548,19 +548,21 @@ async def consolidate(
             except Exception as e:
                 report.errors.append(f"Contradiction detection failed: {e}")
                 logger.exception("Contradiction detection subsystem failed")
-
-            try:
-                from weft.session_tracking import prune_old_access_logs
-
-                if not dry_run:
-                    report.access_logs_pruned = await prune_old_access_logs(pool)
-            except Exception as e:
-                report.errors.append(f"Access log pruning failed: {e}")
-                logger.warning("Access log pruning failed: %s", e)
         finally:
             await lock_conn.execute(
                 "SELECT pg_advisory_unlock($1)", _CONSOLIDATION_LOCK_ID,
             )
+
+    # Pruning runs outside the advisory lock — it's independent of
+    # decay/dedup/contradiction and is idempotent if two runs race.
+    try:
+        from weft.session_tracking import prune_old_access_logs
+
+        if not dry_run:
+            report.access_logs_pruned = await prune_old_access_logs(pool)
+    except Exception as e:
+        report.errors.append(f"Access log pruning failed: {e}")
+        logger.warning("Access log pruning failed: %s", e)
 
     logger.info(
         "Consolidation complete: %d decayed, %d merged, %d contradictions",

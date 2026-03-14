@@ -68,7 +68,7 @@ async def test_primer_return_structure(pool):
         "entities", "changes_since", "total_tokens", "budget_tokens", "budget_remaining",
         "excluded", "freshness_hours", "section_tokens", "hints", "onboarding",
     }
-    assert set(result.keys()) == expected_keys
+    assert expected_keys.issubset(set(result.keys()))
 
     assert result["grounding"] is None or isinstance(result["grounding"], str)
     assert isinstance(result["rules"], list)

@@ -51,6 +51,7 @@ _CAP_RECENT_WORK = 150
 _CAP_ISSUES = 200
 _CAP_DECISIONS = 250
 _CAP_ENTITIES = 150
+_CAP_CHANGES_SINCE_COMMITS = 20
 
 # Max milestone items in recent_work section.
 _MAX_RECENT_WORK = 3
@@ -609,7 +610,7 @@ async def build_primer(
                 commits = await get_recent_commits(since=handoff_ts)
             except Exception:
                 commits = []
-            changes["recent_commits"] = commits
+            changes["recent_commits"] = commits[:_CAP_CHANGES_SINCE_COMMITS]
             changes_since = changes
     except Exception as exc:
         logger.warning("Failed to compute changes_since: %s", exc)
