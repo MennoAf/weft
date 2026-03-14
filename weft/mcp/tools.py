@@ -218,9 +218,17 @@ async def weft_remember(
         result = memory.to_dict()
         if check_contradictions and embedding:
             from weft.consolidation import check_contradictions_on_store
-            warnings = await check_contradictions_on_store(app.pool, memory.id, embedding)
+            warnings = await check_contradictions_on_store(
+                app.pool, memory.id, embedding,
+                memory_type=create.type,
+                project_id=resolved_project,
+            )
             if warnings:
                 result["contradiction_warnings"] = warnings
+                result["contradiction_warnings_text"] = [
+                    f'Warning: This may contradict memory {w["memory_id"]}: "{w["content_preview"]}"'
+                    for w in warnings
+                ]
         return result
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_remember", e)

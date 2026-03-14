@@ -44,6 +44,7 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "retrieval.default_top_k": ("retrieval", "default_top_k"),
     "retrieval.similarity_threshold": ("retrieval", "similarity_threshold"),
     "retrieval.context_budget_tokens": ("retrieval", "context_budget_tokens"),
+    "retrieval.contradiction_check_on_write": ("retrieval", "contradiction_check_on_write"),
     "decay.enabled": ("decay", "enabled"),
     "decay.half_life_days": ("decay", "half_life_days"),
     "decay.floor_score": ("decay", "floor_score"),
@@ -77,6 +78,7 @@ class RetrievalConfig(BaseModel):
     default_top_k: int = 10
     similarity_threshold: float = 0.5
     context_budget_tokens: int = 4000
+    contradiction_check_on_write: bool = True
 
 
 class DecayConfig(BaseModel):

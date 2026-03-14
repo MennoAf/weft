@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from weft.models import (
+    ContradictionWarning,
     Memory,
     MemoryStatus,
     MemoryType,
@@ -30,6 +31,8 @@ from weft.store import (
 )
 
 logger = logging.getLogger(__name__)
+
+_UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 
 # Types that should never be decayed
 IMMORTAL_TYPES = frozenset({MemoryType.preference, MemoryType.user_model, MemoryType.decision})
@@ -577,30 +580,51 @@ async def consolidate(
 # --- Proactive check for weft_remember ---
 
 
+_MIN_CONTENT_LENGTH_FOR_CONTRADICTION = 50
+
+
 async def check_contradictions_on_store(
     pool: asyncpg.Pool,
     memory_id: str,
     embedding: list[float],
     *,
+    memory_type: MemoryType | None = None,
+    project_id: str | object = _UNSET,
     sim_min: float = 0.8,
     sim_max: float = 0.99,
 ) -> list[dict]:
     """Check if a newly stored memory contradicts existing ones.
 
     Called from weft_remember when check_contradictions=True.
-    Returns list of contradiction warnings.
+    Scoped by memory_type and project_id when provided.
+    Returns list of contradiction warnings (dicts with ContradictionWarning fields).
+
+    Short content (< 50 chars) is skipped to avoid false positives on noisy
+    cosine similarity with short texts.
     """
     warnings: list[dict] = []
-
-    similar = await search_by_vector(
-        pool, embedding, limit=10, threshold=sim_min, status=MemoryStatus.active,
-    )
 
     # Get the new memory's content
     new_row = await pool.fetchrow("SELECT content FROM memories WHERE id = $1", memory_id)
     if not new_row:
         return warnings
     new_content = new_row["content"]
+
+    # Short content guard — cosine similarity on short texts is noisy
+    if len(new_content) < _MIN_CONTENT_LENGTH_FOR_CONTRADICTION:
+        return warnings
+
+    # Build search kwargs for type/project scoping
+    search_kwargs: dict = {}
+    if memory_type is not None:
+        search_kwargs["memory_type"] = memory_type
+    if project_id is not _UNSET:
+        search_kwargs["project_id"] = project_id
+
+    similar = await search_by_vector(
+        pool, embedding, limit=10, threshold=sim_min, status=MemoryStatus.active,
+        **search_kwargs,
+    )
 
     for result in similar:
         other = result.memory
@@ -611,12 +635,13 @@ async def check_contradictions_on_store(
 
         if _content_conflicts(new_content, other.content):
             await add_relationship(pool, memory_id, other.id, RelationType.contradicts)
-            warnings.append({
-                "type": "contradiction",
-                "memory_id": other.id,
-                "content_preview": other.content[:100],
-                "similarity": round(result.similarity, 4),
-            })
+            preview = other.content[:100] + ("…" if len(other.content) > 100 else "")
+            warning = ContradictionWarning(
+                memory_id=other.id,
+                content_preview=preview,
+                similarity=round(result.similarity, 4),
+            )
+            warnings.append(warning.to_dict())
 
     return warnings
 
