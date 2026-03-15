@@ -56,7 +56,7 @@ async def test_primer_empty_db(pool):
     assert result["behaviors"] == []
     assert result["entities"] == []
     # Empty DB = all hints + onboarding
-    assert set(result["hints"].keys()) == {"rules", "behaviors", "handoff", "recent_work", "issues", "decisions"}
+    assert set(result["hints"].keys()) == {"rules", "behaviors", "handoff", "recent_work", "issues", "decisions", "loom"}
     assert result["onboarding"] is not None
 
 
@@ -1212,7 +1212,7 @@ async def test_primer_cold_start_has_both_hints_and_onboarding(pool):
     result = await build_primer(pool, budget_tokens=1800)
 
     assert result["onboarding"] is not None
-    assert len(result["hints"]) == 6  # all six sections empty
+    assert len(result["hints"]) == 7  # all six sections empty + loom cold-start hint
 
 
 async def test_primer_established_agent_has_neither(pool):
@@ -1244,3 +1244,36 @@ async def test_primer_established_agent_has_neither(pool):
 
     assert result["onboarding"] is None
     assert result["hints"] == {}
+
+
+# --- Loom cold-start hint ---
+
+
+async def test_primer_loom_hint_on_cold_start(pool):
+    """Loom project hint appears on cold start to prevent task scoping mistakes."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert "loom" in result["hints"]
+    assert "loom_create_project" in result["hints"]["loom"]
+    assert "loom_decompose" in result["hints"]["loom"]
+
+
+async def test_primer_loom_hint_absent_for_established_agent(pool):
+    """Loom hint does not appear once a handoff exists (not a cold start)."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Returning",
+        topic=["session-handoff"], confidence=1.0,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert "loom" not in result["hints"]
+
+
+async def test_primer_onboarding_mentions_loom(pool):
+    """Onboarding text includes Loom integration guidance."""
+    result = await build_primer(pool, budget_tokens=1800)
+
+    assert result["onboarding"] is not None
+    assert "loom_create_project" in result["onboarding"]

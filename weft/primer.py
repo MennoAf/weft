@@ -116,7 +116,11 @@ Tips for getting started:
 - Store decisions with type='decision' so they appear in future primers and aren't re-debated
 - Pin important rules with pinned=True — they always appear in the primer
 - Call weft_handoff before ending sessions — the next primer surfaces it prominently
-- After completing tasks, call weft_learn to capture gotchas and patterns automatically"""
+- After completing tasks, call weft_learn to capture gotchas and patterns automatically
+
+Loom integration:
+- If Loom is available, run loom_create_project before decomposing work \
+to avoid tasks landing in the wrong project."""
 
 
 def _is_unscoped_ingest(mem: Memory, project_id: str | None) -> bool:
@@ -701,11 +705,16 @@ async def build_primer(
         + len(recent_work_section) + len(issue_items)
         + len(decisions_section) + len(entities_section)
     )
-    onboarding: str | None = (
-        _ONBOARDING_TEXT
-        if not handoff_section and total_items <= _COLD_START_THRESHOLD
-        else None
-    )
+    is_cold_start = not handoff_section and total_items <= _COLD_START_THRESHOLD
+    onboarding: str | None = _ONBOARDING_TEXT if is_cold_start else None
+
+    # Loom hint: only on cold start (new/unknown project).
+    if is_cold_start:
+        hints["loom"] = (
+            "New project detected. If Loom is available, run "
+            "loom_create_project to set up a dedicated task space "
+            "before decomposing work with loom_decompose."
+        )
 
     return {
         "grounding": grounding_line,
