@@ -47,6 +47,7 @@ from weft.models import (
     MemorySource,
     MemoryStatus,
     MemoryType,
+    MemoryTypeLiteral,
     RelationType,
 )
 from weft.tokens import estimate_tokens
@@ -180,7 +181,7 @@ def _extract_primer_memory_ids(result: dict) -> list[str]:
 async def weft_remember(
     ctx: Context,
     content: str,
-    type: str = "fact",
+    type: MemoryTypeLiteral = "fact",
     topic: list[str] | None = None,
     source: str = "conversation",
     confidence: float = 0.7,
@@ -242,7 +243,7 @@ async def weft_recall(
     ctx: Context,
     query: str,
     topic: str | None = None,
-    type: str | None = None,
+    type: MemoryTypeLiteral | None = None,
     status: str | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
@@ -371,7 +372,7 @@ async def weft_context(
     query: str,
     budget_tokens: int = 4000,
     topic: str | None = None,
-    type: str | None = None,
+    type: MemoryTypeLiteral | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
     max_per_topic: int = 3,
@@ -427,7 +428,7 @@ async def weft_revise(
     new_content: str,
     new_confidence: float | None = None,
     new_topic: list[str] | None = None,
-    new_type: str | None = None,
+    new_type: MemoryTypeLiteral | None = None,
     review_after: str | None = None,
 ) -> dict:
     """Update a memory's content, creating a new version that supersedes the old one.
@@ -984,7 +985,7 @@ async def weft_search_all(
     ctx: Context,
     query: str | None = None,
     topic: str | None = None,
-    memory_type: str | None = None,
+    memory_type: MemoryTypeLiteral | None = None,
     days: int | None = None,
     limit: int = 20,
 ) -> dict:

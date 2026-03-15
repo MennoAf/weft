@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,17 @@ class MemoryType(str, Enum):
     decision = "decision"
     milestone = "milestone"
     anti_pattern = "anti_pattern"
+
+
+# Literal union of all MemoryType values — used in MCP tool signatures so the
+# JSON Schema explicitly enumerates valid types.  This prevents LLM clients
+# from pre-validating against an inferred (potentially stale) enum.
+# Keep in sync with MemoryType above.
+MemoryTypeLiteral = Literal[
+    "preference", "fact", "pattern", "relationship", "solution",
+    "architecture", "user_model", "handoff", "issue", "decision",
+    "milestone", "anti_pattern",
+]
 
 
 class MemorySource(str, Enum):
