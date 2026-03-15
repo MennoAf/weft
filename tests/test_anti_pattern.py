@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from weft.embeddings import get_provider
-from weft.models import MemoryCreate, MemorySource, MemoryType
+from weft.models import MemoryCreate, MemorySource, MemoryType, MemoryTypeLiteral
 from weft.primer import build_primer
 from weft.store import search_by_vector, store_memory
 
@@ -20,6 +20,19 @@ def test_memory_type_has_anti_pattern():
     assert hasattr(MemoryType, "anti_pattern")
     assert MemoryType.anti_pattern.value == "anti_pattern"
     assert MemoryType("anti_pattern") == MemoryType.anti_pattern
+
+
+def test_memory_type_literal_matches_enum():
+    """MemoryTypeLiteral must stay in sync with MemoryType enum values."""
+    from typing import get_args
+
+    enum_values = {m.value for m in MemoryType}
+    literal_values = set(get_args(MemoryTypeLiteral))
+    assert enum_values == literal_values, (
+        f"MemoryTypeLiteral is out of sync with MemoryType. "
+        f"Missing from Literal: {enum_values - literal_values}. "
+        f"Extra in Literal: {literal_values - enum_values}"
+    )
 
 
 async def test_store_anti_pattern_roundtrip(pool, provider):
