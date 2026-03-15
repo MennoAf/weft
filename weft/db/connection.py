@@ -21,18 +21,23 @@ async def _pgvector_codec_init(conn: asyncpg.Connection) -> None:
     Encodes list[float] → pgvector text format and decodes back automatically,
     eliminating manual string manipulation.
 
-    Silently skips if the vector type doesn't exist yet (pre-migration).
+    Tries multiple schemas since managed Postgres providers may install
+    pgvector in different schemas (public, extensions, pg_catalog).
     """
-    try:
-        await conn.set_type_codec(
-            "vector",
-            encoder=lambda v: "[" + ",".join(str(x) for x in v) + "]",
-            decoder=lambda s: [float(x) for x in s.strip("[]").split(",")],
-            schema="public",
-            format="text",
-        )
-    except ValueError:
-        pass  # pgvector extension not yet installed
+    for schema in ("public", "extensions", "pg_catalog"):
+        try:
+            await conn.set_type_codec(
+                "vector",
+                encoder=lambda v: "[" + ",".join(str(x) for x in v) + "]",
+                decoder=lambda s: [float(x) for x in s.strip("[]").split(",")],
+                schema=schema,
+                format="text",
+            )
+            logger.debug("pgvector codec registered (schema=%s)", schema)
+            return
+        except Exception:
+            continue
+    logger.warning("pgvector codec registration failed: vector type not found in any schema")
 
 
 async def register_pgvector_codec(pool: asyncpg.Pool) -> None:

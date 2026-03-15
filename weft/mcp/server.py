@@ -183,7 +183,11 @@ async def lifespan(server: FastMCP):
         format="%(asctime)s %(levelname)s [%(correlation_id)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    logging.getLogger().addFilter(CorrelationFilter())
+    # Filter must be on the HANDLER (not the logger) so it applies to
+    # propagated records from child loggers (mcp, uvicorn, etc.).
+    corr_filter = CorrelationFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(corr_filter)
 
     # Database (with retry)
     pool = await _connect_with_retry(
@@ -191,7 +195,15 @@ async def lifespan(server: FastMCP):
         "Postgres",
     )
     await run_migrations(pool)
-    await register_pgvector_codec(pool)
+    # Recreate pool so ALL connections get the pgvector codec via init
+    # callback. The first pool's connections were created before migrations
+    # installed the vector extension, so their codec registration silently
+    # failed.
+    await pool.close()
+    pool = await _connect_with_retry(
+        lambda: create_pool(config),
+        "Postgres",
+    )
 
     # Export fallback snapshot
     await _write_fallback_snapshot(pool)
