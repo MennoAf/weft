@@ -32,6 +32,7 @@ USER appuser
 # Default to streamable HTTP transport in production
 ENV WEFT_ENV=production \
     WEFT_TRANSPORT=streamable-http \
+    FASTMCP_STATELESS_HTTP=true \
     PORT=8000
 
 EXPOSE 8000
