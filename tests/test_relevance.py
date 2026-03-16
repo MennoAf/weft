@@ -250,6 +250,67 @@ def test_scored_memory_to_dict():
     assert d["type"] == "fact"
     # Factor breakdowns exposed
     assert "factors" in d
-    assert set(d["factors"].keys()) == {"confidence", "recency", "frequency", "usefulness"}
+    assert set(d["factors"].keys()) == {"confidence", "recency", "frequency", "usefulness", "type_boost"}
     assert d["factors"]["confidence"] == pytest.approx(0.9)
     assert d["factors"]["usefulness"] == pytest.approx(1.0)  # explicit 1.0 in helper
+
+
+# --- type_boost_factor ---
+
+
+def test_anti_pattern_gets_default_boost():
+    """Anti-pattern memories get a 1.3x boost by default."""
+    from weft.relevance import type_boost_factor
+
+    assert type_boost_factor(MemoryType.anti_pattern) == pytest.approx(1.3)
+    assert type_boost_factor(MemoryType.fact) == pytest.approx(1.0)
+    assert type_boost_factor(MemoryType.decision) == pytest.approx(1.0)
+
+
+def test_type_boost_disabled_with_empty_dict():
+    """Passing empty boosts dict disables all boosts."""
+    from weft.relevance import type_boost_factor
+
+    assert type_boost_factor(MemoryType.anti_pattern, boosts={}) == pytest.approx(1.0)
+
+
+def test_anti_pattern_ranks_higher_than_equal_fact():
+    """An anti-pattern with identical signals should outscore a fact."""
+    anti = MemoryRecall(
+        memory=Memory(
+            type=MemoryType.anti_pattern,
+            content="Don't do X",
+            confidence=0.9,
+            accessed_at=NOW,
+            usefulness_score=1.0,
+            status=MemoryStatus.active,
+        ),
+        similarity=0.8,
+    )
+    fact = _make_recall(similarity=0.8, confidence=0.9)
+
+    anti_scored = score_memory(anti, now=NOW)
+    fact_scored = score_memory(fact, now=NOW)
+
+    assert anti_scored.type_boost_factor == pytest.approx(1.3)
+    assert fact_scored.type_boost_factor == pytest.approx(1.0)
+    assert anti_scored.score > fact_scored.score
+
+
+def test_type_boost_disabled_via_weights():
+    """When type_boosts={} in weights, anti-patterns get no boost."""
+    anti = MemoryRecall(
+        memory=Memory(
+            type=MemoryType.anti_pattern,
+            content="Don't do X",
+            confidence=0.9,
+            accessed_at=NOW,
+            usefulness_score=1.0,
+            status=MemoryStatus.active,
+        ),
+        similarity=0.8,
+    )
+    weights = RelevanceWeights(type_boosts={})
+    scored = score_memory(anti, weights=weights, now=NOW)
+
+    assert scored.type_boost_factor == pytest.approx(1.0)
