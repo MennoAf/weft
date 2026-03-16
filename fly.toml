@@ -1,6 +1,9 @@
 app = "weft-mcp"
 primary_region = "iad"
 
+[deploy]
+  strategy = "bluegreen"
+
 [build]
 
 [env]
