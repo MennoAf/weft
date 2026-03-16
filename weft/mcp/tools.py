@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 import asyncpg
 from fastmcp import Context
@@ -543,13 +544,20 @@ async def weft_prime(
     agent_id: str | None = None,
     budget_tokens: int = 2400,
     query: str | None = None,
+    disclosure: Literal["full", "progressive"] = "full",
 ) -> dict:
     """Session primer: assemble structured context for session startup.
     If project_id is omitted, auto-detects from the client's working directory.
 
     query: optional intent/topic string to bias which behaviors, decisions,
     issues, and recent work are surfaced. When provided, those sections use
-    semantic similarity to rank more relevant items higher."""
+    semantic similarity to rank more relevant items higher.
+
+    disclosure: 'full' returns all sections with content (default).
+    'progressive' returns tier-1 sections (rules, handoff, issues,
+    anti-patterns) with full content, and tier-2 sections (decisions,
+    recent_work, behaviors, entities) as counts only. Use weft_focus
+    to load deferred sections when relevant."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_prime start [%s] project=%s", cid, project_id)
@@ -572,6 +580,7 @@ async def weft_prime(
             agent_id=agent_id,
             budget_tokens=budget_tokens,
             query_vec=query_vec,
+            disclosure=disclosure,
         )
 
         # Fire-and-forget: trigger auto-consolidation if due (>24h since last run).

@@ -1277,3 +1277,126 @@ async def test_primer_onboarding_mentions_loom(pool):
 
     assert result["onboarding"] is not None
     assert "loom_create_project" in result["onboarding"]
+
+
+# --- Progressive disclosure ---
+
+
+async def _populate_all_sections(pool):
+    """Helper: populate all primer sections for progressive disclosure tests."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference, content="A pinned rule",
+        confidence=1.0, pinned=True,
+    ))
+    await store_behavior(pool, BehaviorCreate(
+        trigger_pattern="when testing", action="use pytest",
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Did some work",
+        topic=["session-handoff"], confidence=1.0,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone, content="Shipped feature X",
+        confidence=1.0,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.issue, content="Bug in auth flow",
+        confidence=0.8,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.anti_pattern, content="Don't use mocks for DB",
+        confidence=0.9,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.decision, content="Use PostgreSQL not SQLite",
+        confidence=0.9,
+    ))
+
+
+async def test_primer_progressive_defers_tier2(pool):
+    """Progressive mode returns deferred placeholders for tier-2 sections."""
+    await _populate_all_sections(pool)
+
+    result = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
+
+    assert result["disclosure"] == "progressive"
+
+    # Tier 1: full content
+    assert len(result["rules"]) > 0
+    assert isinstance(result["rules"], list)
+    assert len(result["handoff"]) > 0
+    assert isinstance(result["handoff"], list)
+    assert result["issues"]["count"] > 0
+    assert isinstance(result["issues"]["items"], list)
+    assert len(result["anti_patterns"]) > 0
+    assert isinstance(result["anti_patterns"], list)
+
+    # Tier 2: deferred with counts
+    assert result["decisions"]["deferred"] is True
+    assert result["decisions"]["count"] > 0
+    assert "hint" in result["decisions"]
+
+    assert result["recent_work"]["deferred"] is True
+    assert result["recent_work"]["count"] > 0
+
+    assert result["behaviors"]["deferred"] is True
+    assert result["behaviors"]["count"] > 0
+
+    assert result["entities"]["deferred"] is True
+
+
+async def test_primer_progressive_reduces_tokens(pool):
+    """Progressive mode uses fewer tokens than full mode."""
+    await _populate_all_sections(pool)
+
+    full = await build_primer(pool, budget_tokens=2400, disclosure="full")
+    progressive = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
+
+    assert progressive["total_tokens"] < full["total_tokens"]
+    assert progressive["budget_remaining"] > full["budget_remaining"]
+
+
+async def test_primer_full_mode_default(pool):
+    """Default disclosure is full — backward compatible."""
+    await _populate_all_sections(pool)
+
+    result = await build_primer(pool, budget_tokens=2400)
+
+    assert result["disclosure"] == "full"
+    # Decisions should be a list, not a deferred dict
+    assert isinstance(result["decisions"], list)
+
+
+async def test_primer_progressive_empty_sections(pool):
+    """Progressive mode with no data returns zero counts."""
+    result = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
+
+    assert result["disclosure"] == "progressive"
+    assert result["decisions"]["count"] == 0
+    assert result["decisions"]["deferred"] is True
+    assert result["recent_work"]["count"] == 0
+    assert result["behaviors"]["count"] == 0
+    assert result["entities"]["count"] == 0
+
+
+async def test_primer_progressive_tier1_always_included(pool):
+    """Tier-1 sections are never deferred even in progressive mode."""
+    await _populate_all_sections(pool)
+
+    result = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
+
+    # Rules are always full list
+    assert isinstance(result["rules"], list)
+    assert any("A pinned rule" in r["content"] for r in result["rules"])
+
+    # Handoff is always full list
+    assert isinstance(result["handoff"], list)
+    assert len(result["handoff"]) == 1
+
+    # Issues items are always full
+    assert len(result["issues"]["items"]) > 0
+
+    # Anti-patterns are always full list
+    assert isinstance(result["anti_patterns"], list)
+    assert len(result["anti_patterns"]) > 0

@@ -170,6 +170,7 @@ async def build_primer(
     agent_id: str | None = None,
     budget_tokens: int = 2400,
     query_vec: list[float] | None = None,
+    disclosure: str = "full",
 ) -> dict:
     """Assemble a tight session briefing from memories.
 
@@ -716,6 +717,66 @@ async def build_primer(
             "before decomposing work with loom_decompose."
         )
 
+    # --- Progressive disclosure: tier 2 sections become summaries ---
+    progressive = disclosure == "progressive"
+    if progressive:
+        # Tier 2 sections: return counts + deferred flag instead of content.
+        # Agents can call weft_focus(intent="...") to load relevant ones.
+        _deferred_decisions = {
+            "count": len(decisions_section),
+            "deferred": True,
+            "hint": "Use weft_focus(intent=...) to load relevant decisions.",
+        } if decisions_section else {"count": 0, "deferred": True}
+
+        _deferred_recent_work = {
+            "count": len(recent_work_section),
+            "deferred": True,
+            "hint": "Use weft_focus(intent=...) to load recent work.",
+        } if recent_work_section else {"count": 0, "deferred": True}
+
+        _deferred_behaviors = {
+            "count": len(behaviors_section),
+            "deferred": True,
+            "hint": "Use weft_focus(intent=...) to load behavioral rules.",
+        } if behaviors_section else {"count": 0, "deferred": True}
+
+        _deferred_entities = {
+            "count": len(entities_section),
+            "deferred": True,
+            "hint": "Use weft_focus(intent=...) to load known entities.",
+        } if entities_section else {"count": 0, "deferred": True}
+
+        # Recalculate used tokens — only tier 1 sections count.
+        tier1_tokens = (
+            section_tokens["grounding"]
+            + section_tokens["rules"]
+            + section_tokens["handoff"]
+            + section_tokens["issues"]
+            + section_tokens["anti_patterns"]
+        )
+
+        return {
+            "grounding": grounding_line,
+            "rules": rules_section,
+            "behaviors": _deferred_behaviors,
+            "handoff": handoff_section,
+            "recent_work": _deferred_recent_work,
+            "issues": {"count": len(issue_items), "items": issue_items},
+            "anti_patterns": anti_patterns_section,
+            "decisions": _deferred_decisions,
+            "entities": _deferred_entities,
+            "changes_since": changes_since,
+            "total_tokens": tier1_tokens,
+            "budget_tokens": budget_tokens,
+            "budget_remaining": budget_tokens - tier1_tokens,
+            "excluded": excluded,
+            "freshness_hours": freshness_hours,
+            "section_tokens": section_tokens,
+            "hints": hints,
+            "onboarding": onboarding,
+            "disclosure": "progressive",
+        }
+
     return {
         "grounding": grounding_line,
         "rules": rules_section,
@@ -735,4 +796,5 @@ async def build_primer(
         "section_tokens": section_tokens,
         "hints": hints,
         "onboarding": onboarding,
+        "disclosure": "full",
     }
