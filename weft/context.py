@@ -9,6 +9,8 @@ Pipeline:
 
 from __future__ import annotations
 
+import dataclasses
+
 import asyncpg
 
 from weft.models import MemoryRecall, MemoryStatus, MemoryType
@@ -128,7 +130,12 @@ async def build_context(
         }
 
     # 2. Score with relevance engine
-    scored = rank_memories(recalls, weights=weights) if recalls else []
+    # Disable type boosts when a specific type filter is active (boost is
+    # meaningless when all results share the same type).
+    effective_weights = weights or RelevanceWeights()
+    if memory_type is not None and effective_weights.type_boosts is None:
+        effective_weights = dataclasses.replace(effective_weights, type_boosts={})
+    scored = rank_memories(recalls, weights=effective_weights) if recalls else []
 
     # 3. Deduplicate by topic
     diverse = _deduplicate_by_topic(scored, max_per_topic=max_per_topic)

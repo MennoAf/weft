@@ -1,7 +1,7 @@
 """Relevance scoring engine — pure functions, no DB access.
 
 Combines multiple signals into a unified relevance score:
-  final_score = similarity * confidence_factor * recency_factor * frequency_factor * usefulness_factor
+  final_score = similarity * confidence * recency * frequency * usefulness * type_boost
 
 All functions operate on Memory model fields + similarity from SearchResult.
 """
@@ -12,7 +12,13 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from weft.models import Memory, MemoryRecall
+from weft.models import Memory, MemoryRecall, MemoryType
+
+
+# Default per-type score multipliers.  Types not listed get 1.0.
+_DEFAULT_TYPE_BOOSTS: dict[MemoryType, float] = {
+    MemoryType.anti_pattern: 1.3,
+}
 
 
 @dataclass(frozen=True)
@@ -23,6 +29,7 @@ class RelevanceWeights:
     frequency_boost_max: float = 0.2
     frequency_boost_scale: int = 10
     usefulness_floor: float = 0.5
+    type_boosts: dict[MemoryType, float] | None = None  # None → use defaults
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,7 @@ class ScoredMemory:
     recency_factor: float
     frequency_factor: float
     usefulness_factor: float
+    type_boost_factor: float
     score: float
 
     def to_dict(self) -> dict:
@@ -46,6 +54,7 @@ class ScoredMemory:
             "recency": round(self.recency_factor, 4),
             "frequency": round(self.frequency_factor, 4),
             "usefulness": round(self.usefulness_factor, 4),
+            "type_boost": round(self.type_boost_factor, 4),
         }
         return d
 
@@ -128,6 +137,15 @@ def usefulness_factor(
     return floor + (1.0 - floor) * clamped
 
 
+def type_boost_factor(
+    memory_type: MemoryType,
+    boosts: dict[MemoryType, float] | None = None,
+) -> float:
+    """Per-type score multiplier.  Returns 1.0 for unlisted types."""
+    mapping = _DEFAULT_TYPE_BOOSTS if boosts is None else boosts
+    return mapping.get(memory_type, 1.0)
+
+
 def score_memory(
     recall: MemoryRecall,
     *,
@@ -155,8 +173,9 @@ def score_memory(
         last_boosted_at=getattr(mem, "last_boosted_at", None),
         now=now,
     )
+    tb = type_boost_factor(mem.type, boosts=w.type_boosts)
 
-    final = recall.similarity * cf * rf * ff * uf
+    final = recall.similarity * cf * rf * ff * uf * tb
 
     return ScoredMemory(
         memory=mem,
@@ -165,6 +184,7 @@ def score_memory(
         recency_factor=rf,
         frequency_factor=ff,
         usefulness_factor=uf,
+        type_boost_factor=tb,
         score=final,
     )
 
