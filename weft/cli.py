@@ -690,11 +690,9 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
     console = Console()
 
     async def _re_embed():
-        import asyncpg
-
-        from weft.embeddings import get_provider
-
         from weft.db.connection import create_pool
+        from weft.db.reembed import reembed_table
+        from weft.embeddings import get_provider
 
         config = load_config()
         pool = await create_pool(config)
@@ -712,67 +710,21 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
 
         console.print(f"Provider: [bold]{provider.provider_name}[/bold] ({provider.dimensions} dims)")
 
-        # Table → content column mapping
-        table_content_col = {
-            "memories": "content",
-            "behaviors": "action",
-            "entities": "description",
-        }
+        if dry_run:
+            for table in tables:
+                count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+                console.print(f"\n[bold]{table}[/bold]: {count} rows")
+            await pool.close()
+            return 0
 
         total_updated = 0
-
         for table in tables:
-            content_col = table_content_col.get(table)
-            if not content_col:
-                console.print(f"[red]Unknown table: {table}[/red]")
-                continue
-
-            # Check table exists
-            exists = await pool.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
-                table,
-            )
-            if not exists:
-                console.print(f"\n[dim]{table}[/dim]: table does not exist, skipping")
-                continue
-
-            # Count rows
             count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
             console.print(f"\n[bold]{table}[/bold]: {count} rows")
-
-            if count == 0 or dry_run:
+            if count == 0:
                 continue
-
-            # Fetch all rows with content
-            if table == "entities":
-                # entities may have NULL description
-                rows = await pool.fetch(
-                    f"SELECT id, {content_col} FROM {table} WHERE {content_col} IS NOT NULL"  # noqa: S608
-                )
-            else:
-                rows = await pool.fetch(f"SELECT id, {content_col} FROM {table}")  # noqa: S608
-
-            # Process in batches
-            updated = 0
-            for i in range(0, len(rows), batch_size):
-                batch = rows[i:i + batch_size]
-                texts = [r[content_col] for r in batch]
-                ids = [r["id"] for r in batch]
-
-                embeddings = await provider.embed_batch(texts)
-
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        for row_id, emb in zip(ids, embeddings):
-                            await conn.execute(
-                                f"UPDATE {table} SET embedding = $1::vector WHERE id = $2",  # noqa: S608
-                                emb,
-                                row_id,
-                            )
-                updated += len(batch)
-                console.print(f"  {updated}/{len(rows)} rows updated", end="\r")
-
-            console.print(f"  {updated}/{len(rows)} rows updated")
+            updated = await reembed_table(pool, table, provider, batch_size, force=True)
+            console.print(f"  {updated} rows re-embedded")
             total_updated += updated
 
         await pool.close()
