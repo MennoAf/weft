@@ -170,7 +170,7 @@ async def build_primer(
     agent_id: str | None = None,
     budget_tokens: int = 2400,
     query_vec: list[float] | None = None,
-    disclosure: str = "full",
+    disclosure: str = "progressive",
 ) -> dict:
     """Assemble a tight session briefing from memories.
 

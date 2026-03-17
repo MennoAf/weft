@@ -84,7 +84,7 @@ async def test_primer_includes_pinned_in_rules(pool):
         confidence=0.5,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
     assert len(result["rules"]) == 1
     assert "snake_case" in result["rules"][0]["content"]
 
@@ -98,7 +98,7 @@ async def test_pinned_not_duplicated_in_other_sections(pool):
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
     all_ids = (
         [m["id"] for m in result["rules"]]
         + [m["id"] for m in result["handoff"]]
@@ -121,7 +121,7 @@ async def test_pinned_takes_priority_in_budget(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
     assert len(result["rules"]) == 1
     assert "Critical convention pinned" in result["rules"][0]["content"]
     assert result["total_tokens"] + result["budget_remaining"] == result["budget_tokens"]
