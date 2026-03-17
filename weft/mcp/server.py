@@ -21,6 +21,7 @@ from weft.cache import Cache, NullCache
 from weft.config import WeftConfig, load_config
 from weft.db.connection import create_pool, register_pgvector_codec
 from weft.db.migrations import run_migrations
+from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.auth import get_auth_provider
@@ -205,6 +206,9 @@ async def lifespan(server: FastMCP):
         "Postgres",
     )
 
+    # Self-heal vector dimensions if config changed since last run
+    migrated_tables = await ensure_vector_dimensions(pool, config.embedding.dimensions)
+
     # Export fallback snapshot
     await _write_fallback_snapshot(pool)
 
@@ -248,6 +252,17 @@ async def lifespan(server: FastMCP):
             embedding.provider_name, exc,
         )
         raise
+
+    # Re-embed rows nulled by dimension migration (best-effort)
+    if migrated_tables:
+        try:
+            from weft.db.reembed import auto_reembed
+            results = await auto_reembed(pool, embedding, migrated_tables)
+            total = sum(results.values())
+            if total:
+                logger.info("Auto re-embedded %d rows across %d tables", total, len(results))
+        except Exception as exc:
+            logger.warning("Auto re-embed failed (will retry on next query): %s", exc)
 
     # Seed memories on fresh installs (best-effort, never blocks startup)
     try:

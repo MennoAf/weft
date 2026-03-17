@@ -1,0 +1,142 @@
+"""Auto re-embed rows with NULL embeddings after dimension migration.
+
+Provides reembed_table() for per-table batch re-embedding and
+auto_reembed() as the top-level orchestrator called from
+ensure_vector_dimensions after a dimension migration.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+import asyncpg
+
+if TYPE_CHECKING:
+    from weft.embeddings.base import EmbeddingProvider
+
+logger = logging.getLogger(__name__)
+
+# Table → text column used to generate embeddings.
+TABLE_TEXT_COLUMNS: dict[str, str] = {
+    "memories": "content",
+    "behaviors": "action",
+    "entities": "description",
+}
+
+# Known safe table names — reject anything else.
+_ALLOWED_TABLES = frozenset(TABLE_TEXT_COLUMNS.keys())
+
+
+async def reembed_table(
+    pool: asyncpg.Pool,
+    table: str,
+    provider: EmbeddingProvider,
+    batch_size: int = 100,
+    force: bool = False,
+) -> int:
+    """Re-embed rows in a single table.
+
+    By default only processes rows with NULL embeddings (used after
+    dimension migration). With force=True, re-embeds all rows regardless
+    (used by the CLI ``weft re-embed`` command).
+
+    Returns the number of rows successfully re-embedded.
+    """
+    if table not in _ALLOWED_TABLES:
+        raise ValueError(
+            f"Unknown table {table!r}. Allowed: {sorted(_ALLOWED_TABLES)}"
+        )
+
+    text_col = TABLE_TEXT_COLUMNS[table]
+
+    # Fetch rows needing embeddings
+    where = f"WHERE {text_col} IS NOT NULL"
+    if not force:
+        where = f"WHERE embedding IS NULL AND {text_col} IS NOT NULL"
+    rows = await pool.fetch(
+        f"SELECT id, {text_col} FROM {table} {where}"  # noqa: S608
+    )
+
+    if not rows:
+        logger.info("reembed_skip_empty", extra={"table": table})
+        return 0
+
+    total = len(rows)
+    logger.info("reembed_starting", extra={"table": table, "rows": total})
+
+    embedded = 0
+    for i in range(0, total, batch_size):
+        batch = rows[i : i + batch_size]
+        texts = [r[text_col] for r in batch]
+        ids = [r["id"] for r in batch]
+
+        try:
+            embeddings = await provider.embed_batch(texts)
+        except Exception:
+            logger.exception(
+                "reembed_batch_failed",
+                extra={"table": table, "batch_start": i, "batch_size": len(batch)},
+            )
+            continue
+
+        if len(embeddings) != len(texts):
+            logger.warning(
+                "reembed_length_mismatch",
+                extra={
+                    "table": table,
+                    "expected": len(texts),
+                    "got": len(embeddings),
+                },
+            )
+            # Only update rows we got embeddings for
+            ids = ids[: len(embeddings)]
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for row_id, emb in zip(ids, embeddings):
+                    await conn.execute(
+                        f"UPDATE {table} SET embedding = $1::vector WHERE id = $2",  # noqa: S608
+                        emb,
+                        row_id,
+                    )
+
+        embedded += len(ids)
+        logger.info(
+            "reembed_progress",
+            extra={"table": table, "progress": f"{embedded}/{total}"},
+        )
+
+    logger.info(
+        "reembed_complete",
+        extra={"table": table, "embedded": embedded, "total": total},
+    )
+    return embedded
+
+
+async def auto_reembed(
+    pool: asyncpg.Pool,
+    provider: EmbeddingProvider,
+    tables: list[str] | None = None,
+    batch_size: int = 100,
+) -> dict[str, int]:
+    """Re-embed NULL embeddings across multiple tables.
+
+    If tables is None, processes all known tables.
+    Returns {table: rows_embedded} dict.
+    """
+    if tables is None:
+        tables = list(TABLE_TEXT_COLUMNS.keys())
+
+    results: dict[str, int] = {}
+    for table in tables:
+        count = await reembed_table(pool, table, provider, batch_size)
+        results[table] = count
+
+    total = sum(results.values())
+    if total > 0:
+        logger.info(
+            "auto_reembed_complete",
+            extra={"results": results, "total": total},
+        )
+    return results
