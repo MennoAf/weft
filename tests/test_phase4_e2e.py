@@ -159,7 +159,7 @@ async def test_session_priming_workflow(pool):
         confidence=0.85,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     # Pinned rule should be in rules
     assert len(result["rules"]) >= 1
@@ -218,7 +218,7 @@ async def test_full_phase4_workflow(pool, provider):
         await record_feedback(pool, results[0].memory.id, helpful=True)
 
     # 4. Prime session
-    primer = await build_primer(pool, budget_tokens=2000)
+    primer = await build_primer(pool, budget_tokens=2000, disclosure="full")
     assert primer["total_tokens"] <= 2000
     # Budget invariant
     assert primer["total_tokens"] + primer["budget_remaining"] == primer["budget_tokens"]

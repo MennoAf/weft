@@ -35,7 +35,7 @@ from weft.tokens import estimate_tokens
 async def test_primer_empty_db(pool):
     """No memories -> all sections empty, budget_remaining = budget_tokens,
     all hints present, onboarding shown (cold start)."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["grounding"] is None
     assert result["rules"] == []
@@ -62,7 +62,7 @@ async def test_primer_empty_db(pool):
 
 async def test_primer_return_structure(pool):
     """Verify all expected keys are present in the return dict."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     expected_keys = {
         "grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "decisions",
@@ -103,7 +103,7 @@ async def test_primer_budget_enforcement(pool):
         ))
 
     small_budget = 100
-    result = await build_primer(pool, budget_tokens=small_budget)
+    result = await build_primer(pool, budget_tokens=small_budget, disclosure="full")
 
     assert result["total_tokens"] <= small_budget
     assert result["budget_remaining"] >= 0
@@ -128,7 +128,7 @@ async def test_primer_rules_are_pinned_only(pool):
         pinned=False,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["rules"]) == 1
     assert "weft_remember" in result["rules"][0]["content"]
@@ -143,7 +143,7 @@ async def test_primer_unpinned_preferences_not_in_primer(pool):
         pinned=False,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     all_contents = (
         [m["content"] for m in result["rules"]]
@@ -174,7 +174,7 @@ async def test_primer_unpinned_facts_not_in_primer(pool):
         confidence=0.8,
     ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
 
     all_contents = (
         [m["content"] for m in result["rules"]]
@@ -203,7 +203,7 @@ async def test_primer_rules_sorted_by_confidence(pool):
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["rules"]) == 2
     assert result["rules"][0]["confidence"] >= result["rules"][1]["confidence"]
@@ -228,7 +228,7 @@ async def test_primer_surfaces_most_recent_handoff(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["handoff"]) == 1
     assert "project detection" in result["handoff"][0]["content"]
@@ -244,7 +244,7 @@ async def test_primer_handoff_fallback_by_topic(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["handoff"]) == 1
     assert "Mistyped handoff" in result["handoff"][0]["content"]
@@ -266,7 +266,7 @@ async def test_primer_handoff_typed_takes_priority_over_fallback(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["handoff"]) == 1
     assert "Properly typed one" in result["handoff"][0]["content"]
@@ -290,7 +290,7 @@ async def test_primer_issues_section(pool):
         confidence=0.8,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     issues = result["issues"]
     assert issues["count"] == 2
@@ -308,7 +308,7 @@ async def test_primer_issues_empty(pool):
         confidence=0.8,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert result["issues"] == {"count": 0, "items": []}
 
@@ -330,7 +330,7 @@ async def test_primer_issues_budget_aware(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=100)
+    result = await build_primer(pool, budget_tokens=100, disclosure="full")
 
     assert result["total_tokens"] <= 100
 
@@ -353,7 +353,7 @@ async def test_primer_decisions_section(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["decisions"]) == 2
     contents = [d["content"] for d in result["decisions"]]
@@ -370,7 +370,7 @@ async def test_primer_decisions_capped(pool):
             confidence=0.9,
         ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
 
     assert len(result["decisions"]) <= _MAX_DECISIONS
 
@@ -391,7 +391,7 @@ async def test_primer_decisions_project_scoped_first(pool):
         project_id="weft",
     ))
 
-    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500, disclosure="full")
 
     decisions = result["decisions"]
     assert len(decisions) == 2
@@ -411,7 +411,7 @@ async def test_primer_no_duplicates_across_sections(pool):
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     all_ids = (
         [m["id"] for m in result["rules"]]
@@ -451,7 +451,7 @@ async def test_primer_project_scoping(pool):
         project_id="loom",
     ))
 
-    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500, disclosure="full")
 
     rule_contents = [r["content"] for r in result["rules"]]
     assert any("weft_remember" in c for c in rule_contents)
@@ -461,7 +461,7 @@ async def test_primer_project_scoping(pool):
 
 async def test_primer_default_budget_is_2400(pool):
     """Default budget is 2400 tokens."""
-    result = await build_primer(pool)
+    result = await build_primer(pool, disclosure="full")
     assert result["budget_tokens"] == 2400
 
 
@@ -478,7 +478,7 @@ async def test_primer_grounding_with_project(pool):
         project_id="weft",
     ))
 
-    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500, disclosure="full")
 
     assert result["grounding"] is not None
     assert "Python MCP server" in result["grounding"]
@@ -494,14 +494,14 @@ async def test_primer_grounding_none_without_project(pool):
         project_id="weft",
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert result["grounding"] is None
 
 
 async def test_primer_grounding_none_when_no_memory(pool):
     """With project_id but no grounding memory, grounding is None."""
-    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500, disclosure="full")
 
     assert result["grounding"] is None
 
@@ -516,7 +516,7 @@ async def test_primer_grounding_not_cross_project(pool):
         project_id="loom",
     ))
 
-    result = await build_primer(pool, project_id="weft", budget_tokens=1500)
+    result = await build_primer(pool, project_id="weft", budget_tokens=1500, disclosure="full")
 
     assert result["grounding"] is None
 
@@ -540,7 +540,7 @@ async def test_primer_excluded_count_when_budget_full(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=100)
+    result = await build_primer(pool, budget_tokens=100, disclosure="full")
 
     assert result["excluded"] >= 1
 
@@ -554,7 +554,7 @@ async def test_primer_excluded_zero_when_all_fit(pool):
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert result["excluded"] == 0
 
@@ -571,7 +571,7 @@ async def test_primer_handoff_has_age_hours(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["handoff"]) == 1
     assert "age_hours" in result["handoff"][0]
@@ -615,7 +615,7 @@ async def test_handoff_prune_archives_old_handoffs(pool):
     assert archived == 4
 
     # Only the newest handoff should appear in the primer
-    result = await build_primer(pool, project_id="test-proj", budget_tokens=1500)
+    result = await build_primer(pool, project_id="test-proj", budget_tokens=1500, disclosure="full")
     assert len(result["handoff"]) == 1
     assert "Session 4" in result["handoff"][0]["content"]
 
@@ -652,7 +652,7 @@ async def test_handoff_prune_scoped_to_project(pool):
             await update_memory(pool, old.id, status=MemoryStatus.archived)
 
     # proj-b handoff should be untouched
-    result_b = await build_primer(pool, project_id="proj-b", budget_tokens=1500)
+    result_b = await build_primer(pool, project_id="proj-b", budget_tokens=1500, disclosure="full")
     assert len(result_b["handoff"]) == 1
     assert "Project B" in result_b["handoff"][0]["content"]
 
@@ -669,7 +669,7 @@ async def test_primer_freshness_hours_with_memories(pool):
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert result["freshness_hours"] is not None
     # Just created, should be very recent
@@ -678,7 +678,7 @@ async def test_primer_freshness_hours_with_memories(pool):
 
 async def test_primer_freshness_hours_none_when_empty(pool):
     """freshness_hours is None when no memories are included."""
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert result["freshness_hours"] is None
 
@@ -697,7 +697,7 @@ async def test_primer_freshness_hours_reflects_newest(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["freshness_hours"] is not None
     assert result["freshness_hours"] < 1.0
@@ -708,7 +708,7 @@ async def test_primer_freshness_hours_reflects_newest(pool):
 
 async def test_primer_recent_work_empty_when_no_milestones(pool):
     """recent_work is empty when no milestone memories exist."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["recent_work"] == []
     assert result["section_tokens"]["recent_work"] == 0
@@ -723,7 +723,7 @@ async def test_primer_recent_work_surfaces_milestones(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["recent_work"]) == 1
     entry = result["recent_work"][0]
@@ -743,7 +743,7 @@ async def test_primer_recent_work_max_items(pool):
             confidence=1.0,
         ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["recent_work"]) <= _MAX_RECENT_WORK
 
@@ -762,7 +762,7 @@ async def test_primer_recent_work_most_recent_first(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["recent_work"]) == 2
     assert result["recent_work"][0]["summary"] == "Newer milestone"
@@ -778,7 +778,7 @@ async def test_primer_recent_work_respects_section_cap(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["section_tokens"]["recent_work"] <= _CAP_RECENT_WORK
 
@@ -791,7 +791,7 @@ async def test_primer_recent_work_not_in_other_sections(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     # Should be in recent_work
     assert len(result["recent_work"]) == 1
@@ -810,7 +810,7 @@ async def test_primer_recent_work_not_in_other_sections(pool):
 
 async def test_primer_section_tokens_in_response(pool):
     """section_tokens dict is always present with all section keys."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert "section_tokens" in result
     expected_sections = {"grounding", "rules", "behaviors", "handoff", "recent_work", "issues", "anti_patterns", "decisions", "entities"}
@@ -827,7 +827,7 @@ async def test_primer_rules_section_cap(pool):
             pinned=True,
         ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
 
     assert result["section_tokens"]["rules"] <= _CAP_RULES
 
@@ -841,7 +841,7 @@ async def test_primer_issues_section_cap(pool):
             confidence=0.9,
         ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
 
     assert result["section_tokens"]["issues"] <= _CAP_ISSUES
 
@@ -855,7 +855,7 @@ async def test_primer_decisions_section_cap(pool):
             confidence=0.9,
         ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
 
     assert result["section_tokens"]["decisions"] <= _CAP_DECISIONS
 
@@ -877,7 +877,7 @@ async def test_primer_section_caps_dont_block_other_sections(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=4000)
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
 
     assert result["section_tokens"]["rules"] <= _CAP_RULES
     assert len(result["decisions"]) == 1
@@ -897,7 +897,7 @@ async def test_primer_rule_with_overdue_review_after(pool):
         review_after=past,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["rules"]) == 1
     rule = result["rules"][0]
@@ -916,7 +916,7 @@ async def test_primer_rule_with_future_review_after(pool):
         review_after=future,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["rules"]) == 1
     rule = result["rules"][0]
@@ -933,7 +933,7 @@ async def test_primer_rule_without_review_after(pool):
         pinned=True,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["rules"]) == 1
     rule = result["rules"][0]
@@ -950,7 +950,7 @@ async def test_primer_decision_with_overdue_review_after(pool):
         review_after=past,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["decisions"]) == 1
     decision = result["decisions"][0]
@@ -965,7 +965,7 @@ async def test_primer_decision_without_review_after(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert len(result["decisions"]) == 1
     assert "review_due" not in result["decisions"][0]
@@ -995,7 +995,7 @@ async def test_primer_rules_usefulness_tiebreaker(pool):
     # Upgrade m2's usefulness
     await record_feedback(pool, m2.id, helpful=True)
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     assert len(result["rules"]) == 2
     assert result["rules"][0]["content"] == "More useful rule"
@@ -1020,7 +1020,7 @@ async def test_primer_issues_ranked_by_usefulness(pool):
     await record_feedback(pool, m1.id, helpful=False)
     await record_feedback(pool, m2.id, helpful=True)
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     items = result["issues"]["items"]
     assert len(items) == 2
@@ -1045,7 +1045,7 @@ async def test_primer_decisions_ranked_by_usefulness(pool):
     await record_feedback(pool, m1.id, helpful=False)
     await record_feedback(pool, m2.id, helpful=True)
 
-    result = await build_primer(pool, budget_tokens=1500)
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
 
     decisions = result["decisions"]
     assert len(decisions) == 2
@@ -1058,7 +1058,7 @@ async def test_primer_decisions_ranked_by_usefulness(pool):
 
 async def test_primer_hints_all_present_when_empty(pool):
     """All five section hints appear when database is empty."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     hints = result["hints"]
     assert "rules" in hints
@@ -1089,7 +1089,7 @@ async def test_primer_hints_disappear_when_populated(pool):
         confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     hints = result["hints"]
     # Populated sections have no hint
@@ -1126,14 +1126,14 @@ async def test_primer_no_hints_when_all_populated(pool):
         type=MemoryType.decision, content="A choice", confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["hints"] == {}
 
 
 async def test_primer_hint_text_matches_constants(pool):
     """Empty-section hint text matches the _SECTION_HINTS constants exactly."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     for section_name, expected_hint in _SECTION_HINTS.items():
         assert result["hints"][section_name] == expected_hint
@@ -1144,7 +1144,7 @@ async def test_primer_hint_text_matches_constants(pool):
 
 async def test_primer_onboarding_on_cold_start(pool):
     """Onboarding text appears when DB is empty (classic cold start)."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is not None
     assert result["onboarding"] == _ONBOARDING_TEXT
@@ -1165,7 +1165,7 @@ async def test_primer_onboarding_absent_with_handoff(pool):
         confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is None
 
@@ -1180,7 +1180,7 @@ async def test_primer_onboarding_absent_with_many_memories(pool):
             confidence=0.9,
         ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is None
 
@@ -1195,7 +1195,7 @@ async def test_primer_onboarding_with_few_memories_no_handoff(pool):
             confidence=0.9,
         ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is not None
 
@@ -1209,7 +1209,7 @@ async def test_primer_onboarding_token_budget(pool):
 
 async def test_primer_cold_start_has_both_hints_and_onboarding(pool):
     """On cold start, both hints and onboarding are present simultaneously."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is not None
     assert len(result["hints"]) == 7  # all six sections empty + loom cold-start hint
@@ -1240,7 +1240,7 @@ async def test_primer_established_agent_has_neither(pool):
         type=MemoryType.decision, content="A choice", confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is None
     assert result["hints"] == {}
@@ -1251,7 +1251,7 @@ async def test_primer_established_agent_has_neither(pool):
 
 async def test_primer_loom_hint_on_cold_start(pool):
     """Loom project hint appears on cold start to prevent task scoping mistakes."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert "loom" in result["hints"]
     assert "loom_create_project" in result["hints"]["loom"]
@@ -1266,14 +1266,14 @@ async def test_primer_loom_hint_absent_for_established_agent(pool):
         topic=["session-handoff"], confidence=1.0,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert "loom" not in result["hints"]
 
 
 async def test_primer_onboarding_mentions_loom(pool):
     """Onboarding text includes Loom integration guidance."""
-    result = await build_primer(pool, budget_tokens=1800)
+    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is not None
     assert "loom_create_project" in result["onboarding"]
@@ -1357,15 +1357,16 @@ async def test_primer_progressive_reduces_tokens(pool):
     assert progressive["budget_remaining"] > full["budget_remaining"]
 
 
-async def test_primer_full_mode_default(pool):
-    """Default disclosure is full — backward compatible."""
+async def test_primer_progressive_mode_default(pool):
+    """Default disclosure is progressive — returns counts for tier-2 sections."""
     await _populate_all_sections(pool)
 
     result = await build_primer(pool, budget_tokens=2400)
 
-    assert result["disclosure"] == "full"
-    # Decisions should be a list, not a deferred dict
-    assert isinstance(result["decisions"], list)
+    assert result["disclosure"] == "progressive"
+    # Decisions should be deferred (count dict), not a list
+    assert isinstance(result["decisions"], dict)
+    assert "count" in result["decisions"]
 
 
 async def test_primer_progressive_empty_sections(pool):

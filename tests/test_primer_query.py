@@ -42,8 +42,8 @@ async def test_no_query_identical_to_existing(pool, provider):
     await _store(pool, provider, "Use pytest for all tests", MemoryType.decision)
     await _store(pool, provider, "Redis caching is broken", MemoryType.issue)
 
-    result_none = await build_primer(pool, query_vec=None)
-    result_omitted = await build_primer(pool)
+    result_none = await build_primer(pool, query_vec=None, disclosure="full")
+    result_omitted = await build_primer(pool, disclosure="full")
 
     assert result_none["decisions"] == result_omitted["decisions"]
     assert result_none["issues"] == result_omitted["issues"]
@@ -60,7 +60,7 @@ async def test_query_biases_decisions(pool, provider):
 
     # Query about testing should rank the testing decision first
     query_vec = await provider.embed("testing patterns and pytest")
-    result = await build_primer(pool, query_vec=query_vec)
+    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
 
     decisions = result["decisions"]
     assert len(decisions) == 2
@@ -74,7 +74,7 @@ async def test_query_biases_issues(pool, provider):
     await _store(pool, provider, "CSS styling breaks on mobile viewport", MemoryType.issue, topic=["frontend"])
 
     query_vec = await provider.embed("database performance and connection problems")
-    result = await build_primer(pool, query_vec=query_vec)
+    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
 
     issues = result["issues"]["items"]
     assert len(issues) == 2
@@ -87,7 +87,7 @@ async def test_query_biases_milestones(pool, provider):
     await _store(pool, provider, "Migrated authentication to JWT tokens", MemoryType.milestone, topic=["auth"])
 
     query_vec = await provider.embed("caching and Redis performance")
-    result = await build_primer(pool, query_vec=query_vec)
+    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
 
     recent = result["recent_work"]
     assert len(recent) == 2
@@ -102,7 +102,7 @@ async def test_rules_not_biased_by_query(pool, provider):
     await _store(pool, provider, "Always run linter before commit", MemoryType.preference, pinned=True)
 
     query_vec = await provider.embed("database migrations")
-    result = await build_primer(pool, query_vec=query_vec)
+    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
 
     assert len(result["rules"]) == 1
     assert "linter" in result["rules"][0]["content"]
@@ -113,7 +113,7 @@ async def test_handoff_not_biased_by_query(pool, provider):
     await _store(pool, provider, "Worked on frontend refactoring today", MemoryType.handoff)
 
     query_vec = await provider.embed("backend API design")
-    result = await build_primer(pool, query_vec=query_vec)
+    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
 
     assert len(result["handoff"]) == 1
     assert "frontend" in result["handoff"][0]["content"]
@@ -125,7 +125,7 @@ async def test_handoff_not_biased_by_query(pool, provider):
 async def test_empty_store_with_query(pool, provider):
     """Query on empty store returns normal empty primer."""
     query_vec = await provider.embed("anything")
-    result = await build_primer(pool, query_vec=query_vec)
+    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
 
     assert result["decisions"] == []
     assert result["issues"]["items"] == []
@@ -138,7 +138,7 @@ async def test_query_with_no_matching_decisions(pool, provider):
 
     # Completely unrelated query
     query_vec = await provider.embed("quantum physics and black holes")
-    result = await build_primer(pool, query_vec=query_vec)
+    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
 
     # Decision should still appear (threshold is 0.1, very permissive)
     assert len(result["decisions"]) >= 1
@@ -150,7 +150,7 @@ async def test_budget_still_enforced_with_query(pool, provider):
         await _store(pool, provider, f"Decision {i}: " + "x" * 200, MemoryType.decision)
 
     query_vec = await provider.embed("decisions")
-    result = await build_primer(pool, query_vec=query_vec, budget_tokens=300)
+    result = await build_primer(pool, query_vec=query_vec, budget_tokens=300, disclosure="full")
 
     # Should not exceed budget
     assert result["total_tokens"] <= 300

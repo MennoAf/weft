@@ -544,7 +544,7 @@ async def weft_prime(
     agent_id: str | None = None,
     budget_tokens: int = 2400,
     query: str | None = None,
-    disclosure: Literal["full", "progressive"] = "full",
+    disclosure: Literal["full", "progressive"] = "progressive",
 ) -> dict:
     """Session primer: assemble structured context for session startup.
     If project_id is omitted, auto-detects from the client's working directory.
@@ -553,11 +553,11 @@ async def weft_prime(
     issues, and recent work are surfaced. When provided, those sections use
     semantic similarity to rank more relevant items higher.
 
-    disclosure: 'full' returns all sections with content (default).
-    'progressive' returns tier-1 sections (rules, handoff, issues,
-    anti-patterns) with full content, and tier-2 sections (decisions,
-    recent_work, behaviors, entities) as counts only. Use weft_focus
-    to load deferred sections when relevant."""
+    disclosure: 'progressive' (default) returns tier-1 sections (rules,
+    handoff, issues, anti-patterns) with full content, and tier-2
+    sections (decisions, recent_work, behaviors, entities) as counts
+    only. Use weft_focus to load deferred sections when relevant.
+    'full' returns all sections with content."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_prime start [%s] project=%s", cid, project_id)

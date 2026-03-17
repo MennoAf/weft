@@ -56,9 +56,11 @@ Every 10 min:  uv run python -m loom heartbeat TASK_ID
 Weft is this project's persistent memory system. When the Weft MCP server is available, use it instead of flat-file memory.
 
 ### Session Startup
-- Call `weft_prime` at the start of every session to load relevant context (preferences, recent work, project-relevant memories)
+- Call `weft_prime` at the start of every session to load relevant context
+- The primer uses **progressive disclosure by default** — it returns critical sections (rules, handoff, issues, anti-patterns) in full, and shows counts for the rest (decisions, behaviors, recent work, entities)
 - Review the primer output before diving into work — it contains your accumulated knowledge about the user and project
-- Once you know what you're working on, call `weft_focus(intent="...")` to surface memories the primer missed — it's narrow, intent-driven, and excludes what prime already showed
+- Once you know what you're working on, call `weft_focus(intent="...")` to surface relevant memories the primer deferred — it's narrow, intent-driven, and excludes what prime already showed
+- To load everything upfront instead, pass `disclosure="full"` to `weft_prime`
 
 ### When to Remember
 
