@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemoryStatus, MemoryType, MemorySource, RelationType
 from weft.store import (
     add_relationship,
@@ -22,6 +23,11 @@ from weft.store import (
     touch_memory,
     update_memory,
 )
+
+
+@pytest.fixture
+def provider():
+    return get_provider("fastembed")
 
 
 async def test_store_and_get(pool):
@@ -404,3 +410,64 @@ async def test_clear_review_after(pool):
     updated = await update_memory(pool, mem.id, review_after=None)
     assert updated is not None
     assert updated.review_after is None
+
+
+# ── Durability: null-embedding persistence ──────────────────────────
+
+
+async def test_store_without_embedding(pool):
+    """Memory stored with no embedding is persisted and retrievable by ID."""
+    create = MemoryCreate(
+        type=MemoryType.fact,
+        content="Stored without embedding due to provider failure",
+        topic=["durability"],
+    )
+    mem = await store_memory(pool, create, embedding=None)
+    assert mem.id.startswith("weft-")
+    assert mem.content == create.content
+
+    fetched = await get_memory(pool, mem.id)
+    assert fetched is not None
+    assert fetched.content == create.content
+
+
+async def test_null_embedding_excluded_from_vector_search(pool, provider):
+    """Null-embedding rows don't appear in vector search results."""
+    # Store one with embedding, one without
+    content_with = "Memory with a valid embedding for search"
+    emb = await provider.embed(content_with)
+    mem_with = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content_with, topic=["durability"]),
+        embedding=emb,
+    )
+
+    mem_without = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="Memory without embedding — provider was down",
+            topic=["durability"],
+        ),
+        embedding=None,
+    )
+
+    results = await search_by_vector(pool, emb, limit=50)
+    result_ids = {r.memory.id for r in results}
+    assert mem_with.id in result_ids
+    assert mem_without.id not in result_ids
+
+
+async def test_null_embedding_appears_in_list(pool):
+    """Null-embedding memories still appear in non-vector list queries."""
+    create = MemoryCreate(
+        type=MemoryType.fact,
+        content="Listable even without embedding",
+        topic=["durability-list-test"],
+        project_id="durability-test",
+    )
+    mem = await store_memory(pool, create, embedding=None)
+
+    memories = await list_memories(pool, project_id="durability-test")
+    found = [m for m in memories if m.id == mem.id]
+    assert len(found) == 1

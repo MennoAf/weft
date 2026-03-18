@@ -215,11 +215,25 @@ async def weft_remember(
             pinned=pinned,
             review_after=_parse_review_after(review_after),
         )
-        embedding = await app.embedding.embed(content)
+        embedding = None
+        embedding_failed = False
+        try:
+            embedding = await app.embedding.embed(content)
+        except Exception as embed_err:
+            logger.warning(
+                "Embedding failed for weft_remember, storing without vector: %s",
+                embed_err,
+            )
+            embedding_failed = True
         memory = await store_memory(app.pool, create, embedding=embedding)
         await app.cache.set_memory(memory)
         await app.cache.invalidate_stats()
         result = memory.to_dict()
+        if embedding_failed:
+            result["warning"] = (
+                "Memory saved but embedding failed — not searchable by "
+                "semantic similarity until next re-embed cycle."
+            )
         if check_contradictions and embedding:
             from weft.consolidation import check_contradictions_on_store
             warnings = await check_contradictions_on_store(
