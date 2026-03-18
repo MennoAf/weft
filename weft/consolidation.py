@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.auth import current_user_id
 from weft.models import (
     ContradictionWarning,
     Memory,
@@ -178,10 +179,21 @@ async def _batch_fetch_embeddings(
     Returns a dict mapping memory ID to its embedding vector.
     Single query instead of N per-memory fetches.
     """
-    rows = await pool.fetch(
-        "SELECT id, embedding FROM memories WHERE status = $1 AND embedding IS NOT NULL",
-        status.value,
-    )
+    uid = current_user_id.get(None)
+    if uid is not None:
+        rows = await pool.fetch(
+            "SELECT id, embedding FROM memories"
+            " WHERE status = $1 AND embedding IS NOT NULL"
+            " AND (user_id = $2 OR user_id IS NULL)",
+            status.value,
+            uid,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT id, embedding FROM memories"
+            " WHERE status = $1 AND embedding IS NOT NULL",
+            status.value,
+        )
     return {row["id"]: row["embedding"] for row in rows}
 
 
@@ -241,6 +253,7 @@ async def find_duplicates(
                     keep, archive = other, mem
 
                 if not dry_run:
+                    uid = current_user_id.get(None)
                     async with pool.acquire() as conn:
                         async with conn.transaction():
                             await conn.execute(
@@ -254,11 +267,20 @@ async def find_duplicates(
                                 archive.id,
                                 RelationType.supersedes.value,
                             )
-                            await conn.execute(
-                                "UPDATE memories SET status = $1, updated_at = now() WHERE id = $2",
-                                MemoryStatus.archived.value,
-                                archive.id,
-                            )
+                            if uid is not None:
+                                await conn.execute(
+                                    "UPDATE memories SET status = $1, updated_at = now()"
+                                    " WHERE id = $2 AND (user_id = $3 OR user_id IS NULL)",
+                                    MemoryStatus.archived.value,
+                                    archive.id,
+                                    uid,
+                                )
+                            else:
+                                await conn.execute(
+                                    "UPDATE memories SET status = $1, updated_at = now() WHERE id = $2",
+                                    MemoryStatus.archived.value,
+                                    archive.id,
+                                )
 
                 merged.append((keep.id, archive.id))
                 seen_archived.add(archive.id)
@@ -605,7 +627,15 @@ async def check_contradictions_on_store(
     warnings: list[dict] = []
 
     # Get the new memory's content
-    new_row = await pool.fetchrow("SELECT content FROM memories WHERE id = $1", memory_id)
+    uid = current_user_id.get(None)
+    if uid is not None:
+        new_row = await pool.fetchrow(
+            "SELECT content FROM memories WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)",
+            memory_id,
+            uid,
+        )
+    else:
+        new_row = await pool.fetchrow("SELECT content FROM memories WHERE id = $1", memory_id)
     if not new_row:
         return warnings
     new_content = new_row["content"]
