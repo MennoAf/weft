@@ -44,12 +44,12 @@ async def store_memory(
             id, type, topic, content, source, confidence,
             token_count, created_at, updated_at, accessed_at,
             access_count, project_id, agent_id, embedding, status, pinned,
-            review_after
+            review_after, user_id
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
             0, $9, $10, $11::vector, 'active', $12,
-            $13
+            $13, nullif(current_setting('app.user_id', true), '')
         )
         """,
         memory_id,
@@ -578,12 +578,12 @@ async def upsert_by_topic(
                     id, type, topic, content, source, confidence,
                     token_count, created_at, updated_at, accessed_at,
                     access_count, project_id, embedding, status,
-                    pinned, review_after
+                    pinned, review_after, user_id
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $8, $8,
                     0, $9, $10::vector, 'active',
-                    false, $11
+                    false, $11, nullif(current_setting('app.user_id', true), '')
                 )
                 """,
                 memory_id,
@@ -714,8 +714,8 @@ async def add_relationship(
     now = datetime.now(timezone.utc)
     await pool.execute(
         """
-        INSERT INTO memory_relationships (source_id, target_id, relation, created_at)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO memory_relationships (source_id, target_id, relation, created_at, user_id)
+        VALUES ($1, $2, $3, $4, nullif(current_setting('app.user_id', true), ''))
         ON CONFLICT (source_id, target_id, relation) DO NOTHING
         """,
         source_id,

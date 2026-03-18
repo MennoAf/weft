@@ -31,9 +31,11 @@ async def store_entity(
         """
         INSERT INTO entities (
             id, name, entity_type, aliases, description,
-            project_id, agent_id, status, mention_count,
+            project_id, agent_id, user_id, status, mention_count,
             created_at, updated_at, embedding
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', 0, $8, $8, $9::vector)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7,
+                  nullif(current_setting('app.user_id', true), ''),
+                  'active', 0, $8, $8, $9::vector)
         """,
         entity_id,
         create.name,
@@ -170,8 +172,8 @@ async def link_mention(
     """
     result = await pool.execute(
         """
-        INSERT INTO entity_mentions (entity_id, memory_id)
-        VALUES ($1, $2)
+        INSERT INTO entity_mentions (entity_id, memory_id, user_id)
+        VALUES ($1, $2, nullif(current_setting('app.user_id', true), ''))
         ON CONFLICT (entity_id, memory_id) DO NOTHING
         """,
         entity_id,

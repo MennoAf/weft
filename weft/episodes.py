@@ -30,8 +30,10 @@ async def create_episode(
         """
         INSERT INTO episodes (
             id, title, summary, project_id, agent_id,
-            started_at, status, token_count, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'open', 0, $6, $6)
+            user_id, started_at, status, token_count, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5,
+                  nullif(current_setting('app.user_id', true), ''),
+                  $6, 'open', 0, $6, $6)
         """,
         episode_id,
         create.title,
@@ -152,8 +154,8 @@ async def add_memory_to_episode(
 
     result = await pool.execute(
         """
-        INSERT INTO episode_memories (episode_id, memory_id, position)
-        VALUES ($1, $2, $3)
+        INSERT INTO episode_memories (episode_id, memory_id, position, user_id)
+        VALUES ($1, $2, $3, nullif(current_setting('app.user_id', true), ''))
         ON CONFLICT (episode_id, memory_id) DO NOTHING
         """,
         episode_id,

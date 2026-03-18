@@ -38,9 +38,9 @@ async def store_behavior(
             embedding, status
         ) VALUES (
             $1, $2, $3, $4, $5,
-            $6, $7, $8, $9, $10,
-            0, $11, $12, $12,
-            $13::vector, 'active'
+            $6, $7, nullif(current_setting('app.user_id', true), ''), $8, $9,
+            0, $10, $11, $11,
+            $12::vector, 'active'
         )
         """,
         behavior_id,
@@ -50,7 +50,6 @@ async def store_behavior(
         create.scope.value,
         create.project_id,
         create.agent_id,
-        create.user_id,
         create.priority,
         create.enabled,
         token_count,
