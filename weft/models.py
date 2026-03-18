@@ -45,6 +45,14 @@ class MemorySource(str, Enum):
     ingest = "ingest"
 
 
+# Literal union of all MemorySource values — used in MCP tool signatures so the
+# JSON Schema explicitly enumerates valid sources.
+# Keep in sync with MemorySource above.
+MemorySourceLiteral = Literal[
+    "conversation", "code", "documentation", "inference", "seed", "ingest",
+]
+
+
 class MemoryStatus(str, Enum):
     active = "active"
     archived = "archived"
