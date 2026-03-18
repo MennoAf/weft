@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from weft.embeddings import get_provider
-from weft.models import MemoryCreate, MemorySource, MemoryType, MemoryTypeLiteral
+from weft.models import MemoryCreate, MemorySource, MemorySourceLiteral, MemoryType, MemoryTypeLiteral
 from weft.primer import build_primer
 from weft.store import search_by_vector, store_memory
 
@@ -30,6 +30,19 @@ def test_memory_type_literal_matches_enum():
     literal_values = set(get_args(MemoryTypeLiteral))
     assert enum_values == literal_values, (
         f"MemoryTypeLiteral is out of sync with MemoryType. "
+        f"Missing from Literal: {enum_values - literal_values}. "
+        f"Extra in Literal: {literal_values - enum_values}"
+    )
+
+
+def test_memory_source_literal_matches_enum():
+    """MemorySourceLiteral must stay in sync with MemorySource enum values."""
+    from typing import get_args
+
+    enum_values = {m.value for m in MemorySource}
+    literal_values = set(get_args(MemorySourceLiteral))
+    assert enum_values == literal_values, (
+        f"MemorySourceLiteral is out of sync with MemorySource. "
         f"Missing from Literal: {enum_values - literal_values}. "
         f"Extra in Literal: {literal_values - enum_values}"
     )
