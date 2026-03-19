@@ -615,6 +615,7 @@ async def weft_prime(
     budget_tokens: int = 2400,
     query: str | None = None,
     disclosure: Literal["full", "progressive"] = "progressive",
+    mode: str | None = None,
 ) -> dict:
     """Session primer: assemble structured context for session startup.
     If project_id is omitted, auto-detects from the client's working directory.
@@ -627,7 +628,12 @@ async def weft_prime(
     handoff, issues, anti-patterns) with full content, and tier-2
     sections (decisions, recent_work, behaviors, entities) as counts
     only. Use weft_focus to load deferred sections when relevant.
-    'full' returns all sections with content."""
+    'full' returns all sections with content.
+
+    mode: optional name of a retrieval mode/persona (e.g., 'research',
+    'coding'). Adjusts section weights via ModeWeights — behavior_boost
+    and entity_boost scale section token caps, recency_bias shifts
+    milestone ranking toward recency. Falls back to defaults if not found."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_prime start [%s] project=%s", cid, project_id)
@@ -655,6 +661,7 @@ async def weft_prime(
             budget_tokens=budget_tokens,
             query_vec=query_vec,
             disclosure=disclosure,
+            mode=mode,
         )
 
         # Fire-and-forget tasks run without acquire — they're system-level ops
