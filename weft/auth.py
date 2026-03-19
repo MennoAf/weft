@@ -5,6 +5,13 @@ MCP client, this identifies the *user* for Row Level Security scoping.
 
 Flow: HTTP Authorization header → extract_user_id() → current_user_id
 contextvar → connection.py reads it for SET LOCAL app.user_id.
+
+Supports two verification modes (checked in order):
+1. **JWKS (asymmetric, RS256/ES256)** — the default for Supabase projects
+   created after May 2025.  Set SUPABASE_JWKS_URL or SUPABASE_URL and the
+   public key is fetched automatically.
+2. **Shared secret (symmetric, HS256)** — legacy mode.  Set
+   SUPABASE_JWT_SECRET to the project's JWT secret.
 """
 
 from __future__ import annotations
@@ -14,16 +21,59 @@ import os
 from contextvars import ContextVar
 
 import jwt
+from jwt import PyJWKClient
 
 logger = logging.getLogger(__name__)
 
 # Request-scoped user identity. Set by middleware, read by connection layer.
 current_user_id: ContextVar[str | None] = ContextVar("current_user_id", default=None)
 
+# Module-level JWKS client singleton — created once, reuses cached keys.
+_jwk_client: PyJWKClient | None = None
+_jwt_secret: str | None = None
+_auth_mode: str | None = None  # "jwks", "secret", or None
 
-def _get_jwt_secret() -> str | None:
-    """Read the Supabase JWT secret from environment."""
-    return os.environ.get("SUPABASE_JWT_SECRET")
+
+def _init_auth() -> None:
+    """Lazily initialize the JWT verification strategy.
+
+    Checks environment variables once and caches the result so subsequent
+    calls are fast.  Order of precedence:
+
+    1. SUPABASE_JWKS_URL — explicit JWKS endpoint
+    2. SUPABASE_URL — derive JWKS endpoint as <url>/auth/v1/.well-known/jwks.json
+    3. SUPABASE_JWT_SECRET — legacy HS256 symmetric secret
+    """
+    global _jwk_client, _jwt_secret, _auth_mode
+
+    if _auth_mode is not None:
+        return  # already initialized
+
+    # Option 1: Explicit JWKS URL
+    jwks_url = os.environ.get("SUPABASE_JWKS_URL")
+
+    # Option 2: Derive from SUPABASE_URL
+    if not jwks_url:
+        supabase_url = os.environ.get("SUPABASE_URL")
+        if supabase_url:
+            jwks_url = f"{supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+
+    if jwks_url:
+        _jwk_client = PyJWKClient(jwks_url, cache_keys=True, lifespan=600)
+        _auth_mode = "jwks"
+        logger.info("JWT auth: JWKS mode (endpoint: %s)", jwks_url)
+        return
+
+    # Option 3: Legacy symmetric secret
+    secret = os.environ.get("SUPABASE_JWT_SECRET")
+    if secret:
+        _jwt_secret = secret
+        _auth_mode = "secret"
+        logger.info("JWT auth: legacy HS256 mode")
+        return
+
+    _auth_mode = "none"
+    logger.info("JWT auth: disabled (no SUPABASE_JWKS_URL, SUPABASE_URL, or SUPABASE_JWT_SECRET)")
 
 
 def extract_user_id(token: str) -> str | None:
@@ -38,23 +88,39 @@ def extract_user_id(token: str) -> str | None:
     token:
         Raw JWT string (without "Bearer " prefix).
     """
-    secret = _get_jwt_secret()
-    if not secret:
-        logger.debug("No SUPABASE_JWT_SECRET configured — skipping JWT decode")
+    _init_auth()
+
+    if _auth_mode == "none":
+        logger.debug("JWT auth disabled — skipping decode")
         return None
 
     try:
-        payload = jwt.decode(
-            token,
-            secret,
-            algorithms=["HS256"],
-            options={"require": ["sub", "exp"], "verify_aud": False},
-        )
+        if _auth_mode == "jwks":
+            # Asymmetric verification: fetch public key by kid from JWKS endpoint
+            signing_key = _jwk_client.get_signing_key_from_jwt(token)
+            payload = jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=["RS256", "ES256", "EdDSA"],
+                options={"require": ["sub", "exp"], "verify_aud": False},
+            )
+        else:
+            # Legacy symmetric verification
+            payload = jwt.decode(
+                token,
+                _jwt_secret,
+                algorithms=["HS256"],
+                options={"require": ["sub", "exp"], "verify_aud": False},
+            )
     except jwt.ExpiredSignatureError:
         logger.debug("JWT expired")
         return None
     except jwt.InvalidTokenError as exc:
         logger.debug("Invalid JWT: %s", exc)
+        return None
+    except Exception as exc:
+        # JWKS fetch failures, network errors, etc.
+        logger.warning("JWT verification failed: %s", exc)
         return None
 
     sub = payload.get("sub")
@@ -83,3 +149,11 @@ def extract_user_id_from_header(auth_header: str | None) -> str | None:
         return None
 
     return extract_user_id(token)
+
+
+def _reset_auth() -> None:
+    """Reset auth state — only for testing."""
+    global _jwk_client, _jwt_secret, _auth_mode
+    _jwk_client = None
+    _jwt_secret = None
+    _auth_mode = None

@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from weft.auth import current_user_id
+from weft.auth import _reset_auth, current_user_id
 from weft.mcp.server import UserIdentityMiddleware
 
 _SECRET = "test-supabase-jwt-secret-32chars!"
@@ -34,8 +34,10 @@ def _echo_user_id(request: Request) -> JSONResponse:
 
 @pytest.fixture(autouse=True)
 def _set_jwt_secret():
+    _reset_auth()
     with patch.dict("os.environ", {"SUPABASE_JWT_SECRET": _SECRET}):
         yield
+    _reset_auth()
 
 
 @pytest.fixture

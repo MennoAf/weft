@@ -17,7 +17,7 @@ from unittest.mock import patch
 import jwt as pyjwt
 import pytest
 
-from weft.auth import current_user_id, extract_user_id, extract_user_id_from_header
+from weft.auth import _reset_auth, current_user_id, extract_user_id, extract_user_id_from_header
 from weft.db.connection import acquire
 from weft.models import MemoryCreate, MemoryType
 from weft.store import store_memory
@@ -34,8 +34,10 @@ def _make_jwt(sub: str = "test-user-uuid", **extra_claims) -> str:
 
 @pytest.fixture(autouse=True)
 def _set_jwt_secret():
+    _reset_auth()
     with patch.dict("os.environ", {"SUPABASE_JWT_SECRET": _SECRET}):
         yield
+    _reset_auth()
 
 
 @pytest.fixture(autouse=True)

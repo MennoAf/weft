@@ -9,6 +9,7 @@ import jwt as pyjwt
 import pytest
 
 from weft.auth import (
+    _reset_auth,
     current_user_id,
     extract_user_id,
     extract_user_id_from_header,
@@ -39,9 +40,11 @@ def _make_jwt(
 
 @pytest.fixture(autouse=True)
 def _set_jwt_secret():
-    """Ensure SUPABASE_JWT_SECRET is set for all tests."""
+    """Ensure SUPABASE_JWT_SECRET is set for all tests (legacy HS256 mode)."""
+    _reset_auth()  # clear cached auth mode from prior tests
     with patch.dict("os.environ", {"SUPABASE_JWT_SECRET": _SECRET}):
         yield
+    _reset_auth()  # clean up for next test module
 
 
 # --- extract_user_id ---
@@ -84,6 +87,7 @@ class TestExtractUserId:
         assert extract_user_id(token) is None
 
     def test_no_secret_configured(self):
+        _reset_auth()
         with patch.dict("os.environ", {}, clear=True):
             token = _make_jwt()
             assert extract_user_id(token) is None
