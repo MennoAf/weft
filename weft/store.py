@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.db.connection import acquire, get_db
 from weft.models import (
     Memory,
     MemoryCreate,
@@ -38,7 +39,8 @@ async def store_memory(
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.content)
 
-    await pool.execute(
+    db = get_db(pool)
+    await db.execute(
         """
         INSERT INTO memories (
             id, type, topic, content, source, confidence,
@@ -89,7 +91,7 @@ async def store_memory(
 
 async def get_memory(pool: asyncpg.Pool, memory_id: str) -> Memory | None:
     """Fetch a single memory by ID. Returns None if not found."""
-    row = await pool.fetchrow("SELECT * FROM memories WHERE id = $1", memory_id)
+    row = await get_db(pool).fetchrow("SELECT * FROM memories WHERE id = $1", memory_id)
     if not row:
         return None
     return _row_to_memory(row)
@@ -155,7 +157,7 @@ async def list_memories(
     """
     params.extend([limit, offset])
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
     return [_row_to_memory(r) for r in rows]
 
 
@@ -235,7 +237,7 @@ async def search_by_vector(
     """
     params.append(limit)
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
 
     results = []
     for row in rows:
@@ -315,7 +317,7 @@ async def search_cross_project(
     """
     params.append(limit)
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
 
     results = []
     for row in rows:
@@ -378,7 +380,7 @@ async def count_by_vector(
     where = "WHERE " + " AND ".join(conditions)
     query = f"SELECT COUNT(*) FROM memories {where}"
 
-    return await pool.fetchval(query, *params)
+    return await get_db(pool).fetchval(query, *params)
 
 
 async def get_recent_writes(
@@ -388,8 +390,9 @@ async def get_recent_writes(
     project_id: str | None = None,
 ) -> list[dict]:
     """Return the most recently created memories with provenance info."""
+    db = get_db(pool)
     if project_id is not None:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             """SELECT id, type, content, source, agent_id, project_id, created_at
                FROM memories
                WHERE status = 'active' AND (project_id = $1 OR project_id IS NULL)
@@ -397,7 +400,7 @@ async def get_recent_writes(
             project_id, limit,
         )
     else:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             """SELECT id, type, content, source, agent_id, project_id, created_at
                FROM memories
                WHERE status = 'active'
@@ -488,7 +491,7 @@ async def update_memory(
     set_clause = ", ".join(sets)
     params.append(memory_id)
 
-    row = await pool.fetchrow(
+    row = await get_db(pool).fetchrow(
         f"UPDATE memories SET {set_clause} WHERE id = ${idx} RETURNING *",
         *params,
     )
@@ -515,7 +518,7 @@ async def upsert_by_topic(
 
     Returns the updated or newly created Memory.
     """
-    async with pool.acquire() as conn:
+    async with acquire(pool) as conn:
         async with conn.transaction():
             # Look for an existing active memory with exact topic match
             if project_id is not None:
@@ -620,10 +623,11 @@ async def upsert_by_topic(
 
 async def delete_memory(pool: asyncpg.Pool, memory_id: str, *, hard: bool = False) -> bool:
     """Delete a memory. Soft-delete (archive) by default, hard-delete if specified."""
+    db = get_db(pool)
     if hard:
-        result = await pool.execute("DELETE FROM memories WHERE id = $1", memory_id)
+        result = await db.execute("DELETE FROM memories WHERE id = $1", memory_id)
     else:
-        result = await pool.execute(
+        result = await db.execute(
             "UPDATE memories SET status = 'archived', updated_at = now() WHERE id = $1",
             memory_id,
         )
@@ -644,7 +648,7 @@ async def touch_memory(
 
     Formula: new_score = (1 - alpha) * old_score + alpha * 1.0
     """
-    await pool.execute(
+    await get_db(pool).execute(
         """
         UPDATE memories
         SET accessed_at = now(),
@@ -668,7 +672,7 @@ async def record_feedback(
     new_score = alpha * signal + (1 - alpha) * old_score
     where signal = 1.0 for helpful, 0.0 for not helpful.
     """
-    async with pool.acquire() as conn:
+    async with acquire(pool) as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 "SELECT usefulness_score, usefulness_count FROM memories WHERE id = $1 FOR UPDATE",
@@ -712,7 +716,7 @@ async def add_relationship(
 ) -> MemoryRelationship:
     """Create a relationship between two memories."""
     now = datetime.now(timezone.utc)
-    await pool.execute(
+    await get_db(pool).execute(
         """
         INSERT INTO memory_relationships (source_id, target_id, relation, created_at, user_id)
         VALUES ($1, $2, $3, $4, nullif(current_setting('app.user_id', true), ''))
@@ -738,8 +742,9 @@ async def get_relationships(
     relation: RelationType | None = None,
 ) -> list[MemoryRelationship]:
     """Get all relationships for a memory (as source or target)."""
+    db = get_db(pool)
     if relation:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             """
             SELECT * FROM memory_relationships
             WHERE (source_id = $1 OR target_id = $1) AND relation = $2
@@ -748,7 +753,7 @@ async def get_relationships(
             relation.value,
         )
     else:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             "SELECT * FROM memory_relationships WHERE source_id = $1 OR target_id = $1",
             memory_id,
         )
@@ -770,7 +775,7 @@ async def remove_relationship(
     relation: RelationType,
 ) -> bool:
     """Remove a specific relationship. Returns True if deleted."""
-    result = await pool.execute(
+    result = await get_db(pool).execute(
         """
         DELETE FROM memory_relationships
         WHERE source_id = $1 AND target_id = $2 AND relation = $3
@@ -787,21 +792,22 @@ async def remove_relationship(
 
 async def get_stats(pool: asyncpg.Pool) -> dict:
     """Get memory statistics."""
-    total = await pool.fetchval("SELECT COUNT(*) FROM memories")
-    by_status = await pool.fetch(
+    db = get_db(pool)
+    total = await db.fetchval("SELECT COUNT(*) FROM memories")
+    by_status = await db.fetch(
         "SELECT status, COUNT(*) as count FROM memories GROUP BY status"
     )
-    by_type = await pool.fetch(
+    by_type = await db.fetch(
         "SELECT type, COUNT(*) as count FROM memories WHERE status = 'active' GROUP BY type"
     )
-    by_topic = await pool.fetch(
+    by_topic = await db.fetch(
         """
         SELECT unnest(topic) as topic, COUNT(*) as count
         FROM memories WHERE status = 'active'
         GROUP BY topic ORDER BY count DESC LIMIT 20
         """
     )
-    recent = await pool.fetch(
+    recent = await db.fetch(
         "SELECT id, content, accessed_at FROM memories WHERE status = 'active' ORDER BY accessed_at DESC LIMIT 5"
     )
 
@@ -823,7 +829,7 @@ async def get_stats(pool: asyncpg.Pool) -> dict:
 async def get_metadata(pool: asyncpg.Pool, key: str) -> dict | None:
     """Get a metadata value by key. Returns None if not found or table missing."""
     try:
-        row = await pool.fetchrow(
+        row = await get_db(pool).fetchrow(
             "SELECT value FROM weft_metadata WHERE key = $1", key,
         )
         if row is None:
@@ -842,7 +848,7 @@ async def get_metadata(pool: asyncpg.Pool, key: str) -> dict | None:
 async def set_metadata(pool: asyncpg.Pool, key: str, value: dict) -> None:
     """Upsert a metadata value (idempotent)."""
     import json
-    await pool.execute(
+    await get_db(pool).execute(
         """INSERT INTO weft_metadata (key, value, updated_at)
            VALUES ($1, $2::jsonb, NOW())
            ON CONFLICT (key) DO UPDATE
@@ -863,8 +869,9 @@ async def get_last_handoff_timestamp(
     Scoping: project_id=None queries global handoffs (project_id IS NULL).
     A non-None project_id matches that exact project.
     """
+    db = get_db(pool)
     if project_id is not None:
-        row = await pool.fetchrow(
+        row = await db.fetchrow(
             """
             SELECT MAX(created_at) AS ts
             FROM memories
@@ -874,7 +881,7 @@ async def get_last_handoff_timestamp(
             project_id,
         )
     else:
-        row = await pool.fetchrow(
+        row = await db.fetchrow(
             """
             SELECT MAX(created_at) AS ts
             FROM memories
@@ -898,8 +905,9 @@ async def get_memory_changes_since(
     - archived: archived memories with updated_at > since
     - revised: active memories updated since the timestamp but created before it
     """
+    db = get_db(pool)
     if project_id is not None:
-        row = await pool.fetchrow(
+        row = await db.fetchrow(
             """
             SELECT
                 COUNT(*) FILTER (
@@ -917,7 +925,7 @@ async def get_memory_changes_since(
             since, project_id,
         )
     else:
-        row = await pool.fetchrow(
+        row = await db.fetchrow(
             """
             SELECT
                 COUNT(*) FILTER (

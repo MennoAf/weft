@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import ssl
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from contextvars import ContextVar
+from typing import AsyncIterator, Union
 
 import asyncpg
 
@@ -13,6 +14,30 @@ from weft.auth import current_user_id
 from weft.config import WeftConfig
 
 logger = logging.getLogger(__name__)
+
+# Connection contextvar: when set (inside acquire()), store functions use
+# this connection instead of the pool.  This ensures all DB operations
+# within an MCP tool call share a single connection with SET LOCAL
+# app.user_id active, making RLS policies effective.
+_current_conn: ContextVar[asyncpg.Connection | None] = ContextVar(
+    "_current_conn", default=None,
+)
+
+
+def get_db(pool: asyncpg.Pool) -> Union[asyncpg.Pool, asyncpg.Connection]:
+    """Return the RLS-scoped connection if inside acquire(), else the pool.
+
+    Both asyncpg.Pool and asyncpg.Connection expose the same query
+    interface (execute, fetch, fetchrow, fetchval), so callers work
+    identically regardless of which is returned.
+
+    When inside an acquire() context, the returned connection has
+    SET LOCAL app.user_id active, so RLS policies filter correctly.
+    When outside (tests, CLI, background tasks), the pool is returned
+    and queries run without user scoping — seeing only global rows.
+    """
+    conn = _current_conn.get(None)
+    return conn if conn is not None else pool
 
 
 async def _pgvector_codec_init(conn: asyncpg.Connection) -> None:
@@ -101,8 +126,16 @@ async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
     """Acquire a connection with user identity context.
 
     Wraps ``pool.acquire()`` and issues ``SET LOCAL app.user_id``
-    inside a transaction when a user is authenticated. This is the
-    preferred way to get a connection for user-scoped operations.
+    inside a transaction when a user is authenticated.  Also sets
+    the ``_current_conn`` contextvar so downstream code can call
+    ``get_db(pool)`` to reuse this RLS-scoped connection.
+
+    **Idempotent:** if already inside an ``acquire()`` context,
+    yields the existing connection without re-acquiring.  This
+    makes it safe for store functions that call ``acquire()``
+    internally (e.g. ``revise_memory``, ``record_feedback``) —
+    when called from a tool that already holds the scope, they
+    just reuse it.
 
     Usage::
 
@@ -110,6 +143,12 @@ async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
             rows = await conn.fetch("SELECT * FROM memories")
             # RLS automatically filters by the current user
     """
+    existing = _current_conn.get(None)
+    if existing is not None:
+        # Already inside an acquire() context — reuse the connection.
+        yield existing
+        return
+
     async with pool.acquire() as conn:
         user_id = current_user_id.get()
         if user_id is not None:
@@ -119,9 +158,21 @@ async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
                 # Sanitize by rejecting non-UUID-safe characters.
                 if not user_id.replace("-", "").isalnum():
                     logger.warning("Rejecting suspicious user_id: %r", user_id)
-                    yield conn
+                    token = _current_conn.set(conn)
+                    try:
+                        yield conn
+                    finally:
+                        _current_conn.reset(token)
                 else:
                     await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
-                    yield conn
+                    token = _current_conn.set(conn)
+                    try:
+                        yield conn
+                    finally:
+                        _current_conn.reset(token)
         else:
-            yield conn
+            token = _current_conn.set(conn)
+            try:
+                yield conn
+            finally:
+                _current_conn.reset(token)

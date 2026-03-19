@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.db.connection import get_db
 from weft.models import Behavior, BehaviorCreate, BehaviorMatch, BehaviorScope, _weft_id
 from weft.tokens import estimate_tokens
 
@@ -29,7 +30,7 @@ async def store_behavior(
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.trigger_pattern + " " + create.action)
 
-    await pool.execute(
+    await get_db(pool).execute(
         """
         INSERT INTO behaviors (
             id, trigger_pattern, action, confidence, scope,
@@ -77,7 +78,7 @@ async def store_behavior(
 
 async def get_behavior(pool: asyncpg.Pool, behavior_id: str) -> Behavior | None:
     """Fetch a single behavior by ID. Returns None if not found."""
-    row = await pool.fetchrow("SELECT * FROM behaviors WHERE id = $1", behavior_id)
+    row = await get_db(pool).fetchrow("SELECT * FROM behaviors WHERE id = $1", behavior_id)
     if not row:
         return None
     return _row_to_behavior(row)
@@ -135,7 +136,7 @@ async def list_behaviors(
     """
     params.extend([limit, offset])
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
     return [_row_to_behavior(r) for r in rows]
 
 
@@ -193,7 +194,7 @@ async def match_behaviors(
     """
     params.append(limit)
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
 
     results = []
     for row in rows:
@@ -243,7 +244,7 @@ async def update_behavior(
     if trigger_pattern is not None or action is not None:
         # Recalculate token count
         # We need current values for the unchanged field
-        current = await pool.fetchrow(
+        current = await get_db(pool).fetchrow(
             "SELECT trigger_pattern, action FROM behaviors WHERE id = $1",
             behavior_id,
         )
@@ -297,7 +298,7 @@ async def update_behavior(
     set_clause = ", ".join(sets)
     params.append(behavior_id)
 
-    row = await pool.fetchrow(
+    row = await get_db(pool).fetchrow(
         f"UPDATE behaviors SET {set_clause} WHERE id = ${idx} RETURNING *",
         *params,
     )
@@ -311,10 +312,11 @@ async def delete_behavior(
     hard: bool = False,
 ) -> bool:
     """Delete a behavior. Soft-delete (archive) by default."""
+    db = get_db(pool)
     if hard:
-        result = await pool.execute("DELETE FROM behaviors WHERE id = $1", behavior_id)
+        result = await db.execute("DELETE FROM behaviors WHERE id = $1", behavior_id)
     else:
-        result = await pool.execute(
+        result = await db.execute(
             "UPDATE behaviors SET status = 'archived', updated_at = now() WHERE id = $1",
             behavior_id,
         )
@@ -323,7 +325,7 @@ async def delete_behavior(
 
 async def touch_behavior(pool: asyncpg.Pool, behavior_id: str) -> None:
     """Increment access_count and update updated_at."""
-    await pool.execute(
+    await get_db(pool).execute(
         """
         UPDATE behaviors
         SET access_count = access_count + 1,
