@@ -322,6 +322,79 @@ class Mode(BaseModel):
         return self.model_dump(mode="json")
 
 
+class AlertType(str, Enum):
+    due_task = "due_task"
+    stale_decision = "stale_decision"
+    follow_up = "follow_up"
+    custom = "custom"
+
+
+class AlertChannel(str, Enum):
+    log = "log"
+    slack = "slack"
+
+
+class AlertStatus(str, Enum):
+    pending = "pending"
+    fired = "fired"
+    dismissed = "dismissed"
+
+
+class AlertCreate(BaseModel):
+    """Input model for creating an alert.
+
+    trigger_at must be a timezone-aware UTC datetime.
+    Use datetime.now(timezone.utc) for immediate delivery or a future timestamp.
+    """
+
+    alert_type: AlertType
+    title: str
+    body: str | None = None
+    trigger_at: datetime
+    channel: AlertChannel = AlertChannel.log
+    channel_target: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    project_id: str | None = None
+    agent_id: str | None = None
+
+    @classmethod
+    def _validate_trigger_at(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("trigger_at must be timezone-aware")
+        return v
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        self._validate_trigger_at(self.trigger_at)
+
+
+class Alert(BaseModel):
+    """A proactive alert — scheduled notification that fires at trigger_at."""
+
+    id: str = Field(default_factory=_weft_id)
+    user_id: str | None = None
+    alert_type: AlertType
+    title: str
+    body: str | None = None
+    trigger_at: datetime
+    status: AlertStatus = AlertStatus.pending
+    channel: AlertChannel = AlertChannel.log
+    channel_target: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    project_id: str | None = None
+    agent_id: str | None = None
+    fired_at: datetime | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        d = self.model_dump(mode="json")
+        d["alert_type"] = self.alert_type.value
+        d["status"] = self.status.value
+        d["channel"] = self.channel.value
+        return d
+
+
 class ContradictionWarning(BaseModel):
     """A warning that a new memory may contradict an existing one."""
 
