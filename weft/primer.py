@@ -171,6 +171,7 @@ async def build_primer(
     budget_tokens: int = 2400,
     query_vec: list[float] | None = None,
     disclosure: str = "progressive",
+    mode: str | None = None,
 ) -> dict:
     """Assemble a tight session briefing from memories.
 
@@ -188,6 +189,11 @@ async def build_primer(
     issues, decisions) use vector similarity search with blended re-ranking
     instead of plain metadata queries.  Sections 0-1, 3 are never biased.
 
+    When *mode* is provided, the corresponding ModeWeights are resolved and
+    used to scale section caps (behavior_boost, entity_boost) and ranking
+    signals (recency_bias).  vector_weight/bm25_weight are stored but not
+    yet applied to primer retrieval (reserved for hybrid search integration).
+
     Everything else (architecture, patterns, reference facts, preferences)
     lives in recall — fetched on demand when the conversation needs it.
 
@@ -196,6 +202,14 @@ async def build_primer(
     """
     now = datetime.now(timezone.utc)
     biased = query_vec is not None
+
+    # Resolve mode weights (never raises — falls back to defaults)
+    from weft.modes import get_active_weights
+    weights = await get_active_weights(pool, mode)
+
+    # Scale section caps by mode weights (clamped to 0)
+    cap_behaviors = max(0, int(_CAP_BEHAVIORS * weights.behavior_boost))
+    cap_entities = max(0, int(_CAP_ENTITIES * weights.entity_boost))
 
     # list_memories already handles `project_id = $X OR project_id IS NULL`
     # when project_id is provided, so a single call per section suffices.
@@ -374,7 +388,7 @@ async def build_primer(
         cost = beh.token_count or estimate_tokens(beh.trigger_pattern + " " + beh.action)
         if (
             used_tokens + cost <= budget_tokens
-            and section_used + cost <= _CAP_BEHAVIORS
+            and section_used + cost <= cap_behaviors
         ):
             entry = {
                 "trigger": beh.trigger_pattern,
@@ -447,6 +461,11 @@ async def build_primer(
         and m.created_at.timestamp() > cutoff
         and not _is_unscoped_ingest(m, project_id)
     ]
+    # Compute effective similarity weight — recency_bias shifts the blend
+    # toward recency.  At recency_bias=0 (default), use _SIMILARITY_WEIGHT.
+    # At recency_bias=1.0, similarity gets 0 weight (pure recency sort).
+    effective_sim_weight = _SIMILARITY_WEIGHT * (1.0 - weights.recency_bias)
+
     if biased:
         # Blend similarity with recency (newer = higher score).
         _ts_range = (
@@ -455,8 +474,8 @@ async def build_primer(
         ) if len(milestone_candidates) > 1 else 1.0
         milestone_candidates.sort(
             key=lambda pair: (
-                _SIMILARITY_WEIGHT * (pair[1] or 0)
-                + (1 - _SIMILARITY_WEIGHT) * (
+                effective_sim_weight * (pair[1] or 0)
+                + (1 - effective_sim_weight) * (
                     (pair[0].created_at.timestamp() - cutoff) / max(_ts_range, 1.0)
                 )
             ),
@@ -647,7 +666,7 @@ async def build_primer(
         cost = estimate_tokens(ent_text)
         if (
             used_tokens + cost <= budget_tokens
-            and section_used + cost <= _CAP_ENTITIES
+            and section_used + cost <= cap_entities
         ):
             entities_section.append({
                 "name": ent.name,
