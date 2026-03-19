@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.db.connection import get_db
 from weft.models import Episode, EpisodeCreate, EpisodeStatus, Memory, _weft_id
 from weft.store import _row_to_memory
 from weft.tokens import estimate_tokens
@@ -26,7 +27,7 @@ async def create_episode(
     episode_id = _weft_id()
     now = datetime.now(timezone.utc)
 
-    await pool.execute(
+    await get_db(pool).execute(
         """
         INSERT INTO episodes (
             id, title, summary, project_id, agent_id,
@@ -58,7 +59,7 @@ async def create_episode(
 
 async def get_episode(pool: asyncpg.Pool, episode_id: str) -> Episode | None:
     """Fetch a single episode by ID."""
-    row = await pool.fetchrow("SELECT * FROM episodes WHERE id = $1", episode_id)
+    row = await get_db(pool).fetchrow("SELECT * FROM episodes WHERE id = $1", episode_id)
     if not row:
         return None
     return _row_to_episode(row)
@@ -101,7 +102,7 @@ async def list_episodes(
     """
     params.extend([limit, offset])
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
     return [_row_to_episode(r) for r in rows]
 
 
@@ -126,7 +127,7 @@ async def close_episode(
     set_clause = ", ".join(sets)
     params.append(episode_id)
 
-    row = await pool.fetchrow(
+    row = await get_db(pool).fetchrow(
         f"UPDATE episodes SET {set_clause} WHERE id = ${idx} RETURNING *",
         *params,
     )
@@ -144,15 +145,16 @@ async def add_memory_to_episode(
     If position is None, auto-assigns next position.
     Returns True if a new link was created, False if already existed.
     """
+    db = get_db(pool)
     if position is None:
         # Auto-assign next position
-        max_pos = await pool.fetchval(
+        max_pos = await db.fetchval(
             "SELECT COALESCE(MAX(position), -1) FROM episode_memories WHERE episode_id = $1",
             episode_id,
         )
         position = max_pos + 1
 
-    result = await pool.execute(
+    result = await db.execute(
         """
         INSERT INTO episode_memories (episode_id, memory_id, position, user_id)
         VALUES ($1, $2, $3, nullif(current_setting('app.user_id', true), ''))
@@ -172,7 +174,7 @@ async def remove_memory_from_episode(
     memory_id: str,
 ) -> bool:
     """Unlink a memory from an episode. Returns True if removed."""
-    result = await pool.execute(
+    result = await get_db(pool).execute(
         "DELETE FROM episode_memories WHERE episode_id = $1 AND memory_id = $2",
         episode_id,
         memory_id,
@@ -187,7 +189,7 @@ async def get_episode_memories(
     limit: int = 100,
 ) -> list[Memory]:
     """Get memories linked to an episode, ordered by position."""
-    rows = await pool.fetch(
+    rows = await get_db(pool).fetch(
         """
         SELECT m.* FROM memories m
         JOIN episode_memories em ON m.id = em.memory_id
@@ -206,7 +208,7 @@ async def get_episodes_for_memory(
     memory_id: str,
 ) -> list[Episode]:
     """Reverse lookup — which episodes contain this memory?"""
-    rows = await pool.fetch(
+    rows = await get_db(pool).fetch(
         """
         SELECT e.* FROM episodes e
         JOIN episode_memories em ON e.id = em.episode_id
@@ -263,7 +265,7 @@ async def timeline_query(
     """
     params.append(limit)
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
     return [_row_to_episode(r) for r in rows]
 
 

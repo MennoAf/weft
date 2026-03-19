@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.db.connection import acquire
 from weft.models import (
     Memory,
     MemoryStatus,
@@ -54,7 +55,7 @@ async def revise_memory(
     new_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(new_content)
-    async with pool.acquire() as conn:
+    async with acquire(pool) as conn:
         async with conn.transaction():
             # 1. Insert new memory
             await conn.execute(

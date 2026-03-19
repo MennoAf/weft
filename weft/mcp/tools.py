@@ -12,6 +12,7 @@ import asyncpg
 from fastmcp import Context
 
 from weft.correlation import set_correlation_id
+from weft.db.connection import acquire
 from weft.mcp.server import AppContext, mcp
 from weft.behaviors import (
     delete_behavior,
@@ -225,29 +226,30 @@ async def weft_remember(
                 embed_err,
             )
             embedding_failed = True
-        memory = await store_memory(app.pool, create, embedding=embedding)
-        await app.cache.set_memory(memory)
-        await app.cache.invalidate_stats()
-        result = memory.to_dict()
-        if embedding_failed:
-            result["warning"] = (
-                "Memory saved but embedding failed — not searchable by "
-                "semantic similarity until next re-embed cycle."
-            )
-        if check_contradictions and embedding:
-            from weft.consolidation import check_contradictions_on_store
-            warnings = await check_contradictions_on_store(
-                app.pool, memory.id, embedding,
-                memory_type=create.type,
-                project_id=resolved_project,
-            )
-            if warnings:
-                result["contradiction_warnings"] = warnings
-                result["contradiction_warnings_text"] = [
-                    f'Warning: This may contradict memory {w["memory_id"]}: "{w["content_preview"]}"'
-                    for w in warnings
-                ]
-        return result
+        async with acquire(app.pool):
+            memory = await store_memory(app.pool, create, embedding=embedding)
+            await app.cache.set_memory(memory)
+            await app.cache.invalidate_stats()
+            result = memory.to_dict()
+            if embedding_failed:
+                result["warning"] = (
+                    "Memory saved but embedding failed — not searchable by "
+                    "semantic similarity until next re-embed cycle."
+                )
+            if check_contradictions and embedding:
+                from weft.consolidation import check_contradictions_on_store
+                warnings = await check_contradictions_on_store(
+                    app.pool, memory.id, embedding,
+                    memory_type=create.type,
+                    project_id=resolved_project,
+                )
+                if warnings:
+                    result["contradiction_warnings"] = warnings
+                    result["contradiction_warnings_text"] = [
+                        f'Warning: This may contradict memory {w["memory_id"]}: "{w["content_preview"]}"'
+                        for w in warnings
+                    ]
+            return result
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_remember", e)
     except _DB_ERRORS as e:
@@ -274,31 +276,78 @@ async def weft_recall(
         memory_type = MemoryType(type) if type else None
         memory_status = MemoryStatus(status) if status else MemoryStatus.active
         embedding = await app.embedding.embed(query)
-        results = await search_by_vector(
-            app.pool,
-            embedding,
-            limit=limit,
-            threshold=threshold,
-            status=memory_status,
-            memory_type=memory_type,
-            topic=topic,
-            project_id=project_id,
-            agent_id=agent_id,
-        )
-        # Touch accessed memories and enrich with entities
-        enriched = []
-        for r in results:
-            await touch_memory(app.pool, r.memory.id)
-            d = r.to_dict()
-            try:
-                from weft.entities import get_memory_entities
-                ents = await get_memory_entities(app.pool, r.memory.id)
-                if ents:
-                    d["entities"] = [{"name": e.name, "type": e.entity_type.value} for e in ents]
-            except Exception:
-                pass
-            enriched.append(d)
-        # Fire-and-forget: log session access for implicit usefulness signals
+        async with acquire(app.pool):
+            results = await search_by_vector(
+                app.pool,
+                embedding,
+                limit=limit,
+                threshold=threshold,
+                status=memory_status,
+                memory_type=memory_type,
+                topic=topic,
+                project_id=project_id,
+                agent_id=agent_id,
+            )
+            # Touch accessed memories and enrich with entities
+            enriched = []
+            for r in results:
+                await touch_memory(app.pool, r.memory.id)
+                d = r.to_dict()
+                try:
+                    from weft.entities import get_memory_entities
+                    ents = await get_memory_entities(app.pool, r.memory.id)
+                    if ents:
+                        d["entities"] = [{"name": e.name, "type": e.entity_type.value} for e in ents]
+                except Exception:
+                    pass
+                enriched.append(d)
+
+            # Count total matches above threshold (without LIMIT) so the agent
+            # knows whether there are more results to explore.
+            total_matches = await count_by_vector(
+                app.pool,
+                embedding,
+                threshold=threshold,
+                status=memory_status,
+                memory_type=memory_type,
+                topic=topic,
+                project_id=project_id,
+                agent_id=agent_id,
+            )
+            response: dict = {"query": query, "count": len(results), "results": enriched}
+            if total_matches > len(results):
+                response["total_matches"] = total_matches
+                response["showing"] = f"Showing {len(results)} of {total_matches} matches"
+
+            # Cross-project search: surface relevant memories from other projects
+            resolved_project = await _resolve_project_id(ctx, project_id)
+            if resolved_project is not None:
+                try:
+                    from weft.config import load_config
+                    cfg = load_config()
+                    if cfg.retrieval.cross_project_search:
+                        main_ids = {r.memory.id for r in results}
+                        cross_results = await search_cross_project(
+                            app.pool, embedding,
+                            exclude_project_id=resolved_project,
+                            limit=cfg.retrieval.cross_project_limit,
+                            threshold=threshold,
+                            status=memory_status,
+                            memory_type=memory_type,
+                            exclude_ids=list(main_ids),
+                        )
+                        if cross_results:
+                            response["cross_project"] = [
+                                {
+                                    **r.to_dict(),
+                                    "source_project": r.memory.project_id,
+                                }
+                                for r in cross_results
+                            ]
+                except Exception as exc:
+                    logger.warning("Cross-project search failed: %s", exc)
+
+        # Fire-and-forget: log session access (outside acquire — system-level op)
         import asyncio
         if results:
             asyncio.create_task(
@@ -309,51 +358,6 @@ async def weft_recall(
                 ),
                 name="weft-session-log-recall",
             )
-
-        # Count total matches above threshold (without LIMIT) so the agent
-        # knows whether there are more results to explore.
-        total_matches = await count_by_vector(
-            app.pool,
-            embedding,
-            threshold=threshold,
-            status=memory_status,
-            memory_type=memory_type,
-            topic=topic,
-            project_id=project_id,
-            agent_id=agent_id,
-        )
-        response: dict = {"query": query, "count": len(results), "results": enriched}
-        if total_matches > len(results):
-            response["total_matches"] = total_matches
-            response["showing"] = f"Showing {len(results)} of {total_matches} matches"
-
-        # Cross-project search: surface relevant memories from other projects
-        resolved_project = await _resolve_project_id(ctx, project_id)
-        if resolved_project is not None:
-            try:
-                from weft.config import load_config
-                cfg = load_config()
-                if cfg.retrieval.cross_project_search:
-                    main_ids = {r.memory.id for r in results}
-                    cross_results = await search_cross_project(
-                        app.pool, embedding,
-                        exclude_project_id=resolved_project,
-                        limit=cfg.retrieval.cross_project_limit,
-                        threshold=threshold,
-                        status=memory_status,
-                        memory_type=memory_type,
-                        exclude_ids=list(main_ids),
-                    )
-                    if cross_results:
-                        response["cross_project"] = [
-                            {
-                                **r.to_dict(),
-                                "source_project": r.memory.project_id,
-                            }
-                            for r in cross_results
-                        ]
-            except Exception as exc:
-                logger.warning("Cross-project search failed: %s", exc)
 
         return response
     except _INPUT_ERRORS as e:
@@ -374,10 +378,11 @@ async def weft_forget(
     """Archive a memory (soft-delete) or hard-delete it."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        deleted = await delete_memory(app.pool, memory_id, hard=hard)
-        await app.cache.invalidate_memory(memory_id)
-        await app.cache.invalidate_stats()
-        return {"memory_id": memory_id, "deleted": deleted, "hard": hard}
+        async with acquire(app.pool):
+            deleted = await delete_memory(app.pool, memory_id, hard=hard)
+            await app.cache.invalidate_memory(memory_id)
+            await app.cache.invalidate_stats()
+            return {"memory_id": memory_id, "deleted": deleted, "hard": hard}
     except _DB_ERRORS as e:
         return _db_error_response("weft_forget", e)
 
@@ -402,17 +407,18 @@ async def weft_context(
         app: AppContext = ctx.request_context.lifespan_context
         memory_type = MemoryType(type) if type else None
         embedding = await app.embedding.embed(query)
-        result = await build_context(
-            app.pool, embedding,
-            budget_tokens=budget_tokens, max_per_topic=max_per_topic,
-            memory_type=memory_type, topic=topic, project_id=project_id,
-            agent_id=agent_id,
-        )
-        # Touch the memories that made it into context
-        for mem_dict in result["memories"]:
-            await touch_memory(app.pool, mem_dict["id"])
+        async with acquire(app.pool):
+            result = await build_context(
+                app.pool, embedding,
+                budget_tokens=budget_tokens, max_per_topic=max_per_topic,
+                memory_type=memory_type, topic=topic, project_id=project_id,
+                agent_id=agent_id,
+            )
+            # Touch the memories that made it into context
+            for mem_dict in result["memories"]:
+                await touch_memory(app.pool, mem_dict["id"])
 
-        # Fire-and-forget: log session access for implicit usefulness signals
+        # Fire-and-forget: log session access (outside acquire — system-level op)
         import asyncio
         mem_ids = [m["id"] for m in result["memories"]]
         if mem_ids:
@@ -458,16 +464,17 @@ async def weft_revise(
         resolved_type = _MT(new_type) if new_type else None
         app: AppContext = ctx.request_context.lifespan_context
         embedding = await app.embedding.embed(new_content)
-        new, old = await revise_memory(
-            app.pool, memory_id, new_content,
-            embedding=embedding, new_confidence=new_confidence,
-            new_topic=_coerce_list(new_topic), new_type=resolved_type,
-            review_after=_parse_review_after(review_after),
-        )
-        await app.cache.set_memory(new)
-        await app.cache.invalidate_memory(old.id)
-        await app.cache.invalidate_stats()
-        return {"new": new.to_dict(), "superseded": old.to_dict()}
+        async with acquire(app.pool):
+            new, old = await revise_memory(
+                app.pool, memory_id, new_content,
+                embedding=embedding, new_confidence=new_confidence,
+                new_topic=_coerce_list(new_topic), new_type=resolved_type,
+                review_after=_parse_review_after(review_after),
+            )
+            await app.cache.set_memory(new)
+            await app.cache.invalidate_memory(old.id)
+            await app.cache.invalidate_stats()
+            return {"new": new.to_dict(), "superseded": old.to_dict()}
     except _DB_ERRORS as e:
         return _db_error_response("weft_revise", e)
 
@@ -483,19 +490,20 @@ async def weft_relate(
     """Manage relationships between memories: add, get, or remove."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        if action == "add":
-            rel = await add_relationship(app.pool, source_id=memory_id, target_id=target_id, relation=RelationType(relation))
-            return {"source_id": rel.source_id, "target_id": rel.target_id, "relation": rel.relation.value, "created_at": rel.created_at.isoformat()}
-        elif action == "get":
-            rels = await get_relationships(app.pool, memory_id, relation=RelationType(relation) if relation else None)
-            return {"memory_id": memory_id, "count": len(rels), "relationships": [
-                {"source_id": r.source_id, "target_id": r.target_id, "relation": r.relation.value, "created_at": r.created_at.isoformat()} for r in rels
-            ]}
-        elif action == "remove":
-            removed = await remove_relationship(app.pool, source_id=memory_id, target_id=target_id, relation=RelationType(relation))
-            return {"memory_id": memory_id, "target_id": target_id, "relation": relation, "removed": removed}
-        else:
-            return {"error": f"Unknown action: {action}. Use 'add', 'get', or 'remove'."}
+        async with acquire(app.pool):
+            if action == "add":
+                rel = await add_relationship(app.pool, source_id=memory_id, target_id=target_id, relation=RelationType(relation))
+                return {"source_id": rel.source_id, "target_id": rel.target_id, "relation": rel.relation.value, "created_at": rel.created_at.isoformat()}
+            elif action == "get":
+                rels = await get_relationships(app.pool, memory_id, relation=RelationType(relation) if relation else None)
+                return {"memory_id": memory_id, "count": len(rels), "relationships": [
+                    {"source_id": r.source_id, "target_id": r.target_id, "relation": r.relation.value, "created_at": r.created_at.isoformat()} for r in rels
+                ]}
+            elif action == "remove":
+                removed = await remove_relationship(app.pool, source_id=memory_id, target_id=target_id, relation=RelationType(relation))
+                return {"memory_id": memory_id, "target_id": target_id, "relation": relation, "removed": removed}
+            else:
+                return {"error": f"Unknown action: {action}. Use 'add', 'get', or 'remove'."}
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_relate", e)
     except _DB_ERRORS as e:
@@ -526,9 +534,10 @@ async def weft_feedback(
     """Record whether a memory was helpful. Adjusts usefulness score for future ranking."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        result = await record_feedback(app.pool, memory_id, helpful)
-        await app.cache.invalidate_memory(memory_id)
-        return result
+        async with acquire(app.pool):
+            result = await record_feedback(app.pool, memory_id, helpful)
+            await app.cache.invalidate_memory(memory_id)
+            return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_feedback", e)
 
@@ -541,13 +550,13 @@ async def weft_pin(
 ) -> dict:
     """Pin or unpin a memory. Pinned memories are always included in prime and context calls."""
     try:
-
         app: AppContext = ctx.request_context.lifespan_context
-        updated = await update_memory(app.pool, memory_id, pinned=pinned)
-        if not updated:
-            return {"error": f"Memory {memory_id} not found"}
-        await app.cache.invalidate_memory(memory_id)
-        return {"memory_id": memory_id, "pinned": updated.pinned}
+        async with acquire(app.pool):
+            updated = await update_memory(app.pool, memory_id, pinned=pinned)
+            if not updated:
+                return {"error": f"Memory {memory_id} not found"}
+            await app.cache.invalidate_memory(memory_id)
+            return {"memory_id": memory_id, "pinned": updated.pinned}
     except _DB_ERRORS as e:
         return _db_error_response("weft_pin", e)
 
@@ -589,6 +598,10 @@ async def weft_prime(
             except Exception as exc:
                 logger.warning("Failed to embed primer query (non-fatal): %s", exc)
 
+        # NOTE: build_primer uses asyncio.gather for parallel section fetches,
+        # so we do NOT wrap it in acquire() — concurrent queries on a shared
+        # connection would crash.  RLS SELECT policies handle NULL user_id
+        # gracefully (showing global rows).
         result = await build_primer(
             app.pool,
             project_id=resolved_project,
@@ -598,8 +611,8 @@ async def weft_prime(
             disclosure=disclosure,
         )
 
-        # Fire-and-forget: trigger auto-consolidation if due (>24h since last run).
-        # Never blocks the primer response; all exceptions are caught internally.
+        # Fire-and-forget tasks run without acquire — they're system-level ops
+        # that don't need user scoping.
         try:
             import asyncio
             from weft.consolidation import consolidate_if_due
@@ -610,7 +623,6 @@ async def weft_prime(
         except Exception as exc:
             logger.debug("Auto-consolidation scheduling skipped: %s", exc)
 
-        # Fire-and-forget: log session access for all memories in primer
         try:
             primer_mem_ids = _extract_primer_memory_ids(result)
             if primer_mem_ids:
@@ -684,16 +696,17 @@ async def weft_focus(
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
 
-        result = await build_focus(
-            app.pool,
-            intent=intent,
-            embedding_fn=app.embedding.embed,
-            project_id=resolved_project,
-            agent_id=agent_id,
-            budget_tokens=budget_tokens,
-        )
+        async with acquire(app.pool):
+            result = await build_focus(
+                app.pool,
+                intent=intent,
+                embedding_fn=app.embedding.embed,
+                project_id=resolved_project,
+                agent_id=agent_id,
+                budget_tokens=budget_tokens,
+            )
 
-        # Fire-and-forget: log focused memories for session tracking
+        # Fire-and-forget: log focused memories (outside acquire — system-level op)
         import asyncio
         focused_ids = [m["id"] for m in result.focused_memories]
         if focused_ids:
@@ -717,9 +730,10 @@ async def weft_status(ctx: Context) -> dict:
         cached = await app.cache.get_stats()
         if cached:
             return cached
-        stats = await get_stats(app.pool)
-        # Add recent writes with provenance (not cached — always fresh)
-        stats["recent_writes"] = await get_recent_writes(app.pool, limit=10)
+        async with acquire(app.pool):
+            stats = await get_stats(app.pool)
+            # Add recent writes with provenance (not cached — always fresh)
+            stats["recent_writes"] = await get_recent_writes(app.pool, limit=10)
         await app.cache.set_stats(stats)
         return stats
     except _DB_ERRORS as e:
@@ -770,48 +784,49 @@ async def weft_learn(
                 "topic": [],
             }]
 
-        stored: list[dict] = []
-        for c in candidates:
-            create = MemoryCreate(
-                type=MemoryType(c["type"]),
-                content=c["content"],
-                topic=c.get("topic", []) + ([f"task:{task_id}"] if task_id else []),
-                source=MemorySource.conversation,
-                confidence=c["confidence"],
-                project_id=resolved_project,
-                agent_id=agent_id,
-            )
-            embedding = await app.embedding.embed(c["content"])
-            memory = await store_memory(app.pool, create, embedding=embedding)
-            await app.cache.set_memory(memory)
-            stored.append(memory.to_dict())
+        async with acquire(app.pool):
+            stored: list[dict] = []
+            for c in candidates:
+                create = MemoryCreate(
+                    type=MemoryType(c["type"]),
+                    content=c["content"],
+                    topic=c.get("topic", []) + ([f"task:{task_id}"] if task_id else []),
+                    source=MemorySource.conversation,
+                    confidence=c["confidence"],
+                    project_id=resolved_project,
+                    agent_id=agent_id,
+                )
+                embedding = await app.embedding.embed(c["content"])
+                memory = await store_memory(app.pool, create, embedding=embedding)
+                await app.cache.set_memory(memory)
+                stored.append(memory.to_dict())
 
-        # Auto-create a milestone when task_id is provided so primer's
-        # recent_work section shows completed task breadcrumbs.
-        milestone_dict: dict | None = None
-        if task_id:
-            # Build a concise milestone from the first ~100 words of content
-            words = content.split()
-            summary = " ".join(words[:100]) + ("..." if len(words) > 100 else "")
-            milestone_create = MemoryCreate(
-                type=MemoryType.milestone,
-                content=summary,
-                topic=[f"task:{task_id}"],
-                source=MemorySource.conversation,
-                confidence=0.9,
-                project_id=resolved_project,
-                agent_id=agent_id,
-            )
-            ms_embedding = await app.embedding.embed(summary)
-            milestone = await store_memory(
-                app.pool, milestone_create, embedding=ms_embedding,
-            )
-            await app.cache.set_memory(milestone)
-            milestone_dict = milestone.to_dict()
+            # Auto-create a milestone when task_id is provided so primer's
+            # recent_work section shows completed task breadcrumbs.
+            milestone_dict: dict | None = None
+            if task_id:
+                # Build a concise milestone from the first ~100 words of content
+                words = content.split()
+                summary = " ".join(words[:100]) + ("..." if len(words) > 100 else "")
+                milestone_create = MemoryCreate(
+                    type=MemoryType.milestone,
+                    content=summary,
+                    topic=[f"task:{task_id}"],
+                    source=MemorySource.conversation,
+                    confidence=0.9,
+                    project_id=resolved_project,
+                    agent_id=agent_id,
+                )
+                ms_embedding = await app.embedding.embed(summary)
+                milestone = await store_memory(
+                    app.pool, milestone_create, embedding=ms_embedding,
+                )
+                await app.cache.set_memory(milestone)
+                milestone_dict = milestone.to_dict()
 
-        await app.cache.invalidate_stats()
+            await app.cache.invalidate_stats()
 
-        # Boost usefulness for memories accessed this session
+        # Boost usefulness (outside acquire — system-level op)
         session_boost: dict = {}
         try:
             session_boost = await boost_session_memories(app.pool)
@@ -860,10 +875,11 @@ async def weft_feedback_general(
             agent_id=agent_id,
         )
         embedding = await app.embedding.embed(feedback)
-        memory = await store_memory(app.pool, create, embedding=embedding)
-        await app.cache.set_memory(memory)
-        await app.cache.invalidate_stats()
-        return {"id": memory.id, "category": category, "stored": True}
+        async with acquire(app.pool):
+            memory = await store_memory(app.pool, create, embedding=embedding)
+            await app.cache.set_memory(memory)
+            await app.cache.invalidate_stats()
+            return {"id": memory.id, "category": category, "stored": True}
     except _DB_ERRORS as e:
         return _db_error_response("weft_feedback_general", e)
 
@@ -913,55 +929,56 @@ async def weft_handoff(
             agent_id=agent_id,
         )
         embedding = await app.embedding.embed(summary)
-        memory = await store_memory(app.pool, create, embedding=embedding)
-        await app.cache.set_memory(memory)
-        await app.cache.invalidate_stats()
+        async with acquire(app.pool):
+            memory = await store_memory(app.pool, create, embedding=embedding)
+            await app.cache.set_memory(memory)
+            await app.cache.invalidate_stats()
 
-        # Auto-prune: archive previous handoffs for this project so they
-        # don't accumulate.  Only the most recent handoff matters.
-        pruned_count = 0
-        try:
-            prev = await list_memories(
-                app.pool,
-                memory_type=MemoryType.handoff,
-                status=MemoryStatus.active,
-                project_id=resolved_project,
-                limit=100,
-            )
-            for old in prev:
-                if old.id != memory.id:
-                    await update_memory(
-                        app.pool, old.id, status=MemoryStatus.archived,
-                    )
-                    pruned_count += 1
-        except Exception as exc:
-            logger.warning("Handoff auto-prune failed: %s", exc)
+            # Auto-prune: archive previous handoffs for this project so they
+            # don't accumulate.  Only the most recent handoff matters.
+            pruned_count = 0
+            try:
+                prev = await list_memories(
+                    app.pool,
+                    memory_type=MemoryType.handoff,
+                    status=MemoryStatus.active,
+                    project_id=resolved_project,
+                    limit=100,
+                )
+                for old in prev:
+                    if old.id != memory.id:
+                        await update_memory(
+                            app.pool, old.id, status=MemoryStatus.archived,
+                        )
+                        pruned_count += 1
+            except Exception as exc:
+                logger.warning("Handoff auto-prune failed: %s", exc)
 
-        # Auto-episode: close open episodes and create a new one
-        closed_ids = []
-        new_episode_id = None
-        try:
-            open_eps = await list_episodes(
-                app.pool, project_id=resolved_project,
-                status=EpisodeStatus.open, limit=10,
-            )
-            for ep in open_eps:
-                closed = await close_episode(app.pool, ep.id, summary=summary)
-                if closed:
-                    await add_memory_to_episode(app.pool, ep.id, memory.id)
-                    closed_ids.append(ep.id)
+            # Auto-episode: close open episodes and create a new one
+            closed_ids = []
+            new_episode_id = None
+            try:
+                open_eps = await list_episodes(
+                    app.pool, project_id=resolved_project,
+                    status=EpisodeStatus.open, limit=10,
+                )
+                for ep in open_eps:
+                    closed = await close_episode(app.pool, ep.id, summary=summary)
+                    if closed:
+                        await add_memory_to_episode(app.pool, ep.id, memory.id)
+                        closed_ids.append(ep.id)
 
-            new_ep = await create_episode(app.pool, EpisodeCreate(
-                title=f"Session after: {summary[:80]}",
-                project_id=resolved_project,
-                agent_id=agent_id,
-            ))
-            await add_memory_to_episode(app.pool, new_ep.id, memory.id)
-            new_episode_id = new_ep.id
-        except Exception as exc:
-            logger.warning("Auto-episode failed during handoff: %s", exc)
+                new_ep = await create_episode(app.pool, EpisodeCreate(
+                    title=f"Session after: {summary[:80]}",
+                    project_id=resolved_project,
+                    agent_id=agent_id,
+                ))
+                await add_memory_to_episode(app.pool, new_ep.id, memory.id)
+                new_episode_id = new_ep.id
+            except Exception as exc:
+                logger.warning("Auto-episode failed during handoff: %s", exc)
 
-        # Boost usefulness for memories accessed this session
+        # Boost usefulness (outside acquire — system-level op)
         session_boost: dict = {}
         try:
             session_boost = await boost_session_memories(app.pool)
@@ -999,7 +1016,8 @@ async def weft_weekly_recap(
         resolved_project = await _resolve_project_id(ctx, project_id)
         from weft.skills import weekly_recap
 
-        return await weekly_recap(app.pool, days=days, project_id=resolved_project)
+        async with acquire(app.pool):
+            return await weekly_recap(app.pool, days=days, project_id=resolved_project)
     except _DB_ERRORS as e:
         return _db_error_response("weft_weekly_recap", e)
 
@@ -1022,11 +1040,12 @@ async def weft_search_all(
         app: AppContext = ctx.request_context.lifespan_context
         from weft.skills import search_all
 
-        return await search_all(
-            app.pool, app.embedding,
-            query=query, topic=topic, memory_type=memory_type,
-            days=days, limit=limit,
-        )
+        async with acquire(app.pool):
+            return await search_all(
+                app.pool, app.embedding,
+                query=query, topic=topic, memory_type=memory_type,
+                days=days, limit=limit,
+            )
     except _DB_ERRORS as e:
         return _db_error_response("weft_search_all", e)
 
@@ -1048,7 +1067,8 @@ async def weft_project_status(
             return {"error": "project_id required — pass explicitly or run from a project directory"}
         from weft.skills import project_status
 
-        return await project_status(app.pool, project_id=resolved_project, days=days)
+        async with acquire(app.pool):
+            return await project_status(app.pool, project_id=resolved_project, days=days)
     except _DB_ERRORS as e:
         return _db_error_response("weft_project_status", e)
 
@@ -1069,10 +1089,11 @@ async def weft_meal_plan(
         app: AppContext = ctx.request_context.lifespan_context
         from weft.skills import meal_plan
 
-        return await meal_plan(
-            app.pool, lissy_approved=lissy_approved,
-            cuisine=cuisine, tag=tag, limit=limit,
-        )
+        async with acquire(app.pool):
+            return await meal_plan(
+                app.pool, lissy_approved=lissy_approved,
+                cuisine=cuisine, tag=tag, limit=limit,
+            )
     except _DB_ERRORS as e:
         return _db_error_response("weft_meal_plan", e)
 
@@ -1091,7 +1112,8 @@ async def weft_up_next(
         app: AppContext = ctx.request_context.lifespan_context
         from weft.skills import up_next
 
-        return await up_next(app.pool, days=days, include_no_date=include_no_date)
+        async with acquire(app.pool):
+            return await up_next(app.pool, days=days, include_no_date=include_no_date)
     except _DB_ERRORS as e:
         return _db_error_response("weft_up_next", e)
 
@@ -1122,22 +1144,23 @@ async def weft_slack_sync(
             # SDK mode — fully automated
             from weft.slack.sync import sync_slack_sdk
 
-            result = await sync_slack_sdk(
-                app.pool,
-                bot_token,
-                app.embedding,
-                limit_per_channel=limit_per_channel,
-            )
-            return {
-                "mode": "sdk",
-                "channels_synced": result.channels_synced,
-                "messages_found": result.messages_found,
-                "messages_synced": result.messages_synced,
-                "messages_skipped": result.messages_skipped,
-                "messages_updated": result.messages_updated,
-                "memories_created": result.memories_created,
-                "memories_archived": result.memories_archived,
-            }
+            async with acquire(app.pool):
+                result = await sync_slack_sdk(
+                    app.pool,
+                    bot_token,
+                    app.embedding,
+                    limit_per_channel=limit_per_channel,
+                )
+                return {
+                    "mode": "sdk",
+                    "channels_synced": result.channels_synced,
+                    "messages_found": result.messages_found,
+                    "messages_synced": result.messages_synced,
+                    "messages_skipped": result.messages_skipped,
+                    "messages_updated": result.messages_updated,
+                    "memories_created": result.memories_created,
+                    "memories_archived": result.memories_archived,
+                }
         else:
             # Return instructions for MCP-based sync workflow
             channel_ids = _coerce_list(channel_ids)
@@ -1191,14 +1214,15 @@ async def weft_slack_ingest(
         if isinstance(threads, str):
             threads = json.loads(threads)
 
-        result = await sync_slack_messages(
-            app.pool,
-            channels=[channel],
-            messages_by_channel={channel_id: messages},
-            embedding_provider=app.embedding,
-            threads_by_channel={channel_id: threads} if threads else None,
-            user_names=user_names,
-        )
+        async with acquire(app.pool):
+            result = await sync_slack_messages(
+                app.pool,
+                channels=[channel],
+                messages_by_channel={channel_id: messages},
+                embedding_provider=app.embedding,
+                threads_by_channel={channel_id: threads} if threads else None,
+                user_names=user_names,
+            )
         return {
             "channel": channel_name,
             "messages_found": result.messages_found,
@@ -1246,8 +1270,9 @@ async def weft_behavior_add(
             priority=priority,
         )
         embedding = await app.embedding.embed(trigger_pattern)
-        behavior = await store_behavior(app.pool, create, embedding=embedding)
-        return behavior.to_dict()
+        async with acquire(app.pool):
+            behavior = await store_behavior(app.pool, create, embedding=embedding)
+            return behavior.to_dict()
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_behavior_add", e)
     except _DB_ERRORS as e:
@@ -1272,22 +1297,23 @@ async def weft_behavior_match(
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
         embedding = await app.embedding.embed(situation)
-        results = await match_behaviors(
-            app.pool,
-            embedding,
-            limit=limit,
-            threshold=threshold,
-            project_id=resolved_project,
-            agent_id=agent_id,
-        )
-        # Touch matched behaviors to track usage
-        for r in results:
-            await touch_behavior(app.pool, r.behavior.id)
-        return {
-            "situation": situation,
-            "count": len(results),
-            "behaviors": [r.to_dict() for r in results],
-        }
+        async with acquire(app.pool):
+            results = await match_behaviors(
+                app.pool,
+                embedding,
+                limit=limit,
+                threshold=threshold,
+                project_id=resolved_project,
+                agent_id=agent_id,
+            )
+            # Touch matched behaviors to track usage
+            for r in results:
+                await touch_behavior(app.pool, r.behavior.id)
+            return {
+                "situation": situation,
+                "count": len(results),
+                "behaviors": [r.to_dict() for r in results],
+            }
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_behavior_match", e)
     except _DB_ERRORS as e:
@@ -1311,18 +1337,19 @@ async def weft_behavior_list(
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
         behavior_scope = BehaviorScope(scope) if scope else None
-        results = await list_behaviors_store(
-            app.pool,
-            scope=behavior_scope,
-            project_id=resolved_project,
-            agent_id=agent_id,
-            enabled=enabled,
-            limit=limit,
-        )
-        return {
-            "count": len(results),
-            "behaviors": [b.to_dict() for b in results],
-        }
+        async with acquire(app.pool):
+            results = await list_behaviors_store(
+                app.pool,
+                scope=behavior_scope,
+                project_id=resolved_project,
+                agent_id=agent_id,
+                enabled=enabled,
+                limit=limit,
+            )
+            return {
+                "count": len(results),
+                "behaviors": [b.to_dict() for b in results],
+            }
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_behavior_list", e)
     except _DB_ERRORS as e:
@@ -1347,13 +1374,14 @@ async def weft_episode_create(
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
-        ep = await create_episode(app.pool, EpisodeCreate(
-            title=title,
-            summary=summary,
-            project_id=resolved_project,
-            agent_id=agent_id,
-        ))
-        return ep.to_dict()
+        async with acquire(app.pool):
+            ep = await create_episode(app.pool, EpisodeCreate(
+                title=title,
+                summary=summary,
+                project_id=resolved_project,
+                agent_id=agent_id,
+            ))
+            return ep.to_dict()
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_episode_create", e)
     except _DB_ERRORS as e:
@@ -1372,14 +1400,15 @@ async def weft_episode_add(
     If position is omitted, auto-assigns the next sequential position."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        created = await add_memory_to_episode(
-            app.pool, episode_id, memory_id, position=position,
-        )
-        return {
-            "episode_id": episode_id,
-            "memory_id": memory_id,
-            "created": created,
-        }
+        async with acquire(app.pool):
+            created = await add_memory_to_episode(
+                app.pool, episode_id, memory_id, position=position,
+            )
+            return {
+                "episode_id": episode_id,
+                "memory_id": memory_id,
+                "created": created,
+            }
     except _DB_ERRORS as e:
         return _db_error_response("weft_episode_add", e)
 
@@ -1414,20 +1443,21 @@ async def weft_episode_timeline(
         else:
             parsed_start = now - timedelta(hours=hours)
 
-        results = await timeline_query(
-            app.pool,
-            start=parsed_start,
-            end=parsed_end,
-            project_id=resolved_project,
-            agent_id=agent_id,
-            limit=limit,
-        )
-        return {
-            "start": parsed_start.isoformat(),
-            "end": parsed_end.isoformat(),
-            "count": len(results),
-            "episodes": [ep.to_dict() for ep in results],
-        }
+        async with acquire(app.pool):
+            results = await timeline_query(
+                app.pool,
+                start=parsed_start,
+                end=parsed_end,
+                project_id=resolved_project,
+                agent_id=agent_id,
+                limit=limit,
+            )
+            return {
+                "start": parsed_start.isoformat(),
+                "end": parsed_end.isoformat(),
+                "count": len(results),
+                "episodes": [ep.to_dict() for ep in results],
+            }
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_episode_timeline", e)
     except _DB_ERRORS as e:
@@ -1447,33 +1477,34 @@ async def weft_episode_context(
     within budget_tokens. Memories are returned in position order."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        ep = await get_episode(app.pool, episode_id)
-        if ep is None:
-            return {"error": f"Episode {episode_id} not found"}
+        async with acquire(app.pool):
+            ep = await get_episode(app.pool, episode_id)
+            if ep is None:
+                return {"error": f"Episode {episode_id} not found"}
 
-        memories = await get_episode_memories(app.pool, episode_id)
+            memories = await get_episode_memories(app.pool, episode_id)
 
-        # Pack memories within token budget
-        budget = budget_tokens
-        if include_episode:
-            ep_text = f"{ep.title}: {ep.summary or ''}"
-            budget -= estimate_tokens(ep_text)
+            # Pack memories within token budget
+            budget = budget_tokens
+            if include_episode:
+                ep_text = f"{ep.title}: {ep.summary or ''}"
+                budget -= estimate_tokens(ep_text)
 
-        packed = []
-        total_tokens = 0
-        for mem in memories:
-            cost = estimate_tokens(mem.content)
-            if total_tokens + cost > budget:
-                break
-            packed.append(mem)
-            total_tokens += cost
+            packed = []
+            total_tokens = 0
+            for mem in memories:
+                cost = estimate_tokens(mem.content)
+                if total_tokens + cost > budget:
+                    break
+                packed.append(mem)
+                total_tokens += cost
 
-        ewm = EpisodeWithMemories(episode=ep, memories=packed)
-        result = ewm.to_dict()
-        result["tokens_used"] = total_tokens
-        result["tokens_budget"] = budget_tokens
-        result["memories_truncated"] = len(memories) - len(packed)
-        return result
+            ewm = EpisodeWithMemories(episode=ep, memories=packed)
+            result = ewm.to_dict()
+            result["tokens_used"] = total_tokens
+            result["tokens_budget"] = budget_tokens
+            result["memories_truncated"] = len(memories) - len(packed)
+            return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_episode_context", e)
 
@@ -1503,15 +1534,16 @@ async def weft_entity_create(
         aliases = _coerce_list(aliases) or []
         embed_text = name + (f": {description}" if description else "")
         embedding = await app.embedding.embed(embed_text)
-        ent = await store_entity(app.pool, EntityCreate(
-            name=name,
-            entity_type=EntityType(entity_type),
-            aliases=aliases,
-            description=description,
-            project_id=resolved_project,
-            agent_id=agent_id,
-        ), embedding=embedding)
-        return ent.to_dict()
+        async with acquire(app.pool):
+            ent = await store_entity(app.pool, EntityCreate(
+                name=name,
+                entity_type=EntityType(entity_type),
+                aliases=aliases,
+                description=description,
+                project_id=resolved_project,
+                agent_id=agent_id,
+            ), embedding=embedding)
+            return ent.to_dict()
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_entity_create", e)
     except _DB_ERRORS as e:
@@ -1529,12 +1561,13 @@ async def weft_entity_link(
     Increments the entity's mention count on first link."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        created = await link_mention(app.pool, entity_id, memory_id)
-        return {
-            "entity_id": entity_id,
-            "memory_id": memory_id,
-            "created": created,
-        }
+        async with acquire(app.pool):
+            created = await link_mention(app.pool, entity_id, memory_id)
+            return {
+                "entity_id": entity_id,
+                "memory_id": memory_id,
+                "created": created,
+            }
     except _DB_ERRORS as e:
         return _db_error_response("weft_entity_link", e)
 
@@ -1557,21 +1590,22 @@ async def weft_entity_search(
         resolved_project = await _resolve_project_id(ctx, project_id)
         embedding = await app.embedding.embed(query)
         etype = EntityType(entity_type) if entity_type else None
-        results = await search_entities(
-            app.pool, embedding,
-            entity_type=etype,
-            project_id=resolved_project,
-            limit=limit,
-            threshold=threshold,
-        )
-        return {
-            "query": query,
-            "count": len(results),
-            "entities": [
-                {**ent.to_dict(), "similarity": round(sim, 4)}
-                for ent, sim in results
-            ],
-        }
+        async with acquire(app.pool):
+            results = await search_entities(
+                app.pool, embedding,
+                entity_type=etype,
+                project_id=resolved_project,
+                limit=limit,
+                threshold=threshold,
+            )
+            return {
+                "query": query,
+                "count": len(results),
+                "entities": [
+                    {**ent.to_dict(), "similarity": round(sim, 4)}
+                    for ent, sim in results
+                ],
+            }
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_entity_search", e)
     except _DB_ERRORS as e:
@@ -1590,31 +1624,32 @@ async def weft_entity_context(
     within budget_tokens. Memories ordered by mention time (newest first)."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        ent = await get_entity(app.pool, entity_id)
-        if ent is None:
-            return {"error": f"Entity {entity_id} not found"}
+        async with acquire(app.pool):
+            ent = await get_entity(app.pool, entity_id)
+            if ent is None:
+                return {"error": f"Entity {entity_id} not found"}
 
-        memories = await get_entity_memories(app.pool, entity_id)
+            memories = await get_entity_memories(app.pool, entity_id)
 
-        # Reserve tokens for entity metadata
-        ent_text = f"{ent.name}: {ent.description or ''}"
-        budget = budget_tokens - estimate_tokens(ent_text)
+            # Reserve tokens for entity metadata
+            ent_text = f"{ent.name}: {ent.description or ''}"
+            budget = budget_tokens - estimate_tokens(ent_text)
 
-        packed = []
-        total_tokens = 0
-        for mem in memories:
-            cost = estimate_tokens(mem.content)
-            if total_tokens + cost > budget:
-                break
-            packed.append(mem)
-            total_tokens += cost
+            packed = []
+            total_tokens = 0
+            for mem in memories:
+                cost = estimate_tokens(mem.content)
+                if total_tokens + cost > budget:
+                    break
+                packed.append(mem)
+                total_tokens += cost
 
-        result = ent.to_dict()
-        result["memories"] = [m.to_dict() for m in packed]
-        result["memory_count"] = len(packed)
-        result["tokens_used"] = total_tokens
-        result["tokens_budget"] = budget_tokens
-        result["memories_truncated"] = len(memories) - len(packed)
-        return result
+            result = ent.to_dict()
+            result["memories"] = [m.to_dict() for m in packed]
+            result["memory_count"] = len(packed)
+            result["tokens_used"] = total_tokens
+            result["tokens_budget"] = budget_tokens
+            result["memories_truncated"] = len(memories) - len(packed)
+            return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_entity_context", e)

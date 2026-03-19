@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.db.connection import get_db
 from weft.models import Entity, EntityCreate, EntityType, _weft_id
 from weft.store import _row_to_memory
 
@@ -27,7 +28,7 @@ async def store_entity(
     entity_id = _weft_id()
     now = datetime.now(timezone.utc)
 
-    await pool.execute(
+    await get_db(pool).execute(
         """
         INSERT INTO entities (
             id, name, entity_type, aliases, description,
@@ -65,7 +66,7 @@ async def store_entity(
 
 async def get_entity(pool: asyncpg.Pool, entity_id: str) -> Entity | None:
     """Fetch a single entity by ID."""
-    row = await pool.fetchrow("SELECT * FROM entities WHERE id = $1", entity_id)
+    row = await get_db(pool).fetchrow("SELECT * FROM entities WHERE id = $1", entity_id)
     if not row:
         return None
     return _row_to_entity(row)
@@ -114,7 +115,7 @@ async def list_entities(
     """
     params.extend([limit, offset])
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
     return [_row_to_entity(r) for r in rows]
 
 
@@ -151,7 +152,7 @@ async def search_entities(
     """
     params.append(limit)
 
-    rows = await pool.fetch(query, *params)
+    rows = await get_db(pool).fetch(query, *params)
     results = []
     for r in rows:
         sim = float(r["similarity"])
@@ -170,7 +171,8 @@ async def link_mention(
     Also increments the entity's mention_count.
     Returns True if a new link was created, False if already existed.
     """
-    result = await pool.execute(
+    db = get_db(pool)
+    result = await db.execute(
         """
         INSERT INTO entity_mentions (entity_id, memory_id, user_id)
         VALUES ($1, $2, nullif(current_setting('app.user_id', true), ''))
@@ -181,7 +183,7 @@ async def link_mention(
     )
     created = result.split()[-1] != "0"
     if created:
-        await pool.execute(
+        await db.execute(
             "UPDATE entities SET mention_count = mention_count + 1, updated_at = $2 WHERE id = $1",
             entity_id,
             datetime.now(timezone.utc),
@@ -195,14 +197,15 @@ async def unlink_mention(
     memory_id: str,
 ) -> bool:
     """Unlink a memory from an entity. Returns True if removed."""
-    result = await pool.execute(
+    db = get_db(pool)
+    result = await db.execute(
         "DELETE FROM entity_mentions WHERE entity_id = $1 AND memory_id = $2",
         entity_id,
         memory_id,
     )
     removed = result.split()[-1] != "0"
     if removed:
-        await pool.execute(
+        await db.execute(
             "UPDATE entities SET mention_count = GREATEST(mention_count - 1, 0), updated_at = $2 WHERE id = $1",
             entity_id,
             datetime.now(timezone.utc),
@@ -217,7 +220,7 @@ async def get_entity_memories(
     limit: int = 100,
 ):
     """Get memories linked to an entity, ordered by mention time (newest first)."""
-    rows = await pool.fetch(
+    rows = await get_db(pool).fetch(
         """
         SELECT m.* FROM memories m
         JOIN entity_mentions em ON m.id = em.memory_id
@@ -236,7 +239,7 @@ async def get_memory_entities(
     memory_id: str,
 ) -> list[Entity]:
     """Reverse lookup — which entities are linked to this memory?"""
-    rows = await pool.fetch(
+    rows = await get_db(pool).fetch(
         """
         SELECT e.* FROM entities e
         JOIN entity_mentions em ON e.id = em.entity_id
