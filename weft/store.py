@@ -246,6 +246,187 @@ async def search_by_vector(
     return results
 
 
+async def search_by_keyword(
+    pool: asyncpg.Pool,
+    query: str,
+    *,
+    limit: int = 10,
+    status: MemoryStatus | None = MemoryStatus.active,
+    memory_type: MemoryType | None = None,
+    topic: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    exclude_ids: list[str] | None = None,
+) -> list[MemoryRecall]:
+    """Search memories by full-text keyword match (BM25 ranking via ts_rank).
+
+    Uses the search_tsv tsvector column with plainto_tsquery for robust
+    keyword matching including stemming and stop-word removal.
+    """
+    conditions = ["search_tsv IS NOT NULL"]
+    params: list = []
+    idx = 1
+
+    # $1 = tsquery
+    conditions.append(f"search_tsv @@ plainto_tsquery('english', ${idx})")
+    params.append(query)
+    idx += 1
+
+    if status:
+        conditions.append(f"status = ${idx}")
+        params.append(status.value)
+        idx += 1
+
+    if memory_type:
+        conditions.append(f"type = ${idx}")
+        params.append(memory_type.value)
+        idx += 1
+
+    if topic:
+        conditions.append(f"${idx} = ANY(topic)")
+        params.append(topic)
+        idx += 1
+
+    if project_id is not None:
+        conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
+        params.append(project_id)
+        idx += 1
+
+    if agent_id is not None:
+        conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
+        params.append(agent_id)
+        idx += 1
+
+    if exclude_ids:
+        conditions.append(f"NOT (id = ANY(${idx}::text[]))")
+        params.append(exclude_ids)
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    sql = f"""
+        SELECT *,
+               ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
+        FROM memories
+        {where}
+        ORDER BY rank DESC
+        LIMIT ${idx}
+    """
+    params.append(limit)
+
+    rows = await get_db(pool).fetch(sql, *params)
+
+    results = []
+    for row in rows:
+        memory = _row_to_memory(row)
+        # Normalize ts_rank (typically 0–1 but can exceed 1) into 0–1 range
+        # for compatibility with MemoryRecall.similarity
+        raw_rank = float(row["rank"])
+        similarity = min(1.0, raw_rank)
+        results.append(MemoryRecall(memory=memory, similarity=similarity))
+    return results
+
+
+# Reciprocal Rank Fusion constant (standard default from the literature)
+_RRF_K = 60
+
+
+async def search_hybrid(
+    pool: asyncpg.Pool,
+    query: str,
+    embedding: list[float],
+    *,
+    limit: int = 10,
+    threshold: float = 0.0,
+    status: MemoryStatus | None = MemoryStatus.active,
+    memory_type: MemoryType | None = None,
+    topic: str | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    exclude_ids: list[str] | None = None,
+    vector_weight: float = 0.5,
+    keyword_weight: float = 0.5,
+) -> list[MemoryRecall]:
+    """Hybrid search combining vector similarity and BM25 keyword matching.
+
+    Uses Reciprocal Rank Fusion (RRF) to merge results from both retrieval
+    methods. RRF is rank-based, so it handles the different score scales
+    (cosine similarity vs ts_rank) naturally.
+
+    vector_weight/keyword_weight control the relative importance of each
+    signal in the RRF formula: score = w / (k + rank).
+    """
+    # Fetch broader candidate sets from both methods, then fuse
+    candidate_limit = limit * 3  # over-fetch to ensure good fusion
+
+    vector_results = await search_by_vector(
+        pool,
+        embedding,
+        limit=candidate_limit,
+        threshold=threshold,
+        status=status,
+        memory_type=memory_type,
+        topic=topic,
+        project_id=project_id,
+        agent_id=agent_id,
+        exclude_ids=exclude_ids,
+    )
+
+    keyword_results = await search_by_keyword(
+        pool,
+        query,
+        limit=candidate_limit,
+        status=status,
+        memory_type=memory_type,
+        topic=topic,
+        project_id=project_id,
+        agent_id=agent_id,
+        exclude_ids=exclude_ids,
+    )
+
+    # Build rank maps (1-indexed)
+    vector_ranks: dict[str, int] = {}
+    for i, r in enumerate(vector_results):
+        vector_ranks[r.memory.id] = i + 1
+
+    keyword_ranks: dict[str, int] = {}
+    for i, r in enumerate(keyword_results):
+        keyword_ranks[r.memory.id] = i + 1
+
+    # Collect all candidate memories
+    all_memories: dict[str, MemoryRecall] = {}
+    for r in vector_results:
+        all_memories[r.memory.id] = r
+    for r in keyword_results:
+        if r.memory.id not in all_memories:
+            all_memories[r.memory.id] = r
+
+    # Compute RRF scores
+    rrf_scores: dict[str, float] = {}
+    absent_rank = candidate_limit + 1  # penalty rank for missing results
+
+    for mid in all_memories:
+        v_rank = vector_ranks.get(mid, absent_rank)
+        k_rank = keyword_ranks.get(mid, absent_rank)
+        rrf_scores[mid] = (
+            vector_weight / (_RRF_K + v_rank)
+            + keyword_weight / (_RRF_K + k_rank)
+        )
+
+    # Sort by RRF score descending, take top `limit`
+    sorted_ids = sorted(rrf_scores, key=lambda mid: rrf_scores[mid], reverse=True)[:limit]
+
+    # Build results with RRF score as similarity (normalized to 0–1)
+    max_rrf = max(rrf_scores.values()) if rrf_scores else 1.0
+    results = []
+    for mid in sorted_ids:
+        recall = all_memories[mid]
+        normalized_score = rrf_scores[mid] / max_rrf if max_rrf > 0 else 0.0
+        results.append(MemoryRecall(memory=recall.memory, similarity=normalized_score))
+
+    return results
+
+
 _CROSS_PROJECT_PENALTY = 0.8
 
 

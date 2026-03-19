@@ -65,8 +65,10 @@ from weft.store import (
     list_memories,
     record_feedback,
     remove_relationship,
+    search_by_keyword,
     search_by_vector,
     search_cross_project,
+    search_hybrid,
     store_memory,
     touch_memory,
     update_memory,
@@ -267,27 +269,67 @@ async def weft_recall(
     agent_id: str | None = None,
     limit: int = 10,
     threshold: float = 0.3,
+    mode: str = "hybrid",
 ) -> dict:
-    """Retrieve memories by semantic query, topic filter, type filter, status filter, or combination."""
+    """Retrieve memories by semantic query, keyword search, or hybrid (default).
+
+    mode: 'semantic' (vector only), 'keyword' (BM25 full-text only), or 'hybrid' (RRF fusion of both).
+    Hybrid mode combines vector similarity and BM25 keyword matching using Reciprocal Rank Fusion.
+    Keyword mode does not require embeddings and works on exact/stemmed word matches.
+    """
     try:
         cid = set_correlation_id()
-        logger.debug("weft_recall start [%s] query=%r", cid, query[:50])
+        logger.debug("weft_recall start [%s] query=%r mode=%s", cid, query[:50], mode)
         app: AppContext = ctx.request_context.lifespan_context
         memory_type = MemoryType(type) if type else None
         memory_status = MemoryStatus(status) if status else MemoryStatus.active
-        embedding = await app.embedding.embed(query)
+
+        if mode not in ("semantic", "keyword", "hybrid"):
+            mode = "hybrid"
+
+        # Keyword mode doesn't need an embedding
+        embedding = None
+        if mode in ("semantic", "hybrid"):
+            embedding = await app.embedding.embed(query)
+
         async with acquire(app.pool):
-            results = await search_by_vector(
-                app.pool,
-                embedding,
-                limit=limit,
-                threshold=threshold,
-                status=memory_status,
-                memory_type=memory_type,
-                topic=topic,
-                project_id=project_id,
-                agent_id=agent_id,
-            )
+            if mode == "keyword":
+                results = await search_by_keyword(
+                    app.pool,
+                    query,
+                    limit=limit,
+                    status=memory_status,
+                    memory_type=memory_type,
+                    topic=topic,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                )
+            elif mode == "hybrid":
+                results = await search_hybrid(
+                    app.pool,
+                    query,
+                    embedding,
+                    limit=limit,
+                    threshold=threshold,
+                    status=memory_status,
+                    memory_type=memory_type,
+                    topic=topic,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                )
+            else:  # semantic
+                results = await search_by_vector(
+                    app.pool,
+                    embedding,
+                    limit=limit,
+                    threshold=threshold,
+                    status=memory_status,
+                    memory_type=memory_type,
+                    topic=topic,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                )
+
             # Touch accessed memories and enrich with entities
             enriched = []
             for r in results:
@@ -302,50 +344,54 @@ async def weft_recall(
                     pass
                 enriched.append(d)
 
-            # Count total matches above threshold (without LIMIT) so the agent
-            # knows whether there are more results to explore.
-            total_matches = await count_by_vector(
-                app.pool,
-                embedding,
-                threshold=threshold,
-                status=memory_status,
-                memory_type=memory_type,
-                topic=topic,
-                project_id=project_id,
-                agent_id=agent_id,
-            )
-            response: dict = {"query": query, "count": len(results), "results": enriched}
-            if total_matches > len(results):
+            # Count total matches above threshold (semantic/hybrid only)
+            total_matches = None
+            if mode in ("semantic", "hybrid") and embedding is not None:
+                total_matches = await count_by_vector(
+                    app.pool,
+                    embedding,
+                    threshold=threshold,
+                    status=memory_status,
+                    memory_type=memory_type,
+                    topic=topic,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                )
+
+            response: dict = {"query": query, "mode": mode, "count": len(results), "results": enriched}
+            if total_matches is not None and total_matches > len(results):
                 response["total_matches"] = total_matches
                 response["showing"] = f"Showing {len(results)} of {total_matches} matches"
 
             # Cross-project search: surface relevant memories from other projects
-            resolved_project = await _resolve_project_id(ctx, project_id)
-            if resolved_project is not None:
-                try:
-                    from weft.config import load_config
-                    cfg = load_config()
-                    if cfg.retrieval.cross_project_search:
-                        main_ids = {r.memory.id for r in results}
-                        cross_results = await search_cross_project(
-                            app.pool, embedding,
-                            exclude_project_id=resolved_project,
-                            limit=cfg.retrieval.cross_project_limit,
-                            threshold=threshold,
-                            status=memory_status,
-                            memory_type=memory_type,
-                            exclude_ids=list(main_ids),
-                        )
-                        if cross_results:
-                            response["cross_project"] = [
-                                {
-                                    **r.to_dict(),
-                                    "source_project": r.memory.project_id,
-                                }
-                                for r in cross_results
-                            ]
-                except Exception as exc:
-                    logger.warning("Cross-project search failed: %s", exc)
+            # (only when we have an embedding — semantic or hybrid mode)
+            if embedding is not None:
+                resolved_project = await _resolve_project_id(ctx, project_id)
+                if resolved_project is not None:
+                    try:
+                        from weft.config import load_config
+                        cfg = load_config()
+                        if cfg.retrieval.cross_project_search:
+                            main_ids = {r.memory.id for r in results}
+                            cross_results = await search_cross_project(
+                                app.pool, embedding,
+                                exclude_project_id=resolved_project,
+                                limit=cfg.retrieval.cross_project_limit,
+                                threshold=threshold,
+                                status=memory_status,
+                                memory_type=memory_type,
+                                exclude_ids=list(main_ids),
+                            )
+                            if cross_results:
+                                response["cross_project"] = [
+                                    {
+                                        **r.to_dict(),
+                                        "source_project": r.memory.project_id,
+                                    }
+                                    for r in cross_results
+                                ]
+                    except Exception as exc:
+                        logger.warning("Cross-project search failed: %s", exc)
 
         # Fire-and-forget: log session access (outside acquire — system-level op)
         import asyncio
@@ -366,7 +412,7 @@ async def weft_recall(
         logger.warning("Database unavailable in weft_recall: %s", e)
         from weft.fallback import search_fallback
         results = search_fallback(query, limit=limit)
-        return {"query": query, "count": len(results), "results": results, "degraded": True}
+        return {"query": query, "mode": mode, "count": len(results), "results": results, "degraded": True}
 
 
 @mcp.tool()
