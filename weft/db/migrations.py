@@ -502,6 +502,11 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             CONSTRAINT uq_modes_user_id_name UNIQUE (user_id, name)
         );
 
+        -- Partial unique index for NULL user_id (PostgreSQL treats NULLs as
+        -- distinct in regular UNIQUE constraints, so global modes need this)
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_modes_null_user_name
+        ON modes (name) WHERE user_id IS NULL;
+
         CREATE INDEX IF NOT EXISTS idx_modes_user ON modes (user_id);
 
         -- RLS: same pattern as all other user-scoped tables
