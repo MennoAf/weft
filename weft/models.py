@@ -279,6 +279,49 @@ class EpisodeWithMemories(BaseModel):
         return d
 
 
+class ModeWeights(BaseModel):
+    """Retrieval weight overrides for a named mode/persona.
+
+    vector_weight/bm25_weight: balance between semantic and keyword search [0.0–1.0].
+    recency_bias: preference for recent memories [0.0–1.0], 0 = no preference.
+    entity_boost/behavior_boost: multiplicative factors [0.0–10.0], 1.0 = neutral.
+    """
+
+    vector_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    bm25_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    recency_bias: float = Field(default=0.0, ge=0.0, le=1.0)
+    entity_boost: float = Field(default=1.0, ge=0.0, le=10.0)
+    behavior_boost: float = Field(default=1.0, ge=0.0, le=10.0)
+
+
+class ModeCreate(BaseModel):
+    """Input model for creating a mode."""
+
+    name: str
+    description: str | None = None
+    weights: ModeWeights = Field(default_factory=ModeWeights)
+    project_id: str | None = None
+    agent_id: str | None = None
+
+
+class Mode(BaseModel):
+    """A named retrieval persona with weight overrides, scoped per user."""
+
+    id: str = Field(default_factory=_weft_id)
+    user_id: str | None = None
+    name: str
+    description: str | None = None
+    weights: ModeWeights = Field(default_factory=ModeWeights)
+    project_id: str | None = None
+    agent_id: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        return self.model_dump(mode="json")
+
+
 class ContradictionWarning(BaseModel):
     """A warning that a new memory may contradict an existing one."""
 
