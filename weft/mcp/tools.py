@@ -51,6 +51,8 @@ from weft.models import (
     MemoryStatus,
     MemoryType,
     MemoryTypeLiteral,
+    ModeCreate,
+    ModeWeights,
     RelationType,
 )
 from weft.tokens import estimate_tokens
@@ -1706,3 +1708,94 @@ async def weft_entity_context(
             return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_entity_context", e)
+
+
+# --- Mode tools ---
+
+
+@mcp.tool()
+async def weft_mode_set(
+    ctx: Context,
+    name: str,
+    description: str | None = None,
+    vector_weight: float = 0.5,
+    bm25_weight: float = 0.5,
+    recency_bias: float = 0.0,
+    entity_boost: float = 1.0,
+    behavior_boost: float = 1.0,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Create or update a named retrieval mode with custom weights.
+
+    Modes tune how weft_prime assembles context. Use different modes for
+    different tasks — e.g., 'research' with high vector_weight for semantic
+    depth, 'coding' with high behavior_boost for rules-heavy priming.
+
+    vector_weight/bm25_weight: balance semantic vs keyword search [0.0–1.0].
+    recency_bias: favor recent memories [0.0–1.0], 0 = no recency preference.
+    entity_boost: scale entity section capacity [0.0–10.0], 1.0 = default.
+    behavior_boost: scale behavior section capacity [0.0–10.0], 1.0 = default."""
+    try:
+        from weft.modes import upsert_mode
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        weights = ModeWeights(
+            vector_weight=vector_weight,
+            bm25_weight=bm25_weight,
+            recency_bias=recency_bias,
+            entity_boost=entity_boost,
+            behavior_boost=behavior_boost,
+        )
+        create = ModeCreate(
+            name=name,
+            description=description,
+            weights=weights,
+            project_id=resolved_project,
+            agent_id=agent_id,
+        )
+        async with acquire(app.pool):
+            mode = await upsert_mode(app.pool, create)
+            return {"success": True, "mode": mode.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_mode_set", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_mode_set", e)
+
+
+@mcp.tool()
+async def weft_mode_list(ctx: Context) -> dict:
+    """List all saved retrieval modes for the current user.
+
+    Returns modes ordered by name with their weight configurations."""
+    try:
+        from weft.modes import list_modes
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            modes = await list_modes(app.pool)
+            return {
+                "count": len(modes),
+                "modes": [m.to_dict() for m in modes],
+            }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_mode_list", e)
+
+
+@mcp.tool()
+async def weft_mode_delete(ctx: Context, name: str) -> dict:
+    """Delete a saved retrieval mode by name.
+
+    Returns success=True if deleted, or an error if the mode was not found."""
+    try:
+        from weft.modes import delete_mode
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            deleted = await delete_mode(app.pool, name)
+            if deleted:
+                return {"success": True, "deleted": name}
+            return {"success": False, "error": f"Mode '{name}' not found"}
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_mode_delete", e)
