@@ -25,6 +25,7 @@ from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.auth import get_auth_provider
+from weft.mcp.slack_commands import handle_slash_checkin
 from weft.scheduler import scheduler_loop
 from weft.seed import seed_memories
 
@@ -333,6 +334,15 @@ async def healthz(request: Request) -> JSONResponse:
     except Exception as exc:
         logger.warning("Health check failed: %s", exc)
         return JSONResponse({"status": "unhealthy", "error": str(exc)}, status_code=503)
+
+
+@mcp.custom_route("/slack/commands", methods=["POST"])
+async def slack_commands(request: Request) -> JSONResponse:
+    """Slack slash command handler — /checkin mood 3 sleep 7 energy 4."""
+    ctx = _app_ctx_ref.ctx
+    if ctx is None:
+        return JSONResponse({"text": "Server starting up, try again shortly."}, status_code=200)
+    return await handle_slash_checkin(request, ctx.pool)
 
 
 @mcp.custom_route("/mcp/", methods=["GET", "POST", "DELETE"])
