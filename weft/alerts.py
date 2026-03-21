@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
 
@@ -150,6 +152,45 @@ async def mark_alert_fired(pool: asyncpg.Pool, alert_id: str) -> bool:
         alert_id,
     )
     return result.split()[-1] != "0"
+
+
+# --- Daily brief scheduling ---
+
+
+def is_daily_brief_due(now: datetime, *, brief_time: str, brief_tz: str) -> bool:
+    """Check if the daily brief should fire at the given moment.
+
+    Compares the current wall-clock minute in the configured timezone against
+    the configured brief time. Returns True when the current HH:MM matches
+    exactly (1-minute window). The scheduler should call this each poll cycle.
+
+    Args:
+        now: timezone-aware datetime (raises TypeError if naive).
+        brief_time: HH:MM string (e.g. "08:00").
+        brief_tz: IANA timezone (e.g. "America/New_York").
+
+    Raises:
+        TypeError: if *now* is timezone-naive.
+        ValueError: if *brief_time* is not HH:MM or *brief_tz* is invalid.
+    """
+    if now.tzinfo is None:
+        raise TypeError("now must be timezone-aware")
+
+    # Validate timezone
+    try:
+        tz = ZoneInfo(brief_tz)
+    except (ZoneInfoNotFoundError, KeyError):
+        raise ValueError(f"Invalid timezone: {brief_tz!r}")
+
+    # Validate time format
+    brief_time = brief_time.strip()
+    try:
+        parsed = datetime.strptime(brief_time, "%H:%M").time()
+    except ValueError:
+        raise ValueError(f"Invalid brief time (expected HH:MM): {brief_time!r}")
+
+    local_now = now.astimezone(tz)
+    return local_now.hour == parsed.hour and local_now.minute == parsed.minute
 
 
 # --- Helpers ---

@@ -50,6 +50,10 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "decay.floor_score": ("decay", "floor_score"),
     "alert.poll_interval": ("alert", "poll_interval"),
     "alert.batch_size": ("alert", "batch_size"),
+    "slack_sync.interval": ("slack_sync", "interval"),
+    "daily_brief.time": ("daily_brief", "time"),
+    "daily_brief.timezone": ("daily_brief", "timezone"),
+    "daily_brief.channel": ("daily_brief", "channel"),
 }
 
 
@@ -96,6 +100,16 @@ class AlertConfig(BaseModel):
     batch_size: int = 50  # max alerts per poll cycle
 
 
+class SlackSyncConfig(BaseModel):
+    interval: int = 1800  # seconds between auto-sync cycles (default 30min)
+
+
+class DailyBriefConfig(BaseModel):
+    time: str = "08:00"  # HH:MM wall-clock time for delivery
+    timezone: str = "America/New_York"  # IANA timezone for brief schedule
+    channel: str = ""  # Slack channel ID or name; empty = skip Slack delivery
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     project_name: str = "default"
@@ -105,6 +119,8 @@ class WeftConfig(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     decay: DecayConfig = Field(default_factory=DecayConfig)
     alert: AlertConfig = Field(default_factory=AlertConfig)
+    slack_sync: SlackSyncConfig = Field(default_factory=SlackSyncConfig)
+    daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
     api_key: str | None = None
     log_level: str = "INFO"
 
@@ -207,6 +223,8 @@ def _coerce_value(key: str, value: str) -> object:
         ("retrieval", RetrievalConfig),
         ("decay", DecayConfig),
         ("alert", AlertConfig),
+        ("slack_sync", SlackSyncConfig),
+        ("daily_brief", DailyBriefConfig),
     ]:
         for field_name, field_info in section_model.model_fields.items():
             ftype = field_info.annotation
@@ -257,6 +275,14 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
         for k, v in data["alert"].items():
             if hasattr(config.alert, k):
                 setattr(config.alert, k, v)
+    if "slack_sync" in data and isinstance(data["slack_sync"], dict):
+        for k, v in data["slack_sync"].items():
+            if hasattr(config.slack_sync, k):
+                setattr(config.slack_sync, k, v)
+    if "daily_brief" in data and isinstance(data["daily_brief"], dict):
+        for k, v in data["daily_brief"].items():
+            if hasattr(config.daily_brief, k):
+                setattr(config.daily_brief, k, v)
 
 
 # --- YAML helpers (for project-level config) ---
@@ -288,6 +314,10 @@ def _flatten_yaml(data: dict) -> dict:
         flat["decay"] = DecayConfig(**data["decay"])
     if "alert" in data:
         flat["alert"] = AlertConfig(**data["alert"])
+    if "slack_sync" in data:
+        flat["slack_sync"] = SlackSyncConfig(**data["slack_sync"])
+    if "daily_brief" in data:
+        flat["daily_brief"] = DailyBriefConfig(**data["daily_brief"])
     if "logging" in data and "level" in data["logging"]:
         flat["log_level"] = data["logging"]["level"]
     return flat
@@ -360,5 +390,13 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.alert.poll_interval = int(poll_interval)
     if batch_size := os.environ.get("WEFT_ALERT_BATCH_SIZE"):
         config.alert.batch_size = int(batch_size)
+    if sync_interval := os.environ.get("WEFT_SLACK_SYNC_INTERVAL"):
+        config.slack_sync.interval = int(sync_interval)
+    if brief_time := os.environ.get("WEFT_DAILY_BRIEF_TIME"):
+        config.daily_brief.time = brief_time.strip()
+    if brief_tz := os.environ.get("WEFT_DAILY_BRIEF_TZ"):
+        config.daily_brief.timezone = brief_tz.strip()
+    if brief_channel := os.environ.get("WEFT_DAILY_BRIEF_CHANNEL"):
+        config.daily_brief.channel = brief_channel.strip()
 
     return config

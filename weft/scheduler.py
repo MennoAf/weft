@@ -1,8 +1,6 @@
-"""Alert scheduler — background loop that polls and dispatches due alerts.
+"""Background schedulers — alert polling, Slack sync, and daily brief delivery.
 
-Runs as an asyncio task within the MCP server lifespan. Polls the alerts
-table at a configurable interval, dispatches each due alert via channel-
-specific handlers, and marks them fired on success.
+Runs as asyncio tasks within the MCP server lifespan.
 
 Design principles:
 - Per-alert error isolation: one failed dispatch never crashes the loop
@@ -16,12 +14,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Awaitable, Callable
 
 import asyncpg
 from slack_sdk.web.async_client import AsyncWebClient
 
-from weft.alerts import mark_alert_fired, poll_due_alerts
+from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts
 from weft.models import Alert
 
 logger = logging.getLogger(__name__)
@@ -177,3 +176,160 @@ async def scheduler_loop(
     except asyncio.CancelledError:
         logger.info("scheduler.stopped")
         raise
+
+
+# --- Slack sync loop ---
+
+_MIN_SYNC_INTERVAL = 60  # floor to prevent API hammering
+
+
+async def slack_sync_loop(
+    pool: asyncpg.Pool,
+    embedding_provider=None,
+    *,
+    interval: int = 1800,
+) -> None:
+    """Recurring Slack channel sync. Runs until cancelled.
+
+    Calls sync_slack_sdk() on each cycle, auto-discovering all channels
+    the bot is invited to. Syncs immediately on startup, then sleeps
+    for *interval* seconds between cycles. Naturally serialized — a slow
+    sync delays the next cycle rather than overlapping.
+    """
+    from weft.slack.sync import sync_slack_sdk
+
+    interval = max(interval, _MIN_SYNC_INTERVAL)
+    bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+
+    if not bot_token:
+        logger.warning("slack_sync.no_token — Slack sync loop disabled")
+        return
+
+    logger.info("slack_sync.started", extra={"interval": interval})
+    try:
+        while True:
+            t0 = time.monotonic()
+            try:
+                result = await sync_slack_sdk(
+                    pool,
+                    bot_token,
+                    embedding_provider,
+                )
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "slack_sync.complete",
+                    extra={
+                        "channels": result.channels_synced,
+                        "messages_synced": result.messages_synced,
+                        "memories_created": result.memories_created,
+                        "elapsed_s": round(elapsed, 1),
+                    },
+                )
+            except Exception:
+                elapsed = time.monotonic() - t0
+                logger.exception(
+                    "slack_sync.error",
+                    extra={"elapsed_s": round(elapsed, 1)},
+                )
+                # Continue — will retry next cycle
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("slack_sync.stopped")
+        raise
+
+
+# --- Daily brief delivery loop ---
+
+_BRIEF_POLL_INTERVAL = 60  # check every minute whether brief is due
+
+
+async def daily_brief_loop(
+    pool: asyncpg.Pool,
+    *,
+    brief_time: str = "08:00",
+    brief_tz: str = "America/New_York",
+    brief_channel: str = "",
+) -> None:
+    """Scheduled daily brief delivery. Runs until cancelled.
+
+    Polls every minute to check if the configured brief time has arrived.
+    Assembles the brief and posts to Slack (if channel configured).
+    Uses file-based dedup to prevent multiple sends per day.
+    """
+    from weft.brief_state import get_last_brief_date, set_last_brief_date
+    from weft.config import DailyBriefConfig
+    from weft.daily_brief import assemble_daily_brief
+
+    if not brief_channel:
+        logger.info("daily_brief.no_channel — daily brief delivery disabled")
+        return
+
+    logger.info(
+        "daily_brief.started",
+        extra={"time": brief_time, "tz": brief_tz, "channel": brief_channel},
+    )
+
+    try:
+        while True:
+            try:
+                from datetime import datetime as dt_mod
+                from datetime import timezone as tz_mod
+                from zoneinfo import ZoneInfo
+
+                now = dt_mod.now(tz_mod.utc)
+
+                if is_daily_brief_due(now, brief_time=brief_time, brief_tz=brief_tz):
+                    local_date = now.astimezone(ZoneInfo(brief_tz)).date()
+                    last = get_last_brief_date()
+
+                    if last != local_date:
+                        logger.info("daily_brief.assembling")
+                        brief_config = DailyBriefConfig(
+                            time=brief_time, timezone=brief_tz, channel=brief_channel
+                        )
+                        result = await assemble_daily_brief(pool, brief_config, target_date=now)
+
+                        # Post to Slack
+                        await _post_brief_to_slack(brief_channel, result)
+                        set_last_brief_date(local_date)
+                        logger.info("daily_brief.delivered", extra={"date": str(local_date)})
+            except Exception:
+                logger.exception("daily_brief.loop_error")
+
+            await asyncio.sleep(_BRIEF_POLL_INTERVAL)
+    except asyncio.CancelledError:
+        logger.info("daily_brief.stopped")
+        raise
+
+
+async def _post_brief_to_slack(channel: str, brief_result) -> None:
+    """Post the assembled brief to Slack via Block Kit."""
+    import ssl
+
+    import certifi
+
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        logger.warning("daily_brief.slack.no_token")
+        return
+
+    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    client = AsyncWebClient(token=token, ssl=ssl_ctx)
+
+    try:
+        response = await asyncio.wait_for(
+            client.chat_postMessage(
+                channel=channel,
+                text=brief_result.markdown[:300],  # fallback text
+                blocks=brief_result.slack_blocks,
+            ),
+            timeout=_SLACK_TIMEOUT,
+        )
+        if not response.get("ok"):
+            logger.warning(
+                "daily_brief.slack.api_error",
+                extra={"error": response.get("error", "unknown")},
+            )
+    except Exception:
+        logger.exception("daily_brief.slack.post_error")

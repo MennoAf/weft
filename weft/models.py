@@ -327,6 +327,7 @@ class AlertType(str, Enum):
     stale_decision = "stale_decision"
     follow_up = "follow_up"
     custom = "custom"
+    daily_brief = "daily_brief"
 
 
 class AlertChannel(str, Enum):

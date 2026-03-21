@@ -2054,3 +2054,49 @@ async def weft_check_in_history(
             }
     except _DB_ERRORS as e:
         return _db_error_response("weft_check_in_history", e)
+
+
+@mcp.tool()
+async def weft_daily_brief(
+    ctx: Context,
+    date: str | None = None,
+) -> dict:
+    """Assemble a daily brief — morning digest of what needs attention.
+
+    Pulls from: memories due for review, recent handoffs, check-in trends,
+    Loom ready tasks, and pending alerts. Returns markdown and Slack Block Kit.
+
+    date: optional ISO date string (YYYY-MM-DD). Defaults to today."""
+    try:
+        from weft.config import DailyBriefConfig
+        from weft.daily_brief import assemble_daily_brief
+
+        app: AppContext = ctx.request_context.lifespan_context
+        brief_config = DailyBriefConfig(
+            timezone=app.config.daily_brief.timezone,
+        )
+
+        target_date = None
+        if date:
+            try:
+                from datetime import datetime as dt_mod
+                from datetime import timezone as tz_mod
+
+                parsed = dt_mod.fromisoformat(date)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=tz_mod.utc)
+                target_date = parsed
+            except ValueError:
+                return _input_error_response("weft_daily_brief", ValueError(f"Invalid date: {date!r}"))
+
+        async with acquire(app.pool):
+            result = await assemble_daily_brief(
+                app.pool, brief_config, target_date=target_date
+            )
+            return {
+                "markdown": result.markdown,
+                "slack_blocks": result.slack_blocks,
+                "generated_at": result.generated_at.isoformat(),
+            }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_daily_brief", e)
