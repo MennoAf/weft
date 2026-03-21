@@ -48,6 +48,8 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "decay.enabled": ("decay", "enabled"),
     "decay.half_life_days": ("decay", "half_life_days"),
     "decay.floor_score": ("decay", "floor_score"),
+    "alert.poll_interval": ("alert", "poll_interval"),
+    "alert.batch_size": ("alert", "batch_size"),
 }
 
 
@@ -89,6 +91,11 @@ class DecayConfig(BaseModel):
     floor_score: float = 0.1
 
 
+class AlertConfig(BaseModel):
+    poll_interval: int = 60  # seconds between scheduler polls
+    batch_size: int = 50  # max alerts per poll cycle
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     project_name: str = "default"
@@ -97,6 +104,7 @@ class WeftConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     decay: DecayConfig = Field(default_factory=DecayConfig)
+    alert: AlertConfig = Field(default_factory=AlertConfig)
     api_key: str | None = None
     log_level: str = "INFO"
 
@@ -198,6 +206,7 @@ def _coerce_value(key: str, value: str) -> object:
         ("embedding", EmbeddingConfig),
         ("retrieval", RetrievalConfig),
         ("decay", DecayConfig),
+        ("alert", AlertConfig),
     ]:
         for field_name, field_info in section_model.model_fields.items():
             ftype = field_info.annotation
@@ -244,6 +253,10 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
         for k, v in data["decay"].items():
             if hasattr(config.decay, k):
                 setattr(config.decay, k, v)
+    if "alert" in data and isinstance(data["alert"], dict):
+        for k, v in data["alert"].items():
+            if hasattr(config.alert, k):
+                setattr(config.alert, k, v)
 
 
 # --- YAML helpers (for project-level config) ---
@@ -273,6 +286,8 @@ def _flatten_yaml(data: dict) -> dict:
         flat["retrieval"] = RetrievalConfig(**data["retrieval"])
     if "decay" in data:
         flat["decay"] = DecayConfig(**data["decay"])
+    if "alert" in data:
+        flat["alert"] = AlertConfig(**data["alert"])
     if "logging" in data and "level" in data["logging"]:
         flat["log_level"] = data["logging"]["level"]
     return flat
@@ -341,5 +356,9 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.env = WeftEnv(env)
     if api_key := os.environ.get("WEFT_API_KEY"):
         config.api_key = api_key
+    if poll_interval := os.environ.get("WEFT_ALERT_POLL_INTERVAL"):
+        config.alert.poll_interval = int(poll_interval)
+    if batch_size := os.environ.get("WEFT_ALERT_BATCH_SIZE"):
+        config.alert.batch_size = int(batch_size)
 
     return config

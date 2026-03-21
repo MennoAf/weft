@@ -25,6 +25,7 @@ from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.auth import get_auth_provider
+from weft.scheduler import scheduler_loop
 from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ class AppContext:
     config: WeftConfig
     _keepalive_task: asyncio.Task | None = field(default=None, repr=False)
     _fallback_task: asyncio.Task | None = field(default=None, repr=False)
+    _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
 
 
 async def _connect_with_retry(
@@ -279,12 +281,19 @@ async def lifespan(server: FastMCP):
     ctx._keepalive_task = asyncio.create_task(_pool_keepalive(ctx))
     _redis_task = asyncio.create_task(_redis_keepalive(ctx)) if r else None
     ctx._fallback_task = asyncio.create_task(_refresh_fallback(ctx))
+    ctx._scheduler_task = asyncio.create_task(
+        scheduler_loop(
+            pool,
+            interval=config.alert.poll_interval,
+            batch_size=config.alert.batch_size,
+        )
+    )
 
     try:
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task):
+        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task):
             if task is not None:
                 task.cancel()
                 try:
