@@ -1967,3 +1967,90 @@ async def weft_alert_dismiss(ctx: Context, alert_id: str) -> dict:
             return {"success": False, "error": f"Alert '{alert_id}' not found or not pending"}
     except _DB_ERRORS as e:
         return _db_error_response("weft_alert_dismiss", e)
+
+
+# ── Check-in tools ──────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def weft_check_in(
+    ctx: Context,
+    mood: int | None = None,
+    sleep_hours: float | None = None,
+    energy: int | None = None,
+    notes: str | None = None,
+    logged_at: str | None = None,
+) -> dict:
+    """Log a mood/sleep/energy check-in for personal tracking.
+
+    All fields are optional — log whatever you have:
+    mood: 1 (terrible) to 5 (great).
+    sleep_hours: hours of sleep (e.g. 7.5).
+    energy: 1 (exhausted) to 5 (wired).
+    notes: free-text context.
+    logged_at: ISO8601 timestamp (defaults to now)."""
+    try:
+        from datetime import datetime, timezone
+
+        from weft.check_ins import create_check_in
+        from weft.models import CheckInCreate
+
+        if mood is None and sleep_hours is None and energy is None and notes is None:
+            return _input_error_response(
+                "weft_check_in",
+                ValueError("Provide at least one of: mood, sleep_hours, energy, notes"),
+            )
+
+        logged_dt = None
+        if logged_at is not None:
+            try:
+                logged_dt = datetime.fromisoformat(logged_at)
+                if logged_dt.tzinfo is None:
+                    logged_dt = logged_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                return _input_error_response(
+                    "weft_check_in",
+                    ValueError(f"Invalid logged_at '{logged_at}'. Use ISO8601 format."),
+                )
+
+        create = CheckInCreate(
+            mood=mood,
+            sleep_hours=sleep_hours,
+            energy=energy,
+            notes=notes,
+            logged_at=logged_dt,
+        )
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            check_in = await create_check_in(app.pool, create)
+            return {"success": True, "check_in": check_in.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_check_in", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_check_in", e)
+
+
+@mcp.tool()
+async def weft_check_in_history(
+    ctx: Context,
+    limit: int = 30,
+    offset: int = 0,
+) -> dict:
+    """View recent check-in history with stats.
+
+    Returns the last N check-ins plus 30-day aggregated stats
+    (averages, min/max for mood, sleep, energy)."""
+    try:
+        from weft.check_ins import get_check_in_stats, list_check_ins
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            check_ins = await list_check_ins(app.pool, limit=limit, offset=offset)
+            stats = await get_check_in_stats(app.pool)
+            return {
+                "count": len(check_ins),
+                "check_ins": [c.to_dict() for c in check_ins],
+                "stats_30d": stats,
+            }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_check_in_history", e)
