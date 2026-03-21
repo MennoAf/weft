@@ -26,7 +26,7 @@ from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.auth import get_auth_provider
 from weft.mcp.slack_commands import handle_slash_checkin
-from weft.scheduler import scheduler_loop
+from weft.scheduler import daily_brief_loop, scheduler_loop, slack_sync_loop
 from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
@@ -289,12 +289,27 @@ async def lifespan(server: FastMCP):
             batch_size=config.alert.batch_size,
         )
     )
+    ctx._slack_sync_task = asyncio.create_task(
+        slack_sync_loop(
+            pool,
+            embedding,
+            interval=config.slack_sync.interval,
+        )
+    )
+    ctx._daily_brief_task = asyncio.create_task(
+        daily_brief_loop(
+            pool,
+            brief_time=config.daily_brief.time,
+            brief_tz=config.daily_brief.timezone,
+            brief_channel=config.daily_brief.channel,
+        )
+    )
 
     try:
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task):
+        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task):
             if task is not None:
                 task.cancel()
                 try:
