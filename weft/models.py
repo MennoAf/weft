@@ -395,6 +395,42 @@ class Alert(BaseModel):
         return d
 
 
+class CheckInCreate(BaseModel):
+    """Input model for logging a mood/sleep/energy check-in."""
+
+    mood: int | None = None  # 1-5 scale
+    sleep_hours: float | None = None
+    energy: int | None = None  # 1-5 scale
+    notes: str | None = None
+    logged_at: datetime | None = None  # defaults to now() in DB
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        if self.mood is not None and not 1 <= self.mood <= 5:
+            raise ValueError("mood must be 1-5")
+        if self.energy is not None and not 1 <= self.energy <= 5:
+            raise ValueError("energy must be 1-5")
+        if self.sleep_hours is not None and not 0 <= self.sleep_hours <= 24:
+            raise ValueError("sleep_hours must be 0-24")
+
+
+class CheckIn(BaseModel):
+    """A mood/sleep/energy check-in record."""
+
+    id: str = Field(default_factory=_weft_id)
+    user_id: str | None = None
+    mood: int | None = None
+    sleep_hours: float | None = None
+    energy: int | None = None
+    notes: str | None = None
+    logged_at: datetime = Field(default_factory=_now)
+    created_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        return self.model_dump(mode="json")
+
+
 class ContradictionWarning(BaseModel):
     """A warning that a new memory may contradict an existing one."""
 
