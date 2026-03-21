@@ -15,14 +15,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Awaitable, Callable
 
 import asyncpg
+from slack_sdk.web.async_client import AsyncWebClient
 
 from weft.alerts import mark_alert_fired, poll_due_alerts
 from weft.models import Alert
 
 logger = logging.getLogger(__name__)
+
+_SLACK_TIMEOUT = 10  # seconds for Slack API calls
 
 # Default settings — overridden by config in production
 DEFAULT_POLL_INTERVAL = 60  # seconds
@@ -55,10 +59,59 @@ async def dispatch_log(alert: Alert) -> None:
 
 
 async def dispatch_slack(alert: Alert) -> None:
-    """Dispatch an alert to Slack. Not yet implemented — see Epic 5 Slack task."""
-    raise NotImplementedError(
-        "Slack dispatch not yet implemented — see loom-7b19085a"
-    )
+    """Dispatch an alert to Slack via the Web API.
+
+    Uses SLACK_BOT_TOKEN from environment. Requires bot scopes:
+    chat:write. Logs and returns gracefully on any failure.
+    """
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        logger.warning(
+            "alert.slack.no_token",
+            extra={"alert_id": alert.id},
+        )
+        return
+
+    if not alert.channel_target:
+        logger.warning(
+            "alert.slack.no_channel_target",
+            extra={"alert_id": alert.id},
+        )
+        return
+
+    try:
+        client = AsyncWebClient(token=token)
+        trigger_str = (
+            alert.trigger_at.strftime("%Y-%m-%d %H:%M UTC")
+            if alert.trigger_at
+            else "now"
+        )
+        text = (
+            f"*[{alert.alert_type.value}]* {alert.title}\n"
+            f"{alert.body or ''}\n"
+            f"_Due: {trigger_str}_"
+        ).strip()
+
+        response = await asyncio.wait_for(
+            client.chat_postMessage(
+                channel=alert.channel_target,
+                text=text,
+            ),
+            timeout=_SLACK_TIMEOUT,
+        )
+        if not response.get("ok"):
+            logger.warning(
+                "alert.slack.api_error",
+                extra={
+                    "alert_id": alert.id,
+                    "error": response.get("error", "unknown"),
+                },
+            )
+    except Exception:
+        logger.exception(
+            "alert.slack.dispatch_error",
+            extra={"alert_id": alert.id},
+        )
 
 
 # Register built-in handlers
