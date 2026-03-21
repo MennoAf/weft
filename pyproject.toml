@@ -26,6 +26,7 @@ dependencies = [
     "python-frontmatter>=1.1.0",
     "python-dateutil>=2.9.0",
     "slack-sdk>=3.30.0",
+    "aiohttp>=3.13.3",
 ]
 
 [project.scripts]
