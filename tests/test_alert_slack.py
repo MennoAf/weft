@@ -46,7 +46,8 @@ class TestSlackDispatch:
             alert = _make_alert()
             await dispatch_slack(alert)
 
-            mock_cls.assert_called_once_with(token="REDACTED")
+            mock_cls.assert_called_once()
+            assert mock_cls.call_args[1]["token"] == "REDACTED"
             mock_client_instance.chat_postMessage.assert_called_once()
             call_kwargs = mock_client_instance.chat_postMessage.call_args[1]
             assert call_kwargs["channel"] == "#alerts"

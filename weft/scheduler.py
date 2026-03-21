@@ -80,7 +80,12 @@ async def dispatch_slack(alert: Alert) -> None:
         return
 
     try:
-        client = AsyncWebClient(token=token)
+        import ssl
+
+        import certifi
+
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        client = AsyncWebClient(token=token, ssl=ssl_ctx)
         trigger_str = (
             alert.trigger_at.strftime("%Y-%m-%d %H:%M UTC")
             if alert.trigger_at
