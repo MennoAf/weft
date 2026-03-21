@@ -1799,3 +1799,171 @@ async def weft_mode_delete(ctx: Context, name: str) -> dict:
             return {"success": False, "error": f"Mode '{name}' not found"}
     except _DB_ERRORS as e:
         return _db_error_response("weft_mode_delete", e)
+
+
+# ── Alert tools ─────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def weft_alert_create(
+    ctx: Context,
+    alert_type: str,
+    title: str,
+    trigger_at: str,
+    body: str | None = None,
+    channel: str = "log",
+    channel_target: str | None = None,
+    payload: dict | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Schedule a proactive alert that fires at trigger_at.
+
+    alert_type: due_task, stale_decision, follow_up, or custom.
+    trigger_at: ISO8601 datetime string (must be timezone-aware, e.g.
+        '2026-03-21T10:00:00+00:00'). Past times fire on next scheduler tick.
+    channel: 'log' (default) or 'slack'.
+    channel_target: required when channel='slack' (e.g. '#alerts').
+    payload: optional JSON-serializable dict of extra data."""
+    try:
+        from datetime import datetime, timezone
+
+        from weft.alerts import create_alert
+        from weft.models import AlertChannel, AlertCreate, AlertType
+
+        # Validate alert_type
+        valid_types = [t.value for t in AlertType]
+        if alert_type not in valid_types:
+            return _input_error_response(
+                "weft_alert_create",
+                ValueError(f"Invalid alert_type '{alert_type}'. Valid: {valid_types}"),
+            )
+
+        # Validate channel
+        valid_channels = [c.value for c in AlertChannel]
+        if channel not in valid_channels:
+            return _input_error_response(
+                "weft_alert_create",
+                ValueError(f"Invalid channel '{channel}'. Valid: {valid_channels}"),
+            )
+
+        # Validate slack requires channel_target
+        if channel == "slack" and not channel_target:
+            return _input_error_response(
+                "weft_alert_create",
+                ValueError("channel_target is required when channel is 'slack'"),
+            )
+
+        # Parse trigger_at
+        try:
+            trigger_dt = datetime.fromisoformat(trigger_at)
+        except ValueError:
+            return _input_error_response(
+                "weft_alert_create",
+                ValueError(
+                    f"Invalid trigger_at '{trigger_at}'. "
+                    "Use ISO8601 format, e.g. '2026-03-21T10:00:00+00:00'"
+                ),
+            )
+        if trigger_dt.tzinfo is None:
+            trigger_dt = trigger_dt.replace(tzinfo=timezone.utc)
+
+        # Validate payload is JSON-serializable
+        if payload is not None:
+            import json
+            try:
+                json.dumps(payload)
+            except (TypeError, ValueError) as e:
+                return _input_error_response(
+                    "weft_alert_create",
+                    ValueError(f"payload must be JSON-serializable: {e}"),
+                )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        create = AlertCreate(
+            alert_type=AlertType(alert_type),
+            title=title,
+            body=body,
+            trigger_at=trigger_dt,
+            channel=AlertChannel(channel),
+            channel_target=channel_target,
+            payload=payload or {},
+            project_id=resolved_project,
+            agent_id=agent_id,
+        )
+        async with acquire(app.pool):
+            alert = await create_alert(app.pool, create)
+            return {"success": True, "alert": alert.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_alert_create", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_alert_create", e)
+
+
+@mcp.tool()
+async def weft_alert_list(
+    ctx: Context,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List alerts for the current user, newest first.
+
+    status: optional filter — 'pending', 'fired', or 'dismissed'.
+    Returns all alerts if status is omitted."""
+    try:
+        from weft.alerts import list_alerts
+        from weft.models import AlertStatus
+
+        # Validate status if provided
+        if status is not None:
+            valid_statuses = [s.value for s in AlertStatus]
+            if status not in valid_statuses:
+                return _input_error_response(
+                    "weft_alert_list",
+                    ValueError(f"Invalid status '{status}'. Valid: {valid_statuses}"),
+                )
+            status_enum = AlertStatus(status)
+        else:
+            status_enum = None
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            alerts = await list_alerts(
+                app.pool, status=status_enum, limit=limit, offset=offset
+            )
+            return {
+                "count": len(alerts),
+                "alerts": [a.to_dict() for a in alerts],
+            }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_alert_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_alert_list", e)
+
+
+@mcp.tool()
+async def weft_alert_dismiss(ctx: Context, alert_id: str) -> dict:
+    """Dismiss a pending alert by ID. Prevents it from firing.
+
+    Returns success=True if dismissed, success=False if not found or
+    already dismissed/fired."""
+    try:
+        from weft.alerts import dismiss_alert
+
+        if not alert_id or not alert_id.startswith("weft-"):
+            return _input_error_response(
+                "weft_alert_dismiss",
+                ValueError(f"Invalid alert_id '{alert_id}'. Expected format: 'weft-...'"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            dismissed = await dismiss_alert(app.pool, alert_id)
+            if dismissed:
+                return {"success": True, "dismissed": alert_id}
+            return {"success": False, "error": f"Alert '{alert_id}' not found or not pending"}
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_alert_dismiss", e)
