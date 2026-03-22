@@ -2100,3 +2100,55 @@ async def weft_daily_brief(
             }
     except _DB_ERRORS as e:
         return _db_error_response("weft_daily_brief", e)
+
+
+@mcp.tool()
+async def weft_ingest(
+    ctx: Context,
+    text: str,
+    source: str = "conversation",
+    author: str | None = None,
+    metadata: dict | None = None,
+    project_id: str | None = None,
+) -> dict:
+    """Run text through the smart ingestion pipeline.
+
+    Classifies intent via LLM, extracts entities and dates, and routes to
+    appropriate Weft subsystems (memories, entities, alerts).
+
+    source: origin of the text (e.g. 'slack', 'email', 'cli').
+    metadata: optional dict of extra context (channel, thread_ts, etc.).
+    Returns structured IngestResult with counts of created objects."""
+    try:
+        from weft.ingest_pipeline import IngestItem, process
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        item = IngestItem(
+            text=text,
+            source=source,
+            author=author,
+            metadata=metadata or {},
+        )
+
+        async with acquire(app.pool):
+            result = await process(
+                item,
+                app.pool,
+                app.embedding,
+                project_id=resolved_project,
+            )
+
+        return {
+            "memories_created": result.memories_created,
+            "entities_created": result.entities_created,
+            "entities_linked": result.entities_linked,
+            "alerts_created": result.alerts_created,
+            "intents": len(result.intents),
+            "errors": result.errors,
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_ingest", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_ingest", e)

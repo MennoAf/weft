@@ -52,6 +52,7 @@ async def sync_slack_sdk(
     excluded_channels: set[str] | None = None,
     user_names: dict[str, str] | None = None,
     limit_per_channel: int = 200,
+    smart_ingest: bool = False,
 ) -> SyncResult:
     """Sync Slack messages using the slack_sdk directly.
 
@@ -65,21 +66,24 @@ async def sync_slack_sdk(
     if excluded_channels is None:
         excluded_channels = DEFAULT_EXCLUDED_CHANNELS
 
-    # Discover channels
+    # Discover channels — try private+public, fall back to public-only
+    # if the bot token lacks groups:read scope.
     channels: list[ChannelInfo] = []
-    cursor = None
-    while True:
-        resp = await client.conversations_list(
-            types="public_channel,private_channel",
-            cursor=cursor,
-            limit=100,
-        )
-        for ch in resp["channels"]:
-            if ch["name"] not in excluded_channels:
-                channels.append(ChannelInfo(id=ch["id"], name=ch["name"]))
-        cursor = resp.get("response_metadata", {}).get("next_cursor")
-        if not cursor:
-            break
+    channel_types = "public_channel,private_channel"
+    try:
+        channels = await _list_channels(client, channel_types, excluded_channels)
+    except Exception as exc:
+        if "missing_scope" in str(exc):
+            logger.warning(
+                "slack_sync.missing_scope — falling back to public channels "
+                "only. Add groups:read to your Slack app's bot token scopes "
+                "to sync private channels."
+            )
+            channels = await _list_channels(
+                client, "public_channel", excluded_channels
+            )
+        else:
+            raise
 
     # Resolve user names if not provided
     if user_names is None:
@@ -102,6 +106,7 @@ async def sync_slack_sdk(
                 user_names=user_names,
                 limit=limit_per_channel,
                 result=result,
+                smart_ingest=smart_ingest,
             )
             result.channels_synced += 1
         except Exception as exc:
@@ -109,6 +114,29 @@ async def sync_slack_sdk(
 
     sync_state.save()
     return result
+
+
+async def _list_channels(
+    client,
+    channel_types: str,
+    excluded_channels: set[str],
+) -> list[ChannelInfo]:
+    """Paginate conversations_list and return non-excluded channels."""
+    channels: list[ChannelInfo] = []
+    cursor = None
+    while True:
+        resp = await client.conversations_list(
+            types=channel_types,
+            cursor=cursor,
+            limit=100,
+        )
+        for ch in resp["channels"]:
+            if ch["name"] not in excluded_channels:
+                channels.append(ChannelInfo(id=ch["id"], name=ch["name"]))
+        cursor = resp.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+    return channels
 
 
 async def sync_slack_messages(
@@ -176,6 +204,7 @@ async def _sync_channel_sdk(
     user_names: dict[str, str],
     limit: int,
     result: SyncResult,
+    smart_ingest: bool = False,
 ):
     """Fetch and sync messages for one channel using slack_sdk."""
     oldest = sync_state.get_last_sync_ts(channel.id)
@@ -222,6 +251,7 @@ async def _sync_channel_sdk(
         channel_map=channel_map,
         user_names=user_names,
         result=result,
+        smart_ingest=smart_ingest,
     )
 
 
@@ -236,10 +266,17 @@ async def _sync_messages(
     channel_map: dict[str, ChannelMapping] | None,
     user_names: dict[str, str],
     result: SyncResult,
+    smart_ingest: bool = False,
 ):
     """Process a batch of raw messages for a channel."""
     mapping = resolve_channel_mapping(channel.name, channel_map)
     max_ts: str | None = None
+
+    # Lazy-init smart adapter
+    adapter = None
+    if smart_ingest:
+        from weft.ingest_adapters import SlackAdapter
+        adapter = SlackAdapter()
 
     for raw in raw_messages:
         # Skip bot messages and subtypes (join/leave/etc)
@@ -280,7 +317,29 @@ async def _sync_messages(
                 result.memories_archived += 1
             result.messages_updated += 1
 
-        # Build and store memory
+        # --- Smart ingest path (try first, fall back to flat storage) ---
+        if adapter:
+            try:
+                ingest_result = await adapter.ingest(
+                    raw, pool, embedding_provider, channel=channel.name,
+                )
+                if ingest_result and ingest_result.memories_created > 0:
+                    # Smart ingest succeeded — update sync state and continue
+                    sync_state.update_message(
+                        channel.id, msg.ts, [], edited_ts=msg.edited_ts
+                    )
+                    result.messages_synced += 1
+                    result.memories_created += ingest_result.memories_created
+                    if max_ts is None or msg.ts > max_ts:
+                        max_ts = msg.ts
+                    continue
+            except Exception:
+                logger.warning(
+                    "Smart ingest failed for %s in %s, falling back to flat storage",
+                    msg.ts, channel.name, exc_info=True,
+                )
+
+        # --- Flat-memory storage (original path / fallback) ---
         try:
             memory_ids = await _store_message_memory(
                 msg,

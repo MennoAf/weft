@@ -336,3 +336,60 @@ class TestSyncSlackMessages:
 
 
 import json
+
+from weft.slack.sync import sync_slack_sdk
+
+
+class TestSyncSlackSdkScopeFallback:
+    """Test that sync_slack_sdk falls back to public channels when groups:read is missing."""
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_public_on_missing_groups_read(self, mock_pool):
+        """When conversations_list fails with missing_scope groups:read,
+        retry with public_channel only."""
+        from slack_sdk.errors import SlackApiError
+
+        mock_client_cls = AsyncMock()
+        mock_client = mock_client_cls.return_value
+
+        # First call (private+public) raises missing_scope error
+        scope_error = SlackApiError(
+            message="missing_scope",
+            response=MagicMock(data={"error": "missing_scope", "needed": "groups:read"}),
+        )
+        # Second call (public only) succeeds
+        success_resp = {
+            "channels": [{"id": "C1", "name": "general"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+        mock_client.conversations_list = AsyncMock(
+            side_effect=[scope_error, success_resp]
+        )
+        mock_client.users_list = AsyncMock(
+            return_value={"members": [], "response_metadata": {"next_cursor": ""}}
+        )
+        mock_client.conversations_history = AsyncMock(
+            return_value={"messages": [], "response_metadata": {"next_cursor": ""}}
+        )
+
+        with patch("slack_sdk.web.async_client.AsyncWebClient", return_value=mock_client):
+            result = await sync_slack_sdk(mock_pool, "REDACTED")
+
+        assert result.channels_synced == 1
+        # Verify it called conversations_list twice
+        assert mock_client.conversations_list.call_count == 2
+        # Second call should use public_channel only
+        second_call = mock_client.conversations_list.call_args_list[1]
+        assert second_call.kwargs.get("types") == "public_channel"
+
+    @pytest.mark.asyncio
+    async def test_raises_non_scope_errors(self, mock_pool):
+        """Non-scope errors from conversations_list should propagate."""
+        mock_client = AsyncMock()
+        mock_client.conversations_list = AsyncMock(
+            side_effect=RuntimeError("network failure")
+        )
+
+        with patch("slack_sdk.web.async_client.AsyncWebClient", return_value=mock_client):
+            with pytest.raises(RuntimeError, match="network failure"):
+                await sync_slack_sdk(mock_pool, "REDACTED")
