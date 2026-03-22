@@ -13,7 +13,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from anthropic import AsyncAnthropic
@@ -262,4 +262,274 @@ async def classify(
     )]
 
 
-__all__ = ["EntityRef", "Intent", "IngestItem", "IngestResult", "classify"]
+# --- Intent-to-MemoryType mapping ---
+
+_INTENT_MEMORY_TYPE = {
+    "reminder": "fact",
+    "person_fact": "fact",
+    "company_fact": "fact",
+    "follow_up": "fact",
+    "decision": "decision",
+    "action_item": "fact",
+    "general_note": "fact",
+}
+
+# Intent types that should create an alert
+_INTENT_ALERT_TYPES = {
+    "reminder": "follow_up",
+    "action_item": "due_task",
+    "follow_up": "follow_up",
+}
+
+# Default alert offset when no date is provided
+_DEFAULT_ALERT_HOURS = 24
+
+
+# --- Entity resolution ---
+
+
+async def resolve_entities(
+    entities: list[EntityRef],
+    pool: "asyncpg.Pool",
+    embedding_provider,
+    *,
+    project_id: str | None = None,
+    _cache: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve entity references to entity IDs.
+
+    Searches for existing entities by embedding similarity. Creates new ones
+    if no match is found. Uses a within-batch cache to deduplicate entities
+    that appear multiple times in the same batch.
+
+    Returns:
+        Dict mapping entity name → entity ID.
+    """
+    from weft.entities import search_entities, store_entity
+    from weft.models import EntityCreate, EntityType
+
+    if _cache is None:
+        _cache = {}
+
+    resolved: dict[str, str] = {}
+
+    for entity_ref in entities:
+        name = entity_ref.name.strip()
+        if not name or len(name) < 2:
+            logger.debug("resolve_entities.skip_short: %r", name)
+            continue
+
+        # Check batch cache (normalized lowercase)
+        cache_key = name.lower()
+        if cache_key in _cache:
+            resolved[name] = _cache[cache_key]
+            continue
+
+        # Search by embedding similarity
+        embedding = None
+        try:
+            embedding = await embedding_provider.embed(name)
+            etype = (
+                EntityType(entity_ref.entity_type)
+                if entity_ref.entity_type in [e.value for e in EntityType]
+                else None
+            )
+            matches = await search_entities(
+                pool,
+                embedding,
+                entity_type=etype,
+                project_id=project_id,
+                limit=3,
+                threshold=0.6,
+            )
+
+            if matches:
+                # Pick highest similarity match
+                best_entity, best_sim = max(matches, key=lambda x: x[1])
+                resolved[name] = best_entity.id
+                _cache[cache_key] = best_entity.id
+                logger.debug(
+                    "resolve_entities.found: %s → %s (sim=%.3f)",
+                    name, best_entity.id, best_sim,
+                )
+                continue
+        except Exception:
+            logger.exception("resolve_entities.search_error: %s", name)
+
+        # Create new entity
+        try:
+            etype = (
+                EntityType(entity_ref.entity_type)
+                if entity_ref.entity_type in [e.value for e in EntityType]
+                else EntityType.concept
+            )
+            entity = await store_entity(
+                pool,
+                EntityCreate(
+                    name=name,
+                    entity_type=etype,
+                    project_id=project_id,
+                ),
+                embedding=embedding,
+            )
+            resolved[name] = entity.id
+            _cache[cache_key] = entity.id
+            logger.debug("resolve_entities.created: %s → %s", name, entity.id)
+        except Exception:
+            logger.exception("resolve_entities.create_error: %s", name)
+
+    return resolved
+
+
+# --- Router ---
+
+
+async def route(
+    intents: list[Intent],
+    pool: "asyncpg.Pool",
+    embedding_provider=None,
+    *,
+    project_id: str | None = None,
+    source: str = "ingest",
+) -> IngestResult:
+    """Route classified intents to appropriate Weft subsystems.
+
+    Each intent is processed independently — a failure in one intent
+    is caught, logged, and does not abort the rest.
+    """
+    from weft.alerts import create_alert
+    from weft.entities import link_mention
+    from weft.models import (
+        AlertChannel,
+        AlertCreate,
+        AlertType,
+        MemoryCreate,
+        MemorySource,
+        MemoryType,
+    )
+    from weft.store import store_memory
+
+    result = IngestResult(intents=intents)
+    entity_cache: dict[str, str] = {}
+
+    for intent in intents:
+        try:
+            # --- Resolve entities ---
+            entity_ids: dict[str, str] = {}
+            if intent.entities and embedding_provider:
+                entity_ids = await resolve_entities(
+                    intent.entities,
+                    pool,
+                    embedding_provider,
+                    project_id=project_id,
+                    _cache=entity_cache,
+                )
+                result.entities_created += sum(
+                    1 for _ in entity_ids.values()
+                )  # approximate; cache hits counted too
+
+            # --- Build memory ---
+            mem_type_str = _INTENT_MEMORY_TYPE.get(intent.type, "fact")
+            topics = [f"intent:{intent.type}"]
+            if intent.entities:
+                for e in intent.entities:
+                    topics.append(f"entity:{e.name}")
+
+            embedding = None
+            if embedding_provider:
+                try:
+                    embedding = await embedding_provider.embed(intent.content)
+                except Exception:
+                    logger.warning("route.embed_failed for intent: %s", intent.type)
+
+            create = MemoryCreate(
+                type=MemoryType(mem_type_str),
+                content=intent.content,
+                topic=topics,
+                source=MemorySource(source) if source in MemorySource._value2member_map_ else MemorySource.ingest,
+                confidence=intent.confidence,
+                project_id=project_id,
+            )
+            memory = await store_memory(pool, create, embedding=embedding)
+            result.memories_created += 1
+
+            # --- Link entities to memory ---
+            for entity_name, entity_id in entity_ids.items():
+                try:
+                    await link_mention(pool, entity_id, memory.id)
+                    result.entities_linked += 1
+                except Exception:
+                    logger.exception(
+                        "route.link_error: entity=%s memory=%s",
+                        entity_id, memory.id,
+                    )
+
+            # --- Create alert if applicable ---
+            alert_type_str = _INTENT_ALERT_TYPES.get(intent.type)
+            if alert_type_str:
+                if intent.dates:
+                    trigger_at = intent.dates[0]
+                else:
+                    trigger_at = datetime.now(timezone.utc) + timedelta(
+                        hours=_DEFAULT_ALERT_HOURS
+                    )
+                # Ensure timezone-aware
+                if trigger_at.tzinfo is None:
+                    trigger_at = trigger_at.replace(tzinfo=timezone.utc)
+
+                alert_create = AlertCreate(
+                    alert_type=AlertType(alert_type_str),
+                    title=intent.content[:200],
+                    body=intent.raw_text[:500] if intent.raw_text else None,
+                    trigger_at=trigger_at,
+                    channel=AlertChannel.log,
+                    project_id=project_id,
+                )
+                await create_alert(pool, alert_create)
+                result.alerts_created += 1
+
+        except Exception as exc:
+            logger.exception(
+                "route.intent_error: type=%s content=%s",
+                intent.type, intent.content[:100],
+            )
+            result.errors.append(f"{intent.type}: {exc}")
+
+    return result
+
+
+# --- Public entry point ---
+
+
+async def process(
+    item: IngestItem,
+    pool: "asyncpg.Pool",
+    embedding_provider=None,
+    *,
+    project_id: str | None = None,
+    tz_name: str = "America/New_York",
+) -> IngestResult:
+    """Process a single IngestItem through the full pipeline.
+
+    classify → route → return IngestResult.
+    This is the only public entry point for the ingestion pipeline.
+    """
+    intents = await classify(
+        item.text,
+        metadata=item.metadata,
+        tz_name=tz_name,
+    )
+
+    if not intents:
+        return IngestResult()
+
+    return await route(
+        intents,
+        pool,
+        embedding_provider,
+        project_id=project_id,
+        source=item.source,
+    )
+
+
+__all__ = ["EntityRef", "Intent", "IngestItem", "IngestResult", "classify", "process", "route", "resolve_entities"]

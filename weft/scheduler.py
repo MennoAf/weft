@@ -188,6 +188,7 @@ async def slack_sync_loop(
     embedding_provider=None,
     *,
     interval: int = 1800,
+    smart_ingest: bool = False,
 ) -> None:
     """Recurring Slack channel sync. Runs until cancelled.
 
@@ -214,6 +215,7 @@ async def slack_sync_loop(
                     pool,
                     bot_token,
                     embedding_provider,
+                    smart_ingest=smart_ingest,
                 )
                 elapsed = time.monotonic() - t0
                 logger.info(

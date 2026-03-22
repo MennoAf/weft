@@ -294,6 +294,7 @@ async def lifespan(server: FastMCP):
             pool,
             embedding,
             interval=config.slack_sync.interval,
+            smart_ingest=config.slack_sync.smart_ingest,
         )
     )
     ctx._daily_brief_task = asyncio.create_task(

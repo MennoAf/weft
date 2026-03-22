@@ -102,6 +102,7 @@ class AlertConfig(BaseModel):
 
 class SlackSyncConfig(BaseModel):
     interval: int = 1800  # seconds between auto-sync cycles (default 30min)
+    smart_ingest: bool = False  # enable LLM-powered smart ingestion pipeline
 
 
 class DailyBriefConfig(BaseModel):
