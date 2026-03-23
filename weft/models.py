@@ -331,6 +331,12 @@ class AlertType(str, Enum):
     check_in_low_mood = "check_in_low_mood"
     check_in_low_sleep = "check_in_low_sleep"
     check_in_declining_trend = "check_in_declining_trend"
+    loom_stale_claim = "loom_stale_claim"
+    loom_epic_ready = "loom_epic_ready"
+    loom_blocked_pile_up = "loom_blocked_pile_up"
+    memory_consolidation_overdue = "memory_consolidation_overdue"
+    memory_count_threshold = "memory_count_threshold"
+    memory_contradiction = "memory_contradiction"
 
 
 class AlertChannel(str, Enum):

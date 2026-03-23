@@ -253,6 +253,16 @@ async def weft_remember(
                         f'Warning: This may contradict memory {w["memory_id"]}: "{w["content_preview"]}"'
                         for w in warnings
                     ]
+                    # Auto-create a contradiction alert so it's visible next session
+                    try:
+                        from weft.memory_hygiene_alerts import create_contradiction_alert
+                        await create_contradiction_alert(
+                            app.pool,
+                            new_memory_id=memory.id,
+                            contradictions=warnings,
+                        )
+                    except Exception:
+                        pass  # alert creation is best-effort
             return result
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_remember", e)

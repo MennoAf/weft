@@ -305,6 +305,79 @@ async def daily_brief_loop(
         raise
 
 
+# --- Loom awareness loop ---
+
+_LOOM_CHECK_INTERVAL = 3600  # check every hour
+
+
+async def loom_awareness_loop(
+    pool: asyncpg.Pool,
+    *,
+    interval: int = _LOOM_CHECK_INTERVAL,
+) -> None:
+    """Periodic Loom task state checks. Runs until cancelled.
+
+    Checks for stale claims, epic completion readiness, and blocked pile-ups.
+    Creates Weft alerts when thresholds are crossed (with 24h dedup).
+    Gracefully skips if Loom tables don't exist.
+    """
+    from weft.loom_alerts import evaluate_loom_alerts
+
+    logger.info("loom_awareness.started", extra={"interval": interval})
+    try:
+        while True:
+            try:
+                created = await evaluate_loom_alerts(pool)
+                if created:
+                    logger.info(
+                        "loom_awareness.alerts_created",
+                        extra={"count": len(created)},
+                    )
+            except Exception:
+                logger.exception("loom_awareness.loop_error")
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("loom_awareness.stopped")
+        raise
+
+
+# --- Memory hygiene loop ---
+
+_HYGIENE_CHECK_INTERVAL = 3600  # check every hour
+
+
+async def memory_hygiene_loop(
+    pool: asyncpg.Pool,
+    *,
+    interval: int = _HYGIENE_CHECK_INTERVAL,
+) -> None:
+    """Periodic memory health checks. Runs until cancelled.
+
+    Checks for stale decisions, overdue consolidation, and memory count
+    thresholds. Creates Weft alerts when issues are found (with 24h dedup).
+    """
+    from weft.memory_hygiene_alerts import evaluate_memory_hygiene_alerts
+
+    logger.info("memory_hygiene.started", extra={"interval": interval})
+    try:
+        while True:
+            try:
+                created = await evaluate_memory_hygiene_alerts(pool)
+                if created:
+                    logger.info(
+                        "memory_hygiene.alerts_created",
+                        extra={"count": len(created)},
+                    )
+            except Exception:
+                logger.exception("memory_hygiene.loop_error")
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("memory_hygiene.stopped")
+        raise
+
+
 async def _post_brief_to_slack(channel: str, brief_result) -> None:
     """Post the assembled brief to Slack via Block Kit."""
     import ssl
