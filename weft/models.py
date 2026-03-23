@@ -328,6 +328,9 @@ class AlertType(str, Enum):
     follow_up = "follow_up"
     custom = "custom"
     daily_brief = "daily_brief"
+    check_in_low_mood = "check_in_low_mood"
+    check_in_low_sleep = "check_in_low_sleep"
+    check_in_declining_trend = "check_in_declining_trend"
 
 
 class AlertChannel(str, Enum):

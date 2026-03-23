@@ -71,7 +71,30 @@ async def weekly_recap(
     # Sort topics by frequency
     top_topics = sorted(all_topics.items(), key=lambda x: -x[1])[:15]
 
-    return {
+    # Wellness section from check-in patterns
+    wellness: dict | None = None
+    try:
+        from weft.check_in_patterns import analyze_all
+        from weft.check_ins import list_check_ins
+
+        check_ins = await list_check_ins(pool, limit=200)
+        if check_ins:
+            report = analyze_all(check_ins, trend_days=days, rolling_days=days)
+            wellness = {
+                "total_check_ins": report["total_check_ins"],
+                "trends": report["trends"],
+                "streaks": report["streaks"],
+                "sleep_energy_correlation": report["sleep_energy_correlation"],
+                "sleep_mood_correlation": report["sleep_mood_correlation"],
+                "day_of_week": {
+                    "best_day": report["day_of_week"]["best_day"],
+                    "worst_day": report["day_of_week"]["worst_day"],
+                },
+            }
+    except Exception:
+        pass  # wellness is optional — don't break the recap
+
+    result = {
         "period_days": days,
         "total_memories": len(rows),
         "by_type": {k: len(v) for k, v in by_type.items()},
@@ -92,6 +115,9 @@ async def weekly_recap(
             for row in rows[:20]
         ],
     }
+    if wellness:
+        result["wellness"] = wellness
+    return result
 
 
 async def search_all(
