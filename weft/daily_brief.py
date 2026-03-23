@@ -7,6 +7,7 @@ Each data source is queried independently — a failure in one never blocks othe
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -33,6 +34,7 @@ class BriefResult:
 
 # --- Section names (insertion order = display order) ---
 SECTION_META = {
+    "calendar": ("📅", "Today's Calendar"),
     "review_queue": ("📋", "Review Queue"),
     "handoffs": ("🔄", "Recent Handoffs"),
     "checkin_trends": ("💤", "Check-in Trends"),
@@ -186,6 +188,47 @@ async def _query_loom_tasks() -> list[str]:
         return []
 
 
+async def _query_calendar_events(
+    calendar_id: str, tz: ZoneInfo, as_of: datetime,
+) -> list[str]:
+    """Today's Google Calendar events — all-day first, then timed chronologically."""
+    from weft.google_calendar import build_service
+
+    local_now = as_of.astimezone(tz)
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    def _fetch() -> list[dict]:
+        service = build_service()
+        result = service.events().list(
+            calendarId=calendar_id,
+            timeMin=day_start.isoformat(),
+            timeMax=day_end.isoformat(),
+            timeZone=str(tz),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=BRIEF_MAX_ITEMS_PER_SECTION,
+        ).execute()
+        return result.get("items", [])
+
+    events = await asyncio.to_thread(_fetch)
+
+    all_day: list[str] = []
+    timed: list[str] = []
+    for event in events:
+        if event.get("status") == "cancelled":
+            continue
+        summary = event.get("summary", "(No title)")
+        start = event.get("start", {})
+        if "date" in start:
+            all_day.append(f"All day: {summary}")
+        elif "dateTime" in start:
+            dt = datetime.fromisoformat(start["dateTime"]).astimezone(tz)
+            timed.append(f"{dt.strftime('%H:%M')} {summary}")
+
+    return all_day + timed
+
+
 async def _query_alerts(pool: asyncpg.Pool, as_of: datetime) -> list[str]:
     """Pending alerts due today."""
     try:
@@ -313,6 +356,9 @@ async def assemble_daily_brief(
             logger.exception(f"daily_brief.{label}_error")
             return []
 
+    calendar = await _safe(
+        _query_calendar_events(brief_config.calendar_id, tz, target_date), "calendar"
+    )
     review_queue = await _safe(_query_review_queue(pool, target_date), "review_queue")
     handoffs = await _safe(_query_handoffs(pool, target_date), "handoffs")
     checkin_trends = await _safe(_query_checkin_trends(pool), "checkin_trends")
@@ -320,6 +366,7 @@ async def assemble_daily_brief(
     alerts = await _safe(_query_alerts(pool, target_date), "alerts")
 
     sections: dict[str, list[str]] = {
+        "calendar": calendar,
         "review_queue": review_queue,
         "handoffs": handoffs,
         "checkin_trends": checkin_trends,
