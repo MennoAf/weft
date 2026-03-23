@@ -56,6 +56,7 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "daily_brief.time": ("daily_brief", "time"),
     "daily_brief.timezone": ("daily_brief", "timezone"),
     "daily_brief.channel": ("daily_brief", "channel"),
+    "daily_brief.calendar_id": ("daily_brief", "calendar_id"),
 }
 
 
@@ -112,6 +113,7 @@ class DailyBriefConfig(BaseModel):
     time: str = "08:00"  # HH:MM wall-clock time for delivery
     timezone: str = "America/New_York"  # IANA timezone for brief schedule
     channel: str = ""  # Slack channel ID or name; empty = skip Slack delivery
+    calendar_id: str = "primary"  # Google Calendar ID to query
 
 
 class WeftConfig(BaseModel):

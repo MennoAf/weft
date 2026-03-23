@@ -27,6 +27,7 @@ from weft.daily_brief import (
 @pytest.fixture
 def populated_sections():
     return {
+        "calendar": ["All day: Team offsite", "09:00 Standup", "14:00 Design review"],
         "review_queue": ["[decision] Review pricing model… (review due 2024-01-15)"],
         "handoffs": ["Session completed Epic 5, deployed to Fly.io"],
         "checkin_trends": ["Mood: 3.5/5 (stable →)", "Sleep: 7.2h (improving ↑)", "Energy: 4.0/5 (stable →)"],

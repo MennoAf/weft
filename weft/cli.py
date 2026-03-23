@@ -737,6 +737,25 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
         console.print(f"\n[bold]Re-embedded {total} rows.[/bold]")
 
 
+@cli.command(name="calendar-auth")
+@click.option(
+    "--client-secrets",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help="Path to Google OAuth client secrets JSON file.",
+)
+def calendar_auth(client_secrets: str):
+    """Authenticate with Google Calendar (one-time setup)."""
+    from weft.google_calendar import run_oauth_flow, CREDENTIALS_PATH
+
+    try:
+        run_oauth_flow(client_secrets)
+        click.echo(f"Credentials saved to {CREDENTIALS_PATH}")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @cli.group()
 def config():
     """View and modify Weft configuration."""
