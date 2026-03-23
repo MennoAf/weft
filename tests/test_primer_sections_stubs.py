@@ -193,11 +193,20 @@ class TestSectionBuilderSignatures:
 # 5. Smoke test: stubs raise NotImplementedError
 # ---------------------------------------------------------------------------
 
+# Sections that have been implemented (no longer stubs).
+# Update this set as sections are implemented.
+_IMPLEMENTED_SECTIONS = set(_SECTION_BUILDERS.keys())  # All sections now implemented
+
+_STUB_ONLY_BUILDERS = {
+    k: v for k, v in _SECTION_BUILDERS.items()
+    if k not in _IMPLEMENTED_SECTIONS
+}
+
 
 class TestSectionBuilderStubsRaise:
-    """Each stub must raise NotImplementedError when called."""
+    """Each unimplemented stub must raise NotImplementedError when called."""
 
-    @pytest.mark.parametrize("module_path,func_name", _SECTION_BUILDERS.items())
+    @pytest.mark.parametrize("module_path,func_name", _STUB_ONLY_BUILDERS.items())
     @pytest.mark.asyncio
     async def test_stub_raises_not_implemented(self, module_path, func_name):
         import importlib

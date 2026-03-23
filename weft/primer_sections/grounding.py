@@ -12,12 +12,56 @@ from __future__ import annotations
 
 import logging
 
-from weft.primer_sections.context import PrimerContext, SectionResult
+from weft.models import MemoryStatus
+from weft.primer_sections.context import (
+    GROUNDING_TOPIC,
+    SECTION_BUDGETS,
+    PrimerContext,
+    SectionResult,
+)
+from weft.store import list_memories
+from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
+_CAP = SECTION_BUDGETS["grounding"]
+
 
 async def build_grounding_section(ctx: PrimerContext) -> SectionResult:
-    raise NotImplementedError(
-        "build_grounding_section not yet implemented — see PRIMER_REFACTOR.md §Grounding"
+    """Fetch and pack the grounding one-liner.
+
+    Returns a SectionResult whose ``items`` is either empty or contains
+    a single dict ``{"grounding_line": "<content>"}``.  The orchestrator
+    extracts the string for the top-level ``grounding`` key.
+    """
+    if not ctx.project_id:
+        ctx.section_tokens["grounding"] = 0
+        return SectionResult(items=[], tokens_used=0, skipped=True,
+                             skip_reason="no project_id")
+
+    raw = await list_memories(
+        ctx.pool, project_id=ctx.project_id,
+        topic=GROUNDING_TOPIC, status=MemoryStatus.active, limit=1,
+    )
+
+    if not raw:
+        ctx.section_tokens["grounding"] = 0
+        return SectionResult(items=[], tokens_used=0, skipped=False)
+
+    mem = raw[0]
+    cost = mem.token_count or estimate_tokens(mem.content)
+
+    if not ctx.fits(cost, 0, _CAP):
+        ctx.excluded += 1
+        ctx.section_tokens["grounding"] = 0
+        return SectionResult(items=[], tokens_used=0, skipped=False)
+
+    ctx.seen_ids.add(mem.id)
+    ctx.used_tokens += cost
+    ctx.section_tokens["grounding"] = cost
+
+    return SectionResult(
+        items=[{"grounding_line": mem.content}],
+        tokens_used=cost,
+        skipped=False,
     )

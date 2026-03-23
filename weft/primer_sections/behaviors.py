@@ -12,12 +12,61 @@ from __future__ import annotations
 
 import logging
 
-from weft.primer_sections.context import PrimerContext, SectionResult
+from weft.behaviors import list_behaviors, match_behaviors
+from weft.models import BehaviorMatch
+from weft.primer_sections.context import (
+    QUERY_SIMILARITY_THRESHOLD,
+    SECTION_BUDGETS,
+    SECTION_MAX_ITEMS,
+    PrimerContext,
+    SectionResult,
+)
+from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
+_CAP = SECTION_BUDGETS["behaviors"]
+_MAX = SECTION_MAX_ITEMS["behaviors"]
+
 
 async def build_behaviors_section(ctx: PrimerContext) -> SectionResult:
-    raise NotImplementedError(
-        "build_behaviors_section not yet implemented — see PRIMER_REFACTOR.md §Behaviors"
-    )
+    """Fetch and pack behavioral rules/strategies."""
+    cap = max(0, int(_CAP * ctx.behavior_boost))
+
+    if ctx.biased:
+        raw = await match_behaviors(
+            ctx.pool, ctx.query_vec, limit=_MAX * 2,
+            threshold=QUERY_SIMILARITY_THRESHOLD, **ctx.scope,
+        )
+    else:
+        raw = await list_behaviors(
+            ctx.pool, enabled=True, limit=_MAX * 2, **ctx.scope,
+        )
+
+    items: list[dict] = []
+    section_used = 0
+    for item in raw:
+        if len(items) >= _MAX:
+            break
+        if isinstance(item, BehaviorMatch):
+            beh = item.behavior
+        else:
+            beh = item
+        cost = beh.token_count or estimate_tokens(beh.trigger_pattern + " " + beh.action)
+        if ctx.fits(cost, section_used, cap):
+            entry = {
+                "trigger": beh.trigger_pattern,
+                "action": beh.action,
+                "confidence": beh.confidence,
+                "priority": beh.priority,
+                "scope": beh.scope.value if hasattr(beh.scope, "value") else beh.scope,
+                "id": beh.id,
+            }
+            items.append(entry)
+            ctx.used_tokens += cost
+            section_used += cost
+        else:
+            ctx.excluded += 1
+
+    ctx.section_tokens["behaviors"] = section_used
+    return SectionResult(items=items, tokens_used=section_used, skipped=False)

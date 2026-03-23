@@ -13,9 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
+
+if TYPE_CHECKING:
+    from weft.models import Memory
 
 
 @dataclass
@@ -123,3 +126,75 @@ class PrimerContext:
     def biased(self) -> bool:
         """True when query-biased recall is active."""
         return self.query_vec is not None
+
+    def fits(self, cost: int, section_used: int, section_cap: int) -> bool:
+        """True if *cost* tokens fit within both global and section budgets."""
+        return (
+            self.used_tokens + cost <= self.budget_tokens
+            and section_used + cost <= section_cap
+        )
+
+
+# ---------------------------------------------------------------------------
+# Shared constants
+# ---------------------------------------------------------------------------
+
+# Overhead tokens per memory dict entry (id, type, timestamps, metadata).
+DICT_OVERHEAD_TOKENS = 40
+
+# Topic used to identify project grounding memories.
+GROUNDING_TOPIC = "project-grounding"
+
+# Query-biased search threshold — intentionally permissive.
+QUERY_SIMILARITY_THRESHOLD = 0.1
+
+# Blend weight for semantic similarity vs existing ranking signals.
+SIMILARITY_WEIGHT = 0.4
+
+# Max git commits in changes_since section.
+MAX_CHANGES_SINCE_COMMITS = 20
+
+# Cold-start threshold: no handoff AND total_items <= this → show onboarding.
+COLD_START_THRESHOLD = 2
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers (used by multiple sections)
+# ---------------------------------------------------------------------------
+
+
+def unwrap_recall(items: list) -> list[tuple[Any, float | None]]:
+    """Unwrap MemoryRecall → (Memory, similarity) or plain Memory → (Memory, None)."""
+    from weft.models import MemoryRecall
+
+    if not items:
+        return []
+    if isinstance(items[0], MemoryRecall):
+        return [(r.memory, r.similarity) for r in items]
+    return [(m, None) for m in items]
+
+
+def is_unscoped_ingest(mem: Memory, project_id: str | None) -> bool:
+    """True when *mem* is a global ingested record that shouldn't appear in a
+    project-scoped primer."""
+    from weft.models import MemorySource
+
+    if not project_id:
+        return False
+    if mem.project_id is not None:
+        return False
+    return mem.source == MemorySource.ingest or (
+        isinstance(mem.source, str) and mem.source == "ingest"
+    )
+
+
+def annotate_review_after(entry: dict, now: datetime) -> dict:
+    """Add review_after / review_due fields to a memory dict if applicable."""
+    ra = entry.get("review_after")
+    if ra is None:
+        return entry
+    if isinstance(ra, str):
+        ra = datetime.fromisoformat(ra)
+    entry["review_after"] = ra.isoformat()
+    entry["review_due"] = ra <= now
+    return entry
