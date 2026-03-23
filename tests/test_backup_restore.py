@@ -103,7 +103,7 @@ async def test_backup_includes_all_fields(pool):
 
     m = data["memories"][0]
     required = {
-        "id", "type", "topic", "content", "source", "confidence",
+        "id", "user_id", "type", "topic", "content", "source", "confidence",
         "token_count", "created_at", "updated_at", "accessed_at",
         "access_count", "project_id", "agent_id", "status", "pinned",
         "usefulness_score", "usefulness_count", "review_after", "embedding",
@@ -121,6 +121,28 @@ async def test_backup_preserves_relationships(pool):
     source_ids = {r["source_id"] for r in rels}
     assert mem_a.id in source_ids
     assert mem_b.id in source_ids
+
+
+@pytest.mark.asyncio
+async def test_backup_includes_user_id(pool):
+    """Backup should include user_id for each memory (None for global)."""
+    await _seed_test_data(pool)
+
+    # Insert a user-scoped memory directly
+    await pool.execute(
+        """
+        INSERT INTO memories (id, user_id, type, content, source, confidence, status)
+        VALUES ('weft-user1', 'user-abc', 'fact', 'user scoped', 'conversation', 0.9, 'active')
+        """
+    )
+
+    data = await backup_all(pool)
+    user_ids = {m["id"]: m["user_id"] for m in data["memories"]}
+    assert user_ids["weft-user1"] == "user-abc"
+    # Global memories should have None
+    for m in data["memories"]:
+        if m["id"] != "weft-user1":
+            assert m["user_id"] is None
 
 
 @pytest.mark.asyncio

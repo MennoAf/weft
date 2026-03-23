@@ -728,6 +728,24 @@ async def build_primer(
     is_cold_start = not handoff_section and total_items <= _COLD_START_THRESHOLD
     onboarding: str | None = _ONBOARDING_TEXT if is_cold_start else None
 
+    # RLS diagnostic: if all sections are empty but the DB has rows,
+    # the user_id context may be misconfigured.
+    if total_items == 0 and not is_cold_start:
+        try:
+            approx_count = await pool.fetchval(
+                "SELECT reltuples::bigint FROM pg_class WHERE relname = 'memories'"
+            )
+            if approx_count and approx_count > 0:
+                hints["rls_diagnostic"] = (
+                    f"All primer sections returned 0 items but the database "
+                    f"has ~{approx_count} memories. This may indicate a "
+                    f"user_id / RLS misconfiguration. Check that the "
+                    f"Authorization header contains a valid JWT with the "
+                    f"correct 'sub' claim, or that app.user_id is being set."
+                )
+        except Exception:
+            pass  # pg_class access may be restricted — don't block primer
+
     # Loom hint: only on cold start (new/unknown project).
     if is_cold_start:
         hints["loom"] = (
