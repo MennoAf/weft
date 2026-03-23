@@ -17,8 +17,9 @@ from pydantic import BaseModel, Field
 # Load .env file (no-op if missing). Must happen before any os.environ reads.
 # Search order: cwd .env (default), then ~/.weft/.env as fallback.
 # This ensures the CLI works when run from outside the Weft source tree.
-load_dotenv()
-load_dotenv(Path.home() / ".weft" / ".env")
+if not os.environ.get("WEFT_TESTING"):
+    load_dotenv()
+    load_dotenv(Path.home() / ".weft" / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "alert.poll_interval": ("alert", "poll_interval"),
     "alert.batch_size": ("alert", "batch_size"),
     "slack_sync.interval": ("slack_sync", "interval"),
+    "slack_sync.smart_ingest_max_per_sync": ("slack_sync", "smart_ingest_max_per_sync"),
     "daily_brief.time": ("daily_brief", "time"),
     "daily_brief.timezone": ("daily_brief", "timezone"),
     "daily_brief.channel": ("daily_brief", "channel"),
@@ -103,6 +105,7 @@ class AlertConfig(BaseModel):
 class SlackSyncConfig(BaseModel):
     interval: int = 1800  # seconds between auto-sync cycles (default 30min)
     smart_ingest: bool = True  # enable LLM-powered smart ingestion pipeline
+    smart_ingest_max_per_sync: int = 50  # max messages to smart-ingest per sync cycle
 
 
 class DailyBriefConfig(BaseModel):

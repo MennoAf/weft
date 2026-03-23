@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+
+# Prevent load_dotenv from polluting test environment
+os.environ["WEFT_TESTING"] = "1"
 
 import asyncpg
 import pytest
