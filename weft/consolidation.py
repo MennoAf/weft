@@ -259,8 +259,8 @@ async def find_duplicates(
                             await conn.execute(
                                 """
                                 INSERT INTO memory_relationships
-                                    (source_id, target_id, relation, created_at)
-                                VALUES ($1, $2, $3, now())
+                                    (source_id, target_id, relation, created_at, user_id)
+                                VALUES ($1, $2, $3, now(), nullif(current_setting('app.user_id', true), ''))
                                 ON CONFLICT (source_id, target_id, relation) DO NOTHING
                                 """,
                                 keep.id,
