@@ -260,7 +260,7 @@ async def test_primer_changes_since_with_git(pool):
     )
 
     mock_commits = ["abc1234 Add feature X", "def5678 Fix bug Y"]
-    with patch("weft.primer.get_recent_commits", new_callable=AsyncMock, return_value=mock_commits):
+    with patch("weft.primer_sections.changes_since.get_recent_commits", new_callable=AsyncMock, return_value=mock_commits):
         result = await build_primer(pool, project_id="test-proj", budget_tokens=3000)
 
     assert result["changes_since"] is not None
@@ -282,7 +282,7 @@ async def test_primer_changes_since_git_unavailable(pool):
         handoff.id,
     )
 
-    with patch("weft.primer.get_recent_commits", new_callable=AsyncMock, return_value=[]):
+    with patch("weft.primer_sections.changes_since.get_recent_commits", new_callable=AsyncMock, return_value=[]):
         result = await build_primer(pool, project_id="test-proj", budget_tokens=3000)
 
     assert result["changes_since"] is not None

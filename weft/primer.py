@@ -163,7 +163,7 @@ def _newest_created_at(memories: list[dict], now: datetime) -> float | None:
     return round((now - newest).total_seconds() / 3600, 1)
 
 
-async def build_primer(
+async def _build_primer_legacy(
     pool: asyncpg.Pool,
     *,
     project_id: str | None = None,
@@ -173,7 +173,12 @@ async def build_primer(
     disclosure: str = "progressive",
     mode: str | None = None,
 ) -> dict:
-    """Assemble a tight session briefing from memories.
+    """LEGACY monolithic primer — kept as fallback. Use build_primer() instead.
+
+    This is the original 881-line implementation, preserved intact so it can
+    be called directly if the modular orchestrator has issues.  It will be
+    removed once the modular version has been running in production without
+    incidents for a reasonable period.
 
     Seven sections, filled in priority order within the token budget,
     each with its own per-section cap:
@@ -881,11 +886,11 @@ async def build_primer(
 
 
 # ---------------------------------------------------------------------------
-# v2 orchestrator — calls section builders from weft.primer_sections
+# Modular orchestrator — calls section builders from weft.primer_sections
 # ---------------------------------------------------------------------------
 
 
-async def build_primer_v2(
+async def build_primer(
     pool: asyncpg.Pool,
     *,
     project_id: str | None = None,
@@ -895,14 +900,24 @@ async def build_primer_v2(
     disclosure: str = "progressive",
     mode: str | None = None,
 ) -> dict:
-    """Assemble a session briefing using modular section builders.
+    """Assemble a tight session briefing from memories.
 
-    Identical signature and output shape to build_primer().  Uses section
-    builders from weft.primer_sections instead of inline logic.
+    Calls modular section builders from weft.primer_sections in priority
+    order, packing items within per-section and global token budgets.
 
-    This function exists alongside build_primer for comparison testing.
-    Once proven equivalent, build_primer will be renamed to
-    _build_primer_legacy and this function will become build_primer.
+    Sections (in priority order):
+    0. grounding — one-line project description (orientation)
+    1. rules — pinned memories (behavioral overrides, always first)
+    2. behaviors — persistent agent rules/strategies (how to act)
+    3. handoff — last session handoff (continuity)
+    4. recent_work — milestone breadcrumbs (what was recently done)
+    5. issues — active issues (what's broken)
+    5b. anti_patterns — pitfalls to avoid
+    6. decisions — closed decisions (what NOT to suggest)
+    7. entities — known people, projects, tools
+
+    The legacy monolithic implementation is preserved as
+    _build_primer_legacy() for fallback if needed.
     """
     from weft.modes import get_active_weights
     from weft.primer_sections.anti_patterns import build_anti_patterns_section

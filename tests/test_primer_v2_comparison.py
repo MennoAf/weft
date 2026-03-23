@@ -1,11 +1,10 @@
-"""Head-to-head comparison: build_primer vs build_primer_v2.
+"""Head-to-head comparison: _build_primer_legacy vs build_primer (modular).
 
-These tests run BOTH the monolithic and the orchestrator with identical
-inputs and assert byte-for-byte identical output.  This is the final
-safety gate before swapping.
+These tests run BOTH the legacy monolithic and the modular orchestrator
+with identical inputs and assert byte-for-byte identical output.
 
-The test must pass at every budget level, with every data combination,
-and in both disclosure modes before we touch the live code path.
+These tests serve as an ongoing regression gate — if the modular primer
+ever diverges from the legacy implementation, these tests will catch it.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ from weft.models import (
     MemoryStatus,
     MemoryType,
 )
-from weft.primer import build_primer, build_primer_v2
+from weft.primer import _build_primer_legacy, build_primer
 from weft.store import store_memory
 
 
@@ -156,15 +155,15 @@ class TestFullDisclosureComparison:
 
     @pytest.mark.parametrize("budget", [0, 1, 50, 100, 200, 500, 1000, 2400, 8000])
     async def test_budget_sweep(self, heavy_pool, budget):
-        mono = await build_primer(heavy_pool, budget_tokens=budget, disclosure="full")
-        v2 = await build_primer_v2(heavy_pool, budget_tokens=budget, disclosure="full")
+        mono = await _build_primer_legacy(heavy_pool, budget_tokens=budget, disclosure="full")
+        v2 = await build_primer(heavy_pool, budget_tokens=budget, disclosure="full")
         _assert_identical(mono, v2, f"full/budget={budget}")
 
     @pytest.mark.parametrize("budget", [0, 50, 200, 500, 2400, 8000])
     async def test_budget_sweep_with_project(self, heavy_pool, budget):
-        mono = await build_primer(heavy_pool, project_id="v2-proj",
+        mono = await _build_primer_legacy(heavy_pool, project_id="v2-proj",
                                   budget_tokens=budget, disclosure="full")
-        v2 = await build_primer_v2(heavy_pool, project_id="v2-proj",
+        v2 = await build_primer(heavy_pool, project_id="v2-proj",
                                    budget_tokens=budget, disclosure="full")
         _assert_identical(mono, v2, f"full/project/budget={budget}")
 
@@ -174,15 +173,15 @@ class TestProgressiveDisclosureComparison:
 
     @pytest.mark.parametrize("budget", [0, 1, 50, 100, 200, 500, 1000, 2400, 8000])
     async def test_budget_sweep(self, heavy_pool, budget):
-        mono = await build_primer(heavy_pool, budget_tokens=budget, disclosure="progressive")
-        v2 = await build_primer_v2(heavy_pool, budget_tokens=budget, disclosure="progressive")
+        mono = await _build_primer_legacy(heavy_pool, budget_tokens=budget, disclosure="progressive")
+        v2 = await build_primer(heavy_pool, budget_tokens=budget, disclosure="progressive")
         _assert_identical(mono, v2, f"progressive/budget={budget}")
 
     @pytest.mark.parametrize("budget", [0, 50, 200, 500, 2400, 8000])
     async def test_budget_sweep_with_project(self, heavy_pool, budget):
-        mono = await build_primer(heavy_pool, project_id="v2-proj",
+        mono = await _build_primer_legacy(heavy_pool, project_id="v2-proj",
                                   budget_tokens=budget, disclosure="progressive")
-        v2 = await build_primer_v2(heavy_pool, project_id="v2-proj",
+        v2 = await build_primer(heavy_pool, project_id="v2-proj",
                                    budget_tokens=budget, disclosure="progressive")
         _assert_identical(mono, v2, f"progressive/project/budget={budget}")
 
@@ -196,13 +195,13 @@ class TestEmptyDatabase:
     """No data at all — both should produce identical empty primer."""
 
     async def test_full_empty(self, pool):
-        mono = await build_primer(pool, budget_tokens=2400, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=2400, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=2400, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=2400, disclosure="full")
         _assert_identical(mono, v2, "empty/full")
 
     async def test_progressive_empty(self, pool):
-        mono = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
-        v2 = await build_primer_v2(pool, budget_tokens=2400, disclosure="progressive")
+        mono = await _build_primer_legacy(pool, budget_tokens=2400, disclosure="progressive")
+        v2 = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
         _assert_identical(mono, v2, "empty/progressive")
 
 
@@ -221,8 +220,8 @@ class TestEdgeCases:
             content="## Handoff\nJust context.",
             confidence=1.0,
         ))
-        mono = await build_primer(pool, budget_tokens=2400, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=2400, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=2400, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=2400, disclosure="full")
         _assert_identical(mono, v2, "only_handoff")
 
     async def test_oversized_handoff_tight_budget(self, pool):
@@ -238,8 +237,8 @@ class TestEdgeCases:
             confidence=1.0,
             pinned=True,
         ))
-        mono = await build_primer(pool, budget_tokens=200, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=200, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=200, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=200, disclosure="full")
         _assert_identical(mono, v2, "oversized_handoff")
 
     async def test_pinned_decision_dedup(self, pool):
@@ -255,8 +254,8 @@ class TestEdgeCases:
             content="Use pytest-asyncio.",
             confidence=0.8,
         ))
-        mono = await build_primer(pool, budget_tokens=4000, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=4000, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=4000, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=4000, disclosure="full")
         _assert_identical(mono, v2, "pinned_decision_dedup")
 
     async def test_many_identical_confidence(self, pool):
@@ -267,8 +266,8 @@ class TestEdgeCases:
                 content=f"Decision {i}: same confidence.",
                 confidence=0.8,
             ))
-        mono = await build_primer(pool, budget_tokens=4000, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=4000, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=4000, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=4000, disclosure="full")
         _assert_identical(mono, v2, "tie_breaking")
 
     async def test_grounding_no_project(self, pool):
@@ -280,14 +279,14 @@ class TestEdgeCases:
             confidence=1.0,
             project_id="some-proj",
         ))
-        mono = await build_primer(pool, budget_tokens=2400, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=2400, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=2400, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=2400, disclosure="full")
         _assert_identical(mono, v2, "grounding_no_project")
 
     async def test_cold_start_detection(self, pool):
         """Empty DB should trigger cold start in both."""
-        mono = await build_primer(pool, budget_tokens=2400, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=2400, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=2400, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=2400, disclosure="full")
         assert mono["onboarding"] is not None
         assert v2["onboarding"] is not None
         _assert_identical(mono, v2, "cold_start")
@@ -299,8 +298,8 @@ class TestEdgeCases:
             content="Session handoff.",
             confidence=1.0,
         ))
-        mono = await build_primer(pool, budget_tokens=2400, disclosure="full")
-        v2 = await build_primer_v2(pool, budget_tokens=2400, disclosure="full")
+        mono = await _build_primer_legacy(pool, budget_tokens=2400, disclosure="full")
+        v2 = await build_primer(pool, budget_tokens=2400, disclosure="full")
         assert mono["onboarding"] is None
         assert v2["onboarding"] is None
         _assert_identical(mono, v2, "not_cold_start")
