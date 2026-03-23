@@ -83,8 +83,11 @@ async def _query_review_queue(pool: asyncpg.Pool, as_of: datetime) -> list[str]:
         )
         items = []
         for r in rows:
-            preview = r["content"][:80].replace("\n", " ")
-            items.append(f"[{r['type']}] {preview}… (review due {r['review_after'].strftime('%Y-%m-%d')})")
+            content = r["content"].replace("\n", " ")
+            truncated = len(content) > 140
+            preview = content[:140].rsplit(" ", 1)[0] if truncated else content
+            ellipsis = "…" if truncated else ""
+            items.append(f"[{r['type']}] {preview}{ellipsis} (review due {r['review_after'].strftime('%Y-%m-%d')})")
         return items
     except Exception:
         logger.exception("daily_brief.review_queue_error")

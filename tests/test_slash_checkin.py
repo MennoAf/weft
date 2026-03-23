@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from weft.mcp.slack_commands import handle_slash_checkin, parse_checkin_text
+from weft.mcp.slack_commands import (
+    _verify_slack_signature,
+    handle_slash_checkin,
+    parse_checkin_text,
+)
 
 
 # ── Parser tests ────────────────────────────────────────────────────
@@ -75,6 +82,12 @@ def _make_request(text: str = "", user_id: str = "U123") -> MagicMock:
     return req
 
 
+@pytest.fixture(autouse=True)
+def _no_signing_secret(monkeypatch):
+    """Disable Slack signature verification for handler tests."""
+    monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
+
+
 class TestSlashCheckinHandler:
     @pytest.mark.asyncio
     async def test_success(self, pool):
@@ -124,3 +137,49 @@ class TestSlashCheckinHandler:
         assert row["mood"] == 5
         assert row["sleep_hours"] == 8.0
         assert row["energy"] == 5
+
+
+# ── Signature verification tests ──────────────────────────────────
+
+
+FAKE_SECRET = "test_signing_secret_abc123"
+
+
+def _sign(body: bytes, timestamp: str, secret: str = FAKE_SECRET) -> str:
+    """Compute a valid Slack signature for the given body and timestamp."""
+    sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
+    return "v0=" + hmac.new(
+        secret.encode(), sig_basestring.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+class TestVerifySlackSignature:
+    def test_no_secret_allows_all(self, monkeypatch):
+        monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
+        assert _verify_slack_signature(b"anything", "", "") is True
+
+    def test_valid_signature(self, monkeypatch):
+        monkeypatch.setenv("SLACK_SIGNING_SECRET", FAKE_SECRET)
+        ts = str(int(time.time()))
+        body = b"text=mood+3"
+        sig = _sign(body, ts)
+        assert _verify_slack_signature(body, ts, sig) is True
+
+    def test_bad_signature_rejected(self, monkeypatch):
+        monkeypatch.setenv("SLACK_SIGNING_SECRET", FAKE_SECRET)
+        ts = str(int(time.time()))
+        assert _verify_slack_signature(b"body", ts, "v0=bad") is False
+
+    def test_empty_timestamp_rejected(self, monkeypatch):
+        monkeypatch.setenv("SLACK_SIGNING_SECRET", FAKE_SECRET)
+        assert _verify_slack_signature(b"body", "", "v0=whatever") is False
+
+    def test_non_numeric_timestamp_rejected(self, monkeypatch):
+        monkeypatch.setenv("SLACK_SIGNING_SECRET", FAKE_SECRET)
+        assert _verify_slack_signature(b"body", "abc", "v0=whatever") is False
+
+    def test_stale_timestamp_rejected(self, monkeypatch):
+        monkeypatch.setenv("SLACK_SIGNING_SECRET", FAKE_SECRET)
+        old_ts = str(int(time.time()) - 600)
+        sig = _sign(b"body", old_ts)
+        assert _verify_slack_signature(b"body", old_ts, sig) is False
