@@ -274,9 +274,13 @@ async def _sync_messages(
 
     # Lazy-init smart adapter
     adapter = None
+    smart_ingest_remaining: int | None = None
     if smart_ingest:
         from weft.ingest_adapters import SlackAdapter
+
+        from weft.config import load_config
         adapter = SlackAdapter()
+        smart_ingest_remaining = load_config().slack_sync.smart_ingest_max_per_sync
 
     for raw in raw_messages:
         # Skip bot messages and subtypes (join/leave/etc)
@@ -318,12 +322,13 @@ async def _sync_messages(
             result.messages_updated += 1
 
         # --- Smart ingest path (try first, fall back to flat storage) ---
-        if adapter:
+        if adapter and smart_ingest_remaining and smart_ingest_remaining > 0:
             try:
                 ingest_result = await adapter.ingest(
                     raw, pool, embedding_provider, channel=channel.name,
                 )
                 if ingest_result and ingest_result.memories_created > 0:
+                    smart_ingest_remaining -= 1
                     # Smart ingest succeeded — update sync state and continue
                     sync_state.update_message(
                         channel.id, msg.ts, [], edited_ts=msg.edited_ts
@@ -338,6 +343,13 @@ async def _sync_messages(
                     "Smart ingest failed for %s in %s, falling back to flat storage",
                     msg.ts, channel.name, exc_info=True,
                 )
+        elif adapter and smart_ingest_remaining == 0:
+            logger.info(
+                "Smart ingest budget exhausted, falling back to flat storage "
+                "for remaining messages in %s",
+                channel.name,
+            )
+            smart_ingest_remaining = -1  # log once
 
         # --- Flat-memory storage (original path / fallback) ---
         try:
