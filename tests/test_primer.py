@@ -1401,3 +1401,25 @@ async def test_primer_progressive_tier1_always_included(pool):
     # Anti-patterns are always full list
     assert isinstance(result["anti_patterns"], list)
     assert len(result["anti_patterns"]) > 0
+
+
+# --- RLS diagnostic hint ---
+
+
+async def test_primer_no_rls_diagnostic_on_normal_cold_start(pool):
+    """Empty DB should show onboarding, NOT the RLS diagnostic."""
+    result = await build_primer(pool, budget_tokens=2400, disclosure="full")
+
+    assert "rls_diagnostic" not in result["hints"]
+    assert result["onboarding"] is not None
+
+
+async def test_primer_no_rls_diagnostic_with_visible_memories(pool):
+    """When memories are visible, no RLS diagnostic should appear."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.fact, content="Visible fact",
+        source=MemorySource.conversation, confidence=0.9, pinned=True,
+    ))
+    result = await build_primer(pool, budget_tokens=2400, disclosure="full")
+
+    assert "rls_diagnostic" not in result["hints"]
