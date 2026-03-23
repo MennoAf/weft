@@ -878,3 +878,192 @@ async def build_primer(
     if wellness_snapshot:
         result["wellness_snapshot"] = wellness_snapshot
     return result
+
+
+# ---------------------------------------------------------------------------
+# v2 orchestrator — calls section builders from weft.primer_sections
+# ---------------------------------------------------------------------------
+
+
+async def build_primer_v2(
+    pool: asyncpg.Pool,
+    *,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    budget_tokens: int = 2400,
+    query_vec: list[float] | None = None,
+    disclosure: str = "progressive",
+    mode: str | None = None,
+) -> dict:
+    """Assemble a session briefing using modular section builders.
+
+    Identical signature and output shape to build_primer().  Uses section
+    builders from weft.primer_sections instead of inline logic.
+
+    This function exists alongside build_primer for comparison testing.
+    Once proven equivalent, build_primer will be renamed to
+    _build_primer_legacy and this function will become build_primer.
+    """
+    from weft.modes import get_active_weights
+    from weft.primer_sections.anti_patterns import build_anti_patterns_section
+    from weft.primer_sections.behaviors import build_behaviors_section
+    from weft.primer_sections.changes_since import build_changes_since_section
+    from weft.primer_sections.context import PrimerContext
+    from weft.primer_sections.decisions import build_decisions_section
+    from weft.primer_sections.entities import build_entities_section
+    from weft.primer_sections.grounding import build_grounding_section
+    from weft.primer_sections.handoff import build_handoff_section
+    from weft.primer_sections.issues import build_issues_section
+    from weft.primer_sections.onboarding import build_onboarding_section
+    from weft.primer_sections.recent_work import build_recent_work_section
+    from weft.primer_sections.rules import build_rules_section
+    from weft.primer_sections.wellness import build_wellness_section
+
+    now = datetime.now(timezone.utc)
+
+    # Resolve mode weights (never raises — falls back to defaults).
+    weights = await get_active_weights(pool, mode)
+
+    # Build context.
+    ctx = PrimerContext(
+        user_id="",  # Not used by sections directly (RLS handles auth).
+        project_id=project_id,
+        agent_id=agent_id,
+        pool=pool,
+        budget_tokens=budget_tokens,
+        query=None,
+        query_vec=query_vec,
+        disclosure=disclosure,
+        mode=mode,
+        now=now,
+        behavior_boost=weights.behavior_boost,
+        entity_boost=weights.entity_boost,
+        recency_bias=weights.recency_bias,
+    )
+
+    # --- Phase 1: Budget-packed sections (sequential, in priority order) ---
+    grounding_result = await build_grounding_section(ctx)
+    rules_result = await build_rules_section(ctx)
+    behaviors_result = await build_behaviors_section(ctx)
+    handoff_result = await build_handoff_section(ctx)
+    recent_work_result = await build_recent_work_section(ctx)
+    issues_result = await build_issues_section(ctx)
+    anti_patterns_result = await build_anti_patterns_section(ctx)
+    decisions_result = await build_decisions_section(ctx)
+    entities_result = await build_entities_section(ctx)
+
+    # --- Phase 2: Independent post-sections (parallel) ---
+    changes_result, wellness_result = await asyncio.gather(
+        build_changes_since_section(ctx),
+        build_wellness_section(ctx),
+    )
+
+    # --- Phase 3: Freshness calculation ---
+    all_included: list[dict] = (
+        rules_result.items
+        + handoff_result.items
+        + issues_result.items
+        + anti_patterns_result.items
+        + decisions_result.items
+    )
+    freshness_hours = _newest_created_at(all_included, now)
+
+    # --- Phase 4: Onboarding post-processing ---
+    section_counts = {
+        "rules": len(rules_result.items),
+        "behaviors": len(behaviors_result.items),
+        "handoff": len(handoff_result.items),
+        "recent_work": len(recent_work_result.items),
+        "issues": len(issues_result.items),
+        "decisions": len(decisions_result.items),
+        "entities": len(entities_result.items),
+    }
+    onboarding_result = await build_onboarding_section(ctx, section_counts=section_counts)
+    onboarding_data = onboarding_result.items[0] if onboarding_result.items else {}
+    hints = onboarding_data.get("hints", {})
+    onboarding_text = onboarding_data.get("onboarding")
+
+    # --- Phase 5: Extract section values ---
+    grounding_line = (
+        grounding_result.items[0]["grounding_line"]
+        if grounding_result.items else None
+    )
+    changes_since = changes_result.items[0] if changes_result.items else None
+    wellness_snapshot = wellness_result.items[0] if wellness_result.items else None
+
+    # --- Phase 6: Progressive disclosure ---
+    progressive = disclosure == "progressive"
+    if progressive:
+        def _deferred(section_items, hint):
+            count = len(section_items)
+            d = {"count": count, "deferred": True}
+            if count > 0:
+                d["hint"] = hint
+            return d
+
+        tier1_tokens = sum(
+            ctx.section_tokens.get(s, 0)
+            for s in ("grounding", "rules", "handoff", "issues", "anti_patterns")
+        )
+
+        result = {
+            "grounding": grounding_line,
+            "rules": rules_result.items,
+            "behaviors": _deferred(
+                behaviors_result.items,
+                "Use weft_focus(intent=...) to load behavioral rules.",
+            ),
+            "handoff": handoff_result.items,
+            "recent_work": _deferred(
+                recent_work_result.items,
+                "Use weft_focus(intent=...) to load recent work.",
+            ),
+            "issues": {"count": len(issues_result.items), "items": issues_result.items},
+            "anti_patterns": anti_patterns_result.items,
+            "decisions": _deferred(
+                decisions_result.items,
+                "Use weft_focus(intent=...) to load relevant decisions.",
+            ),
+            "entities": _deferred(
+                entities_result.items,
+                "Use weft_focus(intent=...) to load known entities.",
+            ),
+            "changes_since": changes_since,
+            "total_tokens": tier1_tokens,
+            "budget_tokens": budget_tokens,
+            "budget_remaining": budget_tokens - tier1_tokens,
+            "excluded": ctx.excluded,
+            "freshness_hours": freshness_hours,
+            "section_tokens": ctx.section_tokens,
+            "hints": hints,
+            "onboarding": onboarding_text,
+            "disclosure": "progressive",
+        }
+        if wellness_snapshot:
+            result["wellness_snapshot"] = wellness_snapshot
+        return result
+
+    result = {
+        "grounding": grounding_line,
+        "rules": rules_result.items,
+        "behaviors": behaviors_result.items,
+        "handoff": handoff_result.items,
+        "recent_work": recent_work_result.items,
+        "issues": {"count": len(issues_result.items), "items": issues_result.items},
+        "anti_patterns": anti_patterns_result.items,
+        "decisions": decisions_result.items,
+        "entities": entities_result.items,
+        "changes_since": changes_since,
+        "total_tokens": ctx.used_tokens,
+        "budget_tokens": budget_tokens,
+        "budget_remaining": budget_tokens - ctx.used_tokens,
+        "excluded": ctx.excluded,
+        "freshness_hours": freshness_hours,
+        "section_tokens": ctx.section_tokens,
+        "hints": hints,
+        "onboarding": onboarding_text,
+        "disclosure": "full",
+    }
+    if wellness_snapshot:
+        result["wellness_snapshot"] = wellness_snapshot
+    return result
