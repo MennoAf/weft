@@ -92,8 +92,14 @@ def _verify_slack_signature(request_body: bytes, timestamp: str, signature: str)
         logger.warning("slack.commands.no_signing_secret")
         return True  # Allow in dev when no secret is configured
 
-    # Reject requests older than 5 minutes
-    if abs(time.time() - int(timestamp)) > 300:
+    # Reject requests with missing or stale timestamps
+    if not timestamp:
+        return False
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False
+    if abs(time.time() - ts) > 300:
         return False
 
     sig_basestring = f"v0:{timestamp}:{request_body.decode('utf-8')}"
