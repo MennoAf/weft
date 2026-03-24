@@ -47,6 +47,39 @@ _SOLUTION_PATTERNS = [
     (re.compile(r"(?:important|critical|key)[:\s]+(.+)", re.IGNORECASE), "fact", 0.7),
 ]
 
+_BEHAVIOR_PATTERNS = [
+    # "when X, do/use/always Y"
+    (re.compile(
+        r"when(?:ever)?\s+(.+?),?\s+(?:always |you should |we should |I |we )?(?:do|use|run|call|check|make sure|ensure|start with|prefer)\s+(.+)",
+        re.IGNORECASE,
+    ), 0.75),
+    # "if X, then Y" / "if X, Y"
+    (re.compile(
+        r"if\s+(.+?),\s*(?:then\s+)?(?:always |you should |we should )?(.+)",
+        re.IGNORECASE,
+    ), 0.7),
+    # "before/after X, always Y"
+    (re.compile(
+        r"(before|after)\s+(.+?),?\s+(?:always |you should |we should |I |we )?(.+)",
+        re.IGNORECASE,
+    ), 0.75),
+    # "always X when Y"
+    (re.compile(
+        r"always\s+(.+?)\s+when\s+(.+)",
+        re.IGNORECASE,
+    ), 0.8),
+    # "never X without Y" / "don't X without Y"
+    (re.compile(
+        r"(?:never|don't|do not)\s+(.+?)\s+without\s+(.+)",
+        re.IGNORECASE,
+    ), 0.8),
+    # "make sure to X before/after Y"
+    (re.compile(
+        r"make sure (?:to )?(.+?)\s+(before|after)\s+(.+)",
+        re.IGNORECASE,
+    ), 0.75),
+]
+
 ALL_PATTERNS = (
     _PREFERENCE_PATTERNS + _SOLUTION_PATTERNS + _FACT_PATTERNS
     + _PATTERN_PATTERNS + _ARCHITECTURE_PATTERNS
@@ -69,6 +102,63 @@ def _extract_topics(text: str) -> list[str]:
     text_lower = text.lower()
     found = [t for t in tech_terms if t in text_lower]
     return found[:3]  # Cap at 3 topics
+
+
+def extract_behaviors(
+    text: str,
+    *,
+    min_confidence: float = 0.7,
+) -> list[dict[str, Any]]:
+    """Extract behavior candidates (trigger → action rules) from text.
+
+    Returns a list of dicts with: trigger_pattern, action, confidence, source_line.
+    These are NOT stored — caller decides what to do with them.
+    """
+    if not text or not text.strip():
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or len(line) < 15:
+            continue
+
+        clean = re.sub(r"^[-*]\s+", "", line)
+        clean = re.sub(r"^\d+\.\s+", "", clean)
+
+        for pattern, confidence in _BEHAVIOR_PATTERNS:
+            match = pattern.search(clean)
+            if match and confidence >= min_confidence:
+                groups = match.groups()
+                if len(groups) == 2:
+                    trigger, action = groups[0].strip(), groups[1].strip()
+                elif len(groups) == 3:
+                    # "before/after X, Y" or "make sure X before/after Y"
+                    trigger = f"{groups[0].strip()} {groups[1].strip()}"
+                    action = groups[2].strip()
+                else:
+                    continue
+
+                # Skip if too short to be meaningful
+                if len(trigger) < 5 or len(action) < 5:
+                    continue
+
+                key = (trigger.lower(), action.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                candidates.append({
+                    "trigger_pattern": trigger,
+                    "action": action,
+                    "confidence": round(confidence, 2),
+                    "source_line": line,
+                })
+                break  # One match per line
+
+    return candidates
 
 
 def extract_candidates(

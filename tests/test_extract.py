@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from weft.extract import extract_candidates
+from weft.extract import extract_behaviors, extract_candidates
 
 
 def test_extract_preference():
@@ -148,3 +148,97 @@ Had to add retry logic for the initial DB connection on startup"""
     assert len(results) >= 2
     types = [r["type"] for r in results]
     assert all(t == "solution" for t in types)
+
+
+# --- Behavior extraction ---
+
+
+def test_extract_behavior_when_do():
+    """Detects 'when X, do Y' pattern."""
+    text = "When writing tests, always use pytest fixtures instead of setUp"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+    assert "writing tests" in results[0]["trigger_pattern"].lower()
+    assert "pytest" in results[0]["action"].lower()
+
+
+def test_extract_behavior_if_then():
+    """Detects 'if X, then Y' pattern."""
+    text = "If the build fails, check the pre-commit hooks first"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+    assert "build fails" in results[0]["trigger_pattern"].lower()
+    assert "pre-commit" in results[0]["action"].lower()
+
+
+def test_extract_behavior_before_after():
+    """Detects 'before/after X, Y' pattern."""
+    text = "Before committing, always run the full test suite"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+    assert results[0]["confidence"] >= 0.7
+
+
+def test_extract_behavior_always_when():
+    """Detects 'always X when Y' pattern."""
+    text = "Always run equivalence tests when touching the primer"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+    assert "primer" in results[0]["action"].lower() or "primer" in results[0]["trigger_pattern"].lower()
+
+
+def test_extract_behavior_never_without():
+    """Detects 'never X without Y' pattern."""
+    text = "Never deploy without running the smoke tests"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+    assert results[0]["confidence"] >= 0.7
+
+
+def test_extract_behavior_make_sure():
+    """Detects 'make sure to X before Y' pattern."""
+    text = "Make sure to backup the database before running migrations"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+
+
+def test_extract_behavior_empty_input():
+    """Empty input returns empty list."""
+    assert extract_behaviors("") == []
+    assert extract_behaviors("   ") == []
+
+
+def test_extract_behavior_no_match():
+    """Non-behavioral text returns empty."""
+    text = "The quick brown fox jumps over the lazy dog"
+    assert extract_behaviors(text) == []
+
+
+def test_extract_behavior_deduplicates():
+    """Same trigger/action pair only yields one candidate."""
+    text = "When deploying, always run smoke tests\nWhen deploying, always run smoke tests"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+
+
+def test_extract_behavior_multiple():
+    """Extracts multiple behaviors from multi-line text."""
+    text = """When writing tests, always use pytest fixtures
+If the CI fails, check Docker daemon status first
+Never push to main without a PR review"""
+    results = extract_behaviors(text)
+    assert len(results) >= 2
+
+
+def test_extract_behavior_short_lines_ignored():
+    """Short lines are skipped."""
+    text = "if x, do y"
+    assert extract_behaviors(text) == []
+
+
+def test_extract_behavior_has_source_line():
+    """Each candidate includes the original source_line."""
+    text = "When refactoring, always check for unused imports first"
+    results = extract_behaviors(text)
+    assert len(results) == 1
+    assert "source_line" in results[0]

@@ -833,11 +833,12 @@ async def weft_learn(
     call after loom_done with what the agent (or you) learned during the task.
     If project_id is omitted, auto-detects from the client's working directory."""
     try:
-        from weft.extract import extract_candidates
+        from weft.extract import extract_behaviors, extract_candidates
 
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
         candidates = extract_candidates(content, min_confidence=min_confidence)
+        behavior_candidates = extract_behaviors(content, min_confidence=min_confidence)
 
         # Also store the raw content as a solution memory if no patterns matched
         # but the content is substantial enough to be useful
@@ -889,6 +890,22 @@ async def weft_learn(
                 await app.cache.set_memory(milestone)
                 milestone_dict = milestone.to_dict()
 
+            # Auto-extract and store behavior candidates (trigger → action rules)
+            stored_behaviors: list[dict] = []
+            for bc in behavior_candidates:
+                scope = BehaviorScope.project if resolved_project else BehaviorScope.global_
+                create_b = BehaviorCreate(
+                    trigger_pattern=bc["trigger_pattern"],
+                    action=bc["action"],
+                    confidence=bc["confidence"],
+                    scope=scope,
+                    project_id=resolved_project,
+                    agent_id=agent_id,
+                )
+                b_embedding = await app.embedding.embed(bc["trigger_pattern"])
+                behavior = await store_behavior(app.pool, create_b, embedding=b_embedding)
+                stored_behaviors.append(behavior.to_dict())
+
             await app.cache.invalidate_stats()
 
         # Boost usefulness (outside acquire — system-level op)
@@ -902,6 +919,8 @@ async def weft_learn(
             "candidates_found": len(candidates),
             "stored": len(stored),
             "memories": stored,
+            "behaviors_extracted": len(stored_behaviors),
+            "behaviors": stored_behaviors,
             "task_id": task_id,
             "milestone": milestone_dict,
             "session_boost": session_boost,
