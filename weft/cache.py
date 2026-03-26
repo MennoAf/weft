@@ -101,15 +101,15 @@ class Cache:
         """Cache stats."""
         try:
             await self._redis.set(STATS_KEY, json.dumps(stats, default=str), ex=int(STATS_TTL.total_seconds()))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("set_stats failed: %s", e, exc_info=True)
 
     async def invalidate_stats(self) -> None:
         """Invalidate stats cache (after writes)."""
         try:
             await self._redis.delete(STATS_KEY)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("invalidate_stats failed: %s", e, exc_info=True)
 
     # --- Bulk operations ---
 
