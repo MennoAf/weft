@@ -48,6 +48,13 @@ _RLS_TABLES = [
     "check_ins",
 ]
 
+# System tables with RLS enabled but permissive service policies (no per-op CRUD)
+_RLS_SYSTEM_TABLES = [
+    "schema_migrations",
+    "weft_metadata",
+    "memory_access_log",
+]
+
 
 @pytest.fixture(autouse=True)
 def _reset_contextvar():
@@ -72,6 +79,15 @@ class TestRLSPoliciesExist:
         enabled = {r["relname"]: r["relrowsecurity"] for r in rows}
         for table in _RLS_TABLES:
             assert enabled.get(table) is True, f"RLS not enabled on {table}"
+
+    async def test_rls_enabled_on_system_tables(self, pool):
+        rows = await pool.fetch(
+            "SELECT relname, relrowsecurity FROM pg_class WHERE relname = ANY($1::text[])",
+            _RLS_SYSTEM_TABLES,
+        )
+        enabled = {r["relname"]: r["relrowsecurity"] for r in rows}
+        for table in _RLS_SYSTEM_TABLES:
+            assert enabled.get(table) is True, f"RLS not enabled on system table {table}"
 
     async def test_crud_policies_on_all_tables(self, pool):
         rows = await pool.fetch(
