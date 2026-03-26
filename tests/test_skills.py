@@ -109,9 +109,9 @@ class TestWeeklyRecap:
     async def test_with_project_filter(self):
         pool = _mock_pool([])
         await weekly_recap(pool, days=7, project_id="weft")
-        # Verify the query included project_id filter
-        call_args = pool.fetch.call_args
-        assert "weft" in call_args[0]
+        # Verify the first fetch (memories query) included project_id param
+        first_call = pool.fetch.call_args_list[0]
+        assert "weft" in first_call[0]
 
 
 class TestSearchAll:
