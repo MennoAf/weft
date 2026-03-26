@@ -737,8 +737,8 @@ async def _build_primer_legacy(
                 }
             if snapshot:
                 wellness_snapshot = snapshot
-    except Exception:
-        pass  # wellness is optional — never block the primer
+    except Exception as e:
+        logger.debug("wellness_snapshot_fetch failed: %s", e, exc_info=True)
 
     # Collect all included memories for freshness calculation
     all_included: list[dict] = (
@@ -785,8 +785,8 @@ async def _build_primer_legacy(
                     f"Authorization header contains a valid JWT with the "
                     f"correct 'sub' claim, or that app.user_id is being set."
                 )
-        except Exception:
-            pass  # pg_class access may be restricted — don't block primer
+        except Exception as e:
+            logger.debug("rls_diagnostic_check failed: %s", e, exc_info=True)
 
     # Loom hint: only on cold start (new/unknown project).
     if is_cold_start:

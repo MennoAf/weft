@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 import asyncpg
 
@@ -91,8 +94,8 @@ async def weekly_recap(
                     "worst_day": report["day_of_week"]["worst_day"],
                 },
             }
-    except Exception:
-        pass  # wellness is optional — don't break the recap
+    except Exception as e:
+        logger.debug("weekly_recap wellness_snapshot failed: %s", e, exc_info=True)
 
     result = {
         "period_days": days,

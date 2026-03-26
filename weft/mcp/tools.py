@@ -139,8 +139,8 @@ async def _detect_project_id(ctx: Context) -> str | None:
             path = uri.replace("file://", "").rstrip("/")
             name = path.rsplit("/", 1)[-1] if "/" in path else path
             return name.lower() or None
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("detect_project_id failed: %s", e, exc_info=True)
     return None
 
 
@@ -261,8 +261,8 @@ async def weft_remember(
                             new_memory_id=memory.id,
                             contradictions=warnings,
                         )
-                    except Exception:
-                        pass  # alert creation is best-effort
+                    except Exception as e:
+                        logger.warning("contradiction_alert_dispatch failed: %s", e, exc_info=True)
             return result
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_remember", e)
@@ -352,8 +352,8 @@ async def weft_recall(
                     ents = await get_memory_entities(app.pool, r.memory.id)
                     if ents:
                         d["entities"] = [{"name": e.name, "type": e.entity_type.value} for e in ents]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("entity_enrichment failed for %s: %s", r.memory.id, e, exc_info=True)
                 enriched.append(d)
 
             # Count total matches above threshold (semantic/hybrid only)

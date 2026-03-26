@@ -127,8 +127,8 @@ async def _pool_keepalive(ctx: AppContext) -> None:
             # Best-effort close of the old pool
             try:
                 await old_pool.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Old pool close failed: %s", e, exc_info=True)
 
 
 async def _redis_keepalive(ctx: AppContext) -> None:
@@ -152,8 +152,8 @@ async def _redis_keepalive(ctx: AppContext) -> None:
                 continue
             try:
                 await old_redis.aclose()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Old Redis close failed: %s", e, exc_info=True)
 
 
 async def _refresh_fallback(ctx: AppContext) -> None:

@@ -109,8 +109,8 @@ async def build_onboarding_section(
                     f"Authorization header contains a valid JWT with the "
                     f"correct 'sub' claim, or that app.user_id is being set."
                 )
-        except Exception:
-            pass  # pg_class access may be restricted
+        except Exception as e:
+            logger.debug("rls_diagnostic_check failed: %s", e, exc_info=True)
 
     # Loom hint: only on cold start.
     if is_cold_start:
