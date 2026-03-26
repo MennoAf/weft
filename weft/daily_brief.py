@@ -8,9 +8,7 @@ Each data source is queried independently — a failure in one never blocks othe
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -18,6 +16,7 @@ from zoneinfo import ZoneInfo
 import asyncpg
 
 from weft.config import DailyBriefConfig
+from weft.loom_query import LoomQueryError, get_ready_tasks, loom_tables_exist
 
 logger = logging.getLogger(__name__)
 
@@ -157,30 +156,21 @@ async def _query_checkin_trends(pool: asyncpg.Pool) -> list[str]:
         return []
 
 
-async def _query_loom_tasks() -> list[str]:
-    """Ready/blocked tasks from Loom via CLI."""
+async def _query_loom_tasks(pool: asyncpg.Pool) -> list[str]:
+    """Ready tasks from Loom via direct DB query."""
     try:
-        result = subprocess.run(
-            ["uv", "run", "python", "-m", "loom", "ready", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            logger.warning("daily_brief.loom_error: exit %d", result.returncode)
+        if not await loom_tables_exist(pool):
+            logger.info("daily_brief.loom_not_found — skipping task section")
             return []
 
-        tasks = json.loads(result.stdout) if result.stdout.strip() else []
+        tasks = await get_ready_tasks(pool, limit=BRIEF_MAX_ITEMS_PER_SECTION)
         items = []
-        for t in tasks[:BRIEF_MAX_ITEMS_PER_SECTION]:
+        for t in tasks:
             title = t.get("title", "untitled")
             priority = t.get("priority", "")
             items.append(f"[{priority}] {title}")
         return items
-    except FileNotFoundError:
-        logger.info("daily_brief.loom_not_found — skipping task section")
-        return []
-    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+    except LoomQueryError as e:
         logger.warning("daily_brief.loom_error: %s", e)
         return []
     except Exception:
@@ -362,7 +352,7 @@ async def assemble_daily_brief(
     review_queue = await _safe(_query_review_queue(pool, target_date), "review_queue")
     handoffs = await _safe(_query_handoffs(pool, target_date), "handoffs")
     checkin_trends = await _safe(_query_checkin_trends(pool), "checkin_trends")
-    ready_tasks = await _safe(_query_loom_tasks(), "ready_tasks")
+    ready_tasks = await _safe(_query_loom_tasks(pool), "ready_tasks")
     alerts = await _safe(_query_alerts(pool, target_date), "alerts")
 
     sections: dict[str, list[str]] = {

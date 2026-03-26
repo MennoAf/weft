@@ -19,6 +19,14 @@ from typing import Any, Literal
 
 import asyncpg
 
+from weft.loom_query import (
+    LoomQueryError,
+    get_blocked_pile_ups,
+    get_completable_epics,
+    get_stale_claimed_tasks,
+    loom_tables_exist,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -142,37 +150,20 @@ async def _evaluate_loom(pool: asyncpg.Pool) -> list[dict[str, Any]]:
 
     Queries the Loom tasks table for stale claims, epic completion readiness,
     and blocked pile-ups. Read-only — no create_alert calls.
+    Delegates all SQL to weft.loom_query.
     """
-    from weft.loom_alerts import (
-        _BLOCKED_PILE_UP_THRESHOLD,
-        _STALE_CLAIM_HOURS,
-        _loom_tables_exist,
-    )
-
-    if not await _loom_tables_exist(pool):
+    try:
+        if not await loom_tables_exist(pool):
+            return []
+    except LoomQueryError:
         return []
 
     findings: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
 
     # 1. Stale claims
-    from datetime import timedelta
-
-    stale_cutoff = now - timedelta(hours=_STALE_CLAIM_HOURS)
     try:
-        rows = await pool.fetch(
-            """
-            SELECT t.id, t.title, t.assignee, t.claimed_at,
-                   p.name AS project_name
-            FROM tasks t
-            LEFT JOIN projects p ON t.project_id = p.id
-            WHERE t.status = 'claimed'
-              AND t.claimed_at < $1
-            ORDER BY t.claimed_at ASC
-            LIMIT 20
-            """,
-            stale_cutoff,
-        )
+        rows = await get_stale_claimed_tasks(pool)
         if rows:
             stale_list = []
             for r in rows:
@@ -189,24 +180,7 @@ async def _evaluate_loom(pool: asyncpg.Pool) -> list[dict[str, Any]]:
 
     # 2. Epic completion readiness
     try:
-        rows = await pool.fetch(
-            """
-            SELECT e.id, e.title, p.name AS project_name,
-                   count(*) AS child_count
-            FROM tasks e
-            JOIN tasks c ON c.parent_id = e.id
-            LEFT JOIN projects p ON e.project_id = p.id
-            WHERE e.status NOT IN ('done', 'cancelled')
-              AND NOT EXISTS (
-                  SELECT 1 FROM tasks child
-                  WHERE child.parent_id = e.id
-                    AND child.status NOT IN ('done', 'cancelled')
-              )
-            GROUP BY e.id, e.title, p.name
-            ORDER BY e.title
-            LIMIT 20
-            """,
-        )
+        rows = await get_completable_epics(pool)
         if rows:
             findings.append({
                 "source": "loom_alerts",
@@ -219,20 +193,7 @@ async def _evaluate_loom(pool: asyncpg.Pool) -> list[dict[str, Any]]:
 
     # 3. Blocked pile-ups
     try:
-        rows = await pool.fetch(
-            """
-            SELECT p.name AS project_name, count(*) AS blocked_count
-            FROM tasks t
-            JOIN projects p ON t.project_id = p.id
-            WHERE t.status = 'blocked'
-              AND p.status = 'active'
-            GROUP BY p.id, p.name
-            HAVING count(*) >= $1
-            ORDER BY count(*) DESC
-            LIMIT 10
-            """,
-            _BLOCKED_PILE_UP_THRESHOLD,
-        )
+        rows = await get_blocked_pile_ups(pool)
         if rows:
             pile_list = [f"{r['project_name']}: {r['blocked_count']}" for r in rows]
             findings.append({
