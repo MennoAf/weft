@@ -2181,3 +2181,25 @@ async def weft_ingest(
         return _input_error_response("weft_ingest", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_ingest", e)
+
+
+@mcp.tool()
+async def weft_check_health(
+    ctx: Context,
+) -> dict:
+    """Run a read-only health check across all alert subsystems.
+
+    Evaluates check-in patterns, Loom task awareness, and memory hygiene
+    without creating alerts or writing to the database. Returns a unified
+    summary of findings and any evaluator errors."""
+    try:
+        from weft.health_check import run_all_evaluators, summary_to_dict
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            result = await run_all_evaluators(app.pool)
+        return summary_to_dict(result)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_check_health", e)
+    except Exception as e:
+        return {"error": f"Health check failed: {type(e).__name__}: {e}"}
