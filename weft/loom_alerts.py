@@ -16,6 +16,13 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 
 from weft.alerts import create_alert, list_alerts
+from weft.loom_query import (
+    LoomQueryError,
+    get_blocked_pile_ups,
+    get_completable_epics,
+    get_stale_claimed_tasks,
+    loom_tables_exist,
+)
 from weft.models import AlertCreate, AlertStatus, AlertType
 
 logger = logging.getLogger(__name__)
@@ -38,17 +45,6 @@ async def _recent_alert_types(pool: asyncpg.Pool) -> set[str]:
     }
 
 
-async def _loom_tables_exist(pool: asyncpg.Pool) -> bool:
-    """Check if Loom tables exist in this database."""
-    try:
-        exists = await pool.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'tasks')"
-        )
-        return bool(exists)
-    except Exception:
-        return False
-
-
 async def check_stale_claims(pool: asyncpg.Pool) -> list[dict]:
     """Alert on tasks claimed for 48h+ without update.
 
@@ -57,22 +53,9 @@ async def check_stale_claims(pool: asyncpg.Pool) -> list[dict]:
     The Loom daemon handles retries, but this alerts the human.
     """
     now = datetime.now(timezone.utc)
-    stale_cutoff = now - timedelta(hours=_STALE_CLAIM_HOURS)
 
     try:
-        rows = await pool.fetch(
-            """
-            SELECT t.id, t.title, t.assignee, t.claimed_at, t.claim_expires_at,
-                   p.name AS project_name
-            FROM tasks t
-            LEFT JOIN projects p ON t.project_id = p.id
-            WHERE t.status = 'claimed'
-              AND t.claimed_at < $1
-            ORDER BY t.claimed_at ASC
-            LIMIT 20
-            """,
-            stale_cutoff,
-        )
+        rows = await get_stale_claimed_tasks(pool, threshold_hours=_STALE_CLAIM_HOURS)
     except Exception:
         logger.warning("loom_alerts.stale_claims.query_error", exc_info=True)
         return []
@@ -111,24 +94,7 @@ async def check_epic_completion(pool: asyncpg.Pool) -> list[dict]:
     Uses Loom's parent_id relationship — an epic is a task with children.
     """
     try:
-        rows = await pool.fetch(
-            """
-            SELECT e.id, e.title, p.name AS project_name,
-                   count(*) AS child_count
-            FROM tasks e
-            JOIN tasks c ON c.parent_id = e.id
-            LEFT JOIN projects p ON e.project_id = p.id
-            WHERE e.status NOT IN ('done', 'cancelled')
-              AND NOT EXISTS (
-                  SELECT 1 FROM tasks child
-                  WHERE child.parent_id = e.id
-                    AND child.status NOT IN ('done', 'cancelled')
-              )
-            GROUP BY e.id, e.title, p.name
-            ORDER BY e.title
-            LIMIT 20
-            """,
-        )
+        rows = await get_completable_epics(pool)
     except Exception:
         logger.warning("loom_alerts.epic_completion.query_error", exc_info=True)
         return []
@@ -161,21 +127,7 @@ async def check_epic_completion(pool: asyncpg.Pool) -> list[dict]:
 async def check_blocked_pile_up(pool: asyncpg.Pool) -> list[dict]:
     """Alert when 5+ tasks are blocked in a single project."""
     try:
-        rows = await pool.fetch(
-            """
-            SELECT p.name AS project_name, p.id AS project_id,
-                   count(*) AS blocked_count
-            FROM tasks t
-            JOIN projects p ON t.project_id = p.id
-            WHERE t.status = 'blocked'
-              AND p.status = 'active'
-            GROUP BY p.id, p.name
-            HAVING count(*) >= $1
-            ORDER BY count(*) DESC
-            LIMIT 10
-            """,
-            _BLOCKED_PILE_UP_THRESHOLD,
-        )
+        rows = await get_blocked_pile_ups(pool, threshold=_BLOCKED_PILE_UP_THRESHOLD)
     except Exception:
         logger.warning("loom_alerts.blocked_pile_up.query_error", exc_info=True)
         return []
@@ -210,8 +162,12 @@ async def evaluate_loom_alerts(pool: asyncpg.Pool) -> list[dict]:
 
     Gracefully skips if Loom tables don't exist in this database.
     """
-    if not await _loom_tables_exist(pool):
-        logger.debug("loom_alerts.skipped — Loom tables not found")
+    try:
+        if not await loom_tables_exist(pool):
+            logger.debug("loom_alerts.skipped — Loom tables not found")
+            return []
+    except LoomQueryError:
+        logger.debug("loom_alerts.skipped — Loom DB not reachable")
         return []
 
     created: list[dict] = []
