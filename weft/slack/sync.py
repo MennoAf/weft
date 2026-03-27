@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
@@ -40,6 +41,43 @@ class ChannelInfo:
 
     id: str
     name: str
+
+
+async def _add_ingest_reaction(
+    client,
+    channel_id: str,
+    message_ts: str,
+    emoji: str = "brain",
+) -> bool:
+    """Add a reaction emoji to a message after successful ingestion.
+
+    Fire-and-forget — failures are logged but never block ingestion.
+    Idempotent: adding the same reaction twice is safe (Slack returns already_reacted).
+    """
+    try:
+        resp = await asyncio.wait_for(
+            client.reactions_add(
+                channel=channel_id,
+                name=emoji,
+                timestamp=message_ts,
+            ),
+            timeout=5.0,
+        )
+        if not resp.get("ok"):
+            error = resp.get("error", "unknown")
+            if error != "already_reacted":
+                logger.warning(
+                    "slack_sync.reaction_add_failed: %s (channel=%s, ts=%s)",
+                    error, channel_id, message_ts,
+                )
+                return False
+        return True
+    except Exception:
+        logger.warning(
+            "slack_sync.reaction_add_error (channel=%s, ts=%s)",
+            channel_id, message_ts, exc_info=True,
+        )
+        return False
 
 
 async def sync_slack_sdk(
@@ -252,6 +290,7 @@ async def _sync_channel_sdk(
         user_names=user_names,
         result=result,
         smart_ingest=smart_ingest,
+        slack_client=client,
     )
 
 
@@ -267,10 +306,20 @@ async def _sync_messages(
     user_names: dict[str, str],
     result: SyncResult,
     smart_ingest: bool = False,
+    slack_client=None,
 ):
     """Process a batch of raw messages for a channel."""
     mapping = resolve_channel_mapping(channel.name, channel_map)
     max_ts: str | None = None
+
+    # Load reaction config
+    react_on_ingest = False
+    ingest_emoji = "brain"
+    if slack_client:
+        from weft.config import load_config
+        _sync_cfg = load_config().slack_sync
+        react_on_ingest = _sync_cfg.react_on_ingest
+        ingest_emoji = _sync_cfg.ingest_reaction_emoji
 
     # Lazy-init smart adapter
     adapter = None
@@ -329,6 +378,10 @@ async def _sync_messages(
                 )
                 if ingest_result and ingest_result.memories_created > 0:
                     smart_ingest_remaining -= 1
+                    if react_on_ingest and slack_client:
+                        await _add_ingest_reaction(
+                            slack_client, channel.id, msg.ts, ingest_emoji,
+                        )
                     # Smart ingest succeeded — update sync state and continue
                     sync_state.update_message(
                         channel.id, msg.ts, [], edited_ts=msg.edited_ts
@@ -361,6 +414,10 @@ async def _sync_messages(
                 embedding_provider,
                 user_names=user_names,
             )
+            if react_on_ingest and slack_client and memory_ids:
+                await _add_ingest_reaction(
+                    slack_client, channel.id, msg.ts, ingest_emoji,
+                )
             sync_state.update_message(
                 channel.id, msg.ts, memory_ids, edited_ts=msg.edited_ts
             )
