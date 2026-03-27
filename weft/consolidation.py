@@ -604,6 +604,111 @@ async def consolidate(
 
 _MIN_CONTENT_LENGTH_FOR_CONTRADICTION = 50
 
+_DEFAULT_DEDUP_THRESHOLD = 0.92
+
+
+@dataclass
+class DedupResult:
+    """Result of pre-insert duplicate check."""
+
+    is_duplicate: bool
+    existing_memory: Memory | None = None
+    similarity: float = 0.0
+    action: str = "stored"  # "stored" | "revised" | "deduplicated"
+
+    def to_dict(self) -> dict:
+        d: dict = {"action": self.action, "is_duplicate": self.is_duplicate}
+        if self.existing_memory:
+            d["existing_memory_id"] = self.existing_memory.id
+            d["similarity"] = round(self.similarity, 4)
+        return d
+
+
+async def check_dedup_on_store(
+    pool: asyncpg.Pool,
+    content: str,
+    embedding: list[float],
+    new_confidence: float,
+    *,
+    memory_type: MemoryType | None = None,
+    project_id: str | object = _UNSET,
+    threshold: float = _DEFAULT_DEDUP_THRESHOLD,
+) -> DedupResult:
+    """Check for near-duplicate active memories before storing.
+
+    Called from weft_remember BEFORE store_memory(). If a near-duplicate is
+    found (similarity >= threshold):
+    - If new content is substantively different (longer or meaningfully updated),
+      revise the existing memory in-place with the new content and return it.
+    - If effectively identical, return the existing memory with action='deduplicated'.
+
+    Pinned memories are never revised — new content is stored separately.
+    Returns DedupResult with is_duplicate=False if no match found.
+    """
+    if len(content) < _MIN_CONTENT_LENGTH_FOR_CONTRADICTION:
+        return DedupResult(is_duplicate=False)
+
+    search_kwargs: dict = {}
+    if memory_type is not None:
+        search_kwargs["memory_type"] = memory_type
+    if project_id is not _UNSET:
+        search_kwargs["project_id"] = project_id
+
+    similar = await search_by_vector(
+        pool, embedding, limit=5, threshold=threshold, status=MemoryStatus.active,
+        **search_kwargs,
+    )
+
+    if not similar:
+        return DedupResult(is_duplicate=False)
+
+    # Take the highest-similarity match
+    best = similar[0]
+    existing = best.memory
+
+    # Never revise pinned memories — let the new one store separately
+    if existing.pinned:
+        return DedupResult(is_duplicate=False)
+
+    # Decide: revise vs deduplicate
+    new_is_substantive = (
+        len(content) > len(existing.content) * 1.2
+        or new_confidence > existing.confidence + 0.01
+    )
+
+    if new_is_substantive:
+        # Revise existing memory with new content
+        merged_confidence = max(existing.confidence, new_confidence)
+        updated = await update_memory(
+            pool,
+            existing.id,
+            content=content,
+            confidence=merged_confidence,
+            embedding=embedding,
+        )
+        logger.info(
+            "Pre-insert dedup: revised %s (sim=%.3f, new content %d chars)",
+            existing.id, best.similarity, len(content),
+        )
+        return DedupResult(
+            is_duplicate=True,
+            existing_memory=updated or existing,
+            similarity=best.similarity,
+            action="revised",
+        )
+    else:
+        # Effectively identical — bump access and return existing
+        logger.info(
+            "Pre-insert dedup: deduplicated against %s (sim=%.3f)",
+            existing.id, best.similarity,
+        )
+        return DedupResult(
+            is_duplicate=True,
+            existing_memory=existing,
+            similarity=best.similarity,
+            action="deduplicated",
+        )
+
 
 async def check_contradictions_on_store(
     pool: asyncpg.Pool,
