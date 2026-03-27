@@ -8,6 +8,7 @@ from weft.slack.hash_store import SlackSyncState
 from weft.slack.sync import (
     ChannelInfo,
     SyncResult,
+    _add_ingest_reaction,
     _store_message_memory,
     _sync_messages,
     sync_slack_messages,
@@ -393,3 +394,136 @@ class TestSyncSlackSdkScopeFallback:
         with patch("slack_sdk.web.async_client.AsyncWebClient", return_value=mock_client):
             with pytest.raises(RuntimeError, match="network failure"):
                 await sync_slack_sdk(mock_pool, "REDACTED")
+
+
+class TestAddIngestReaction:
+    """Tests for the _add_ingest_reaction helper."""
+
+    @pytest.mark.asyncio
+    async def test_adds_reaction_on_success(self):
+        client = AsyncMock()
+        client.reactions_add.return_value = {"ok": True}
+
+        result = await _add_ingest_reaction(client, "C123", "100.0", "brain")
+
+        assert result is True
+        client.reactions_add.assert_called_once_with(
+            channel="C123", name="brain", timestamp="100.0",
+        )
+
+    @pytest.mark.asyncio
+    async def test_handles_already_reacted(self):
+        """already_reacted is not an error — returns True."""
+        client = AsyncMock()
+        client.reactions_add.return_value = {"ok": False, "error": "already_reacted"}
+
+        result = await _add_ingest_reaction(client, "C123", "100.0")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_handles_api_error(self):
+        """API errors return False but don't raise."""
+        client = AsyncMock()
+        client.reactions_add.return_value = {"ok": False, "error": "no_permission"}
+
+        result = await _add_ingest_reaction(client, "C123", "100.0")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_handles_exception(self):
+        """Network errors return False but don't raise."""
+        client = AsyncMock()
+        client.reactions_add.side_effect = RuntimeError("network")
+
+        result = await _add_ingest_reaction(client, "C123", "100.0")
+
+        assert result is False
+
+
+class TestIngestReactionIntegration:
+    """Test that reactions are added during message sync."""
+
+    @pytest.mark.asyncio
+    async def test_reaction_added_on_successful_sync(
+        self, mock_pool, channel, sync_state,
+    ):
+        """When slack_client is provided and react_on_ingest=True, reactions fire."""
+        messages = [_make_message("100.0")]
+        result = SyncResult()
+        mock_client = AsyncMock()
+        mock_client.reactions_add.return_value = {"ok": True}
+
+        with patch("weft.slack.sync.store_memory") as mock_store, \
+             patch("weft.config.load_config") as mock_config:
+            mock_mem = MagicMock()
+            mock_mem.id = "weft-test1"
+            mock_store.return_value = mock_mem
+            mock_cfg = MagicMock()
+            mock_cfg.slack_sync.react_on_ingest = True
+            mock_cfg.slack_sync.ingest_reaction_emoji = "brain"
+            mock_config.return_value = mock_cfg
+
+            await _sync_messages(
+                channel, messages, {}, mock_pool, None,
+                sync_state=sync_state, channel_map=None,
+                user_names={}, result=result,
+                slack_client=mock_client,
+            )
+
+        assert result.messages_synced == 1
+        mock_client.reactions_add.assert_called_once_with(
+            channel="C123", name="brain", timestamp="100.0",
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_reaction_without_client(
+        self, mock_pool, channel, sync_state,
+    ):
+        """When slack_client is None (MCP mode), no reactions are attempted."""
+        messages = [_make_message("100.0")]
+        result = SyncResult()
+
+        with patch("weft.slack.sync.store_memory") as mock_store:
+            mock_mem = MagicMock()
+            mock_mem.id = "weft-test1"
+            mock_store.return_value = mock_mem
+
+            await _sync_messages(
+                channel, messages, {}, mock_pool, None,
+                sync_state=sync_state, channel_map=None,
+                user_names={}, result=result,
+                slack_client=None,
+            )
+
+        assert result.messages_synced == 1
+
+    @pytest.mark.asyncio
+    async def test_reaction_disabled_by_config(
+        self, mock_pool, channel, sync_state,
+    ):
+        """When react_on_ingest=False, no reactions fire."""
+        messages = [_make_message("100.0")]
+        result = SyncResult()
+        mock_client = AsyncMock()
+
+        with patch("weft.slack.sync.store_memory") as mock_store, \
+             patch("weft.config.load_config") as mock_config:
+            mock_mem = MagicMock()
+            mock_mem.id = "weft-test1"
+            mock_store.return_value = mock_mem
+            mock_cfg = MagicMock()
+            mock_cfg.slack_sync.react_on_ingest = False
+            mock_cfg.slack_sync.ingest_reaction_emoji = "brain"
+            mock_config.return_value = mock_cfg
+
+            await _sync_messages(
+                channel, messages, {}, mock_pool, None,
+                sync_state=sync_state, channel_map=None,
+                user_names={}, result=result,
+                slack_client=mock_client,
+            )
+
+        assert result.messages_synced == 1
+        mock_client.reactions_add.assert_not_called()

@@ -107,6 +107,8 @@ class SlackSyncConfig(BaseModel):
     interval: int = 1800  # seconds between auto-sync cycles (default 30min)
     smart_ingest: bool = True  # enable LLM-powered smart ingestion pipeline
     smart_ingest_max_per_sync: int = 50  # max messages to smart-ingest per sync cycle
+    react_on_ingest: bool = True  # add emoji reaction after successful ingest
+    ingest_reaction_emoji: str = "brain"  # emoji name (without colons)
 
 
 class DailyBriefConfig(BaseModel):
