@@ -7,13 +7,17 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from weft.loom_alerts import (
-    _BLOCKED_PILE_UP_THRESHOLD,
-    _STALE_CLAIM_HOURS,
+    LoomAlertConfig,
     check_blocked_pile_up,
     check_epic_completion,
     check_stale_claims,
     evaluate_loom_alerts,
 )
+
+# Use config defaults as test constants
+_cfg = LoomAlertConfig()
+_BLOCKED_PILE_UP_THRESHOLD = _cfg.blocked_pile_up_threshold
+_STALE_CLAIM_HOURS = _cfg.stale_claim_hours
 from weft.models import AlertType
 
 # Minimal Loom schema for tests (only what the queries need)

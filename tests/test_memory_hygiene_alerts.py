@@ -8,16 +8,20 @@ import pytest
 
 from weft.alerts import create_alert
 from weft.memory_hygiene_alerts import (
-    _CONSOLIDATION_OVERDUE_HOURS,
-    _MEMORY_COUNT_THRESHOLD,
-    _STALE_DECISION_CONFIDENCE,
-    _STALE_DECISION_DAYS,
+    MemoryHygieneConfig,
     check_consolidation_overdue,
     check_memory_count,
     check_stale_decisions,
     create_contradiction_alert,
     evaluate_memory_hygiene_alerts,
 )
+
+# Use config defaults as test constants
+_cfg = MemoryHygieneConfig()
+_CONSOLIDATION_OVERDUE_HOURS = _cfg.consolidation_overdue_hours
+_MEMORY_COUNT_THRESHOLD = _cfg.memory_count_threshold
+_STALE_DECISION_CONFIDENCE = _cfg.stale_decision_confidence
+_STALE_DECISION_DAYS = _cfg.stale_decision_days
 from weft.models import AlertType, MemoryType
 from weft.store import store_memory, set_metadata
 

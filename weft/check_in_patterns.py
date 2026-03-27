@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,17 @@ import asyncpg
 from weft.models import CheckIn
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CheckInAlertConfig:
+    """Configuration for check-in pattern alert thresholds."""
+
+    low_mood_streak: int = 3  # consecutive days at mood <= 2
+    low_sleep_hours: float = 6.0  # average sleep below this
+    low_sleep_days: int = 5  # over this many days
+    dedup_hours: int = 24  # suppress duplicate alerts within this window
+
 
 # Day names for readability
 _DAY_NAMES = [
@@ -311,16 +323,12 @@ def analyze_all(
 
 # --- Alert evaluation ---
 
-# Hardcoded V1 thresholds
-_ALERT_LOW_MOOD_STREAK = 3  # consecutive days at mood <= 2
-_ALERT_LOW_SLEEP_HOURS = 6.0  # average sleep below this
-_ALERT_LOW_SLEEP_DAYS = 5  # over this many days
-_ALERT_DEDUP_HOURS = 24  # suppress duplicate alerts within this window
-
 
 async def evaluate_check_in_alerts(
     pool: asyncpg.Pool,
     check_ins: list[CheckIn],
+    *,
+    config: CheckInAlertConfig | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate check-in patterns against thresholds and create alerts.
 
@@ -338,6 +346,7 @@ async def evaluate_check_in_alerts(
     if not check_ins:
         return []
 
+    cfg = config or CheckInAlertConfig()
     report = analyze_all(check_ins, trend_days=90, rolling_days=30)
     created: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
@@ -346,7 +355,7 @@ async def evaluate_check_in_alerts(
     recent_alerts = await list_alerts(pool, status=AlertStatus.pending, limit=100)
     fired_alerts = await list_alerts(pool, status=AlertStatus.fired, limit=100)
     all_recent = recent_alerts + fired_alerts
-    dedup_cutoff = now - timedelta(hours=_ALERT_DEDUP_HOURS)
+    dedup_cutoff = now - timedelta(hours=cfg.dedup_hours)
     recent_types: set[str] = set()
     for a in all_recent:
         if a.created_at >= dedup_cutoff:
@@ -356,7 +365,7 @@ async def evaluate_check_in_alerts(
     low_streaks = report["streaks"]["low_mood_streaks"]
     if low_streaks and AlertType.check_in_low_mood.value not in recent_types:
         longest = max(low_streaks, key=lambda s: s["length"])
-        if longest["length"] >= _ALERT_LOW_MOOD_STREAK:
+        if longest["length"] >= cfg.low_mood_streak:
             alert = await create_alert(
                 pool,
                 AlertCreate(
@@ -372,22 +381,22 @@ async def evaluate_check_in_alerts(
     sorted_cis = sorted(check_ins, key=lambda ci: ci.logged_at, reverse=True)
     recent_sleep = [
         ci.sleep_hours
-        for ci in sorted_cis[:_ALERT_LOW_SLEEP_DAYS * 2]  # look at recent entries
+        for ci in sorted_cis[:cfg.low_sleep_days * 2]  # look at recent entries
         if ci.sleep_hours is not None
-        and ci.logged_at >= now - timedelta(days=_ALERT_LOW_SLEEP_DAYS + 1)
+        and ci.logged_at >= now - timedelta(days=cfg.low_sleep_days + 1)
     ]
     if (
-        len(recent_sleep) >= _ALERT_LOW_SLEEP_DAYS
+        len(recent_sleep) >= cfg.low_sleep_days
         and AlertType.check_in_low_sleep.value not in recent_types
     ):
         avg_sleep = sum(recent_sleep) / len(recent_sleep)
-        if avg_sleep < _ALERT_LOW_SLEEP_HOURS:
+        if avg_sleep < cfg.low_sleep_hours:
             alert = await create_alert(
                 pool,
                 AlertCreate(
                     alert_type=AlertType.check_in_low_sleep,
                     title=f"Low sleep average: {avg_sleep:.1f}h over last {len(recent_sleep)} entries",
-                    body=f"Average sleep has been {avg_sleep:.1f}h (below {_ALERT_LOW_SLEEP_HOURS}h threshold).",
+                    body=f"Average sleep has been {avg_sleep:.1f}h (below {cfg.low_sleep_hours}h threshold).",
                     trigger_at=now,
                 ),
             )
