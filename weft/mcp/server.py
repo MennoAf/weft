@@ -24,7 +24,6 @@ from weft.db.migrations import run_migrations
 from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
-from weft.mcp.auth import get_auth_provider
 from weft.mcp.slack_commands import handle_slash_checkin
 from weft.scheduler import daily_brief_loop, loom_awareness_loop, memory_hygiene_loop, scheduler_loop, slack_sync_loop
 from weft.seed import seed_memories
@@ -45,12 +44,35 @@ _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
 class UserIdentityMiddleware(BaseHTTPMiddleware):
     """Extract user identity from Authorization header and set contextvar.
 
-    Graceful degradation: missing, invalid, or expired tokens are silently
-    ignored — the request proceeds with current_user_id=None (global-only
-    visibility under RLS).
+    In production mode with an API key configured, also enforces bearer
+    token authentication on the /mcp endpoint (rejects 401 if missing/wrong).
+    Health checks and other endpoints are unauthenticated.
+
+    Graceful degradation: missing, invalid, or expired JWT tokens for user
+    identity are silently ignored — the request proceeds with
+    current_user_id=None (global-only visibility under RLS).
     """
 
+    def __init__(self, app, api_key: str | None = None):
+        super().__init__(app)
+        self._api_key = api_key
+
     async def dispatch(self, request: Request, call_next):
+        # Enforce API key on /mcp endpoint in production
+        if self._api_key and request.url.path.startswith("/mcp"):
+            import hmac
+            auth_header = request.REDACTEDget("authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+                if not hmac.compare_digest(token, self._api_key):
+                    return JSONResponse(
+                        {"error": "invalid api key"}, status_code=401,
+                    )
+            else:
+                return JSONResponse(
+                    {"error": "missing authorization header"}, status_code=401,
+                )
+
         auth_header = request.REDACTEDget("authorization")
         user_id = extract_user_id_from_header(auth_header)
         token = current_user_id.set(user_id)
@@ -61,7 +83,12 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
 
 
 # Starlette Middleware descriptor for passing to FastMCP http_app / run()
-user_identity_middleware = Middleware(UserIdentityMiddleware)
+# API key is resolved at import time; middleware enforces it on /mcp in production.
+_config_for_middleware = load_config()
+user_identity_middleware = Middleware(
+    UserIdentityMiddleware,
+    api_key=_config_for_middleware.api_key if _config_for_middleware.is_production else None,
+)
 
 
 @dataclass
@@ -335,9 +362,7 @@ class _AppCtxRef:
 
 _app_ctx_ref = _AppCtxRef()
 
-_config = load_config()
-_auth = get_auth_provider(_config.api_key, _config.is_production)
-mcp = FastMCP("weft", lifespan=lifespan, auth=_auth)
+mcp = FastMCP("weft", lifespan=lifespan)
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
