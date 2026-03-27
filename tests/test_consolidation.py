@@ -12,7 +12,9 @@ from weft.consolidation import (
     ConsolidationConfig,
     ConsolidationReport,
     DecayConfig,
+    DedupResult,
     _content_conflicts,
+    check_dedup_on_store,
     compute_decay_score,
     consolidate,
     find_contradictions,
@@ -27,7 +29,7 @@ from weft.models import (
     MemoryStatus,
     MemoryType,
 )
-from weft.store import get_memory, get_relationships, store_memory
+from weft.store import get_memory, get_relationships, store_memory, update_memory
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +313,185 @@ class TestFindDuplicates:
 
         merged = await find_duplicates(pool, threshold=0.95)
         assert len(merged) == 0
+
+
+# ---------------------------------------------------------------------------
+# 2b. Pre-insert dedup (check_dedup_on_store)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDedupOnStore:
+    """Tests for the pre-insert dedup check in check_dedup_on_store."""
+
+    async def test_no_match_stores_normally(self, pool):
+        """When no similar memory exists, is_duplicate should be False."""
+        provider = get_provider("fastembed")
+        content = "Weft uses PostgreSQL with pgvector for semantic search"
+        embedding = await provider.embed(content)
+
+        result = await check_dedup_on_store(
+            pool, content, embedding, new_confidence=0.7,
+        )
+
+        assert not result.is_duplicate
+        assert result.action == "stored"
+        assert result.existing_memory is None
+
+    async def test_near_duplicate_deduplicates(self, pool):
+        """Effectively identical content should return deduplicated action."""
+        provider = get_provider("fastembed")
+        content_a = "pgvector uses cosine distance to measure vector similarity in PostgreSQL"
+        content_b = "pgvector uses cosine distance to measure vector similarity in PostgreSQL databases"
+
+        emb_a = await provider.embed(content_a)
+        emb_b = await provider.embed(content_b)
+
+        # Store the first memory
+        mem_a = await store_memory(
+            pool,
+            MemoryCreate(type=MemoryType.fact, content=content_a, confidence=0.7),
+            embedding=emb_a,
+        )
+
+        # Check dedup with very similar content (same confidence, not longer)
+        result = await check_dedup_on_store(
+            pool, content_b, emb_b, new_confidence=0.7, threshold=0.85,
+        )
+
+        assert result.is_duplicate
+        assert result.action == "deduplicated"
+        assert result.existing_memory.id == mem_a.id
+
+    async def test_substantive_update_revises(self, pool):
+        """New content that is substantively longer should revise existing."""
+        provider = get_provider("fastembed")
+        content_short = "Redis is used for caching in the Weft memory system"
+        content_long = (
+            "Redis is used for caching in the Weft memory system. "
+            "It provides L1 cache with TTL-based expiration and serves as the "
+            "primary cache layer before falling back to PostgreSQL queries."
+        )
+
+        emb_short = await provider.embed(content_short)
+        emb_long = await provider.embed(content_long)
+
+        mem_short = await store_memory(
+            pool,
+            MemoryCreate(type=MemoryType.fact, content=content_short, confidence=0.6),
+            embedding=emb_short,
+        )
+
+        result = await check_dedup_on_store(
+            pool, content_long, emb_long, new_confidence=0.7, threshold=0.75,
+        )
+
+        assert result.is_duplicate
+        assert result.action == "revised"
+        assert result.existing_memory.id == mem_short.id
+        # The existing memory should now have the longer content
+        updated = await get_memory(pool, mem_short.id)
+        assert updated.content == content_long
+        assert updated.confidence == pytest.approx(0.7, abs=0.01)  # max(0.6, 0.7)
+
+    async def test_higher_confidence_revises(self, pool):
+        """Higher confidence new content should revise even if similar length."""
+        provider = get_provider("fastembed")
+        content_a = "FastEmbed generates embeddings locally using ONNX runtime models"
+        content_b = "FastEmbed generates embeddings locally using ONNX runtime engine"
+
+        emb_a = await provider.embed(content_a)
+        emb_b = await provider.embed(content_b)
+
+        mem_a = await store_memory(
+            pool,
+            MemoryCreate(type=MemoryType.fact, content=content_a, confidence=0.5),
+            embedding=emb_a,
+        )
+
+        result = await check_dedup_on_store(
+            pool, content_b, emb_b, new_confidence=0.8, threshold=0.85,
+        )
+
+        assert result.is_duplicate
+        assert result.action == "revised"
+        updated = await get_memory(pool, mem_a.id)
+        assert updated.confidence == pytest.approx(0.8, abs=0.01)
+
+    async def test_pinned_memory_not_revised(self, pool):
+        """Pinned memories should never be revised — new content stores separately."""
+        provider = get_provider("fastembed")
+        content_a = "Weft project is owned by Jason Bauman and uses PostgreSQL"
+        content_b = "Weft project is owned by Jason Bauman and uses PostgreSQL sixteen"
+
+        emb_a = await provider.embed(content_a)
+        emb_b = await provider.embed(content_b)
+
+        await store_memory(
+            pool,
+            MemoryCreate(type=MemoryType.fact, content=content_a, confidence=0.9, pinned=True),
+            embedding=emb_a,
+        )
+
+        result = await check_dedup_on_store(
+            pool, content_b, emb_b, new_confidence=0.7, threshold=0.85,
+        )
+
+        assert not result.is_duplicate
+        assert result.action == "stored"
+
+    async def test_short_content_skips_check(self, pool):
+        """Content shorter than 50 chars should skip dedup check."""
+        provider = get_provider("fastembed")
+        content = "short"
+        embedding = await provider.embed(content)
+
+        result = await check_dedup_on_store(
+            pool, content, embedding, new_confidence=0.7,
+        )
+
+        assert not result.is_duplicate
+        assert result.action == "stored"
+
+    async def test_different_content_no_match(self, pool):
+        """Very different content should not trigger dedup."""
+        provider = get_provider("fastembed")
+        content_a = "Python is a programming language used for artificial intelligence"
+        content_b = "The weather forecast for Tokyo shows rain throughout the entire week"
+
+        emb_a = await provider.embed(content_a)
+        emb_b = await provider.embed(content_b)
+
+        await store_memory(
+            pool,
+            MemoryCreate(type=MemoryType.fact, content=content_a, confidence=0.7),
+            embedding=emb_a,
+        )
+
+        result = await check_dedup_on_store(
+            pool, content_b, emb_b, new_confidence=0.7,
+        )
+
+        assert not result.is_duplicate
+        assert result.action == "stored"
+
+    async def test_dedup_result_to_dict(self):
+        """DedupResult.to_dict() should include all relevant fields."""
+        result = DedupResult(is_duplicate=False)
+        d = result.to_dict()
+        assert d == {"action": "stored", "is_duplicate": False}
+
+        mem = _make_memory(content="test")
+        result2 = DedupResult(
+            is_duplicate=True,
+            existing_memory=mem,
+            similarity=0.95,
+            action="revised",
+        )
+        d2 = result2.to_dict()
+        assert d2["action"] == "revised"
+        assert d2["is_duplicate"] is True
+        assert d2["similarity"] == 0.95
+        assert "existing_memory_id" in d2
 
 
 # ---------------------------------------------------------------------------

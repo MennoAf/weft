@@ -231,6 +231,23 @@ async def weft_remember(
             )
             embedding_failed = True
         async with acquire(app.pool):
+            # Pre-insert dedup check (requires embedding)
+            if embedding and not pinned:
+                from weft.consolidation import check_dedup_on_store
+                dedup = await check_dedup_on_store(
+                    app.pool, content, embedding,
+                    new_confidence=confidence,
+                    memory_type=create.type,
+                    project_id=resolved_project,
+                )
+                if dedup.is_duplicate:
+                    result = dedup.existing_memory.to_dict()
+                    result["dedup"] = dedup.to_dict()
+                    if dedup.existing_memory:
+                        await app.cache.set_memory(dedup.existing_memory)
+                        await app.cache.invalidate_stats()
+                    return result
+
             memory = await store_memory(app.pool, create, embedding=embedding)
             await app.cache.set_memory(memory)
             await app.cache.invalidate_stats()
