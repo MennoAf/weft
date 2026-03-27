@@ -12,6 +12,7 @@ Each periodic check has 24h dedup to avoid alert spam.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -22,17 +23,21 @@ from weft.models import AlertCreate, AlertStatus, AlertType
 
 logger = logging.getLogger(__name__)
 
-# Thresholds
-_STALE_DECISION_DAYS = 90  # decisions older than this with low confidence
-_STALE_DECISION_CONFIDENCE = 0.6  # below this = low confidence
-_CONSOLIDATION_OVERDUE_HOURS = 72  # nudge if consolidation hasn't run in 3 days
-_MEMORY_COUNT_THRESHOLD = 1000  # alert when active memories exceed this
-_DEDUP_HOURS = 24
+
+@dataclass
+class MemoryHygieneConfig:
+    """Configuration for memory hygiene alert thresholds."""
+
+    stale_decision_days: int = 90  # decisions older than this with low confidence
+    stale_decision_confidence: float = 0.6  # below this = low confidence
+    consolidation_overdue_hours: int = 72  # nudge if consolidation hasn't run in 3 days
+    memory_count_threshold: int = 1000  # alert when active memories exceed this
+    dedup_hours: int = 24  # suppress duplicate alerts within this window
 
 
-async def _recent_alert_types(pool: asyncpg.Pool) -> set[str]:
-    """Collect alert types created in the last 24h for dedup."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=_DEDUP_HOURS)
+async def _recent_alert_types(pool: asyncpg.Pool, *, dedup_hours: int = 24) -> set[str]:
+    """Collect alert types created in the last N hours for dedup."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=dedup_hours)
     pending = await list_alerts(pool, status=AlertStatus.pending, limit=200)
     fired = await list_alerts(pool, status=AlertStatus.fired, limit=200)
     return {
@@ -42,15 +47,20 @@ async def _recent_alert_types(pool: asyncpg.Pool) -> set[str]:
     }
 
 
-async def check_stale_decisions(pool: asyncpg.Pool) -> list[dict]:
+async def check_stale_decisions(
+    pool: asyncpg.Pool,
+    *,
+    config: MemoryHygieneConfig | None = None,
+) -> list[dict]:
     """Alert on decisions with overdue review_after or old + low confidence.
 
     Two triggers:
     1. review_after date has passed (explicit review schedule)
-    2. Decision older than 90 days with confidence < 0.6 (implicit staleness)
+    2. Decision older than N days with confidence < threshold (implicit staleness)
     """
+    cfg = config or MemoryHygieneConfig()
     now = datetime.now(timezone.utc)
-    stale_cutoff = now - timedelta(days=_STALE_DECISION_DAYS)
+    stale_cutoff = now - timedelta(days=cfg.stale_decision_days)
 
     try:
         # Overdue review_after
@@ -82,7 +92,7 @@ async def check_stale_decisions(pool: asyncpg.Pool) -> list[dict]:
             LIMIT 20
             """,
             stale_cutoff,
-            _STALE_DECISION_CONFIDENCE,
+            cfg.stale_decision_confidence,
         )
     except Exception:
         logger.warning("memory_hygiene.stale_decisions.query_error", exc_info=True)
@@ -92,7 +102,7 @@ async def check_stale_decisions(pool: asyncpg.Pool) -> list[dict]:
     if total == 0:
         return []
 
-    recent_types = await _recent_alert_types(pool)
+    recent_types = await _recent_alert_types(pool, dedup_hours=cfg.dedup_hours)
     if AlertType.stale_decision.value in recent_types:
         return []
 
@@ -116,8 +126,13 @@ async def check_stale_decisions(pool: asyncpg.Pool) -> list[dict]:
     return [alert.to_dict()]
 
 
-async def check_consolidation_overdue(pool: asyncpg.Pool) -> list[dict]:
-    """Alert when weft_consolidate hasn't run in 72+ hours."""
+async def check_consolidation_overdue(
+    pool: asyncpg.Pool,
+    *,
+    config: MemoryHygieneConfig | None = None,
+) -> list[dict]:
+    """Alert when weft_consolidate hasn't run in N+ hours."""
+    cfg = config or MemoryHygieneConfig()
     from weft.store import get_metadata
 
     now = datetime.now(timezone.utc)
@@ -147,12 +162,12 @@ async def check_consolidation_overdue(pool: asyncpg.Pool) -> list[dict]:
             return []
         last_run = datetime.fromisoformat(ran_at)
         hours_since = (now - last_run).total_seconds() / 3600
-        is_overdue = hours_since >= _CONSOLIDATION_OVERDUE_HOURS
+        is_overdue = hours_since >= cfg.consolidation_overdue_hours
 
     if not is_overdue:
         return []
 
-    recent_types = await _recent_alert_types(pool)
+    recent_types = await _recent_alert_types(pool, dedup_hours=cfg.dedup_hours)
     if AlertType.memory_consolidation_overdue.value in recent_types:
         return []
 
@@ -174,8 +189,13 @@ async def check_consolidation_overdue(pool: asyncpg.Pool) -> list[dict]:
     return [alert.to_dict()]
 
 
-async def check_memory_count(pool: asyncpg.Pool) -> list[dict]:
+async def check_memory_count(
+    pool: asyncpg.Pool,
+    *,
+    config: MemoryHygieneConfig | None = None,
+) -> list[dict]:
     """Alert when active memory count exceeds threshold."""
+    cfg = config or MemoryHygieneConfig()
     now = datetime.now(timezone.utc)
 
     try:
@@ -186,10 +206,10 @@ async def check_memory_count(pool: asyncpg.Pool) -> list[dict]:
         logger.warning("memory_hygiene.count.query_error", exc_info=True)
         return []
 
-    if count < _MEMORY_COUNT_THRESHOLD:
+    if count < cfg.memory_count_threshold:
         return []
 
-    recent_types = await _recent_alert_types(pool)
+    recent_types = await _recent_alert_types(pool, dedup_hours=cfg.dedup_hours)
     if AlertType.memory_count_threshold.value in recent_types:
         return []
 
@@ -199,7 +219,7 @@ async def check_memory_count(pool: asyncpg.Pool) -> list[dict]:
             alert_type=AlertType.memory_count_threshold,
             title=f"Memory count threshold reached: {count} active memories",
             body=(
-                f"Active memory count ({count}) exceeds {_MEMORY_COUNT_THRESHOLD}. "
+                f"Active memory count ({count}) exceeds {cfg.memory_count_threshold}. "
                 f"Consider running weft_consolidate to merge duplicates and archive stale memories."
             ),
             trigger_at=now,
@@ -250,12 +270,17 @@ async def create_contradiction_alert(
     return alert.to_dict()
 
 
-async def evaluate_memory_hygiene_alerts(pool: asyncpg.Pool) -> list[dict]:
+async def evaluate_memory_hygiene_alerts(
+    pool: asyncpg.Pool,
+    *,
+    config: MemoryHygieneConfig | None = None,
+) -> list[dict]:
     """Run all memory hygiene checks. Returns list of created alert dicts."""
+    cfg = config or MemoryHygieneConfig()
     created: list[dict] = []
-    created.extend(await check_stale_decisions(pool))
-    created.extend(await check_consolidation_overdue(pool))
-    created.extend(await check_memory_count(pool))
+    created.extend(await check_stale_decisions(pool, config=cfg))
+    created.extend(await check_consolidation_overdue(pool, config=cfg))
+    created.extend(await check_memory_count(pool, config=cfg))
     # Note: contradiction alerts are created inline from weft_remember,
     # not from the periodic scheduler.
 

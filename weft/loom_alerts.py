@@ -11,6 +11,7 @@ Each check has 24h dedup to avoid alert spam.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -27,15 +28,19 @@ from weft.models import AlertCreate, AlertStatus, AlertType
 
 logger = logging.getLogger(__name__)
 
-# Thresholds
-_STALE_CLAIM_HOURS = 48
-_BLOCKED_PILE_UP_THRESHOLD = 5
-_DEDUP_HOURS = 24
+
+@dataclass
+class LoomAlertConfig:
+    """Configuration for Loom task awareness alert thresholds."""
+
+    stale_claim_hours: int = 48  # tasks claimed this long without heartbeat/update
+    blocked_pile_up_threshold: int = 5  # blocked tasks per project before alerting
+    dedup_hours: int = 24  # suppress duplicate alerts within this window
 
 
-async def _recent_alert_types(pool: asyncpg.Pool) -> set[str]:
-    """Collect alert types created in the last 24h for dedup."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=_DEDUP_HOURS)
+async def _recent_alert_types(pool: asyncpg.Pool, *, dedup_hours: int = 24) -> set[str]:
+    """Collect alert types created in the last N hours for dedup."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=dedup_hours)
     pending = await list_alerts(pool, status=AlertStatus.pending, limit=200)
     fired = await list_alerts(pool, status=AlertStatus.fired, limit=200)
     return {
@@ -45,17 +50,22 @@ async def _recent_alert_types(pool: asyncpg.Pool) -> set[str]:
     }
 
 
-async def check_stale_claims(pool: asyncpg.Pool) -> list[dict]:
+async def check_stale_claims(
+    pool: asyncpg.Pool,
+    *,
+    config: LoomAlertConfig | None = None,
+) -> list[dict]:
     """Alert on tasks claimed for 48h+ without update.
 
     These are tasks where claimed_at is old and claim_expires_at has passed
     (or the task is still claimed but no heartbeat has refreshed the TTL).
     The Loom daemon handles retries, but this alerts the human.
     """
+    cfg = config or LoomAlertConfig()
     now = datetime.now(timezone.utc)
 
     try:
-        rows = await get_stale_claimed_tasks(pool, threshold_hours=_STALE_CLAIM_HOURS)
+        rows = await get_stale_claimed_tasks(pool, threshold_hours=cfg.stale_claim_hours)
     except Exception:
         logger.warning("loom_alerts.stale_claims.query_error", exc_info=True)
         return []
@@ -63,7 +73,7 @@ async def check_stale_claims(pool: asyncpg.Pool) -> list[dict]:
     if not rows:
         return []
 
-    recent_types = await _recent_alert_types(pool)
+    recent_types = await _recent_alert_types(pool, dedup_hours=cfg.dedup_hours)
     if AlertType.loom_stale_claim.value in recent_types:
         return []
 
@@ -88,11 +98,16 @@ async def check_stale_claims(pool: asyncpg.Pool) -> list[dict]:
     return [alert.to_dict()]
 
 
-async def check_epic_completion(pool: asyncpg.Pool) -> list[dict]:
+async def check_epic_completion(
+    pool: asyncpg.Pool,
+    *,
+    config: LoomAlertConfig | None = None,
+) -> list[dict]:
     """Alert when all children of an epic are done but the epic is still open.
 
     Uses Loom's parent_id relationship — an epic is a task with children.
     """
+    cfg = config or LoomAlertConfig()
     try:
         rows = await get_completable_epics(pool)
     except Exception:
@@ -102,7 +117,7 @@ async def check_epic_completion(pool: asyncpg.Pool) -> list[dict]:
     if not rows:
         return []
 
-    recent_types = await _recent_alert_types(pool)
+    recent_types = await _recent_alert_types(pool, dedup_hours=cfg.dedup_hours)
     if AlertType.loom_epic_ready.value in recent_types:
         return []
 
@@ -124,10 +139,15 @@ async def check_epic_completion(pool: asyncpg.Pool) -> list[dict]:
     return [alert.to_dict()]
 
 
-async def check_blocked_pile_up(pool: asyncpg.Pool) -> list[dict]:
-    """Alert when 5+ tasks are blocked in a single project."""
+async def check_blocked_pile_up(
+    pool: asyncpg.Pool,
+    *,
+    config: LoomAlertConfig | None = None,
+) -> list[dict]:
+    """Alert when blocked tasks exceed threshold in a single project."""
+    cfg = config or LoomAlertConfig()
     try:
-        rows = await get_blocked_pile_ups(pool, threshold=_BLOCKED_PILE_UP_THRESHOLD)
+        rows = await get_blocked_pile_ups(pool, threshold=cfg.blocked_pile_up_threshold)
     except Exception:
         logger.warning("loom_alerts.blocked_pile_up.query_error", exc_info=True)
         return []
@@ -135,7 +155,7 @@ async def check_blocked_pile_up(pool: asyncpg.Pool) -> list[dict]:
     if not rows:
         return []
 
-    recent_types = await _recent_alert_types(pool)
+    recent_types = await _recent_alert_types(pool, dedup_hours=cfg.dedup_hours)
     if AlertType.loom_blocked_pile_up.value in recent_types:
         return []
 
@@ -150,18 +170,23 @@ async def check_blocked_pile_up(pool: asyncpg.Pool) -> list[dict]:
         AlertCreate(
             alert_type=AlertType.loom_blocked_pile_up,
             title=f"Blocked task pile-up in {len(rows)} project(s)",
-            body="Projects with 5+ blocked tasks:\n" + "\n".join(pile_list),
+            body=f"Projects with {cfg.blocked_pile_up_threshold}+ blocked tasks:\n" + "\n".join(pile_list),
             trigger_at=now,
         ),
     )
     return [alert.to_dict()]
 
 
-async def evaluate_loom_alerts(pool: asyncpg.Pool) -> list[dict]:
+async def evaluate_loom_alerts(
+    pool: asyncpg.Pool,
+    *,
+    config: LoomAlertConfig | None = None,
+) -> list[dict]:
     """Run all Loom awareness checks. Returns list of created alert dicts.
 
     Gracefully skips if Loom tables don't exist in this database.
     """
+    cfg = config or LoomAlertConfig()
     try:
         if not await loom_tables_exist(pool):
             logger.debug("loom_alerts.skipped — Loom tables not found")
@@ -171,9 +196,9 @@ async def evaluate_loom_alerts(pool: asyncpg.Pool) -> list[dict]:
         return []
 
     created: list[dict] = []
-    created.extend(await check_stale_claims(pool))
-    created.extend(await check_epic_completion(pool))
-    created.extend(await check_blocked_pile_up(pool))
+    created.extend(await check_stale_claims(pool, config=cfg))
+    created.extend(await check_epic_completion(pool, config=cfg))
+    created.extend(await check_blocked_pile_up(pool, config=cfg))
 
     if created:
         logger.info("loom_alerts: created %d alerts", len(created))

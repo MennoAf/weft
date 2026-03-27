@@ -8,12 +8,16 @@ import pytest
 
 from weft.alerts import create_alert, list_alerts
 from weft.check_in_patterns import (
-    _ALERT_DEDUP_HOURS,
-    _ALERT_LOW_MOOD_STREAK,
-    _ALERT_LOW_SLEEP_DAYS,
-    _ALERT_LOW_SLEEP_HOURS,
+    CheckInAlertConfig,
     evaluate_check_in_alerts,
 )
+
+# Use config defaults as test constants
+_cfg = CheckInAlertConfig()
+_ALERT_DEDUP_HOURS = _cfg.dedup_hours
+_ALERT_LOW_MOOD_STREAK = _cfg.low_mood_streak
+_ALERT_LOW_SLEEP_DAYS = _cfg.low_sleep_days
+_ALERT_LOW_SLEEP_HOURS = _cfg.low_sleep_hours
 from weft.models import AlertCreate, AlertStatus, AlertType, CheckIn
 
 
