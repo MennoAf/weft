@@ -15,6 +15,33 @@ from weft.config import WeftConfig
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_user_id() -> str | None:
+    """Resolve the current user ID from available auth sources.
+
+    Checks (in order):
+    1. current_user_id contextvar (set by legacy middleware or direct code)
+    2. FastMCP OAuth access token upstream claims (set by OIDCProxy auth)
+    """
+    uid = current_user_id.get()
+    if uid is not None:
+        return uid
+    try:
+        from fastmcp.server.auth.middleware import get_access_token
+        token = get_access_token()
+        if token is not None:
+            claims = getattr(token, "claims", {})
+            # OAuthProxy embeds upstream IdP claims in the JWT
+            upstream = claims.get("upstream_claims", {})
+            # Try standard OIDC sub, then GitHub login, then JWT sub
+            return upstream.get("sub") or upstream.get("login") or claims.get("sub")
+    except (ImportError, LookupError, AttributeError):
+        # ImportError: fastmcp not installed or auth module unavailable
+        # LookupError: contextvar not set (no HTTP request context)
+        # AttributeError: token structure differs from expected
+        pass
+    return None
+
 # Connection contextvar: when set (inside acquire()), store functions use
 # this connection instead of the pool.  This ensures all DB operations
 # within an MCP tool call share a single connection with SET LOCAL
@@ -111,7 +138,7 @@ async def set_user_context(conn: asyncpg.Connection) -> None:
     meaning ``current_setting('app.user_id', true)`` returns NULL.
     RLS policies then show only global (user_id IS NULL) rows.
     """
-    user_id = current_user_id.get()
+    user_id = _resolve_user_id()
     if user_id is not None:
         # SET is a utility command — doesn't support $1 parameterization.
         # Sanitize by rejecting non-UUID-safe characters.
@@ -150,7 +177,7 @@ async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
         return
 
     async with pool.acquire() as conn:
-        user_id = current_user_id.get()
+        user_id = _resolve_user_id()
         if user_id is not None:
             # SET LOCAL requires a transaction context.
             async with conn.transaction():

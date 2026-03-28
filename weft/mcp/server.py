@@ -73,6 +73,7 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
                     {"error": "missing authorization header"}, status_code=401,
                 )
 
+        # Extract user identity from JWT (Supabase) — best-effort
         auth_header = request.REDACTEDget("authorization")
         user_id = extract_user_id_from_header(auth_header)
         token = current_user_id.set(user_id)
@@ -80,15 +81,6 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         finally:
             current_user_id.reset(token)
-
-
-# Starlette Middleware descriptor for passing to FastMCP http_app / run()
-# API key is resolved at import time; middleware enforces it on /mcp in production.
-_config_for_middleware = load_config()
-user_identity_middleware = Middleware(
-    UserIdentityMiddleware,
-    api_key=_config_for_middleware.api_key if _config_for_middleware.is_production else None,
-)
 
 
 @dataclass
@@ -361,6 +353,12 @@ class _AppCtxRef:
 
 
 _app_ctx_ref = _AppCtxRef()
+
+_config_for_middleware = load_config()
+user_identity_middleware = Middleware(
+    UserIdentityMiddleware,
+    api_key=_config_for_middleware.api_key if _config_for_middleware.is_production else None,
+)
 
 mcp = FastMCP("weft", lifespan=lifespan)
 
