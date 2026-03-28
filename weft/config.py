@@ -130,6 +130,10 @@ class WeftConfig(BaseModel):
     slack_sync: SlackSyncConfig = Field(default_factory=SlackSyncConfig)
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
     api_key: str | None = None
+    supabase_url: str | None = None
+    github_oauth_client_id: str | None = None
+    github_oauth_client_secret: str | None = None
+    base_url: str | None = None  # Public URL of this server (for OAuth callback)
     log_level: str = "INFO"
 
     @property
@@ -394,6 +398,14 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.env = WeftEnv(env)
     if api_key := os.environ.get("WEFT_API_KEY"):
         config.api_key = api_key
+    if supabase_url := os.environ.get("SUPABASE_URL"):
+        config.supabase_url = supabase_url.rstrip("/")
+    if gh_client_id := os.environ.get("GITHUB_OAUTH_CLIENT_ID"):
+        config.github_oauth_client_id = gh_client_id
+    if gh_client_secret := os.environ.get("GITHUB_OAUTH_CLIENT_SECRET"):
+        config.github_oauth_client_secret = gh_client_secret
+    if base_url := os.environ.get("WEFT_BASE_URL"):
+        config.base_url = base_url.rstrip("/")
     if poll_interval := os.environ.get("WEFT_ALERT_POLL_INTERVAL"):
         config.alert.poll_interval = int(poll_interval)
     if batch_size := os.environ.get("WEFT_ALERT_BATCH_SIZE"):
