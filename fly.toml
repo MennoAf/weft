@@ -10,7 +10,6 @@ primary_region = "iad"
   WEFT_ENV = "production"
   WEFT_TRANSPORT = "streamable-http"
   WEFT_REDIS_URL = ""
-  WEFT_BASE_URL = "https://weft-mcp.fly.dev"
   WEFT_LOG_LEVEL = "INFO"
   PORT = "8000"
 
