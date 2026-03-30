@@ -27,6 +27,7 @@ from weft.models import (
 )
 from weft.primer import build_primer
 from weft.primer_sections.anti_patterns import build_anti_patterns_section
+from weft.primer_sections.autonomy import build_autonomy_section
 from weft.primer_sections.behaviors import build_behaviors_section
 from weft.primer_sections.context import PrimerContext
 from weft.primer_sections.decisions import build_decisions_section
@@ -59,6 +60,7 @@ async def _run_all_sections(ctx):
     results["anti_patterns"] = await build_anti_patterns_section(ctx)
     results["decisions"] = await build_decisions_section(ctx)
     results["entities"] = await build_entities_section(ctx)
+    results["autonomy"] = await build_autonomy_section(ctx)
     return results
 
 

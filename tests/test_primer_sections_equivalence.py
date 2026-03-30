@@ -23,6 +23,7 @@ from weft.models import (
 )
 from weft.primer import build_primer
 from weft.primer_sections.anti_patterns import build_anti_patterns_section
+from weft.primer_sections.autonomy import build_autonomy_section
 from weft.primer_sections.behaviors import build_behaviors_section
 from weft.primer_sections.context import PrimerContext
 from weft.primer_sections.decisions import build_decisions_section
@@ -292,6 +293,7 @@ async def test_full_pipeline_token_equivalence(populated_pool):
     await build_anti_patterns_section(ctx)
     await build_decisions_section(ctx)
     await build_entities_section(ctx)
+    await build_autonomy_section(ctx)
 
     assert ctx.used_tokens == mono["total_tokens"]
     assert ctx.section_tokens == mono["section_tokens"]
@@ -311,6 +313,7 @@ async def test_empty_db_equivalence(pool):
     await build_anti_patterns_section(ctx)
     await build_decisions_section(ctx)
     await build_entities_section(ctx)
+    await build_autonomy_section(ctx)
 
     assert ctx.used_tokens == 0
     assert ctx.used_tokens == mono["total_tokens"]
