@@ -417,6 +417,60 @@ class Alert(BaseModel):
         return d
 
 
+class TriggerConditionType(str, Enum):
+    """Type of condition that activates a trigger."""
+
+    time = "time"          # Fires at/after a specific time or on a cron schedule
+    threshold = "threshold"  # Fires when a metric exceeds a value
+    event = "event"        # Fires when a named event occurs
+    absence = "absence"    # Fires when something hasn't happened for N hours
+
+
+class TriggerStatus(str, Enum):
+    enabled = "enabled"
+    disabled = "disabled"
+    fired = "fired"        # One-shot trigger that has already fired
+
+
+class TriggerCreate(BaseModel):
+    """Input model for creating a proactive trigger."""
+
+    name: str
+    condition_type: TriggerConditionType
+    condition: dict[str, Any] = Field(default_factory=dict)
+    action: str  # Description of what should happen when triggered
+    cooldown_hours: float | None = None  # Minimum hours between firings
+    max_fires: int | None = None  # None = unlimited
+    project_id: str | None = None
+    agent_id: str | None = None
+
+
+class Trigger(BaseModel):
+    """A proactive trigger — condition-driven rule that fires actions."""
+
+    id: str = Field(default_factory=_weft_id)
+    name: str
+    condition_type: TriggerConditionType
+    condition: dict[str, Any] = Field(default_factory=dict)
+    action: str
+    status: TriggerStatus = TriggerStatus.enabled
+    cooldown_hours: float | None = None
+    max_fires: int | None = None
+    fire_count: int = 0
+    last_fired_at: datetime | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        d = self.model_dump(mode="json")
+        d["condition_type"] = self.condition_type.value
+        d["status"] = self.status.value
+        return d
+
+
 class CheckInCreate(BaseModel):
     """Input model for logging a mood/sleep/energy check-in."""
 
