@@ -785,6 +785,18 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             WHERE expires_at IS NOT NULL AND status = 'open';
         """,
     ),
+    (
+        27,
+        "Add graduated_memory_id column to episodes for graduation path",
+        """
+        ALTER TABLE episodes ADD COLUMN IF NOT EXISTS graduated_memory_id TEXT
+            REFERENCES memories(id) ON DELETE SET NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_episodes_graduated
+            ON episodes (graduated_memory_id)
+            WHERE graduated_memory_id IS NOT NULL;
+        """,
+    ),
 ]
 
 

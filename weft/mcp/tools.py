@@ -34,6 +34,7 @@ from weft.episodes import (
     create_episode,
     get_episode,
     get_episode_memories,
+    graduate_episode,
     list_episodes,
     timeline_query,
 )
@@ -1608,6 +1609,63 @@ async def weft_episode_context(
             return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_episode_context", e)
+
+
+@mcp.tool()
+async def weft_episode_graduate(
+    ctx: Context,
+    episode_id: str,
+    memory_type: str = "fact",
+    content: str | None = None,
+    topic: list[str] | None = None,
+    confidence: float = 0.7,
+) -> dict:
+    """Graduate an episode into a persistent memory.
+
+    Converts an episode's accumulated context into a long-term memory record.
+    The episode is marked as 'graduated' and linked to the new memory.
+    Use this when an episode contains insights worth preserving beyond its TTL.
+
+    memory_type: type for the new memory ('fact', 'pattern', 'solution',
+        'architecture', 'decision', etc.)
+    content: custom memory content. If omitted, uses episode title + summary.
+    topic: optional tags for the new memory.
+    confidence: confidence score for the new memory (0.0-1.0, default 0.7)."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        topic = _coerce_list(topic) or []
+
+        # Generate embedding for the memory content
+        embed_text = content
+        if embed_text is None:
+            ep = await get_episode(app.pool, episode_id)
+            if ep is None:
+                return {"error": f"Episode {episode_id} not found"}
+            parts = [ep.title]
+            if ep.summary:
+                parts.append(ep.summary)
+            embed_text = "\n\n".join(parts)
+
+        embedding = await app.embedding.embed(embed_text)
+
+        async with acquire(app.pool):
+            updated_ep, memory = await graduate_episode(
+                app.pool,
+                episode_id,
+                memory_type=MemoryType(memory_type),
+                content=content,
+                topic=topic,
+                confidence=confidence,
+                embedding=embedding,
+            )
+            await app.cache.invalidate_stats()
+            result = updated_ep.to_dict()
+            result["graduated_memory"] = memory.to_dict()
+            return result
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_episode_graduate", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_episode_graduate", e)
 
 
 # --- Entity tools ---
