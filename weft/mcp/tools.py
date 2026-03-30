@@ -2727,6 +2727,210 @@ async def weft_calibration_history(
 
 
 @mcp.tool()
+async def weft_degradation_set(
+    ctx: Context,
+    name: str,
+    trigger_type: str,
+    action: str,
+    condition: dict | None = None,
+    description: str | None = None,
+    cooldown_minutes: float | None = None,
+    max_fires: int | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Create a degradation policy — a rule that fires a response action
+    when system health degrades.
+
+    trigger_type: 'low_confidence', 'api_error', 'context_decay', or 'budget_breach'.
+    action: 'pause', 'escalate', 'restart', or 'restrict'.
+    condition: dict with trigger-specific params (see below).
+
+    Condition requirements per trigger_type:
+      low_confidence: {"threshold": 0.3}  (float 0.0-1.0)
+      api_error:      {"max_errors": 5, "window_minutes": 10}
+      context_decay:  {"max_age_hours": 24}
+      budget_breach:  {"max_tokens": 100000}"""
+    try:
+        from weft.degradation import create_policy
+        from weft.models import (
+            DegradationAction,
+            DegradationPolicyCreate,
+            DegradationTriggerType,
+        )
+
+        valid_triggers = [t.value for t in DegradationTriggerType]
+        if trigger_type not in valid_triggers:
+            return _input_error_response(
+                "weft_degradation_set",
+                ValueError(f"Invalid trigger_type '{trigger_type}'. Valid: {valid_triggers}"),
+            )
+
+        valid_actions = [a.value for a in DegradationAction]
+        if action not in valid_actions:
+            return _input_error_response(
+                "weft_degradation_set",
+                ValueError(f"Invalid action '{action}'. Valid: {valid_actions}"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        create = DegradationPolicyCreate(
+            name=name,
+            trigger_type=DegradationTriggerType(trigger_type),
+            condition=condition or {},
+            action=DegradationAction(action),
+            description=description,
+            cooldown_minutes=cooldown_minutes,
+            max_fires=max_fires,
+            project_id=resolved_project,
+            agent_id=agent_id,
+        )
+        async with acquire(app.pool):
+            policy = await create_policy(app.pool, create)
+        return {"success": True, "policy": policy.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_degradation_set", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_degradation_set", e)
+
+
+@mcp.tool()
+async def weft_degradation_check(
+    ctx: Context,
+    confidence: float | None = None,
+    error_count: int | None = None,
+    context_age_hours: float | None = None,
+    tokens_used: int | None = None,
+    project_id: str | None = None,
+) -> dict:
+    """Check current metrics against active degradation policies and fire
+    any that match.
+
+    Pass the metrics you have — policies only trigger on metrics they
+    care about. Returns a list of triggered policies with the action
+    to take.
+
+    confidence: current confidence level (0.0-1.0).
+    error_count: number of API errors in recent window.
+    context_age_hours: hours since context was refreshed.
+    tokens_used: total tokens consumed in session."""
+    try:
+        from weft.degradation import update_degradation_state
+
+        metrics: dict[str, float | int] = {}
+        if confidence is not None:
+            metrics["confidence"] = confidence
+        if error_count is not None:
+            metrics["error_count"] = error_count
+        if context_age_hours is not None:
+            metrics["context_age_hours"] = context_age_hours
+        if tokens_used is not None:
+            metrics["tokens_used"] = tokens_used
+
+        if not metrics:
+            return _input_error_response(
+                "weft_degradation_check",
+                ValueError("At least one metric must be provided"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        async with acquire(app.pool):
+            triggered = await update_degradation_state(
+                app.pool,
+                metrics=metrics,
+                project_id=resolved_project,
+            )
+        return {
+            "success": True,
+            "triggered": triggered,
+            "triggered_count": len(triggered),
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_degradation_check", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_degradation_check", e)
+
+
+@mcp.tool()
+async def weft_degradation_list(
+    ctx: Context,
+    trigger_type: str | None = None,
+    action: str | None = None,
+    status: str | None = None,
+    project_id: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """List degradation policies with optional filters.
+
+    trigger_type: 'low_confidence', 'api_error', 'context_decay', or 'budget_breach'.
+    action: 'pause', 'escalate', 'restart', or 'restrict'.
+    status: 'active', 'disabled', or 'fired'."""
+    try:
+        from weft.degradation import list_policies
+        from weft.models import (
+            DegradationAction,
+            DegradationPolicyStatus,
+            DegradationTriggerType,
+        )
+
+        tt_enum = None
+        if trigger_type is not None:
+            valid = [t.value for t in DegradationTriggerType]
+            if trigger_type not in valid:
+                return _input_error_response(
+                    "weft_degradation_list",
+                    ValueError(f"Invalid trigger_type '{trigger_type}'. Valid: {valid}"),
+                )
+            tt_enum = DegradationTriggerType(trigger_type)
+
+        action_enum = None
+        if action is not None:
+            valid = [a.value for a in DegradationAction]
+            if action not in valid:
+                return _input_error_response(
+                    "weft_degradation_list",
+                    ValueError(f"Invalid action '{action}'. Valid: {valid}"),
+                )
+            action_enum = DegradationAction(action)
+
+        status_enum = None
+        if status is not None:
+            valid = [s.value for s in DegradationPolicyStatus]
+            if status not in valid:
+                return _input_error_response(
+                    "weft_degradation_list",
+                    ValueError(f"Invalid status '{status}'. Valid: {valid}"),
+                )
+            status_enum = DegradationPolicyStatus(status)
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        async with acquire(app.pool):
+            policies = await list_policies(
+                app.pool,
+                trigger_type=tt_enum,
+                action=action_enum,
+                status=status_enum,
+                project_id=resolved_project,
+                limit=limit,
+            )
+        return {
+            "success": True,
+            "policies": [p.to_dict() for p in policies],
+            "count": len(policies),
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_degradation_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_degradation_list", e)
+
+
+@mcp.tool()
 async def weft_budget_check(
     ctx: Context,
     daily_limit_usd: float = 10.0,
