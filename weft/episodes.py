@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from datetime import timedelta
+
 from weft.db.connection import get_db
-from weft.models import Episode, EpisodeCreate, EpisodeStatus, Memory, _weft_id
+from weft.models import Episode, EpisodeCreate, EpisodeStatus, EpisodeWithMemories, Memory, _weft_id
 from weft.store import _row_to_memory
 from weft.tokens import estimate_tokens
 
@@ -23,18 +25,23 @@ async def create_episode(
     pool: asyncpg.Pool,
     create: EpisodeCreate,
 ) -> Episode:
-    """Create a new open episode."""
+    """Create a new open episode. If ttl_hours is set, computes expires_at."""
     episode_id = _weft_id()
     now = datetime.now(timezone.utc)
+
+    expires_at = None
+    if create.ttl_hours is not None:
+        expires_at = now + timedelta(hours=create.ttl_hours)
 
     await get_db(pool).execute(
         """
         INSERT INTO episodes (
             id, title, summary, project_id, agent_id,
-            user_id, started_at, status, token_count, created_at, updated_at
+            user_id, started_at, expires_at, status, token_count,
+            created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5,
                   nullif(current_setting('app.user_id', true), ''),
-                  $6, 'open', 0, $6, $6)
+                  $6, $7, 'open', 0, $6, $6)
         """,
         episode_id,
         create.title,
@@ -42,6 +49,7 @@ async def create_episode(
         create.project_id,
         create.agent_id,
         now,
+        expires_at,
     )
 
     return Episode(
@@ -51,6 +59,7 @@ async def create_episode(
         project_id=create.project_id,
         agent_id=create.agent_id,
         started_at=now,
+        expires_at=expires_at,
         status=EpisodeStatus.open,
         created_at=now,
         updated_at=now,
@@ -282,8 +291,81 @@ def _row_to_episode(row: asyncpg.Record) -> Episode:
         agent_id=row["agent_id"],
         started_at=row["started_at"],
         ended_at=row["ended_at"],
+        expires_at=row.get("expires_at"),
         status=EpisodeStatus(row["status"]),
         token_count=row["token_count"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+async def get_working_memory(
+    pool: asyncpg.Pool,
+    *,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 50,
+) -> list[EpisodeWithMemories]:
+    """Get active working memory — open episodes that haven't expired.
+
+    Returns episodes with their linked memories, ordered by most recent first.
+    Excludes episodes where expires_at has passed.
+    """
+    conditions = [
+        "status = 'open'",
+        "(expires_at IS NULL OR expires_at > now())",
+    ]
+    params: list = []
+    idx = 1
+
+    if project_id is not None:
+        conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
+        params.append(project_id)
+        idx += 1
+
+    if agent_id is not None:
+        conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
+        params.append(agent_id)
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+    params.append(limit)
+
+    rows = await get_db(pool).fetch(
+        f"""
+        SELECT * FROM episodes {where}
+        ORDER BY started_at DESC
+        LIMIT ${idx}
+        """,
+        *params,
+    )
+
+    result = []
+    for row in rows:
+        episode = _row_to_episode(row)
+        memories = await get_episode_memories(pool, episode.id)
+        result.append(EpisodeWithMemories(episode=episode, memories=memories))
+    return result
+
+
+async def expire_stale_episodes(pool: asyncpg.Pool) -> int:
+    """Mark expired episodes as 'expired'. Returns count of episodes expired.
+
+    Finds open episodes where expires_at <= now() and transitions them
+    to 'expired' status with ended_at set to now().
+    """
+    now = datetime.now(timezone.utc)
+    result = await get_db(pool).execute(
+        """
+        UPDATE episodes
+        SET status = 'expired', ended_at = $1, updated_at = $1
+        WHERE status = 'open'
+          AND expires_at IS NOT NULL
+          AND expires_at <= $1
+        """,
+        now,
+    )
+    count = int(result.split()[-1])
+    if count > 0:
+        logger.info("episodes.expired", extra={"count": count})
+    return count

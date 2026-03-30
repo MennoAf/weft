@@ -233,6 +233,7 @@ class EntityCreate(BaseModel):
 class EpisodeStatus(str, Enum):
     open = "open"
     closed = "closed"
+    expired = "expired"
 
 
 class Episode(BaseModel):
@@ -245,10 +246,18 @@ class Episode(BaseModel):
     agent_id: str | None = None
     started_at: datetime = Field(default_factory=_now)
     ended_at: datetime | None = None
+    expires_at: datetime | None = None
     status: EpisodeStatus = EpisodeStatus.open
     token_count: int = 0
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if this episode has passed its TTL."""
+        if self.expires_at is None:
+            return False
+        return datetime.now(timezone.utc) >= self.expires_at
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""
@@ -264,6 +273,7 @@ class EpisodeCreate(BaseModel):
     summary: str | None = None
     project_id: str | None = None
     agent_id: str | None = None
+    ttl_hours: float | None = None
 
 
 class EpisodeWithMemories(BaseModel):
