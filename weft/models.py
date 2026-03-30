@@ -433,7 +433,14 @@ class TriggerStatus(str, Enum):
 
 
 class TriggerCreate(BaseModel):
-    """Input model for creating a proactive trigger."""
+    """Input model for creating a proactive trigger.
+
+    Condition payloads are validated per condition_type:
+      time:      requires 'trigger_at' (ISO datetime string)
+      threshold: requires 'metric' (str) and 'threshold' (number)
+      event:     requires 'event_name' (str)
+      absence:   requires 'absence_hours' (positive number)
+    """
 
     name: str
     condition_type: TriggerConditionType
@@ -443,6 +450,40 @@ class TriggerCreate(BaseModel):
     max_fires: int | None = None  # None = unlimited
     project_id: str | None = None
     agent_id: str | None = None
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        self._validate_condition()
+
+    def _validate_condition(self) -> None:
+        ct = self.condition_type
+        c = self.condition
+
+        if ct == TriggerConditionType.time:
+            if "trigger_at" not in c:
+                raise ValueError("time trigger requires 'trigger_at' in condition")
+            try:
+                datetime.fromisoformat(c["trigger_at"])
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"trigger_at must be a valid ISO datetime: {e}") from e
+
+        elif ct == TriggerConditionType.threshold:
+            if "metric" not in c:
+                raise ValueError("threshold trigger requires 'metric' in condition")
+            if "threshold" not in c:
+                raise ValueError("threshold trigger requires 'threshold' in condition")
+            if not isinstance(c["threshold"], (int, float)):
+                raise ValueError("threshold must be a number")
+
+        elif ct == TriggerConditionType.event:
+            if "event_name" not in c:
+                raise ValueError("event trigger requires 'event_name' in condition")
+
+        elif ct == TriggerConditionType.absence:
+            if "absence_hours" not in c:
+                raise ValueError("absence trigger requires 'absence_hours' in condition")
+            if not isinstance(c["absence_hours"], (int, float)) or c["absence_hours"] <= 0:
+                raise ValueError("absence_hours must be a positive number")
 
 
 class Trigger(BaseModel):
