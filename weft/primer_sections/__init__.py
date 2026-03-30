@@ -20,6 +20,7 @@ from weft.primer_sections.onboarding import build_onboarding_section
 from weft.primer_sections.recent_work import build_recent_work_section
 from weft.primer_sections.rules import build_rules_section
 from weft.primer_sections.wellness import build_wellness_section
+from weft.primer_sections.working_memory import build_working_memory_section
 
 __all__ = [
     "PrimerContext",
@@ -37,4 +38,5 @@ __all__ = [
     "build_recent_work_section",
     "build_rules_section",
     "build_wellness_section",
+    "build_working_memory_section",
 ]

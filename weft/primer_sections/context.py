@@ -54,6 +54,7 @@ SECTION_BUDGETS: dict[str, int] = {
     "anti_patterns": 150,
     "decisions": 250,
     "entities": 150,
+    "working_memory": 200,
 }
 
 # Hard caps on items shown per section.
