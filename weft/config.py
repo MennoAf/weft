@@ -109,6 +109,7 @@ class SlackSyncConfig(BaseModel):
     smart_ingest_max_per_sync: int = 50  # max messages to smart-ingest per sync cycle
     react_on_ingest: bool = True  # add emoji reaction after successful ingest
     ingest_reaction_emoji: str = "brain"  # emoji name (without colons)
+    skip_prefixes: list[str] = ["/checkin"]  # skip messages starting with these (already captured elsewhere)
 
 
 class DailyBriefConfig(BaseModel):

@@ -321,6 +321,14 @@ async def _sync_messages(
         react_on_ingest = _sync_cfg.react_on_ingest
         ingest_emoji = _sync_cfg.ingest_reaction_emoji
 
+    # Load skip prefixes
+    skip_prefixes: list[str] = []
+    if slack_client:
+        skip_prefixes = _sync_cfg.skip_prefixes
+    else:
+        from weft.config import load_config
+        skip_prefixes = load_config().slack_sync.skip_prefixes
+
     # Lazy-init smart adapter
     adapter = None
     smart_ingest_remaining: int | None = None
@@ -334,6 +342,11 @@ async def _sync_messages(
     for raw in raw_messages:
         # Skip bot messages and subtypes (join/leave/etc)
         if raw.get("bot_id") or raw.get("subtype"):
+            continue
+
+        # Skip messages with prefixes already captured elsewhere (e.g. /checkin)
+        msg_text = raw.get("text", "").strip()
+        if skip_prefixes and any(msg_text.startswith(p) for p in skip_prefixes):
             continue
 
         # Skip thread replies — they'll be included with their parent

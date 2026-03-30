@@ -128,6 +128,28 @@ class TestSyncMessages:
         assert result.messages_found == 1  # only parent counted
 
     @pytest.mark.asyncio
+    async def test_skips_messages_with_configured_prefixes(self, mock_pool, channel, sync_state):
+        messages = [
+            _make_message("100.0", text="/checkin mood 4 sleep 7 energy 3"),
+            _make_message("200.0", text="normal message"),
+        ]
+        result = SyncResult()
+
+        with patch("weft.slack.sync.store_memory") as mock_store:
+            mock_mem = MagicMock()
+            mock_mem.id = "weft-test1"
+            mock_store.return_value = mock_mem
+
+            await _sync_messages(
+                channel, messages, {}, mock_pool, None,
+                sync_state=sync_state, channel_map=None,
+                user_names={}, result=result,
+            )
+
+        assert result.messages_found == 1  # /checkin message skipped
+        assert result.messages_synced == 1
+
+    @pytest.mark.asyncio
     async def test_attaches_thread_replies(self, mock_pool, channel, sync_state):
         parent_ts = "100.0"
         messages = [_make_message(parent_ts, reply_count=1)]
