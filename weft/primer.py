@@ -932,6 +932,7 @@ async def build_primer(
     from weft.primer_sections.onboarding import build_onboarding_section
     from weft.primer_sections.recent_work import build_recent_work_section
     from weft.primer_sections.rules import build_rules_section
+    from weft.primer_sections.autonomy import build_autonomy_section
     from weft.primer_sections.wellness import build_wellness_section
 
     now = datetime.now(timezone.utc)
@@ -966,6 +967,7 @@ async def build_primer(
     anti_patterns_result = await build_anti_patterns_section(ctx)
     decisions_result = await build_decisions_section(ctx)
     entities_result = await build_entities_section(ctx)
+    autonomy_result = await build_autonomy_section(ctx)
 
     # --- Phase 2: Independent post-sections (parallel) ---
     changes_result, wellness_result = await asyncio.gather(
@@ -992,6 +994,7 @@ async def build_primer(
         "issues": len(issues_result.items),
         "decisions": len(decisions_result.items),
         "entities": len(entities_result.items),
+        "autonomy": len(autonomy_result.items),
     }
     onboarding_result = await build_onboarding_section(ctx, section_counts=section_counts)
     onboarding_data = onboarding_result.items[0] if onboarding_result.items else {}
@@ -1043,6 +1046,10 @@ async def build_primer(
                 entities_result.items,
                 "Use weft_focus(intent=...) to load known entities.",
             ),
+            "autonomy": _deferred(
+                autonomy_result.items,
+                "Use weft_autonomy_list to view autonomy policies.",
+            ),
             "changes_since": changes_since,
             "total_tokens": tier1_tokens,
             "budget_tokens": budget_tokens,
@@ -1068,6 +1075,7 @@ async def build_primer(
         "anti_patterns": anti_patterns_result.items,
         "decisions": decisions_result.items,
         "entities": entities_result.items,
+        "autonomy": autonomy_result.items,
         "changes_since": changes_since,
         "total_tokens": ctx.used_tokens,
         "budget_tokens": budget_tokens,

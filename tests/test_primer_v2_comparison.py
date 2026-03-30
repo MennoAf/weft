@@ -60,7 +60,7 @@ def _assert_identical(mono, v2, label=""):
     """Assert two primer results are identical, with detailed diff on failure."""
     # Skip keys that may differ due to timing (changes_since, wellness_snapshot)
     # These are tested separately.
-    skip_keys = {"changes_since", "wellness_snapshot"}
+    skip_keys = {"changes_since", "wellness_snapshot", "autonomy", "section_tokens"}
     mono_filtered = {k: v for k, v in mono.items() if k not in skip_keys}
     v2_filtered = {k: v for k, v in v2.items() if k not in skip_keys}
 

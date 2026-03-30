@@ -2220,3 +2220,184 @@ async def weft_check_health(
         return _db_error_response("weft_check_health", e)
     except Exception as e:
         return {"error": f"Health check failed: {type(e).__name__}: {e}"}
+
+
+# ── Autonomy policy tools ──────────────────────────────────────────
+
+
+@mcp.tool()
+async def weft_autonomy_check(
+    ctx: Context,
+    action: str,
+) -> dict:
+    """Check the autonomy tier for an action.
+
+    Returns the effective tier (never/earned/always) and whether the action
+    is permitted. Unknown actions default to 'earned' (conservative but not
+    blocked).
+
+    action: the action identifier (e.g. 'send_slack_message', 'deploy')."""
+    try:
+        from weft.autonomy import AutonomyTier, get_policy_by_action, get_tier_for_action
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tier = await get_tier_for_action(app.pool, action)
+            policy = await get_policy_by_action(app.pool, action)
+
+        result: dict = {
+            "action": action,
+            "tier": tier.value,
+            "permitted": tier == AutonomyTier.always,
+            "requires_approval": tier == AutonomyTier.earned,
+            "blocked": tier == AutonomyTier.never,
+        }
+        if policy:
+            result["policy_id"] = policy.id
+            result["description"] = policy.description
+            result["conditions"] = policy.conditions
+        else:
+            result["policy_id"] = None
+            result["rationale"] = "No policy found — defaulting to 'earned' (requires approval)"
+        return result
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_autonomy_check", e)
+
+
+@mcp.tool()
+async def weft_autonomy_set(
+    ctx: Context,
+    action: str,
+    tier: str = "never",
+    description: str | None = None,
+    conditions: dict | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    enabled: bool = True,
+) -> dict:
+    """Create or register an autonomy policy for an action.
+
+    tier: 'never' (hard stop), 'earned' (requires approval), or 'always' (safe zone).
+    conditions: optional JSON dict of constraints (e.g. {"environment": "staging"}).
+    Default tier is 'never' — conservative by design."""
+    try:
+        from weft.autonomy import ActionPolicyCreate, AutonomyTier, create_policy
+
+        valid_tiers = [t.value for t in AutonomyTier]
+        if tier not in valid_tiers:
+            return _input_error_response(
+                "weft_autonomy_set",
+                ValueError(f"Invalid tier '{tier}'. Valid: {valid_tiers}"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        create = ActionPolicyCreate(
+            action=action,
+            tier=AutonomyTier(tier),
+            description=description,
+            conditions=conditions or {},
+            project_id=resolved_project,
+            agent_id=agent_id,
+            enabled=enabled,
+        )
+        async with acquire(app.pool):
+            policy = await create_policy(app.pool, create)
+        return {"success": True, "policy": policy.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_autonomy_set", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_autonomy_set", e)
+
+
+@mcp.tool()
+async def weft_autonomy_list(
+    ctx: Context,
+    tier: str | None = None,
+    enabled_only: bool = True,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List autonomy policies, optionally filtered by tier.
+
+    tier: optional filter — 'never', 'earned', or 'always'.
+    enabled_only: if true (default), only returns enabled policies."""
+    try:
+        from weft.autonomy import AutonomyTier, list_policies
+
+        tier_enum = None
+        if tier is not None:
+            valid_tiers = [t.value for t in AutonomyTier]
+            if tier not in valid_tiers:
+                return _input_error_response(
+                    "weft_autonomy_list",
+                    ValueError(f"Invalid tier '{tier}'. Valid: {valid_tiers}"),
+                )
+            tier_enum = AutonomyTier(tier)
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            policies = await list_policies(
+                app.pool, tier=tier_enum, enabled_only=enabled_only,
+                limit=limit, offset=offset,
+            )
+        return {
+            "count": len(policies),
+            "policies": [p.to_dict() for p in policies],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_autonomy_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_autonomy_list", e)
+
+
+@mcp.tool()
+async def weft_autonomy_calibrate(
+    ctx: Context,
+    policy_id: str,
+    new_tier: str,
+    reason: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Change an action policy's tier, recording a calibration event.
+
+    Promotes or demotes a policy between tiers. NEVER-tier policies are
+    immutable hard-stops and cannot be changed (returns an error).
+
+    policy_id: the policy to calibrate (weft-... ID).
+    new_tier: target tier — 'earned' or 'always'.
+    reason: why the tier is changing (recorded for audit trail)."""
+    try:
+        from weft.autonomy import AutonomyTier, list_calibration_events, update_policy_tier
+
+        valid_tiers = [t.value for t in AutonomyTier]
+        if new_tier not in valid_tiers:
+            return _input_error_response(
+                "weft_autonomy_calibrate",
+                ValueError(f"Invalid new_tier '{new_tier}'. Valid: {valid_tiers}"),
+            )
+
+        if not policy_id or not policy_id.startswith("weft-"):
+            return _input_error_response(
+                "weft_autonomy_calibrate",
+                ValueError(f"Invalid policy_id '{policy_id}'. Expected format: 'weft-...'"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            updated = await update_policy_tier(
+                app.pool, policy_id, AutonomyTier(new_tier),
+                reason=reason, agent_id=agent_id,
+            )
+            events = await list_calibration_events(app.pool, policy_id, limit=5)
+
+        return {
+            "success": True,
+            "policy": updated.to_dict(),
+            "calibration_history": [e.to_dict() for e in events],
+        }
+    except (ValueError, LookupError) as e:
+        return _input_error_response("weft_autonomy_calibrate", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_autonomy_calibrate", e)
