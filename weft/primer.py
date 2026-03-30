@@ -933,6 +933,7 @@ async def build_primer(
     from weft.primer_sections.recent_work import build_recent_work_section
     from weft.primer_sections.rules import build_rules_section
     from weft.primer_sections.autonomy import build_autonomy_section
+    from weft.primer_sections.calibration import build_calibration_section
     from weft.primer_sections.wellness import build_wellness_section
     from weft.primer_sections.working_memory import build_working_memory_section
 
@@ -969,6 +970,7 @@ async def build_primer(
     decisions_result = await build_decisions_section(ctx)
     entities_result = await build_entities_section(ctx)
     autonomy_result = await build_autonomy_section(ctx)
+    calibration_result = await build_calibration_section(ctx)
     working_memory_result = await build_working_memory_section(ctx)
 
     # --- Phase 2: Independent post-sections (parallel) ---
@@ -1052,6 +1054,10 @@ async def build_primer(
                 autonomy_result.items,
                 "Use weft_autonomy_list to view autonomy policies.",
             ),
+            **({"calibration": _deferred(
+                calibration_result.items,
+                "Use weft_calibration_summary to view calibration insights.",
+            )} if not calibration_result.skipped else {}),
             **({"working_memory": _deferred(
                 working_memory_result.items,
                 "Use weft_focus(intent=...) to load open episodes.",
@@ -1082,6 +1088,7 @@ async def build_primer(
         "decisions": decisions_result.items,
         "entities": entities_result.items,
         "autonomy": autonomy_result.items,
+        **({"calibration": calibration_result.items} if not calibration_result.skipped else {}),
         **({"working_memory": working_memory_result.items} if not working_memory_result.skipped else {}),
         "changes_since": changes_since,
         "total_tokens": ctx.used_tokens,

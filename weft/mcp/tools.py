@@ -2577,6 +2577,156 @@ async def weft_cost_summary(
 
 
 @mcp.tool()
+async def weft_calibrate(
+    ctx: Context,
+    action_category: str,
+    action_description: str,
+    outcome: str,
+    agent_id: str | None = None,
+    project_id: str | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Record a calibration event — whether an agent action was approved,
+    rejected, or modified by the user.
+
+    After recording, evaluates whether the action_category warrants a
+    tier promotion or demotion based on recent calibration history.
+
+    outcome: 'approved', 'rejected', or 'modified'.
+    context: optional dict of extra metadata about the action."""
+    try:
+        from weft.calibration import evaluate_tier_change, record_calibration
+        from weft.models import CalibrationCreate, CalibrationOutcome
+
+        valid_outcomes = [o.value for o in CalibrationOutcome]
+        if outcome not in valid_outcomes:
+            return _input_error_response(
+                "weft_calibrate",
+                ValueError(f"Invalid outcome '{outcome}'. Valid: {valid_outcomes}"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        create = CalibrationCreate(
+            action_category=action_category,
+            action_description=action_description,
+            outcome=CalibrationOutcome(outcome),
+            agent_id=agent_id,
+            project_id=resolved_project,
+            context=context or {},
+        )
+        async with acquire(app.pool):
+            record = await record_calibration(app.pool, create)
+            evaluation = await evaluate_tier_change(
+                app.pool,
+                action_category,
+                project_id=resolved_project,
+            )
+        return {
+            "success": True,
+            "record": record.to_dict(),
+            "tier_evaluation": evaluation,
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_calibrate", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_calibrate", e)
+
+
+@mcp.tool()
+async def weft_calibration_summary(
+    ctx: Context,
+    action_category: str | None = None,
+    project_id: str | None = None,
+    since_days: int | None = None,
+) -> dict:
+    """Get aggregate calibration statistics — approval rates overall and
+    per action category.
+
+    action_category: filter to a specific category (optional).
+    since_days: only count records from the last N days (optional).
+
+    Returns total, approved, rejected, modified counts, approval_rate,
+    and per-category breakdown."""
+    try:
+        from weft.calibration import get_calibration_summary
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        since = None
+        if since_days is not None:
+            if since_days <= 0:
+                return _input_error_response(
+                    "weft_calibration_summary",
+                    ValueError("since_days must be positive"),
+                )
+            since = datetime.now(timezone.utc) - timedelta(days=since_days)
+
+        async with acquire(app.pool):
+            summary = await get_calibration_summary(
+                app.pool,
+                action_category=action_category,
+                project_id=resolved_project,
+                since=since,
+            )
+        return {"success": True, **summary}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_calibration_summary", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_calibration_summary", e)
+
+
+@mcp.tool()
+async def weft_calibration_history(
+    ctx: Context,
+    action_category: str | None = None,
+    outcome: str | None = None,
+    project_id: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """List recent calibration records with optional filters.
+
+    action_category: filter by category (optional).
+    outcome: filter by outcome — 'approved', 'rejected', or 'modified' (optional).
+    limit: max records to return (default 20)."""
+    try:
+        from weft.calibration import list_calibrations
+        from weft.models import CalibrationOutcome
+
+        if outcome is not None:
+            valid_outcomes = [o.value for o in CalibrationOutcome]
+            if outcome not in valid_outcomes:
+                return _input_error_response(
+                    "weft_calibration_history",
+                    ValueError(f"Invalid outcome '{outcome}'. Valid: {valid_outcomes}"),
+                )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        outcome_enum = CalibrationOutcome(outcome) if outcome else None
+        async with acquire(app.pool):
+            records = await list_calibrations(
+                app.pool,
+                action_category=action_category,
+                outcome=outcome_enum,
+                project_id=resolved_project,
+                limit=limit,
+            )
+        return {
+            "success": True,
+            "records": [r.to_dict() for r in records],
+            "count": len(records),
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_calibration_history", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_calibration_history", e)
+
+
+@mcp.tool()
 async def weft_budget_check(
     ctx: Context,
     daily_limit_usd: float = 10.0,
