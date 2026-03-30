@@ -2401,3 +2401,148 @@ async def weft_autonomy_calibrate(
         return _input_error_response("weft_autonomy_calibrate", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_autonomy_calibrate", e)
+
+
+# ── Cost tracking tools ─────────────────────────────────────────────
+
+
+@mcp.tool()
+async def weft_cost_record(
+    ctx: Context,
+    entry_type: str = "session",
+    reference_id: str | None = None,
+    model: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_tokens: int = 0,
+    estimated_cost_usd: float = 0.0,
+    metadata: dict | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Record a cost entry for token usage and estimated spend.
+
+    entry_type: 'session', 'task', or 'tool_call'.
+    reference_id: optional identifier (session ID, task ID, etc.).
+    model: the model used (e.g. 'claude-sonnet-4-20250514').
+    input_tokens/output_tokens/total_tokens: token counts.
+    estimated_cost_usd: estimated cost in USD."""
+    try:
+        from weft.cost_tracking import CostEntryCreate, CostEntryType, record_cost
+
+        valid_types = [t.value for t in CostEntryType]
+        if entry_type not in valid_types:
+            return _input_error_response(
+                "weft_cost_record",
+                ValueError(f"Invalid entry_type '{entry_type}'. Valid: {valid_types}"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        create = CostEntryCreate(
+            entry_type=CostEntryType(entry_type),
+            reference_id=reference_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            estimated_cost_usd=estimated_cost_usd,
+            metadata=metadata or {},
+            project_id=resolved_project,
+            agent_id=agent_id,
+        )
+        async with acquire(app.pool):
+            entry = await record_cost(app.pool, create)
+        return {"success": True, "entry": entry.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_cost_record", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_cost_record", e)
+
+
+@mcp.tool()
+async def weft_cost_summary(
+    ctx: Context,
+    since: str | None = None,
+    until: str | None = None,
+    entry_type: str | None = None,
+    project_id: str | None = None,
+) -> dict:
+    """Get aggregated cost summary over a time window.
+
+    since/until: ISO8601 datetime strings (optional, defaults to all time).
+    entry_type: optional filter — 'session', 'task', or 'tool_call'.
+    project_id: optional filter by project."""
+    try:
+        from weft.cost_tracking import CostEntryType, get_cost_summary
+
+        since_dt = None
+        until_dt = None
+        type_enum = None
+
+        if since is not None:
+            since_dt = datetime.fromisoformat(since)
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+
+        if until is not None:
+            until_dt = datetime.fromisoformat(until)
+            if until_dt.tzinfo is None:
+                until_dt = until_dt.replace(tzinfo=timezone.utc)
+
+        if entry_type is not None:
+            valid_types = [t.value for t in CostEntryType]
+            if entry_type not in valid_types:
+                return _input_error_response(
+                    "weft_cost_summary",
+                    ValueError(f"Invalid entry_type '{entry_type}'. Valid: {valid_types}"),
+                )
+            type_enum = CostEntryType(entry_type)
+
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            summary = await get_cost_summary(
+                app.pool,
+                since=since_dt,
+                until=until_dt,
+                entry_type=type_enum,
+                project_id=resolved_project,
+            )
+        return summary.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_cost_summary", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_cost_summary", e)
+
+
+@mcp.tool()
+async def weft_budget_check(
+    ctx: Context,
+    daily_limit_usd: float = 10.0,
+) -> dict:
+    """Check today's spending against a daily budget limit.
+
+    Returns within_budget (bool), pct_used (0-100+), remaining_usd,
+    and daily_spent_usd. Default daily limit is $10.
+
+    daily_limit_usd: the budget ceiling for today (in USD)."""
+    try:
+        from weft.cost_tracking import check_budget
+
+        if daily_limit_usd < 0:
+            return _input_error_response(
+                "weft_budget_check",
+                ValueError("daily_limit_usd must be non-negative"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            status = await check_budget(app.pool, daily_limit_usd)
+        return status.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_budget_check", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_budget_check", e)
