@@ -254,17 +254,27 @@ async def get_triggers_due(
 ) -> list[Trigger]:
     """Get enabled triggers whose cooldown has elapsed.
 
-    For time-based triggers, also checks that the trigger_at time in the
-    condition has passed. For absence triggers, checks that the
-    absence_hours threshold has been exceeded since last_fired_at or created_at.
+    Pushes cooldown and max_fires checks into SQL for efficiency.
+    Post-filters in Python for condition-type-specific logic:
+      - time: trigger_at must have passed
+      - absence: absence_hours since last fire (or creation) must have elapsed
+      - event/threshold: always due (evaluation happens at fire time)
 
     Returns triggers sorted by creation time (oldest first).
     """
     now = now or datetime.now(timezone.utc)
 
-    conditions = ["status = 'enabled'"]
-    params: list = []
-    idx = 1
+    conditions = [
+        "status = 'enabled'",
+        # max_fires: NULL means unlimited, otherwise fire_count must be below
+        "(max_fires IS NULL OR fire_count < max_fires)",
+        # cooldown: NULL means no cooldown, never-fired means no cooldown,
+        # otherwise last_fired_at + cooldown must be <= now
+        f"(cooldown_hours IS NULL OR last_fired_at IS NULL OR "
+        f"last_fired_at + make_interval(secs => cooldown_hours * 3600) <= ${1})",
+    ]
+    params: list = [now]
+    idx = 2
 
     if condition_type is not None:
         conditions.append(f"condition_type = ${idx}")
@@ -282,19 +292,11 @@ async def get_triggers_due(
         *params,
     )
 
+    # Post-filter for condition-type-specific checks that require JSONB parsing
     due: list[Trigger] = []
     for row in rows:
         trigger = _row_to_trigger(row)
 
-        # Check max_fires limit
-        if trigger.max_fires is not None and trigger.fire_count >= trigger.max_fires:
-            continue
-
-        # Check cooldown
-        if not is_cooldown_elapsed(trigger, now):
-            continue
-
-        # Condition-type-specific checks
         if trigger.condition_type == TriggerConditionType.time:
             trigger_at = trigger.condition.get("trigger_at")
             if trigger_at is not None:
@@ -303,13 +305,25 @@ async def get_triggers_due(
                     if now < target:
                         continue
                 except (ValueError, TypeError):
-                    pass  # Malformed trigger_at — treat as due
+                    logger.warning(
+                        "triggers.malformed_trigger_at",
+                        extra={"trigger_id": trigger.id, "trigger_at": trigger_at},
+                    )
+                    continue  # Skip malformed — don't fire unpredictably
 
         elif trigger.condition_type == TriggerConditionType.absence:
             absence_hours = trigger.condition.get("absence_hours")
             if absence_hours is not None:
                 reference = trigger.last_fired_at or trigger.created_at
-                if now < reference + timedelta(hours=float(absence_hours)):
+                try:
+                    threshold = timedelta(hours=float(absence_hours))
+                    if now < reference + threshold:
+                        continue
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "triggers.malformed_absence_hours",
+                        extra={"trigger_id": trigger.id, "absence_hours": absence_hours},
+                    )
                     continue
 
         due.append(trigger)

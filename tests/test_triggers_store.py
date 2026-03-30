@@ -25,6 +25,7 @@ from weft.triggers import (
 async def _make_trigger(pool, name="test trigger", **kwargs):
     defaults = {
         "condition_type": TriggerConditionType.event,
+        "condition": {"event_name": "test_event"},
         "action": "notify user",
     }
     defaults.update(kwargs)
@@ -86,7 +87,9 @@ async def test_list_triggers_all(pool):
 
 
 async def test_list_triggers_by_condition_type(pool):
-    await _make_trigger(pool, name="time", condition_type=TriggerConditionType.time)
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    await _make_trigger(pool, name="time", condition_type=TriggerConditionType.time,
+                        condition={"trigger_at": future})
     await _make_trigger(pool, name="event", condition_type=TriggerConditionType.event)
     await _make_trigger(pool, name="event2", condition_type=TriggerConditionType.event)
 
@@ -308,7 +311,8 @@ async def test_get_triggers_due_absence_condition(pool):
 async def test_get_triggers_due_filter_by_condition_type(pool):
     """Can filter due triggers by condition_type."""
     await _make_trigger(pool, name="event", condition_type=TriggerConditionType.event)
-    await _make_trigger(pool, name="threshold", condition_type=TriggerConditionType.threshold)
+    await _make_trigger(pool, name="threshold", condition_type=TriggerConditionType.threshold,
+                        condition={"metric": "memory_count", "threshold": 100})
 
     due = await get_triggers_due(pool, condition_type=TriggerConditionType.event)
     assert len(due) == 1
@@ -332,11 +336,84 @@ async def test_get_triggers_due_filter_by_project(pool):
 async def test_trigger_to_dict(pool):
     t = await _make_trigger(
         pool,
-        condition={"key": "value"},
+        condition={"event_name": "deploy", "extra": "metadata"},
         cooldown_hours=1.5,
     )
     d = t.to_dict()
     assert d["condition_type"] == "event"
     assert d["status"] == "enabled"
-    assert d["condition"] == {"key": "value"}
+    assert d["condition"]["event_name"] == "deploy"
     assert d["cooldown_hours"] == pytest.approx(1.5)
+
+
+# --- Condition validation ---
+
+
+def test_validation_time_requires_trigger_at():
+    with pytest.raises(ValueError, match="trigger_at"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.time,
+            condition={}, action="x",
+        )
+
+
+def test_validation_time_rejects_bad_iso():
+    with pytest.raises(ValueError, match="valid ISO datetime"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.time,
+            condition={"trigger_at": "not-a-date"}, action="x",
+        )
+
+
+def test_validation_threshold_requires_metric_and_value():
+    with pytest.raises(ValueError, match="metric"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.threshold,
+            condition={"threshold": 10}, action="x",
+        )
+    with pytest.raises(ValueError, match="threshold"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.threshold,
+            condition={"metric": "count"}, action="x",
+        )
+
+
+def test_validation_threshold_rejects_non_numeric():
+    with pytest.raises(ValueError, match="number"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.threshold,
+            condition={"metric": "count", "threshold": "high"}, action="x",
+        )
+
+
+def test_validation_event_requires_event_name():
+    with pytest.raises(ValueError, match="event_name"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.event,
+            condition={}, action="x",
+        )
+
+
+def test_validation_absence_requires_hours():
+    with pytest.raises(ValueError, match="absence_hours"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.absence,
+            condition={}, action="x",
+        )
+
+
+def test_validation_absence_rejects_negative():
+    with pytest.raises(ValueError, match="positive"):
+        TriggerCreate(
+            name="bad", condition_type=TriggerConditionType.absence,
+            condition={"absence_hours": -1}, action="x",
+        )
+
+
+def test_validation_allows_extra_keys():
+    """Extra keys in condition are allowed — only required keys are enforced."""
+    tc = TriggerCreate(
+        name="ok", condition_type=TriggerConditionType.event,
+        condition={"event_name": "deploy", "channel": "#ops"}, action="x",
+    )
+    assert tc.condition["channel"] == "#ops"
