@@ -2,13 +2,15 @@
 
 Records whether agent actions were approved, rejected, or modified by users.
 Aggregation queries support autonomy tier promotion/demotion decisions.
+Includes evaluate_tier_change() for automatic promotion/demotion after each
+calibration event.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
@@ -21,6 +23,13 @@ from weft.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Thresholds for tier promotion/demotion evaluation
+_PROMO_MIN_RECORDS = 5          # Minimum calibrations before considering promotion
+_PROMO_APPROVAL_RATE = 0.8     # 80% approval rate needed for promotion
+_DEMO_MIN_RECORDS = 3           # Minimum calibrations before considering demotion
+_DEMO_REJECTION_RATE = 0.5     # 50% rejection rate triggers demotion
+_EVAL_WINDOW_DAYS = 30          # Look at records from the last 30 days
 
 
 # --- Row mapping ---
@@ -230,3 +239,80 @@ async def delete_calibration(
         record_id,
     )
     return result.split()[-1] != "0"
+
+
+# --- Tier evaluation ---
+
+
+async def evaluate_tier_change(
+    pool: asyncpg.Pool,
+    action_category: str,
+    *,
+    project_id: str | None = None,
+) -> dict:
+    """Evaluate whether an action category warrants promotion or demotion.
+
+    Looks at calibration records within the evaluation window and compares
+    approval/rejection rates against thresholds. Returns a recommendation
+    dict with keys: action, recommendation, reason, stats.
+
+    Recommendations: "promote", "demote", or "no_change".
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=_EVAL_WINDOW_DAYS)
+    summary = await get_calibration_summary(
+        pool,
+        action_category=action_category,
+        project_id=project_id,
+        since=since,
+    )
+
+    total = summary["total"]
+    approved = summary["approved"]
+    rejected = summary["rejected"]
+
+    result = {
+        "action_category": action_category,
+        "recommendation": "no_change",
+        "reason": "",
+        "stats": {
+            "total": total,
+            "approved": approved,
+            "rejected": rejected,
+            "window_days": _EVAL_WINDOW_DAYS,
+        },
+    }
+
+    if total == 0:
+        result["reason"] = "No calibration records in evaluation window"
+        return result
+
+    approval_rate = approved / total
+    rejection_rate = rejected / total
+
+    # Check demotion first (safety takes priority)
+    if total >= _DEMO_MIN_RECORDS and rejection_rate >= _DEMO_REJECTION_RATE:
+        result["recommendation"] = "demote"
+        result["reason"] = (
+            f"Rejection rate {rejection_rate:.0%} >= {_DEMO_REJECTION_RATE:.0%} "
+            f"threshold over {total} records"
+        )
+        result["stats"]["rejection_rate"] = rejection_rate
+        return result
+
+    # Check promotion
+    if total >= _PROMO_MIN_RECORDS and approval_rate >= _PROMO_APPROVAL_RATE:
+        result["recommendation"] = "promote"
+        result["reason"] = (
+            f"Approval rate {approval_rate:.0%} >= {_PROMO_APPROVAL_RATE:.0%} "
+            f"threshold over {total} records"
+        )
+        result["stats"]["approval_rate"] = approval_rate
+        return result
+
+    result["reason"] = (
+        f"Insufficient evidence: {total} records, "
+        f"{approval_rate:.0%} approval, {rejection_rate:.0%} rejection"
+    )
+    result["stats"]["approval_rate"] = approval_rate
+    result["stats"]["rejection_rate"] = rejection_rate
+    return result

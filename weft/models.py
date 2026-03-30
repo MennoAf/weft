@@ -585,6 +585,143 @@ class CalibrationRecord(BaseModel):
         return d
 
 
+class DegradationTriggerType(str, Enum):
+    """Type of condition that triggers a degradation policy."""
+
+    low_confidence = "low_confidence"      # Memory confidence drops below threshold
+    api_error = "api_error"                # Repeated API/embedding failures
+    context_decay = "context_decay"        # Context window saturation or staleness
+    budget_breach = "budget_breach"        # Token/cost budget exceeded
+
+
+DegradationTriggerTypeLiteral = Literal[
+    "low_confidence", "api_error", "context_decay", "budget_breach",
+]
+
+
+class DegradationAction(str, Enum):
+    """Action to take when a degradation policy fires."""
+
+    pause = "pause"          # Suspend the operation
+    escalate = "escalate"    # Escalate to human/supervisor
+    restart = "restart"      # Restart the operation from scratch
+    restrict = "restrict"    # Limit scope or capabilities
+
+
+DegradationActionLiteral = Literal[
+    "pause", "escalate", "restart", "restrict",
+]
+
+
+class DegradationPolicyStatus(str, Enum):
+    active = "active"
+    disabled = "disabled"
+    fired = "fired"
+
+
+class DegradationPolicyCreate(BaseModel):
+    """Input model for creating a degradation policy.
+
+    Condition payloads are validated per trigger_type:
+      low_confidence: requires 'threshold' (float 0.0-1.0)
+      api_error:      requires 'max_errors' (positive int) and 'window_minutes' (positive number)
+      context_decay:  requires 'max_age_hours' (positive number)
+      budget_breach:  requires 'max_tokens' (positive int)
+    """
+
+    name: str
+    trigger_type: DegradationTriggerType
+    condition: dict[str, Any] = Field(default_factory=dict)
+    action: DegradationAction
+    description: str | None = None
+    cooldown_minutes: float | None = None  # Minimum minutes between firings
+    max_fires: int | None = None           # None = unlimited
+    project_id: str | None = None
+    agent_id: str | None = None
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        self._validate_condition()
+
+    def _validate_condition(self) -> None:
+        tt = self.trigger_type
+        c = self.condition
+
+        if tt == DegradationTriggerType.low_confidence:
+            if "threshold" not in c:
+                raise ValueError(
+                    "low_confidence trigger requires 'threshold' in condition"
+                )
+            if not isinstance(c["threshold"], (int, float)):
+                raise ValueError("threshold must be a number")
+            if not 0.0 <= c["threshold"] <= 1.0:
+                raise ValueError("threshold must be between 0.0 and 1.0")
+
+        elif tt == DegradationTriggerType.api_error:
+            if "max_errors" not in c:
+                raise ValueError(
+                    "api_error trigger requires 'max_errors' in condition"
+                )
+            if not isinstance(c["max_errors"], int) or c["max_errors"] <= 0:
+                raise ValueError("max_errors must be a positive integer")
+            if "window_minutes" not in c:
+                raise ValueError(
+                    "api_error trigger requires 'window_minutes' in condition"
+                )
+            if (
+                not isinstance(c["window_minutes"], (int, float))
+                or c["window_minutes"] <= 0
+            ):
+                raise ValueError("window_minutes must be a positive number")
+
+        elif tt == DegradationTriggerType.context_decay:
+            if "max_age_hours" not in c:
+                raise ValueError(
+                    "context_decay trigger requires 'max_age_hours' in condition"
+                )
+            if (
+                not isinstance(c["max_age_hours"], (int, float))
+                or c["max_age_hours"] <= 0
+            ):
+                raise ValueError("max_age_hours must be a positive number")
+
+        elif tt == DegradationTriggerType.budget_breach:
+            if "max_tokens" not in c:
+                raise ValueError(
+                    "budget_breach trigger requires 'max_tokens' in condition"
+                )
+            if not isinstance(c["max_tokens"], int) or c["max_tokens"] <= 0:
+                raise ValueError("max_tokens must be a positive integer")
+
+
+class DegradationPolicy(BaseModel):
+    """A degradation policy — condition-driven rule for handling system degradation."""
+
+    id: str = Field(default_factory=_weft_id)
+    name: str
+    trigger_type: DegradationTriggerType
+    condition: dict[str, Any] = Field(default_factory=dict)
+    action: DegradationAction
+    description: str | None = None
+    status: DegradationPolicyStatus = DegradationPolicyStatus.active
+    cooldown_minutes: float | None = None
+    max_fires: int | None = None
+    fire_count: int = 0
+    last_fired_at: datetime | None = None
+    project_id: str | None = None
+    agent_id: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        d = self.model_dump(mode="json")
+        d["trigger_type"] = self.trigger_type.value
+        d["action"] = self.action.value
+        d["status"] = self.status.value
+        return d
+
+
 class ContradictionWarning(BaseModel):
     """A warning that a new memory may contradict an existing one."""
 
