@@ -774,6 +774,17 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             USING (user_id IS NULL OR user_id = nullif(current_setting('app.user_id', true), ''));
         """,
     ),
+    (
+        26,
+        "Add expires_at column to episodes for working memory TTL",
+        """
+        ALTER TABLE episodes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
+        CREATE INDEX IF NOT EXISTS idx_episodes_expires
+            ON episodes (expires_at)
+            WHERE expires_at IS NOT NULL AND status = 'open';
+        """,
+    ),
 ]
 
 
