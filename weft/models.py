@@ -507,6 +507,43 @@ class CheckIn(BaseModel):
         return self.model_dump(mode="json")
 
 
+class CalibrationOutcome(str, Enum):
+    approved = "approved"
+    rejected = "rejected"
+    modified = "modified"
+
+
+class CalibrationCreate(BaseModel):
+    """Input model for recording an agent action calibration."""
+
+    action_category: str
+    action_description: str
+    outcome: CalibrationOutcome
+    agent_id: str | None = None
+    project_id: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class CalibrationRecord(BaseModel):
+    """A record of an agent action outcome (approved/rejected/modified)."""
+
+    id: str = Field(default_factory=_weft_id)
+    action_category: str
+    action_description: str
+    outcome: CalibrationOutcome
+    agent_id: str | None = None
+    project_id: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+    user_id: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for MCP tool responses."""
+        d = self.model_dump(mode="json")
+        d["outcome"] = self.outcome.value
+        return d
+
+
 class ContradictionWarning(BaseModel):
     """A warning that a new memory may contradict an existing one."""
 
