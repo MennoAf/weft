@@ -934,6 +934,7 @@ async def build_primer(
     from weft.primer_sections.rules import build_rules_section
     from weft.primer_sections.autonomy import build_autonomy_section
     from weft.primer_sections.calibration import build_calibration_section
+    from weft.primer_sections.degradation import build_degradation_section
     from weft.primer_sections.wellness import build_wellness_section
     from weft.primer_sections.working_memory import build_working_memory_section
 
@@ -971,6 +972,7 @@ async def build_primer(
     entities_result = await build_entities_section(ctx)
     autonomy_result = await build_autonomy_section(ctx)
     calibration_result = await build_calibration_section(ctx)
+    degradation_result = await build_degradation_section(ctx)
     working_memory_result = await build_working_memory_section(ctx)
 
     # --- Phase 2: Independent post-sections (parallel) ---
@@ -1058,6 +1060,10 @@ async def build_primer(
                 calibration_result.items,
                 "Use weft_calibration_summary to view calibration insights.",
             )} if not calibration_result.skipped else {}),
+            **({"degradation": _deferred(
+                degradation_result.items,
+                "Use weft_degradation_list to view degradation policies.",
+            )} if not degradation_result.skipped else {}),
             **({"working_memory": _deferred(
                 working_memory_result.items,
                 "Use weft_focus(intent=...) to load open episodes.",
@@ -1089,6 +1095,7 @@ async def build_primer(
         "entities": entities_result.items,
         "autonomy": autonomy_result.items,
         **({"calibration": calibration_result.items} if not calibration_result.skipped else {}),
+        **({"degradation": degradation_result.items} if not degradation_result.skipped else {}),
         **({"working_memory": working_memory_result.items} if not working_memory_result.skipped else {}),
         "changes_since": changes_since,
         "total_tokens": ctx.used_tokens,

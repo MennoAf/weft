@@ -312,3 +312,93 @@ async def get_active_policies(
 
     rows = await get_db(pool).fetch(query, *params)
     return [_row_to_policy(r) for r in rows]
+
+
+# --- State evaluation ---
+
+
+async def update_degradation_state(
+    pool: asyncpg.Pool,
+    *,
+    metrics: dict[str, float | int],
+    project_id: str | None = None,
+) -> list[dict]:
+    """Evaluate current metrics against active degradation policies.
+
+    Checks each eligible policy's condition against the provided metrics
+    and fires any that match. Returns a list of triggered policy dicts
+    with the action to take.
+
+    metrics keys should match condition requirements:
+      - "confidence": current confidence level (0.0-1.0)
+      - "error_count": number of API errors in window
+      - "context_age_hours": hours since context was fresh
+      - "tokens_used": total tokens consumed
+
+    Returns list of dicts: [{policy_id, name, action, reason, ...}, ...]
+    """
+    active = await get_active_policies(pool, project_id=project_id)
+    triggered: list[dict] = []
+
+    for policy in active:
+        match = _evaluate_condition(policy, metrics)
+        if match is None:
+            continue
+
+        fired = await record_fire(pool, policy.id)
+        if fired is None:
+            continue
+
+        triggered.append({
+            "policy_id": policy.id,
+            "name": policy.name,
+            "trigger_type": policy.trigger_type.value,
+            "action": policy.action.value,
+            "reason": match,
+            "fire_count": fired.fire_count,
+            "status": fired.status.value,
+        })
+        logger.info(
+            "Degradation policy %s fired: %s → %s (%s)",
+            policy.id, policy.name, policy.action.value, match,
+        )
+
+    return triggered
+
+
+def _evaluate_condition(
+    policy: DegradationPolicy,
+    metrics: dict[str, float | int],
+) -> str | None:
+    """Check if a policy's condition is met by the current metrics.
+
+    Returns a reason string if triggered, None otherwise.
+    """
+    tt = policy.trigger_type
+    c = policy.condition
+
+    if tt == DegradationTriggerType.low_confidence:
+        threshold = c.get("threshold", 0.3)
+        current = metrics.get("confidence")
+        if current is not None and current < threshold:
+            return f"confidence {current:.2f} < threshold {threshold:.2f}"
+
+    elif tt == DegradationTriggerType.api_error:
+        max_errors = c.get("max_errors", 5)
+        current = metrics.get("error_count")
+        if current is not None and current >= max_errors:
+            return f"error_count {current} >= max_errors {max_errors}"
+
+    elif tt == DegradationTriggerType.context_decay:
+        max_age = c.get("max_age_hours", 24)
+        current = metrics.get("context_age_hours")
+        if current is not None and current >= max_age:
+            return f"context_age_hours {current:.1f} >= max_age {max_age}"
+
+    elif tt == DegradationTriggerType.budget_breach:
+        max_tokens = c.get("max_tokens", 100000)
+        current = metrics.get("tokens_used")
+        if current is not None and current >= max_tokens:
+            return f"tokens_used {current} >= max_tokens {max_tokens}"
+
+    return None
