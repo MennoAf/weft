@@ -14,8 +14,18 @@ import asyncpg
 from datetime import timedelta
 
 from weft.db.connection import get_db
-from weft.models import Episode, EpisodeCreate, EpisodeStatus, EpisodeWithMemories, Memory, _weft_id
-from weft.store import _row_to_memory
+from weft.models import (
+    Episode,
+    EpisodeCreate,
+    EpisodeStatus,
+    EpisodeWithMemories,
+    Memory,
+    MemoryCreate,
+    MemorySource,
+    MemoryType,
+    _weft_id,
+)
+from weft.store import _row_to_memory, store_memory
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -278,6 +288,77 @@ async def timeline_query(
     return [_row_to_episode(r) for r in rows]
 
 
+async def graduate_episode(
+    pool: asyncpg.Pool,
+    episode_id: str,
+    *,
+    memory_type: MemoryType = MemoryType.fact,
+    content: str | None = None,
+    topic: list[str] | None = None,
+    confidence: float = 0.7,
+    embedding: list[float] | None = None,
+) -> tuple[Episode, Memory]:
+    """Graduate an episode into a persistent memory.
+
+    Creates a memory from the episode's content (or custom content),
+    links the memory to the episode, sets graduated_memory_id, and
+    transitions the episode to 'graduated' status.
+
+    Returns the updated episode and the newly created memory.
+    Raises ValueError if the episode doesn't exist or is already graduated.
+    """
+    ep = await get_episode(pool, episode_id)
+    if ep is None:
+        raise ValueError(f"Episode {episode_id} not found")
+    if ep.status == EpisodeStatus.graduated:
+        raise ValueError(f"Episode {episode_id} is already graduated")
+
+    # Build memory content from episode if not provided
+    if content is None:
+        parts = [ep.title]
+        if ep.summary:
+            parts.append(ep.summary)
+        content = "\n\n".join(parts)
+
+    # Create the persistent memory
+    memory = await store_memory(
+        pool,
+        MemoryCreate(
+            type=memory_type,
+            content=content,
+            topic=topic or [],
+            source=MemorySource.conversation,
+            confidence=confidence,
+            project_id=ep.project_id,
+            agent_id=ep.agent_id,
+        ),
+        embedding=embedding,
+    )
+
+    # Link the memory to the episode
+    await add_memory_to_episode(pool, episode_id, memory.id)
+
+    # Update episode: set graduated status and graduated_memory_id
+    now = datetime.now(timezone.utc)
+    row = await get_db(pool).fetchrow(
+        """
+        UPDATE episodes
+        SET status = 'graduated',
+            graduated_memory_id = $1,
+            ended_at = COALESCE(ended_at, $2),
+            updated_at = $2
+        WHERE id = $3
+        RETURNING *
+        """,
+        memory.id,
+        now,
+        episode_id,
+    )
+
+    updated_ep = _row_to_episode(row)
+    return updated_ep, memory
+
+
 # --- Helpers ---
 
 
@@ -292,6 +373,7 @@ def _row_to_episode(row: asyncpg.Record) -> Episode:
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         expires_at=row.get("expires_at"),
+        graduated_memory_id=row.get("graduated_memory_id"),
         status=EpisodeStatus(row["status"]),
         token_count=row["token_count"],
         created_at=row["created_at"],

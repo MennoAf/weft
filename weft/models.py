@@ -234,6 +234,7 @@ class EpisodeStatus(str, Enum):
     open = "open"
     closed = "closed"
     expired = "expired"
+    graduated = "graduated"
 
 
 class Episode(BaseModel):
@@ -247,6 +248,7 @@ class Episode(BaseModel):
     started_at: datetime = Field(default_factory=_now)
     ended_at: datetime | None = None
     expires_at: datetime | None = None
+    graduated_memory_id: str | None = None
     status: EpisodeStatus = EpisodeStatus.open
     token_count: int = 0
     created_at: datetime = Field(default_factory=_now)
