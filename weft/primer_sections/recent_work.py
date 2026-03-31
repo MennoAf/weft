@@ -87,7 +87,7 @@ async def build_recent_work_section(ctx: PrimerContext) -> SectionResult:
             ctx.excluded += 1
             continue
         cost = mem.token_count or estimate_tokens(mem.content)
-        if ctx.fits(cost, section_used, _CAP):
+        if ctx.fits_or_guarantee(cost, section_used, _CAP):
             age_hours = (ctx.now - mem.created_at).total_seconds() / 3600
             entry = {
                 "summary": mem.content,

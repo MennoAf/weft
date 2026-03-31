@@ -52,7 +52,7 @@ async def build_calibration_section(ctx: PrimerContext) -> SectionResult:
         f"{summary['approval_rate']:.0%} approval rate (last {_EVAL_WINDOW_DAYS}d)"
     )
     cost = estimate_tokens(overview_text)
-    if ctx.fits(cost, section_used, _CAP):
+    if ctx.fits_or_guarantee(cost, section_used, _CAP):
         items.append(overview)
         ctx.used_tokens += cost
         section_used += cost

@@ -78,7 +78,7 @@ async def build_anti_patterns_section(ctx: PrimerContext) -> SectionResult:
             ctx.excluded += len(candidates) - i
             break
         cost = (mem.token_count or estimate_tokens(mem.content)) + DICT_OVERHEAD_TOKENS
-        if ctx.fits(cost, section_used, _CAP):
+        if ctx.fits_or_guarantee(cost, section_used, _CAP):
             items.append({
                 "id": mem.id,
                 "type": mem.type.value,

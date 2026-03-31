@@ -70,7 +70,7 @@ async def build_issues_section(ctx: PrimerContext) -> SectionResult:
     section_used = 0
     for mem, _sim in candidates:
         cost = (mem.token_count or estimate_tokens(mem.content)) + DICT_OVERHEAD_TOKENS
-        if ctx.fits(cost, section_used, _CAP):
+        if ctx.fits_or_guarantee(cost, section_used, _CAP):
             items.append({
                 "id": mem.id,
                 "type": mem.type.value,
