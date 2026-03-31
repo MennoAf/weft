@@ -47,7 +47,7 @@ class SectionResult:
 SECTION_BUDGETS: dict[str, int] = {
     "grounding": 50,
     "rules": 100,
-    "behaviors": 150,
+    "behaviors": 400,
     "handoff": 800,
     "recent_work": 150,
     "issues": 200,
