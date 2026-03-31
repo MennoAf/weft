@@ -53,7 +53,12 @@ async def build_behaviors_section(ctx: PrimerContext) -> SectionResult:
         else:
             beh = item
         cost = beh.token_count or estimate_tokens(beh.trigger_pattern + " " + beh.action)
-        if ctx.fits(cost, section_used, cap):
+        # Guarantee at least the highest-priority behavior surfaces even if
+        # it exceeds the section cap, provided global budget has room.
+        # Skip the guarantee when cap is explicitly zeroed (mode suppression).
+        first_item = len(items) == 0
+        fits_global = ctx.used_tokens + cost <= ctx.budget_tokens
+        if ctx.fits(cost, section_used, cap) or (first_item and cap > 0 and fits_global):
             entry = {
                 "trigger": beh.trigger_pattern,
                 "action": beh.action,
