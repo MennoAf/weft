@@ -1458,6 +1458,31 @@ async def weft_behavior_list(
         return _db_error_response("weft_behavior_list", e)
 
 
+@mcp.tool()
+async def weft_behavior_delete(
+    ctx: Context,
+    behavior_id: str,
+    hard: bool = False,
+) -> dict:
+    """Delete a behavioral rule by ID.
+
+    hard=False (default): soft-delete (archives the behavior).
+    hard=True: permanently removes the behavior from the database."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            deleted = await delete_behavior(app.pool, behavior_id, hard=hard)
+            return {
+                "behavior_id": behavior_id,
+                "deleted": deleted,
+                "hard": hard,
+            }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_behavior_delete", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_behavior_delete", e)
+
+
 # --- Episode tools ---
 
 
