@@ -51,9 +51,9 @@ SECTION_BUDGETS: dict[str, int] = {
     "handoff": 800,
     "recent_work": 300,
     "issues": 200,
-    "anti_patterns": 150,
+    "anti_patterns": 250,
     "decisions": 250,
-    "entities": 150,
+    "entities": 250,
     "working_memory": 200,
 }
 
