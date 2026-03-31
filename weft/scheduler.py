@@ -21,7 +21,7 @@ import asyncpg
 from slack_sdk.web.async_client import AsyncWebClient
 
 from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts
-from weft.models import Alert
+from weft.models import Alert, Trigger
 
 logger = logging.getLogger(__name__)
 
@@ -375,6 +375,46 @@ async def memory_hygiene_loop(
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         logger.info("memory_hygiene.stopped")
+        raise
+
+
+# --- Trigger evaluation loop ---
+
+_TRIGGER_EVAL_INTERVAL = 300  # check every 5 minutes
+
+
+async def trigger_evaluation_loop(
+    pool: asyncpg.Pool,
+    *,
+    interval: int = _TRIGGER_EVAL_INTERVAL,
+) -> None:
+    """Periodic trigger evaluation. Runs until cancelled.
+
+    Checks for due triggers (cooldown elapsed, conditions met) and logs them.
+    Actual firing is left to the agent or explicit weft_trigger_fire calls —
+    this loop surfaces what's ready so the primer can include it.
+    """
+    from weft.triggers import get_triggers_due
+
+    logger.info("trigger_eval.started", extra={"interval": interval})
+    try:
+        while True:
+            try:
+                due = await get_triggers_due(pool)
+                if due:
+                    logger.info(
+                        "trigger_eval.due_triggers",
+                        extra={
+                            "count": len(due),
+                            "trigger_ids": [t.id for t in due],
+                        },
+                    )
+            except Exception:
+                logger.exception("trigger_eval.loop_error")
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("trigger_eval.stopped")
         raise
 
 

@@ -25,7 +25,7 @@ from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.slack_commands import handle_slash_checkin
-from weft.scheduler import daily_brief_loop, loom_awareness_loop, memory_hygiene_loop, scheduler_loop, slack_sync_loop
+from weft.scheduler import daily_brief_loop, loom_awareness_loop, memory_hygiene_loop, scheduler_loop, slack_sync_loop, trigger_evaluation_loop
 from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
@@ -330,12 +330,15 @@ async def lifespan(server: FastMCP):
     ctx._memory_hygiene_task = asyncio.create_task(
         memory_hygiene_loop(pool)
     )
+    ctx._trigger_eval_task = asyncio.create_task(
+        trigger_evaluation_loop(pool)
+    )
 
     try:
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._loom_awareness_task, ctx._memory_hygiene_task):
+        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task):
             if task is not None:
                 task.cancel()
                 try:

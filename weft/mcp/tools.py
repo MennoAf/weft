@@ -2983,3 +2983,208 @@ async def weft_budget_check(
         return _input_error_response("weft_budget_check", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_budget_check", e)
+
+
+# --- Proactive trigger tools ---
+
+
+@mcp.tool()
+async def weft_trigger_create(
+    ctx: Context,
+    name: str,
+    condition_type: str,
+    condition: dict,
+    action: str,
+    cooldown_hours: float | None = None,
+    max_fires: int | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Create a proactive trigger that fires when its condition is met.
+
+    condition_type: 'time', 'threshold', 'event', or 'absence'.
+    condition: dict with type-specific params:
+      time: {'trigger_at': '<ISO datetime>'}
+      threshold: {'metric': '<name>', 'threshold': <number>}
+      event: {'event_name': '<name>'}
+      absence: {'absence_hours': <positive number>}
+    action: description of what should happen when triggered.
+    cooldown_hours: minimum hours between firings (None = no cooldown).
+    max_fires: stop after N firings (None = unlimited)."""
+    try:
+        from weft.models import TriggerConditionType, TriggerCreate
+        from weft.triggers import create_trigger
+
+        valid_types = [t.value for t in TriggerConditionType]
+        if condition_type not in valid_types:
+            return _input_error_response(
+                "weft_trigger_create",
+                ValueError(f"Invalid condition_type '{condition_type}'. Valid: {valid_types}"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        create = TriggerCreate(
+            name=name,
+            condition_type=TriggerConditionType(condition_type),
+            condition=condition,
+            action=action,
+            cooldown_hours=cooldown_hours,
+            max_fires=max_fires,
+            project_id=resolved_project,
+            agent_id=agent_id,
+        )
+        async with acquire(app.pool):
+            trigger = await create_trigger(app.pool, create)
+            return {"success": True, "trigger": trigger.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_trigger_create", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_trigger_create", e)
+
+
+@mcp.tool()
+async def weft_trigger_list(
+    ctx: Context,
+    condition_type: str | None = None,
+    status: str | None = None,
+    project_id: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """List proactive triggers with optional filters.
+
+    condition_type: 'time', 'threshold', 'event', or 'absence'.
+    status: 'enabled', 'disabled', or 'fired'."""
+    try:
+        from weft.models import TriggerConditionType, TriggerStatus
+        from weft.triggers import list_triggers
+
+        ct_enum = None
+        if condition_type is not None:
+            valid = [t.value for t in TriggerConditionType]
+            if condition_type not in valid:
+                return _input_error_response(
+                    "weft_trigger_list",
+                    ValueError(f"Invalid condition_type '{condition_type}'. Valid: {valid}"),
+                )
+            ct_enum = TriggerConditionType(condition_type)
+
+        st_enum = None
+        if status is not None:
+            valid = [s.value for s in TriggerStatus]
+            if status not in valid:
+                return _input_error_response(
+                    "weft_trigger_list",
+                    ValueError(f"Invalid status '{status}'. Valid: {valid}"),
+                )
+            st_enum = TriggerStatus(status)
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        async with acquire(app.pool):
+            triggers = await list_triggers(
+                app.pool,
+                condition_type=ct_enum,
+                status=st_enum,
+                project_id=resolved_project,
+                limit=limit,
+            )
+        return {
+            "count": len(triggers),
+            "triggers": [t.to_dict() for t in triggers],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_trigger_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_trigger_list", e)
+
+
+@mcp.tool()
+async def weft_trigger_due(
+    ctx: Context,
+    condition_type: str | None = None,
+    project_id: str | None = None,
+) -> dict:
+    """Get triggers whose conditions are met and cooldown has elapsed.
+
+    Returns enabled triggers ready to fire, sorted oldest-first.
+    condition_type: optional filter — 'time', 'threshold', 'event', or 'absence'."""
+    try:
+        from weft.models import TriggerConditionType
+        from weft.triggers import get_triggers_due
+
+        ct_enum = None
+        if condition_type is not None:
+            valid = [t.value for t in TriggerConditionType]
+            if condition_type not in valid:
+                return _input_error_response(
+                    "weft_trigger_due",
+                    ValueError(f"Invalid condition_type '{condition_type}'. Valid: {valid}"),
+                )
+            ct_enum = TriggerConditionType(condition_type)
+
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        async with acquire(app.pool):
+            due = await get_triggers_due(
+                app.pool,
+                condition_type=ct_enum,
+                project_id=resolved_project,
+            )
+        return {
+            "count": len(due),
+            "triggers": [t.to_dict() for t in due],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_trigger_due", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_trigger_due", e)
+
+
+@mcp.tool()
+async def weft_trigger_fire(
+    ctx: Context,
+    trigger_id: str,
+) -> dict:
+    """Record that a trigger has fired. Increments fire_count and sets last_fired_at.
+
+    If max_fires is reached, transitions status to 'fired' (one-shot complete).
+    Returns the updated trigger."""
+    try:
+        from weft.triggers import record_fire
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            trigger = await record_fire(app.pool, trigger_id)
+            return {"success": True, "trigger": trigger.to_dict()}
+    except LookupError as e:
+        return _input_error_response("weft_trigger_fire", e)
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_trigger_fire", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_trigger_fire", e)
+
+
+@mcp.tool()
+async def weft_trigger_delete(
+    ctx: Context,
+    trigger_id: str,
+) -> dict:
+    """Permanently delete a proactive trigger."""
+    try:
+        from weft.triggers import delete_trigger
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            deleted = await delete_trigger(app.pool, trigger_id)
+            return {
+                "trigger_id": trigger_id,
+                "deleted": deleted,
+            }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_trigger_delete", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_trigger_delete", e)
