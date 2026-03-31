@@ -68,7 +68,7 @@ async def build_working_memory_section(ctx: PrimerContext) -> SectionResult:
             text += ms["content"]
         cost = estimate_tokens(text) + 20  # overhead for dict keys
 
-        if ctx.fits(cost, section_used, _CAP):
+        if ctx.fits_or_guarantee(cost, section_used, _CAP):
             items.append(entry)
             ctx.used_tokens += cost
             section_used += cost

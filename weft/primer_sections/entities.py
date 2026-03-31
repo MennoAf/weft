@@ -39,7 +39,7 @@ async def build_entities_section(ctx: PrimerContext) -> SectionResult:
             break
         ent_text = ent.name + (f": {ent.description}" if ent.description else "")
         cost = estimate_tokens(ent_text)
-        if ctx.fits(cost, section_used, cap):
+        if ctx.fits_or_guarantee(cost, section_used, cap):
             items.append({
                 "name": ent.name,
                 "type": ent.entity_type.value,

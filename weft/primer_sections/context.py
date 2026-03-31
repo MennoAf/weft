@@ -49,7 +49,7 @@ SECTION_BUDGETS: dict[str, int] = {
     "rules": 100,
     "behaviors": 400,
     "handoff": 800,
-    "recent_work": 150,
+    "recent_work": 300,
     "issues": 200,
     "anti_patterns": 150,
     "decisions": 250,
@@ -134,6 +134,21 @@ class PrimerContext:
             self.used_tokens + cost <= self.budget_tokens
             and section_used + cost <= section_cap
         )
+
+    def fits_or_guarantee(
+        self, cost: int, section_used: int, section_cap: int,
+    ) -> bool:
+        """Like fits(), but guarantees at least one item per section.
+
+        Returns True when the item fits normally, OR when no items have
+        been packed yet (section_used == 0) and the global budget has
+        room.  Respects explicit suppression (cap == 0 from mode weights).
+        """
+        if self.fits(cost, section_used, section_cap):
+            return True
+        if section_used == 0 and section_cap > 0:
+            return self.used_tokens + cost <= self.budget_tokens
+        return False
 
 
 # ---------------------------------------------------------------------------

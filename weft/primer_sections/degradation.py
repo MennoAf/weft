@@ -55,7 +55,7 @@ async def build_degradation_section(ctx: PrimerContext) -> SectionResult:
         if policy.fire_count > 0:
             text += f" (fired {policy.fire_count}x)"
         cost = estimate_tokens(text)
-        if ctx.fits(cost, section_used, _CAP):
+        if ctx.fits_or_guarantee(cost, section_used, _CAP):
             entry = {
                 "id": policy.id,
                 "name": policy.name,

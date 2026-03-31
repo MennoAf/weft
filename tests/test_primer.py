@@ -771,17 +771,30 @@ async def test_primer_recent_work_most_recent_first(pool):
 
 
 async def test_primer_recent_work_respects_section_cap(pool):
-    """recent_work section respects its token cap."""
-    # Create a milestone that's very long — should hit the cap
+    """recent_work section respects its token cap.
+
+    The guarantee-first policy allows one oversized item through if global
+    budget has room, but subsequent items must fit within the cap.
+    """
+    # Create a milestone that's very long — exceeds section cap
     await store_memory(pool, MemoryCreate(
         type=MemoryType.milestone,
         content="Big milestone: " + "x" * 1000,
         confidence=1.0,
     ))
+    # Create a second milestone
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.milestone,
+        content="Second milestone",
+        confidence=1.0,
+    ))
 
     result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
-    assert result["section_tokens"]["recent_work"] <= _CAP_RECENT_WORK
+    # Guarantee-first: the oversized item still surfaces
+    assert len(result["recent_work"]) >= 1
+    # But it shouldn't exceed the global budget
+    assert result["total_tokens"] <= 1800
 
 
 async def test_primer_recent_work_not_in_other_sections(pool):

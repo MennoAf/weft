@@ -35,7 +35,7 @@ async def build_autonomy_section(ctx: PrimerContext) -> SectionResult:
         if policy.description:
             text += f" — {policy.description}"
         cost = estimate_tokens(text)
-        if ctx.fits(cost, section_used, _CAP):
+        if ctx.fits_or_guarantee(cost, section_used, _CAP):
             items.append({
                 "action": policy.action,
                 "tier": policy.tier.value,
