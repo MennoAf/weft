@@ -36,6 +36,7 @@ async def revise_memory(
     new_confidence: float | None = None,
     new_topic: list[str] | None = None,
     new_type: MemoryType | None = None,
+    new_project_id: str | None = _UNSET,
     review_after: datetime | None = _UNSET,
 ) -> tuple[Memory, Memory]:
     """Create a new version of a memory, superseding the old one.
@@ -52,6 +53,7 @@ async def revise_memory(
     resolved_type = new_type if new_type is not None else old.type
     resolved_topic = new_topic if new_topic is not None else old.topic
     resolved_confidence = new_confidence if new_confidence is not None else old.confidence
+    resolved_project_id = old.project_id if new_project_id is _UNSET else new_project_id
     new_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(new_content)
@@ -80,7 +82,7 @@ async def revise_memory(
                 resolved_confidence,
                 token_count,
                 now,
-                old.project_id,
+                resolved_project_id,
                 old.agent_id,
                 embedding,
                 resolved_review,
@@ -117,7 +119,7 @@ async def revise_memory(
         updated_at=now,
         accessed_at=now,
         access_count=0,
-        project_id=old.project_id,
+        project_id=resolved_project_id,
         agent_id=old.agent_id,
         status=MemoryStatus.active,
         pinned=False,
