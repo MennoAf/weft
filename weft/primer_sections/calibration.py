@@ -11,12 +11,12 @@ import logging
 from datetime import timedelta
 
 from weft.calibration import evaluate_tier_change, get_calibration_summary
-from weft.primer_sections.context import PrimerContext, SectionResult
+from weft.primer_sections.context import SECTION_BUDGETS, PrimerContext, SectionResult
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
-_CAP = 150   # token budget for calibration section
+_CAP = SECTION_BUDGETS["calibration"]
 _EVAL_WINDOW_DAYS = 30
 _MIN_RECORDS_TO_SHOW = 1  # Don't show section if fewer records exist
 

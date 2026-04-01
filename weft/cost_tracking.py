@@ -192,7 +192,7 @@ async def get_cost_summary(
         idx += 1
 
     if project_id is not None:
-        clauses.append(f"project_id = ${idx}")
+        clauses.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
         idx += 1
 
