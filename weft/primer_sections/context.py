@@ -2,11 +2,8 @@
 
 Defines PrimerContext (the bag of state passed to every section builder)
 and SectionResult (the uniform return type).  Also houses SECTION_BUDGETS
-so the orchestrator owns token allocation — individual sections never
-hardcode their own limits.
-
-Reference: weft/primer.py lines 1-100 (constants) and 166-202 (build_primer
-signature and shared setup).  Line numbers are as-of commit 2955aed.
+and SECTION_MAX_ITEMS so token allocation and item caps are centralized —
+individual sections read from these dicts rather than hardcoding limits.
 """
 
 from __future__ import annotations
@@ -54,6 +51,11 @@ SECTION_BUDGETS: dict[str, int] = {
     "anti_patterns": 250,
     "decisions": 250,
     "entities": 250,
+    "autonomy": 150,
+    "calibration": 150,
+    "cost": 100,
+    "degradation": 150,
+    "triggers": 150,
     "working_memory": 200,
 }
 
@@ -64,6 +66,9 @@ SECTION_MAX_ITEMS: dict[str, int] = {
     "entities": 10,
     "anti_patterns": 3,
     "recent_work": 3,
+    "autonomy": 10,
+    "degradation": 10,
+    "triggers": 10,
 }
 
 

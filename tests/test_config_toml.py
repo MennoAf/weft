@@ -179,3 +179,42 @@ def test_config_set_invalid_key():
     result = runner.invoke(cli, ["config", "set", "invalid.key.name", "value"])
     assert result.exit_code != 0
     assert "Unknown config key" in result.output
+
+
+# --- Primer config ---
+
+
+def test_primer_config_defaults():
+    """PrimerConfig has sensible defaults (no sections disabled)."""
+    from weft.config import PrimerConfig
+
+    pc = PrimerConfig()
+    assert pc.disabled_sections == []
+
+
+def test_primer_config_in_weft_config():
+    """WeftConfig includes a primer config section."""
+    config = WeftConfig()
+    assert hasattr(config, "primer")
+    assert config.primer.disabled_sections == []
+
+
+def test_primer_config_from_toml(tmp_path: Path, monkeypatch):
+    """PrimerConfig.disabled_sections loads from TOML."""
+    import tomllib
+
+    toml_path = tmp_path / ".weft" / "config.toml"
+    toml_path.parent.mkdir(parents=True)
+    toml_path.write_text('[primer]\ndisabled_sections = ["triggers", "cost"]\n')
+
+    # Verify TOML is valid
+    with open(toml_path, "rb") as f:
+        data = tomllib.load(f)
+    assert data["primer"]["disabled_sections"] == ["triggers", "cost"]
+
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    for var in ["WEFT_DATABASE_URL", "WEFT_REDIS_URL", "WEFT_LOG_LEVEL"]:
+        monkeypatch.delenv(var, raising=False)
+
+    config = load_config()
+    assert config.primer.disabled_sections == ["triggers", "cost"]

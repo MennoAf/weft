@@ -11,6 +11,8 @@ import logging
 
 from weft.autonomy import AutonomyTier, list_policies
 from weft.primer_sections.context import (
+    SECTION_BUDGETS,
+    SECTION_MAX_ITEMS,
     PrimerContext,
     SectionResult,
 )
@@ -18,8 +20,8 @@ from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
-_CAP = 150  # token budget for autonomy section
-_MAX = 10   # max policies to show
+_CAP = SECTION_BUDGETS["autonomy"]
+_MAX = SECTION_MAX_ITEMS["autonomy"]
 
 
 async def build_autonomy_section(ctx: PrimerContext) -> SectionResult:

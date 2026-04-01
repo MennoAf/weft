@@ -57,6 +57,7 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "daily_brief.timezone": ("daily_brief", "timezone"),
     "daily_brief.channel": ("daily_brief", "channel"),
     "daily_brief.calendar_id": ("daily_brief", "calendar_id"),
+    "primer.disabled_sections": ("primer", "disabled_sections"),
 }
 
 
@@ -119,6 +120,14 @@ class DailyBriefConfig(BaseModel):
     calendar_id: str = "primary"  # Google Calendar ID to query
 
 
+class PrimerConfig(BaseModel):
+    disabled_sections: list[str] = Field(
+        default_factory=list,
+        description="Section names to suppress from the primer output "
+        "(e.g. ['triggers', 'cost']). Data is preserved; only display is affected.",
+    )
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     project_name: str = "default"
@@ -130,6 +139,7 @@ class WeftConfig(BaseModel):
     alert: AlertConfig = Field(default_factory=AlertConfig)
     slack_sync: SlackSyncConfig = Field(default_factory=SlackSyncConfig)
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
+    primer: PrimerConfig = Field(default_factory=PrimerConfig)
     api_key: str | None = None
     supabase_url: str | None = None
     log_level: str = "INFO"
@@ -235,6 +245,7 @@ def _coerce_value(key: str, value: str) -> object:
         ("alert", AlertConfig),
         ("slack_sync", SlackSyncConfig),
         ("daily_brief", DailyBriefConfig),
+        ("primer", PrimerConfig),
     ]:
         for field_name, field_info in section_model.model_fields.items():
             ftype = field_info.annotation
@@ -293,6 +304,10 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
         for k, v in data["daily_brief"].items():
             if hasattr(config.daily_brief, k):
                 setattr(config.daily_brief, k, v)
+    if "primer" in data and isinstance(data["primer"], dict):
+        for k, v in data["primer"].items():
+            if hasattr(config.primer, k):
+                setattr(config.primer, k, v)
 
 
 # --- YAML helpers (for project-level config) ---
@@ -328,6 +343,8 @@ def _flatten_yaml(data: dict) -> dict:
         flat["slack_sync"] = SlackSyncConfig(**data["slack_sync"])
     if "daily_brief" in data:
         flat["daily_brief"] = DailyBriefConfig(**data["daily_brief"])
+    if "primer" in data:
+        flat["primer"] = PrimerConfig(**data["primer"])
     if "logging" in data and "level" in data["logging"]:
         flat["log_level"] = data["logging"]["level"]
     return flat

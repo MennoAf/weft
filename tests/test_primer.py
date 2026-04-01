@@ -1437,3 +1437,203 @@ async def test_primer_no_rls_diagnostic_with_visible_memories(pool):
     result = await build_primer(pool, budget_tokens=2400, disclosure="full")
 
     assert "rls_diagnostic" not in result["hints"]
+
+
+# --- New primer sections: triggers, cost, calibration, degradation ---
+
+
+async def test_primer_includes_triggers_section(pool):
+    """When enabled triggers exist, they appear in the primer output."""
+    from weft.models import TriggerConditionType, TriggerCreate
+    from weft.triggers import create_trigger
+
+    await create_trigger(pool, TriggerCreate(
+        name="Daily standup reminder",
+        condition_type=TriggerConditionType.time,
+        condition={"trigger_at": "2099-01-01T09:00:00Z"},
+        action="Send standup reminder to Slack",
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "triggers" in result
+    assert len(result["triggers"]) == 1
+    assert result["triggers"][0]["name"] == "Daily standup reminder"
+    assert result["triggers"][0]["condition_type"] == "time"
+    assert "triggers" in result["section_tokens"]
+
+
+async def test_primer_excludes_triggers_when_none(pool):
+    """No triggers -> section omitted from output."""
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "triggers" not in result
+
+
+async def test_primer_includes_cost_section(pool):
+    """When cost entries exist, a cost summary appears in the primer."""
+    from weft.cost_tracking import CostEntryCreate, record_cost
+
+    await record_cost(pool, CostEntryCreate(
+        input_tokens=5000,
+        output_tokens=2000,
+        total_tokens=7000,
+        estimated_cost_usd=0.05,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "cost" in result
+    assert len(result["cost"]) == 1
+    assert result["cost"][0]["total_tokens"] == 7000
+    assert result["cost"][0]["total_cost_usd"] == 0.05
+    assert "cost" in result["section_tokens"]
+
+
+async def test_primer_excludes_cost_when_none(pool):
+    """No cost entries -> section omitted from output."""
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "cost" not in result
+
+
+async def test_primer_includes_calibration_section(pool):
+    """When calibration records exist, insights appear in the primer."""
+    from weft.calibration import record_calibration
+    from weft.models import CalibrationCreate, CalibrationOutcome
+
+    for i in range(3):
+        await record_calibration(pool, CalibrationCreate(
+            action_category="send_email",
+            action_description=f"Send email {i}",
+            outcome=CalibrationOutcome.approved,
+            context={},
+        ))
+
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "calibration" in result
+    assert len(result["calibration"]) >= 1
+    assert result["calibration"][0]["total"] == 3
+    assert result["calibration"][0]["approval_rate"] == 1.0
+    assert "calibration" in result["section_tokens"]
+
+
+async def test_primer_excludes_calibration_when_none(pool):
+    """No calibration records -> section omitted from output."""
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "calibration" not in result
+
+
+async def test_primer_includes_degradation_section(pool):
+    """When active degradation policies exist, they appear in the primer."""
+    from weft.degradation import create_policy
+    from weft.models import (
+        DegradationAction,
+        DegradationPolicyCreate,
+        DegradationTriggerType,
+    )
+
+    await create_policy(pool, DegradationPolicyCreate(
+        name="Budget guard",
+        trigger_type=DegradationTriggerType.budget_breach,
+        condition={"max_tokens": 100000},
+        action=DegradationAction.pause,
+        description="Pause when token budget exceeded",
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "degradation" in result
+    assert len(result["degradation"]) >= 1
+    assert result["degradation"][0]["name"] == "Budget guard"
+    assert result["degradation"][0]["trigger_type"] == "budget_breach"
+    assert "degradation" in result["section_tokens"]
+
+
+async def test_primer_excludes_degradation_when_none(pool):
+    """No degradation policies -> section omitted from output."""
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+
+    assert "degradation" not in result
+
+
+async def test_primer_progressive_defers_new_sections(pool):
+    """Under progressive disclosure, new sections are deferred with hints."""
+    from weft.cost_tracking import CostEntryCreate, record_cost
+    from weft.models import TriggerConditionType, TriggerCreate
+    from weft.triggers import create_trigger
+
+    await create_trigger(pool, TriggerCreate(
+        name="Test trigger",
+        condition_type=TriggerConditionType.event,
+        condition={"event_name": "deploy"},
+        action="Run smoke tests",
+    ))
+    await record_cost(pool, CostEntryCreate(
+        total_tokens=1000,
+        estimated_cost_usd=0.01,
+    ))
+
+    result = await build_primer(pool, budget_tokens=4000, disclosure="progressive")
+
+    # Triggers should be deferred
+    assert "triggers" in result
+    assert result["triggers"]["deferred"] is True
+    assert result["triggers"]["count"] == 1
+    assert "hint" in result["triggers"]
+
+    # Cost should be deferred
+    assert "cost" in result
+    assert result["cost"]["deferred"] is True
+    assert result["cost"]["count"] == 1
+
+
+# --- Section disable toggles ---
+
+
+async def test_primer_disabled_sections_parameter(pool):
+    """Sections listed in disabled_sections are suppressed."""
+    from weft.models import TriggerConditionType, TriggerCreate
+    from weft.triggers import create_trigger
+
+    await create_trigger(pool, TriggerCreate(
+        name="Should be hidden",
+        condition_type=TriggerConditionType.event,
+        condition={"event_name": "deploy"},
+        action="Test",
+    ))
+
+    # Without disabling: triggers should appear
+    result = await build_primer(pool, budget_tokens=4000, disclosure="full")
+    assert "triggers" in result
+
+    # With disabling: triggers should be absent
+    result = await build_primer(
+        pool, budget_tokens=4000, disclosure="full",
+        disabled_sections={"triggers"},
+    )
+    assert "triggers" not in result
+
+
+async def test_primer_disabled_core_section(pool):
+    """Even core sections (rules, issues) can be disabled."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.preference, content="A rule",
+        confidence=1.0, pinned=True,
+    ))
+
+    result = await build_primer(
+        pool, budget_tokens=4000, disclosure="full",
+        disabled_sections={"rules"},
+    )
+    assert result["rules"] == []
+
+
+async def test_primer_disabled_sections_empty_set_is_noop(pool):
+    """Empty disabled set changes nothing."""
+    result_default = await build_primer(pool, budget_tokens=2400, disclosure="full", disabled_sections=set())
+    result_none = await build_primer(pool, budget_tokens=2400, disclosure="full")
+
+    assert set(result_default.keys()) == set(result_none.keys())

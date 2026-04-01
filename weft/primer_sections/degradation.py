@@ -11,13 +11,18 @@ import logging
 
 from weft.degradation import list_policies
 from weft.models import DegradationPolicyStatus
-from weft.primer_sections.context import PrimerContext, SectionResult
+from weft.primer_sections.context import (
+    SECTION_BUDGETS,
+    SECTION_MAX_ITEMS,
+    PrimerContext,
+    SectionResult,
+)
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
-_CAP = 150   # token budget for degradation section
-_MAX = 10    # max policies to show
+_CAP = SECTION_BUDGETS["degradation"]
+_MAX = SECTION_MAX_ITEMS["degradation"]
 
 
 async def build_degradation_section(ctx: PrimerContext) -> SectionResult:

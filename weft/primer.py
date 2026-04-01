@@ -899,6 +899,7 @@ async def build_primer(
     query_vec: list[float] | None = None,
     disclosure: str = "progressive",
     mode: str | None = None,
+    disabled_sections: set[str] | None = None,
 ) -> dict:
     """Assemble a tight session briefing from memories.
 
@@ -915,6 +916,11 @@ async def build_primer(
     5b. anti_patterns — pitfalls to avoid
     6. decisions — closed decisions (what NOT to suggest)
     7. entities — known people, projects, tools
+    8. autonomy — permission boundaries
+    9. calibration — approval rate insights
+    10. degradation — active guardrail policies
+    11. triggers — proactive trigger rules
+    12. cost — spending posture summary
 
     The legacy monolithic implementation is preserved as
     _build_primer_legacy() for fallback if needed.
@@ -923,7 +929,7 @@ async def build_primer(
     from weft.primer_sections.anti_patterns import build_anti_patterns_section
     from weft.primer_sections.behaviors import build_behaviors_section
     from weft.primer_sections.changes_since import build_changes_since_section
-    from weft.primer_sections.context import PrimerContext
+    from weft.primer_sections.context import PrimerContext, SectionResult
     from weft.primer_sections.decisions import build_decisions_section
     from weft.primer_sections.entities import build_entities_section
     from weft.primer_sections.grounding import build_grounding_section
@@ -934,7 +940,9 @@ async def build_primer(
     from weft.primer_sections.rules import build_rules_section
     from weft.primer_sections.autonomy import build_autonomy_section
     from weft.primer_sections.calibration import build_calibration_section
+    from weft.primer_sections.cost import build_cost_section
     from weft.primer_sections.degradation import build_degradation_section
+    from weft.primer_sections.triggers import build_triggers_section
     from weft.primer_sections.wellness import build_wellness_section
     from weft.primer_sections.working_memory import build_working_memory_section
 
@@ -960,25 +968,44 @@ async def build_primer(
         recency_bias=weights.recency_bias,
     )
 
+    # Resolve disabled sections: explicit parameter > config > empty set.
+    if disabled_sections is None:
+        from weft.config import load_config
+        try:
+            cfg = load_config()
+            disabled_sections = set(cfg.primer.disabled_sections)
+        except Exception:
+            disabled_sections = set()
+
+    _skip = SectionResult(items=[], tokens_used=0, skipped=True, skip_reason="disabled")
+
+    def _enabled(name: str) -> bool:
+        return name not in disabled_sections
+
     # --- Phase 1: Budget-packed sections (sequential, in priority order) ---
-    grounding_result = await build_grounding_section(ctx)
-    rules_result = await build_rules_section(ctx)
-    behaviors_result = await build_behaviors_section(ctx)
-    handoff_result = await build_handoff_section(ctx)
-    recent_work_result = await build_recent_work_section(ctx)
-    issues_result = await build_issues_section(ctx)
-    anti_patterns_result = await build_anti_patterns_section(ctx)
-    decisions_result = await build_decisions_section(ctx)
-    entities_result = await build_entities_section(ctx)
-    autonomy_result = await build_autonomy_section(ctx)
-    calibration_result = await build_calibration_section(ctx)
-    degradation_result = await build_degradation_section(ctx)
-    working_memory_result = await build_working_memory_section(ctx)
+    grounding_result = await build_grounding_section(ctx) if _enabled("grounding") else _skip
+    rules_result = await build_rules_section(ctx) if _enabled("rules") else _skip
+    behaviors_result = await build_behaviors_section(ctx) if _enabled("behaviors") else _skip
+    handoff_result = await build_handoff_section(ctx) if _enabled("handoff") else _skip
+    recent_work_result = await build_recent_work_section(ctx) if _enabled("recent_work") else _skip
+    issues_result = await build_issues_section(ctx) if _enabled("issues") else _skip
+    anti_patterns_result = await build_anti_patterns_section(ctx) if _enabled("anti_patterns") else _skip
+    decisions_result = await build_decisions_section(ctx) if _enabled("decisions") else _skip
+    entities_result = await build_entities_section(ctx) if _enabled("entities") else _skip
+    autonomy_result = await build_autonomy_section(ctx) if _enabled("autonomy") else _skip
+    calibration_result = await build_calibration_section(ctx) if _enabled("calibration") else _skip
+    degradation_result = await build_degradation_section(ctx) if _enabled("degradation") else _skip
+    triggers_result = await build_triggers_section(ctx) if _enabled("triggers") else _skip
+    cost_result = await build_cost_section(ctx) if _enabled("cost") else _skip
+    working_memory_result = await build_working_memory_section(ctx) if _enabled("working_memory") else _skip
 
     # --- Phase 2: Independent post-sections (parallel) ---
+    async def _noop() -> SectionResult:
+        return _skip
+
     changes_result, wellness_result = await asyncio.gather(
-        build_changes_since_section(ctx),
-        build_wellness_section(ctx),
+        build_changes_since_section(ctx) if _enabled("changes_since") else _noop(),
+        build_wellness_section(ctx) if _enabled("wellness") else _noop(),
     )
 
     # --- Phase 3: Freshness calculation ---
@@ -1064,6 +1091,14 @@ async def build_primer(
                 degradation_result.items,
                 "Use weft_degradation_list to view degradation policies.",
             )} if not degradation_result.skipped else {}),
+            **({"triggers": _deferred(
+                triggers_result.items,
+                "Use weft_trigger_list to view proactive triggers.",
+            )} if not triggers_result.skipped else {}),
+            **({"cost": _deferred(
+                cost_result.items,
+                "Use weft_cost_summary to view cost details.",
+            )} if not cost_result.skipped else {}),
             **({"working_memory": _deferred(
                 working_memory_result.items,
                 "Use weft_focus(intent=...) to load open episodes.",
@@ -1096,6 +1131,8 @@ async def build_primer(
         "autonomy": autonomy_result.items,
         **({"calibration": calibration_result.items} if not calibration_result.skipped else {}),
         **({"degradation": degradation_result.items} if not degradation_result.skipped else {}),
+        **({"triggers": triggers_result.items} if not triggers_result.skipped else {}),
+        **({"cost": cost_result.items} if not cost_result.skipped else {}),
         **({"working_memory": working_memory_result.items} if not working_memory_result.skipped else {}),
         "changes_since": changes_since,
         "total_tokens": ctx.used_tokens,
