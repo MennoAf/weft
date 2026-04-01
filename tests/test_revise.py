@@ -145,6 +145,33 @@ async def test_revise_without_new_type_inherits(original_memory):
     assert new.type == old.type
 
 
+async def test_revise_with_new_project_id(original_memory):
+    """Revise can reassign a memory to a different project."""
+    pool, old, provider = original_memory
+    assert old.project_id is None  # fixture doesn't set project_id
+
+    emb = await provider.embed("fixed project assignment")
+    new, _ = await revise_memory(
+        pool, old.id, "fixed project assignment",
+        embedding=emb, new_project_id="delphi",
+    )
+    assert new.project_id == "delphi"
+    assert new.id != old.id
+
+    # Verify in DB
+    db_new = await get_memory(pool, new.id)
+    assert db_new.project_id == "delphi"
+
+
+async def test_revise_without_new_project_id_inherits(original_memory):
+    """Revise without new_project_id inherits the original project_id."""
+    pool, old, provider = original_memory
+    emb = await provider.embed("same project update")
+
+    new, _ = await revise_memory(pool, old.id, "same project update", embedding=emb)
+    assert new.project_id == old.project_id
+
+
 @pytest.mark.asyncio
 async def test_revise_nonexistent(pool):
     """Revising a nonexistent memory should raise ValueError."""

@@ -145,9 +145,26 @@ async def _detect_project_id(ctx: Context) -> str | None:
     return None
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
 async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
-    """Return the explicit project_id if provided, otherwise auto-detect."""
+    """Return the explicit project_id if provided, otherwise auto-detect.
+
+    Raises ValueError if the explicit value looks like a UUID — project_ids
+    should be human-readable directory names (e.g. 'delphi', not a Loom
+    project UUID).
+    """
     if explicit is not None:
+        if _UUID_RE.match(explicit):
+            raise ValueError(
+                f"project_id looks like a UUID ({explicit}). "
+                "Use the directory/folder name instead (e.g. 'delphi', 'loom', 'weft'). "
+                "UUIDs are Loom project IDs — Weft project_ids should be "
+                "human-readable names that match the working directory."
+            )
         return explicit
     return await _detect_project_id(ctx)
 
@@ -527,9 +544,14 @@ async def weft_revise(
     new_confidence: float | None = None,
     new_topic: list[str] | None = None,
     new_type: MemoryTypeLiteral | None = None,
+    new_project_id: str | None = None,
     review_after: str | None = None,
 ) -> dict:
     """Update a memory's content, creating a new version that supersedes the old one.
+
+    new_project_id: optional project_id for the new version. Use this to fix
+    memories saved under the wrong project (e.g. a UUID instead of the
+    directory name). Must be a human-readable name, not a UUID.
 
     review_after: optional lifecycle date for the new version. Accepts ISO
     timestamp or relative durations like '30d', '2w', '3m'."""
@@ -538,6 +560,14 @@ async def weft_revise(
         from weft.revise import revise_memory
 
         resolved_type = _MT(new_type) if new_type else None
+        if new_project_id is not None and _UUID_RE.match(new_project_id):
+            return _input_error_response(
+                "weft_revise",
+                ValueError(
+                    f"new_project_id looks like a UUID ({new_project_id}). "
+                    "Use the directory/folder name instead."
+                ),
+            )
         app: AppContext = ctx.request_context.lifespan_context
         embedding = await app.embedding.embed(new_content)
         async with acquire(app.pool):
@@ -545,6 +575,7 @@ async def weft_revise(
                 app.pool, memory_id, new_content,
                 embedding=embedding, new_confidence=new_confidence,
                 new_topic=_coerce_list(new_topic), new_type=resolved_type,
+                new_project_id=new_project_id,
                 review_after=_parse_review_after(review_after),
             )
             await app.cache.set_memory(new)

@@ -186,6 +186,43 @@ class TestResolveProjectId:
         )
         assert result == "weft"
 
+    def test_rejects_uuid_project_id(self):
+        from weft.mcp.tools import _resolve_project_id
+        import asyncio
+        import pytest
+        from unittest.mock import MagicMock
+
+        ctx = MagicMock()
+        with pytest.raises(ValueError, match="looks like a UUID"):
+            asyncio.get_event_loop().run_until_complete(
+                _resolve_project_id(ctx, "49d60a99-5a5f-4f02-a545-18f8a9bb51d5")
+            )
+
+    def test_rejects_uppercase_uuid(self):
+        from weft.mcp.tools import _resolve_project_id
+        import asyncio
+        import pytest
+        from unittest.mock import MagicMock
+
+        ctx = MagicMock()
+        with pytest.raises(ValueError, match="looks like a UUID"):
+            asyncio.get_event_loop().run_until_complete(
+                _resolve_project_id(ctx, "49D60A99-5A5F-4F02-A545-18F8A9BB51D5")
+            )
+
+    def test_allows_normal_project_names(self):
+        from weft.mcp.tools import _resolve_project_id
+        import asyncio
+        from unittest.mock import MagicMock
+
+        ctx = MagicMock()
+        # These should all pass without error
+        for name in ["delphi", "loom", "weft", "my-project", "pitch_room"]:
+            result = asyncio.get_event_loop().run_until_complete(
+                _resolve_project_id(ctx, name)
+            )
+            assert result == name
+
 
 class TestCoerceList:
     """MCP transport sometimes serializes list params as JSON strings."""
