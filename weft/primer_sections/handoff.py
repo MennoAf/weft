@@ -49,7 +49,10 @@ async def build_handoff_section(ctx: PrimerContext) -> SectionResult:
                 "to silence this warning (fallback will be removed in v0.3)",
             )
 
-    candidates.sort(key=lambda m: m.created_at, reverse=True)
+    # Prefer project-scoped handoffs over global (NULL) ones, then most recent.
+    candidates.sort(
+        key=lambda m: (m.project_id is not None, m.created_at), reverse=True,
+    )
 
     items: list[dict] = []
     section_used = 0

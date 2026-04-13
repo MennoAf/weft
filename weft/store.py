@@ -106,13 +106,17 @@ async def list_memories(
     project_id: str | None = None,
     agent_id: str | None = None,
     pinned: bool | None = None,
+    exact_scope: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Memory]:
     """List memories with optional filters.
 
     Scoping: pass project_id and/or agent_id to narrow results.
-    Each axis uses OR-NULL logic (matches the value OR global memories).
+    Each axis uses OR-NULL logic (matches the value OR global memories)
+    by default.  Pass exact_scope=True to match the exact project_id /
+    agent_id without the OR-NULL fallback (useful for pruning operations
+    that should not touch global or cross-project records).
     Omit both for brain-wide (unscoped) queries.
     """
     conditions = []
@@ -135,12 +139,18 @@ async def list_memories(
         idx += 1
 
     if project_id is not None:
-        conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
+        if exact_scope:
+            conditions.append(f"project_id = ${idx}")
+        else:
+            conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
         idx += 1
 
     if agent_id is not None:
-        conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
+        if exact_scope:
+            conditions.append(f"agent_id = ${idx}")
+        else:
+            conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
         idx += 1
 
