@@ -1076,6 +1076,7 @@ async def weft_handoff(
                     memory_type=MemoryType.handoff,
                     status=MemoryStatus.active,
                     project_id=resolved_project,
+                    exact_scope=True,
                     limit=100,
                 )
                 for old in prev:

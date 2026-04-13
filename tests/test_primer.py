@@ -658,6 +658,72 @@ async def test_handoff_prune_scoped_to_project(pool):
     assert "Project B" in result_b["handoff"][0]["content"]
 
 
+async def test_handoff_prefers_project_scoped_over_global(pool):
+    """When both a global and project-scoped handoff exist, the project-scoped
+    one wins even if the global one was created more recently."""
+    # Older project-scoped handoff
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Project-specific work",
+        topic=["session-handoff"], confidence=1.0, project_id="my-proj",
+    ))
+    await asyncio.sleep(0.01)
+    # Newer global handoff — should NOT mask the project one
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Global session notes",
+        topic=["session-handoff"], confidence=1.0, project_id=None,
+    ))
+
+    result = await build_primer(pool, project_id="my-proj", budget_tokens=1500, disclosure="full")
+    assert len(result["handoff"]) == 1
+    assert "Project-specific work" in result["handoff"][0]["content"]
+
+
+async def test_handoff_prune_does_not_archive_global(pool):
+    """Auto-prune with exact_scope=True should not archive global handoffs
+    when pruning for a specific project."""
+    from weft.store import update_memory
+
+    # Global handoff
+    global_ho = await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Global notes",
+        topic=["session-handoff"], confidence=1.0, project_id=None,
+    ))
+    # Two project handoffs
+    old_proj = await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Old project work",
+        topic=["session-handoff"], confidence=1.0, project_id="proj-x",
+    ))
+    await asyncio.sleep(0.01)
+    new_proj = await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** New project work",
+        topic=["session-handoff"], confidence=1.0, project_id="proj-x",
+    ))
+
+    # Prune with exact_scope (mimics fixed auto-prune)
+    prev = await list_memories(
+        pool, memory_type=MemoryType.handoff,
+        status=MemoryStatus.active, project_id="proj-x",
+        exact_scope=True, limit=100,
+    )
+    for old in prev:
+        if old.id != new_proj.id:
+            await update_memory(pool, old.id, status=MemoryStatus.archived)
+
+    # Global handoff should still be active
+    from weft.store import get_memory
+    g = await get_memory(pool, global_ho.id)
+    assert g.status == MemoryStatus.active
+
+    # Old project handoff should be archived
+    o = await get_memory(pool, old_proj.id)
+    assert o.status == MemoryStatus.archived
+
+
 # --- Freshness indicator ---
 
 

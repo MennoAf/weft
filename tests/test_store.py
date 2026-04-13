@@ -87,6 +87,34 @@ async def test_list_by_topic(pool):
     assert len(beta) == 2
 
 
+async def test_list_memories_exact_scope(pool):
+    """exact_scope=True skips OR-NULL, matching only the exact project_id."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff, content="global handoff", project_id=None,
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff, content="proj-a handoff", project_id="proj-a",
+    ))
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff, content="proj-b handoff", project_id="proj-b",
+    ))
+
+    # Default OR-NULL: proj-a query also returns global
+    or_null = await list_memories(
+        pool, memory_type=MemoryType.handoff, project_id="proj-a",
+    )
+    assert len(or_null) == 2
+    assert {m.content for m in or_null} == {"global handoff", "proj-a handoff"}
+
+    # exact_scope: only proj-a
+    exact = await list_memories(
+        pool, memory_type=MemoryType.handoff, project_id="proj-a",
+        exact_scope=True,
+    )
+    assert len(exact) == 1
+    assert exact[0].content == "proj-a handoff"
+
+
 async def test_update_memory(pool):
     """Update mutable fields."""
     mem = await store_memory(pool, MemoryCreate(
