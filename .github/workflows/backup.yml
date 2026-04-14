@@ -3,7 +3,7 @@ name: Scheduled Weft Backup
 on:
   schedule:
     # Every 4 hours at :15 past to avoid top-of-hour congestion
-    - cron: "15 */4 * * *"
+    - cron: "15 */12 * * *"
   workflow_dispatch:
     inputs:
       commit_to_branch:
@@ -104,7 +104,7 @@ jobs:
         with:
           name: weft-backup-${{ github.run_id }}
           path: ${{ env.BACKUP_FILE }}
-          retention-days: 90
+          retention-days: 30
 
       - name: Commit to backups branch
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.commit_to_branch == 'true'
