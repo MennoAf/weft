@@ -946,6 +946,25 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             USING (user_id IS NULL OR user_id = nullif(current_setting('app.user_id', true), ''));
         """,
     ),
+    (
+        31,
+        "Create oauth_storage table for persistent OAuth state on Fly.io",
+        """
+        CREATE TABLE IF NOT EXISTS oauth_storage (
+            collection  TEXT NOT NULL DEFAULT '',
+            key         TEXT NOT NULL,
+            value       JSONB NOT NULL,
+            expires_at  TIMESTAMPTZ,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (collection, key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_oauth_storage_expires
+            ON oauth_storage (expires_at)
+            WHERE expires_at IS NOT NULL;
+        """,
+    ),
 ]
 
 
