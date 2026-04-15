@@ -24,6 +24,7 @@ from weft.db.migrations import run_migrations
 from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
+from weft.mcp.auth import get_oauth_provider
 from weft.mcp.slack_commands import handle_slash_checkin
 from weft.scheduler import daily_brief_loop, loom_awareness_loop, memory_hygiene_loop, scheduler_loop, slack_sync_loop, trigger_evaluation_loop
 from weft.seed import seed_memories
@@ -76,6 +77,35 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
         # Extract user identity from JWT (Supabase) — best-effort
         auth_header = request.REDACTEDget("authorization")
         user_id = extract_user_id_from_header(auth_header)
+        token = current_user_id.set(user_id)
+        try:
+            return await call_next(request)
+        finally:
+            current_user_id.reset(token)
+
+
+class OAuthIdentityMiddleware(BaseHTTPMiddleware):
+    """Bridge FastMCP OAuth AccessToken claims to Weft's current_user_id ContextVar.
+
+    Runs after OAuthProxy's built-in auth middleware has verified the bearer
+    token and populated request.scope["user"].  Extracts the Google user ID
+    (``sub``) or email from the verified AccessToken claims.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        user_id = None
+        try:
+            from fastmcp.server.dependencies import get_access_token
+            access_token = get_access_token()
+            if access_token and access_token.claims:
+                # Prefer 'sub' (stable Google user ID), fall back to 'email'
+                user_id = access_token.claims.get("sub") or access_token.claims.get("email")
+        except RuntimeError:
+            # No HTTP request context (e.g. during startup) — proceed without identity
+            pass
+        except Exception as exc:
+            logger.debug("OAuth identity extraction failed: %s", exc)
+
         token = current_user_id.set(user_id)
         try:
             return await call_next(request)
@@ -358,12 +388,29 @@ class _AppCtxRef:
 _app_ctx_ref = _AppCtxRef()
 
 _config_for_middleware = load_config()
-user_identity_middleware = Middleware(
-    UserIdentityMiddleware,
-    api_key=_config_for_middleware.api_key if _config_for_middleware.is_production else None,
+
+# OAuth provider (Google) for Claude web/app access.  None when not configured.
+_oauth_provider = get_oauth_provider(
+    _config_for_middleware,
+    pool_factory=lambda: _app_ctx_ref.ctx.pool,
 )
 
-mcp = FastMCP("weft", lifespan=lifespan)
+if _oauth_provider:
+    # OAuth mode: OAuthProxy handles auth on /mcp; OAuthIdentityMiddleware
+    # bridges the verified AccessToken claims → current_user_id ContextVar.
+    mcp = FastMCP("weft", lifespan=lifespan, auth=_oauth_provider)
+    http_identity_middleware = Middleware(OAuthIdentityMiddleware)
+else:
+    # API key mode (default): UserIdentityMiddleware enforces WEFT_API_KEY
+    # and extracts Supabase JWT user identity.
+    mcp = FastMCP("weft", lifespan=lifespan)
+    http_identity_middleware = Middleware(
+        UserIdentityMiddleware,
+        api_key=_config_for_middleware.api_key if _config_for_middleware.is_production else None,
+    )
+
+# Backward-compat alias used by __main__.py
+user_identity_middleware = http_identity_middleware
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

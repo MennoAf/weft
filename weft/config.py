@@ -120,6 +120,16 @@ class DailyBriefConfig(BaseModel):
     calendar_id: str = "primary"  # Google Calendar ID to query
 
 
+class OAuthConfig(BaseModel):
+    client_id: str | None = None  # Google OAuth client ID
+    client_secret: str | None = None  # Google OAuth client secret
+    base_url: str | None = None  # Public URL for OAuth redirects (e.g. https://weft-mcp.fly.dev)
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.client_id and self.client_secret and self.base_url)
+
+
 class PrimerConfig(BaseModel):
     disabled_sections: list[str] = Field(
         default_factory=list,
@@ -140,6 +150,7 @@ class WeftConfig(BaseModel):
     slack_sync: SlackSyncConfig = Field(default_factory=SlackSyncConfig)
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
     primer: PrimerConfig = Field(default_factory=PrimerConfig)
+    oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     api_key: str | None = None
     supabase_url: str | None = None
     log_level: str = "INFO"
@@ -427,5 +438,13 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.daily_brief.timezone = brief_tz.strip()
     if brief_channel := os.environ.get("WEFT_DAILY_BRIEF_CHANNEL"):
         config.daily_brief.channel = brief_channel.strip()
+
+    # OAuth (Google provider for Claude web/app access)
+    if oauth_client_id := os.environ.get("GOOGLE_OAUTH_CLIENT_ID"):
+        config.oauth.client_id = oauth_client_id
+    if oauth_client_secret := os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET"):
+        config.oauth.client_secret = oauth_client_secret
+    if base_url := os.environ.get("WEFT_BASE_URL"):
+        config.oauth.base_url = base_url.rstrip("/")
 
     return config
