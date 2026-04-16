@@ -75,6 +75,8 @@ class WeftTokenVerifier(TokenVerifier):
     to authenticate against the same server.
     """
 
+    required_scopes: list[str] = ["openid", "email"]
+
     def __init__(
         self,
         api_key: str | None = None,
