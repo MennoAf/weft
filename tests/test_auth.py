@@ -1,11 +1,11 @@
-"""Tests for API key authentication and dual-mode OAuth verifier."""
+"""Tests for API key authentication and OAuth proxy dual-auth."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from fastmcp.server.auth import AccessToken
-from weft.mcp.auth import ApiKeyVerifier, WeftTokenVerifier, get_auth_provider
+from weft.mcp.auth import ApiKeyVerifier, get_auth_provider, get_oauth_provider
 
 
 class TestApiKeyVerifier:
@@ -54,67 +54,53 @@ class TestGetAuthProvider:
             get_auth_provider("", is_production=True)
 
 
-class TestWeftTokenVerifier:
-    """Dual-mode verifier: API key (fast) then Google (slow)."""
+class TestWeftOAuthProxy:
+    """Dual-auth: API key intercepted before OAuth JWT flow."""
 
     @pytest.fixture
-    def mock_google_verifier(self):
-        verifier = AsyncMock()
-        verifier.verify_token = AsyncMock(return_value=None)
-        return verifier
-
-    @pytest.fixture
-    def dual_verifier(self, mock_google_verifier):
-        return WeftTokenVerifier(
-            api_key="test-api-key",
-            google_verifier=mock_google_verifier,
+    def oauth_config(self):
+        """Minimal WeftConfig with OAuth configured."""
+        from weft.config import OAuthConfig, WeftConfig
+        config = WeftConfig(api_key="test-api-key")
+        config.oauth = OAuthConfig(
+            client_id="fake-client-id",
+            client_secret="fake-client-secret",
+            base_url="https://example.com",
         )
+        return config
 
-    async def test_api_key_takes_priority(self, dual_verifier, mock_google_verifier):
-        """API key should be checked first — no Google call needed."""
-        result = await dual_verifier.verify_token("test-api-key")
+    @pytest.fixture
+    def proxy(self, oauth_config):
+        """Build a WeftOAuthProxy with a mock pool factory."""
+        mock_pool_factory = lambda: AsyncMock()
+        provider = get_oauth_provider(oauth_config, mock_pool_factory)
+        assert provider is not None
+        return provider
+
+    async def test_api_key_accepted(self, proxy):
+        """API key should be accepted without hitting OAuth JWT validation."""
+        result = await proxy.load_access_token("test-api-key")
         assert result is not None
         assert result.client_id == "weft-apikey"
-        mock_google_verifier.verify_token.assert_not_called()
 
-    async def test_falls_through_to_google(self, dual_verifier, mock_google_verifier):
-        """Non-API-key token should fall through to Google verifier."""
-        google_token = AccessToken(
-            token="google-access-token",
-            client_id="google-client",
-            scopes=["openid"],
-            claims={"sub": "12345", "email": "user@gmail.com"},
-        )
-        mock_google_verifier.verify_token.return_value = google_token
-
-        result = await dual_verifier.verify_token("google-access-token")
-        assert result is not None
-        assert result.client_id == "google-client"
-        assert result.claims["sub"] == "12345"
-        mock_google_verifier.verify_token.assert_called_once_with("google-access-token")
-
-    async def test_both_fail_returns_none(self, dual_verifier, mock_google_verifier):
-        """If API key doesn't match and Google rejects, return None."""
-        mock_google_verifier.verify_token.return_value = None
-        result = await dual_verifier.verify_token("unknown-token")
+    async def test_wrong_key_falls_through(self, proxy):
+        """Non-API-key token should fall through to OAuth JWT flow (which returns None for invalid JWTs)."""
+        result = await proxy.load_access_token("not-the-api-key")
         assert result is None
 
-    async def test_api_key_only_mode(self):
-        """Verifier with no Google fallback — API key only."""
-        verifier = WeftTokenVerifier(api_key="my-key")
-        result = await verifier.verify_token("my-key")
-        assert result is not None
-        # Unknown token
-        result = await verifier.verify_token("nope")
+    async def test_empty_token_rejected(self, proxy):
+        """Empty token should not match API key."""
+        result = await proxy.load_access_token("")
         assert result is None
 
-    async def test_google_only_mode(self, mock_google_verifier):
-        """Verifier with no API key — Google only."""
-        verifier = WeftTokenVerifier(google_verifier=mock_google_verifier)
-        google_token = AccessToken(
-            token="gtoken", client_id="gc", scopes=[], claims={"sub": "u1"},
-        )
-        mock_google_verifier.verify_token.return_value = google_token
-        result = await verifier.verify_token("gtoken")
-        assert result is not None
-        assert result.claims["sub"] == "u1"
+    def test_required_scopes_set(self, proxy):
+        """Proxy should advertise openid and email scopes for Google."""
+        assert "openid" in proxy.required_scopes
+        assert "email" in proxy.required_scopes
+
+    def test_not_configured_returns_none(self):
+        """When OAuth env vars are missing, returns None (API key mode only)."""
+        from weft.config import WeftConfig
+        config = WeftConfig()
+        result = get_oauth_provider(config, lambda: AsyncMock())
+        assert result is None
