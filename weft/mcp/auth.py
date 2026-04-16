@@ -106,7 +106,7 @@ def get_oauth_provider(
                 return AccessToken(
                     token=token,
                     client_id="weft-apikey",
-                    scopes=[],
+                    scopes=["openid", "email"],
                 )
             # Standard OAuth JWT flow
             return await super().load_access_token(token)
