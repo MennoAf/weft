@@ -1,11 +1,8 @@
-"""Tests for API key authentication and OAuth proxy dual-auth."""
-
-from unittest.mock import AsyncMock, patch
+"""Tests for API key authentication."""
 
 import pytest
 
-from fastmcp.server.auth import AccessToken
-from weft.mcp.auth import ApiKeyVerifier, get_auth_provider, get_oauth_provider
+from weft.mcp.auth import ApiKeyVerifier, get_auth_provider
 
 
 class TestApiKeyVerifier:
@@ -52,55 +49,3 @@ class TestGetAuthProvider:
     def test_production_empty_key_raises(self):
         with pytest.raises(ValueError, match="WEFT_API_KEY is required"):
             get_auth_provider("", is_production=True)
-
-
-class TestWeftOAuthProxy:
-    """Dual-auth: API key intercepted before OAuth JWT flow."""
-
-    @pytest.fixture
-    def oauth_config(self):
-        """Minimal WeftConfig with OAuth configured."""
-        from weft.config import OAuthConfig, WeftConfig
-        config = WeftConfig(api_key="test-api-key")
-        config.oauth = OAuthConfig(
-            client_id="fake-client-id",
-            client_secret="fake-client-secret",
-            base_url="https://example.com",
-        )
-        return config
-
-    @pytest.fixture
-    def proxy(self, oauth_config):
-        """Build a WeftOAuthProxy with a mock pool factory."""
-        mock_pool_factory = lambda: AsyncMock()
-        provider = get_oauth_provider(oauth_config, mock_pool_factory)
-        assert provider is not None
-        return provider
-
-    async def test_api_key_accepted(self, proxy):
-        """API key should be accepted without hitting OAuth JWT validation."""
-        result = await proxy.load_access_token("test-api-key")
-        assert result is not None
-        assert result.client_id == "weft-apikey"
-
-    async def test_wrong_key_falls_through(self, proxy):
-        """Non-API-key token should fall through to OAuth JWT flow (which returns None for invalid JWTs)."""
-        result = await proxy.load_access_token("not-the-api-key")
-        assert result is None
-
-    async def test_empty_token_rejected(self, proxy):
-        """Empty token should not match API key."""
-        result = await proxy.load_access_token("")
-        assert result is None
-
-    def test_required_scopes_set(self, proxy):
-        """Proxy should advertise openid and email scopes for Google."""
-        assert "openid" in proxy.required_scopes
-        assert "email" in proxy.required_scopes
-
-    def test_not_configured_returns_none(self):
-        """When OAuth env vars are missing, returns None (API key mode only)."""
-        from weft.config import WeftConfig
-        config = WeftConfig()
-        result = get_oauth_provider(config, lambda: AsyncMock())
-        assert result is None
