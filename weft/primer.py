@@ -982,28 +982,47 @@ async def build_primer(
     def _enabled(name: str) -> bool:
         return name not in disabled_sections
 
-    # --- Phase 1: Budget-packed sections (sequential, in priority order) ---
-    grounding_result = await build_grounding_section(ctx) if _enabled("grounding") else _skip
-    rules_result = await build_rules_section(ctx) if _enabled("rules") else _skip
-    behaviors_result = await build_behaviors_section(ctx) if _enabled("behaviors") else _skip
-    handoff_result = await build_handoff_section(ctx) if _enabled("handoff") else _skip
-    recent_work_result = await build_recent_work_section(ctx) if _enabled("recent_work") else _skip
-    issues_result = await build_issues_section(ctx) if _enabled("issues") else _skip
-    anti_patterns_result = await build_anti_patterns_section(ctx) if _enabled("anti_patterns") else _skip
-    decisions_result = await build_decisions_section(ctx) if _enabled("decisions") else _skip
-    entities_result = await build_entities_section(ctx) if _enabled("entities") else _skip
-    autonomy_result = await build_autonomy_section(ctx) if _enabled("autonomy") else _skip
-    calibration_result = await build_calibration_section(ctx) if _enabled("calibration") else _skip
-    degradation_result = await build_degradation_section(ctx) if _enabled("degradation") else _skip
-    triggers_result = await build_triggers_section(ctx) if _enabled("triggers") else _skip
-    cost_result = await build_cost_section(ctx) if _enabled("cost") else _skip
-    working_memory_result = await build_working_memory_section(ctx) if _enabled("working_memory") else _skip
-
-    # --- Phase 2: Independent post-sections (parallel) ---
+    # --- Phase 1: All sections in parallel ---
+    # Sections are independent (read-only ctx, asyncpg pool handles concurrency).
+    # Running them concurrently collapses 20-40 sequential DB round-trips into
+    # a handful of concurrent batches — critical for Fly.io latency.
     async def _noop() -> SectionResult:
         return _skip
 
-    changes_result, wellness_result = await asyncio.gather(
+    (
+        grounding_result,
+        rules_result,
+        behaviors_result,
+        handoff_result,
+        recent_work_result,
+        issues_result,
+        anti_patterns_result,
+        decisions_result,
+        entities_result,
+        autonomy_result,
+        calibration_result,
+        degradation_result,
+        triggers_result,
+        cost_result,
+        working_memory_result,
+        changes_result,
+        wellness_result,
+    ) = await asyncio.gather(
+        build_grounding_section(ctx) if _enabled("grounding") else _noop(),
+        build_rules_section(ctx) if _enabled("rules") else _noop(),
+        build_behaviors_section(ctx) if _enabled("behaviors") else _noop(),
+        build_handoff_section(ctx) if _enabled("handoff") else _noop(),
+        build_recent_work_section(ctx) if _enabled("recent_work") else _noop(),
+        build_issues_section(ctx) if _enabled("issues") else _noop(),
+        build_anti_patterns_section(ctx) if _enabled("anti_patterns") else _noop(),
+        build_decisions_section(ctx) if _enabled("decisions") else _noop(),
+        build_entities_section(ctx) if _enabled("entities") else _noop(),
+        build_autonomy_section(ctx) if _enabled("autonomy") else _noop(),
+        build_calibration_section(ctx) if _enabled("calibration") else _noop(),
+        build_degradation_section(ctx) if _enabled("degradation") else _noop(),
+        build_triggers_section(ctx) if _enabled("triggers") else _noop(),
+        build_cost_section(ctx) if _enabled("cost") else _noop(),
+        build_working_memory_section(ctx) if _enabled("working_memory") else _noop(),
         build_changes_since_section(ctx) if _enabled("changes_since") else _noop(),
         build_wellness_section(ctx) if _enabled("wellness") else _noop(),
     )
