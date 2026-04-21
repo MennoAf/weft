@@ -17,6 +17,7 @@ import asyncpg
 
 from weft.config import DailyBriefConfig
 from weft.loom_query import LoomQueryError, get_ready_tasks, loom_tables_exist
+from weft.retrieval_modes import sources_for_mode
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +66,11 @@ def compute_trend(recent: list[float], prior: list[float]) -> str:
 
 
 async def _query_review_queue(pool: asyncpg.Pool, as_of: datetime) -> list[str]:
-    """Memories with review_after <= today."""
+    """Memories with review_after <= today. Face-mode filter: excludes codebase ingest noise."""
     try:
         from weft.db.connection import get_db
 
+        face_sources = sources_for_mode("face") or []
         rows = await get_db(pool).fetch(
             """
             SELECT id, type, content, review_after
@@ -76,11 +78,13 @@ async def _query_review_queue(pool: asyncpg.Pool, as_of: datetime) -> list[str]:
             WHERE status = 'active'
               AND review_after IS NOT NULL
               AND review_after <= $1
+              AND source = ANY($3::text[])
             ORDER BY review_after ASC
             LIMIT $2
             """,
             as_of,
             BRIEF_MAX_ITEMS_PER_SECTION,
+            face_sources,
         )
         items = []
         for r in rows:

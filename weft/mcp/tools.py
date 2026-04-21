@@ -317,12 +317,16 @@ async def weft_recall(
     limit: int = 10,
     threshold: float = 0.3,
     mode: str = "hybrid",
+    retrieval_mode: str = "face",
 ) -> dict:
     """Retrieve memories by semantic query, keyword search, or hybrid (default).
 
     mode: 'semantic' (vector only), 'keyword' (BM25 full-text only), or 'hybrid' (RRF fusion of both).
     Hybrid mode combines vector similarity and BM25 keyword matching using Reciprocal Rank Fusion.
     Keyword mode does not require embeddings and works on exact/stemmed word matches.
+
+    retrieval_mode: 'face' (default — excludes codebase ingest noise), 'code' (includes ingest
+    and code-context sources for agent-in-repo queries), or 'all' (no source filter).
     """
     try:
         cid = set_correlation_id()
@@ -333,6 +337,9 @@ async def weft_recall(
 
         if mode not in ("semantic", "keyword", "hybrid"):
             mode = "hybrid"
+
+        from weft.retrieval_modes import sources_for_mode
+        sources = sources_for_mode(retrieval_mode)
 
         # Keyword mode doesn't need an embedding
         embedding = None
@@ -350,6 +357,7 @@ async def weft_recall(
                     topic=topic,
                     project_id=project_id,
                     agent_id=agent_id,
+                    sources=sources,
                 )
             elif mode == "hybrid":
                 results = await search_hybrid(
@@ -363,6 +371,7 @@ async def weft_recall(
                     topic=topic,
                     project_id=project_id,
                     agent_id=agent_id,
+                    sources=sources,
                 )
             else:  # semantic
                 results = await search_by_vector(
@@ -375,6 +384,7 @@ async def weft_recall(
                     topic=topic,
                     project_id=project_id,
                     agent_id=agent_id,
+                    sources=sources,
                 )
 
             # Touch accessed memories and enrich with entities
@@ -403,6 +413,7 @@ async def weft_recall(
                     topic=topic,
                     project_id=project_id,
                     agent_id=agent_id,
+                    sources=sources,
                 )
 
             response: dict = {"query": query, "mode": mode, "count": len(results), "results": enriched}
@@ -428,6 +439,7 @@ async def weft_recall(
                                 status=memory_status,
                                 memory_type=memory_type,
                                 exclude_ids=list(main_ids),
+                                sources=sources,
                             )
                             if cross_results:
                                 response["cross_project"] = [
@@ -1164,12 +1176,18 @@ async def weft_search_all(
     memory_type: MemoryTypeLiteral | None = None,
     days: int | None = None,
     limit: int = 20,
+    retrieval_mode: str = "face",
 ) -> dict:
     """Cross-project brain-wide search combining semantic and filter queries.
 
     At least one filter is required. Searches across ALL projects (not scoped).
     Use for finding information that spans projects or when you don't know
-    which project something belongs to."""
+    which project something belongs to.
+
+    retrieval_mode: 'face' (default — excludes codebase ingest noise),
+    'code' (includes ingest + code-context for agent-in-repo queries),
+    or 'all' (no source filter).
+    """
     try:
         app: AppContext = ctx.request_context.lifespan_context
         from weft.skills import search_all
@@ -1178,7 +1196,7 @@ async def weft_search_all(
             return await search_all(
                 app.pool, app.embedding,
                 query=query, topic=topic, memory_type=memory_type,
-                days=days, limit=limit,
+                days=days, limit=limit, retrieval_mode=retrieval_mode,
             )
     except _DB_ERRORS as e:
         return _db_error_response("weft_search_all", e)
