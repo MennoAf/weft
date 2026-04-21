@@ -132,12 +132,16 @@ async def search_all(
     memory_type: str | None = None,
     days: int | None = None,
     limit: int = 20,
+    retrieval_mode: str = "face",
 ) -> dict:
     """Cross-project search combining semantic + filter queries."""
     from weft.models import MemoryType
+    from weft.retrieval_modes import sources_for_mode
 
     if not any([query, topic, memory_type, days]):
         return {"error": "At least one filter required (query, topic, memory_type, or days)"}
+
+    sources = sources_for_mode(retrieval_mode)
 
     # If we have a text query, use vector search
     if query and embedding_provider:
@@ -146,6 +150,7 @@ async def search_all(
         results = await search_by_vector(
             pool, embedding, limit=limit, topic=topic,
             memory_type=mt, project_id=None,  # brain-wide
+            sources=sources,
         )
 
         # Post-filter by days if specified
@@ -179,6 +184,11 @@ async def search_all(
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         conditions.append(f"created_at >= ${idx}")
         params.append(cutoff)
+        idx += 1
+
+    if sources:
+        conditions.append(f"source = ANY(${idx}::text[])")
+        params.append(sources)
         idx += 1
 
     where = " AND ".join(conditions)

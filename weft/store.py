@@ -183,6 +183,7 @@ async def search_by_vector(
     project_id: str | None = None,
     agent_id: str | None = None,
     exclude_ids: list[str] | None = None,
+    sources: list[str] | None = None,
 ) -> list[MemoryRecall]:
     """Search memories by vector similarity (cosine distance).
 
@@ -192,6 +193,9 @@ async def search_by_vector(
 
     exclude_ids: memory IDs to exclude from results (e.g., already surfaced
     by primer). Uses NOT id = ANY($N) for efficient filtering.
+
+    sources: allowlist of MemorySource values. None = no filter. Passed pre-ANN
+    so top-K stays meaningful when excluded sources dominate the pool.
     """
     conditions = ["embedding IS NOT NULL"]
     params: list = []
@@ -235,6 +239,11 @@ async def search_by_vector(
         params.append(exclude_ids)
         idx += 1
 
+    if sources:
+        conditions.append(f"source = ANY(${idx}::text[])")
+        params.append(sources)
+        idx += 1
+
     where = "WHERE " + " AND ".join(conditions)
 
     query = f"""
@@ -267,6 +276,7 @@ async def search_by_keyword(
     project_id: str | None = None,
     agent_id: str | None = None,
     exclude_ids: list[str] | None = None,
+    sources: list[str] | None = None,
 ) -> list[MemoryRecall]:
     """Search memories by full-text keyword match (BM25 ranking via ts_rank).
 
@@ -310,6 +320,11 @@ async def search_by_keyword(
     if exclude_ids:
         conditions.append(f"NOT (id = ANY(${idx}::text[]))")
         params.append(exclude_ids)
+        idx += 1
+
+    if sources:
+        conditions.append(f"source = ANY(${idx}::text[])")
+        params.append(sources)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions)
@@ -356,6 +371,7 @@ async def search_hybrid(
     exclude_ids: list[str] | None = None,
     vector_weight: float = 0.5,
     keyword_weight: float = 0.5,
+    sources: list[str] | None = None,
 ) -> list[MemoryRecall]:
     """Hybrid search combining vector similarity and BM25 keyword matching.
 
@@ -380,6 +396,7 @@ async def search_hybrid(
         project_id=project_id,
         agent_id=agent_id,
         exclude_ids=exclude_ids,
+        sources=sources,
     )
 
     keyword_results = await search_by_keyword(
@@ -392,6 +409,7 @@ async def search_hybrid(
         project_id=project_id,
         agent_id=agent_id,
         exclude_ids=exclude_ids,
+        sources=sources,
     )
 
     # Build rank maps (1-indexed)
@@ -450,6 +468,7 @@ async def search_cross_project(
     status: MemoryStatus | None = MemoryStatus.active,
     memory_type: MemoryType | None = None,
     exclude_ids: list[str] | None = None,
+    sources: list[str] | None = None,
 ) -> list[MemoryRecall]:
     """Search memories from OTHER projects (cross-project insights).
 
@@ -496,6 +515,11 @@ async def search_cross_project(
         params.append(exclude_ids)
         idx += 1
 
+    if sources:
+        conditions.append(f"source = ANY(${idx}::text[])")
+        params.append(sources)
+        idx += 1
+
     where = "WHERE " + " AND ".join(conditions)
 
     query = f"""
@@ -530,6 +554,7 @@ async def count_by_vector(
     topic: str | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    sources: list[str] | None = None,
 ) -> int:
     """Count total memories matching a vector search (same filters as search_by_vector, no LIMIT)."""
     conditions = ["embedding IS NOT NULL"]
@@ -566,6 +591,11 @@ async def count_by_vector(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if sources:
+        conditions.append(f"source = ANY(${idx}::text[])")
+        params.append(sources)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions)
