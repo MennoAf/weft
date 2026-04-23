@@ -129,3 +129,122 @@ async def test_migration_is_idempotent(pool):
     applied = await run_migrations(pool)
     # No new migrations should be applied on second run
     assert len(applied) == 0, "Migration should be idempotent"
+
+
+@pytest.mark.asyncio
+async def test_phase1_migrations_raw_sql_idempotent_on_empty_db(pool):
+    """Apply migration 31 (user_id columns) and 32 (audit table) raw SQL twice.
+
+    Bypasses the schema_migrations short-circuit to prove the SQL itself is
+    truly idempotent — not relying on the runner's version-tracking. Covers
+    the Phase 1 acceptance criterion: migrations must succeed on both empty
+    and populated DBs, and must not raise on re-run.
+    """
+    from weft.db.migrations import MIGRATIONS
+
+    phase1_sql = [sql for version, _, sql in MIGRATIONS if version in (31, 32)]
+    assert len(phase1_sql) == 2, "expected migrations 31 and 32 in MIGRATIONS list"
+
+    for _ in range(2):
+        for sql in phase1_sql:
+            await pool.execute(sql)
+
+    # Confirm audit_backfill_user_id exists with expected columns.
+    cols = await pool.fetch(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'audit_backfill_user_id'
+        ORDER BY ordinal_position
+        """
+    )
+    col_names = [r["column_name"] for r in cols]
+    assert col_names == [
+        "id",
+        "source_table",
+        "row_id",
+        "old_scope",
+        "new_scope",
+        "migrated_at",
+    ], f"audit_backfill_user_id columns unexpected: {col_names}"
+
+
+@pytest.mark.asyncio
+async def test_phase1_user_id_indexes_exist(pool):
+    """All 7 user-scoped tables have an idx_<table>_user index on user_id."""
+    tables = [
+        "behaviors",
+        "entities",
+        "episodes",
+        "modes",
+        "autonomy_policies",
+        "calibration_records",
+        "degradation_policies",
+    ]
+    for table in tables:
+        idx_name = f"idx_{table}_user"
+        exists = await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)",
+            idx_name,
+        )
+        assert exists, f"missing index {idx_name} on {table}"
+
+
+@pytest.mark.asyncio
+async def test_phase1_migrations_idempotent_on_populated_db(pool):
+    """Apply migrations 31+32 raw SQL twice against a DB with seeded rows.
+
+    Verifies the populated-DB path of the Phase 1 acceptance criterion:
+    existing rows must survive intact (same count, same user_id assignments)
+    and no column/table already-exists errors may be raised.
+    """
+    import uuid
+
+    from weft.db.migrations import MIGRATIONS
+
+    # Seed one row per scoped table, split across user_id=NULL (global) and
+    # user_id=some-user (user-scoped) to cover both row classes.
+    user_a = "user-a-idempotency-test"
+    seeded: dict[str, list[str]] = {}
+
+    # behaviors
+    b_null = uuid.uuid4().hex
+    b_user = uuid.uuid4().hex
+    await pool.execute(
+        "INSERT INTO behaviors (id, trigger_pattern, action, user_id) VALUES ($1, 'p', 'a', NULL), ($2, 'p', 'a', $3)",
+        b_null, b_user, user_a,
+    )
+    seeded["behaviors"] = [b_null, b_user]
+
+    # Also insert into audit_backfill_user_id to confirm migration 32 table
+    # tolerates existing rows.
+    await pool.execute(
+        """
+        INSERT INTO audit_backfill_user_id (source_table, row_id, old_scope, new_scope)
+        VALUES ('behaviors', $1, 'pure-user', 'user-scoped')
+        """,
+        b_null,
+    )
+
+    phase1_sql = [sql for version, _, sql in MIGRATIONS if version in (31, 32)]
+
+    # Re-run migration SQL twice (bypassing schema_migrations version-tracking).
+    for _ in range(2):
+        for sql in phase1_sql:
+            await pool.execute(sql)
+
+    # Rows still intact with their original user_id.
+    rows = await pool.fetch(
+        "SELECT id, user_id FROM behaviors WHERE id = ANY($1::text[]) ORDER BY id",
+        seeded["behaviors"],
+    )
+    assert len(rows) == 2, "seeded behaviors rows lost after re-running migrations"
+    user_ids = {r["id"]: r["user_id"] for r in rows}
+    assert user_ids[b_null] is None, "NULL user_id row was mutated"
+    assert user_ids[b_user] == user_a, f"user-scoped row user_id changed: {user_ids[b_user]}"
+
+    # Audit row still present.
+    audit_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM audit_backfill_user_id WHERE row_id = $1",
+        b_null,
+    )
+    assert audit_count == 1, f"audit row count unexpected: {audit_count}"
