@@ -946,6 +946,58 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             USING (user_id IS NULL OR user_id = nullif(current_setting('app.user_id', true), ''));
         """,
     ),
+    (
+        31,
+        "Ensure user_id column exists and is nullable on all user-scoped tables",
+        """
+        -- Add user_id to behaviors if missing (created in migration 10 but ensure it exists)
+        ALTER TABLE behaviors ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+        -- Add user_id to entities if missing
+        ALTER TABLE entities ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+        -- Add user_id to episodes if missing
+        ALTER TABLE episodes ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+        -- Add user_id to modes if missing (created in migration 20 but ensure it exists)
+        ALTER TABLE modes ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+        -- Add user_id to autonomy_policies if missing (created in migration 24 but ensure it exists)
+        ALTER TABLE autonomy_policies ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+        -- Add user_id to calibration_records if missing (created in migration 29 but ensure it exists)
+        ALTER TABLE calibration_records ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+        -- Add user_id to degradation_policies if missing (created in migration 30 but ensure it exists)
+        ALTER TABLE degradation_policies ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+        -- Create indexes for efficient user_id filtering (idempotent)
+        CREATE INDEX IF NOT EXISTS idx_behaviors_user ON behaviors (user_id);
+        CREATE INDEX IF NOT EXISTS idx_entities_user ON entities (user_id);
+        CREATE INDEX IF NOT EXISTS idx_episodes_user ON episodes (user_id);
+        CREATE INDEX IF NOT EXISTS idx_modes_user ON modes (user_id);
+        CREATE INDEX IF NOT EXISTS idx_autonomy_policies_user ON autonomy_policies (user_id);
+        CREATE INDEX IF NOT EXISTS idx_calibration_records_user ON calibration_records (user_id);
+        CREATE INDEX IF NOT EXISTS idx_degradation_policies_user ON degradation_policies (user_id);
+        """,
+    ),
+    (
+        32,
+        "Create audit_backfill_user_id table for Phase 1 backfill audit trail",
+        """
+        CREATE TABLE IF NOT EXISTS audit_backfill_user_id (
+            id           SERIAL PRIMARY KEY,
+            source_table TEXT NOT NULL,
+            row_id       TEXT NOT NULL,
+            old_scope    TEXT NOT NULL,
+            new_scope    TEXT NOT NULL,
+            migrated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_audit_backfill_source
+            ON audit_backfill_user_id (source_table, row_id);
+        """,
+    ),
 ]
 
 
