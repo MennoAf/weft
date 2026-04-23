@@ -28,16 +28,17 @@ async def store_entity(
     entity_id = _weft_id()
     now = datetime.now(timezone.utc)
 
-    # Use provided user_id if given, otherwise fall back to app context
-    user_id = create.user_id if create.user_id is not None else None
-
+    # Explicit user_id on EntityCreate wins; otherwise fall through to the
+    # RLS session context (set by acquire() via SET LOCAL app.user_id). This
+    # matches store_memory / store_behavior / create_episode.
     await get_db(pool).execute(
         """
         INSERT INTO entities (
             id, name, entity_type, aliases, description,
             project_id, agent_id, user_id, status, mention_count,
             created_at, updated_at, embedding
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7,
+                  COALESCE($8, nullif(current_setting('app.user_id', true), '')),
                   'active', 0, $9, $9, $10::vector)
         """,
         entity_id,
@@ -47,7 +48,7 @@ async def store_entity(
         create.description,
         create.project_id,
         create.agent_id,
-        user_id,
+        create.user_id,
         now,
         embedding,
     )
