@@ -105,6 +105,7 @@ async def list_memories(
     topic: str | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     pinned: bool | None = None,
     exact_scope: bool = False,
     limit: int = 50,
@@ -118,6 +119,9 @@ async def list_memories(
     agent_id without the OR-NULL fallback (useful for pruning operations
     that should not touch global or cross-project records).
     Omit both for brain-wide (unscoped) queries.
+
+    user_id: If provided, filters to memories owned by this user OR globally-scoped
+    memories (user_id IS NULL). If None, returns all.
     """
     conditions = []
     params: list = []
@@ -154,6 +158,11 @@ async def list_memories(
         params.append(agent_id)
         idx += 1
 
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
+        idx += 1
+
     if pinned is not None:
         conditions.append(f"pinned = ${idx}")
         params.append(pinned)
@@ -182,6 +191,7 @@ async def search_by_vector(
     topic: str | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     exclude_ids: list[str] | None = None,
     sources: list[str] | None = None,
 ) -> list[MemoryRecall]:
@@ -190,6 +200,9 @@ async def search_by_vector(
     Scoping: pass project_id and/or agent_id to narrow results.
     Each axis uses OR-NULL logic (matches the value OR global memories).
     Omit both for brain-wide (unscoped) queries.
+
+    user_id: If provided, filters to memories owned by this user OR globally-scoped
+    memories (user_id IS NULL). If None, returns all.
 
     exclude_ids: memory IDs to exclude from results (e.g., already surfaced
     by primer). Uses NOT id = ANY($N) for efficient filtering.
@@ -234,6 +247,11 @@ async def search_by_vector(
         params.append(agent_id)
         idx += 1
 
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
+        idx += 1
+
     if exclude_ids:
         conditions.append(f"NOT (id = ANY(${idx}::text[]))")
         params.append(exclude_ids)
@@ -275,6 +293,7 @@ async def search_by_keyword(
     topic: str | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     exclude_ids: list[str] | None = None,
     sources: list[str] | None = None,
 ) -> list[MemoryRecall]:
@@ -282,6 +301,9 @@ async def search_by_keyword(
 
     Uses the search_tsv tsvector column with plainto_tsquery for robust
     keyword matching including stemming and stop-word removal.
+
+    user_id: If provided, filters to memories owned by this user OR globally-scoped
+    memories (user_id IS NULL). If None, returns all.
     """
     conditions = ["search_tsv IS NOT NULL"]
     params: list = []
@@ -315,6 +337,11 @@ async def search_by_keyword(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
         idx += 1
 
     if exclude_ids:
@@ -368,6 +395,7 @@ async def search_hybrid(
     topic: str | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     exclude_ids: list[str] | None = None,
     vector_weight: float = 0.5,
     keyword_weight: float = 0.5,
@@ -381,6 +409,9 @@ async def search_hybrid(
 
     vector_weight/keyword_weight control the relative importance of each
     signal in the RRF formula: score = w / (k + rank).
+
+    user_id: If provided, filters to memories owned by this user OR globally-scoped
+    memories (user_id IS NULL). If None, returns all.
     """
     # Fetch broader candidate sets from both methods, then fuse
     candidate_limit = limit * 3  # over-fetch to ensure good fusion
@@ -395,6 +426,7 @@ async def search_hybrid(
         topic=topic,
         project_id=project_id,
         agent_id=agent_id,
+        user_id=user_id,
         exclude_ids=exclude_ids,
         sources=sources,
     )
@@ -408,6 +440,7 @@ async def search_hybrid(
         topic=topic,
         project_id=project_id,
         agent_id=agent_id,
+        user_id=user_id,
         exclude_ids=exclude_ids,
         sources=sources,
     )
