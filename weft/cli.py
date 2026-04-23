@@ -841,3 +841,121 @@ def config_set(key: str, value: str):
 
     save_config_value(key, value)
     click.echo(f"Saved {key} = {value} to {CONFIG_PATH}")
+
+
+# ---------------------------------------------------------------------------
+# Identity — manage the canonical user_id for this installation.
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def identity():
+    """Manage the canonical user_id for this Weft installation.
+
+    Precedence: WEFT_USER_ID env var → ~/.weft/user_id.json → random UUID.
+    Set your identity explicitly to bind local data to your hosted JWT sub
+    (or any other canonical ID) so both paths agree on who owns what.
+    """
+    pass
+
+
+@identity.command("show")
+def identity_show():
+    """Print the current user_id and how it was resolved."""
+    from weft.config.user_identity import describe_user_id
+
+    info = describe_user_id()
+    source_note = {
+        "env": f"from ${info['env_var']} environment variable",
+        "config": f"from {info['config_path']}",
+        "unset": "not yet set — next call to get_user_id() will generate a random UUID",
+    }.get(info["source"], info["source"])
+
+    if info["user_id"]:
+        click.echo(f"user_id: {info['user_id']}")
+        click.echo(f"source:  {source_note}")
+    else:
+        click.echo("user_id: (unset)")
+        click.echo(f"source:  {source_note}")
+        click.echo(
+            "\nTo bind this install to a specific identity (e.g. your hosted "
+            "JWT sub), run:\n  weft identity set <user-id>"
+        )
+
+
+@identity.command("set")
+@click.argument("user_id")
+def identity_set(user_id: str):
+    """Persist a canonical user_id to ~/.weft/user_id.json.
+
+    Overwrites any existing value. The WEFT_USER_ID env var still takes
+    precedence at read time if set — unset it in your shell if you want
+    the persisted value to be authoritative.
+    """
+    from weft.config.user_identity import describe_user_id, set_user_id
+
+    set_user_id(user_id)
+    info = describe_user_id()
+    click.echo(f"Saved user_id={user_id} to {info['config_path']}")
+    if info["source"] == "env":
+        click.echo(
+            f"\nNote: ${info['env_var']} is currently set and overrides the "
+            f"config file. Unset it to make the persisted value authoritative."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Admin — one-shot operations against a live database. Always dry-run first.
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def admin():
+    """Admin operations. These touch prod data — inspect dry-runs first."""
+    pass
+
+
+@admin.command("dry-run-backfill")
+@click.option(
+    "--user-id",
+    default=None,
+    help="Identity that would be stamped. Defaults to the resolved "
+         "get_user_id() for this environment. Does NOT mutate — read-only.",
+)
+def admin_dry_run_backfill(user_id: str | None):
+    """Report the backfill landscape without mutating anything.
+
+    Prints per-table NULL counts, any distinct non-NULL user_ids already
+    present, and the identity that a real backfill would stamp. Always run
+    this before invoking the real backfill against a shared database.
+    """
+    from weft.config import load_config
+    from weft.db.backfill_user_id import dry_run_backfill_user_id
+    from weft.db.connection import create_pool
+
+    async def _go():
+        cfg = load_config()
+        pool = await create_pool(cfg)
+        try:
+            report = await dry_run_backfill_user_id(pool, user_id=user_id)
+        finally:
+            await pool.close()
+
+        click.echo("=" * 64)
+        click.echo("  Backfill dry run — NO MUTATIONS")
+        click.echo("=" * 64)
+        click.echo(f"Proposed user_id (would be stamped onto NULL rows):")
+        click.echo(f"  {report.proposed_user_id}")
+        click.echo(f"Total NULL-user_id rows across scoped tables: "
+                   f"{report.total_null_rows}")
+        click.echo()
+        click.echo(f"{'Table':28} {'Total':>8} {'NULL':>8}  Distinct non-NULL user_ids")
+        click.echo("-" * 64)
+        for table, info in report.per_table.items():
+            distinct = ", ".join(info["distinct_user_ids"]) or "(none)"
+            click.echo(
+                f"{table:28} {info['total_rows']:>8} {info['null_count']:>8}  "
+                f"{distinct}"
+            )
+
+    asyncio.run(_go())
