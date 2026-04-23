@@ -110,3 +110,111 @@ async def test_backfill_skips_already_assigned(pool):
         "SELECT COUNT(*) FROM audit_backfill_user_id WHERE row_id = $1", row_id
     )
     assert audit_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Explicit user_id override (admin-safety path)
+# ---------------------------------------------------------------------------
+
+async def test_backfill_accepts_explicit_user_id(pool):
+    """When user_id is passed explicitly, that value lands in rows + audit —
+    NOT whatever get_user_id() would resolve in the current environment."""
+    from weft.db.backfill_user_id import backfill_user_id
+
+    row_id = await _insert_behavior(pool, project_id="proj-z", user_id=None)
+
+    count = await backfill_user_id(pool, user_id="explicit-admin-id")
+    assert count >= 1
+
+    row = await pool.fetchrow("SELECT user_id FROM behaviors WHERE id = $1", row_id)
+    assert row["user_id"] == "explicit-admin-id"
+
+    # Config-resolved get_user_id() must not have been used.
+    assert row["user_id"] != get_user_id()
+
+
+async def test_backfill_explicit_user_id_does_not_change_existing(pool):
+    """Override value doesn't touch rows that already have a user_id set."""
+    from weft.db.backfill_user_id import backfill_user_id
+
+    protected_id = await _insert_behavior(
+        pool, project_id=None, user_id="pre-existing-user"
+    )
+    null_id = await _insert_behavior(pool, project_id=None, user_id=None)
+
+    await backfill_user_id(pool, user_id="stamp-this")
+
+    protected = await pool.fetchrow(
+        "SELECT user_id FROM behaviors WHERE id = $1", protected_id
+    )
+    stamped = await pool.fetchrow(
+        "SELECT user_id FROM behaviors WHERE id = $1", null_id
+    )
+    assert protected["user_id"] == "pre-existing-user"
+    assert stamped["user_id"] == "stamp-this"
+
+
+# ---------------------------------------------------------------------------
+# Dry-run reporting (read-only landscape)
+# ---------------------------------------------------------------------------
+
+async def test_dry_run_does_not_mutate(pool):
+    """dry_run_backfill_user_id must not touch any table or write audit rows."""
+    from weft.db.backfill_user_id import dry_run_backfill_user_id
+
+    null_id = await _insert_behavior(pool, project_id=None, user_id=None)
+    seen_id = await _insert_behavior(pool, project_id=None, user_id="existing-user")
+
+    before_null = await pool.fetchval(
+        "SELECT user_id FROM behaviors WHERE id = $1", null_id
+    )
+    before_seen = await pool.fetchval(
+        "SELECT user_id FROM behaviors WHERE id = $1", seen_id
+    )
+
+    report = await dry_run_backfill_user_id(pool, user_id="dry-run-probe")
+
+    # Nothing mutated.
+    after_null = await pool.fetchval(
+        "SELECT user_id FROM behaviors WHERE id = $1", null_id
+    )
+    after_seen = await pool.fetchval(
+        "SELECT user_id FROM behaviors WHERE id = $1", seen_id
+    )
+    assert after_null == before_null  # still NULL
+    assert after_seen == before_seen  # still "existing-user"
+
+    # No audit rows written.
+    audit_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM audit_backfill_user_id"
+    )
+    assert audit_count == 0
+
+    # Report reflects the landscape.
+    assert report.proposed_user_id == "dry-run-probe"
+    assert report.total_null_rows >= 1
+    beh = report.per_table["behaviors"]
+    assert beh["null_count"] >= 1
+    assert "existing-user" in beh["distinct_user_ids"]
+    assert beh["total_rows"] >= 2
+
+
+async def test_dry_run_covers_all_scoped_tables(pool):
+    """Report includes an entry for every scoped table, even if empty."""
+    from weft.db.backfill_user_id import _TABLES, dry_run_backfill_user_id
+
+    report = await dry_run_backfill_user_id(pool)
+    expected_tables = {t[0] for t in _TABLES}
+    assert set(report.per_table.keys()) == expected_tables
+    for name, info in report.per_table.items():
+        assert "null_count" in info
+        assert "distinct_user_ids" in info
+        assert "total_rows" in info
+
+
+async def test_dry_run_proposed_user_id_defaults_to_get_user_id(pool):
+    """When no override is passed, report shows what a real run would use."""
+    from weft.db.backfill_user_id import dry_run_backfill_user_id
+
+    report = await dry_run_backfill_user_id(pool)
+    assert report.proposed_user_id == get_user_id()
