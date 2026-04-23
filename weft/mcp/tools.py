@@ -11,6 +11,7 @@ from typing import Literal
 import asyncpg
 from fastmcp import Context
 
+from weft.config.user_identity import get_user_id
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
 from weft.mcp.server import AppContext, mcp
@@ -318,6 +319,7 @@ async def weft_recall(
     threshold: float = 0.3,
     mode: str = "hybrid",
     retrieval_mode: str = "face",
+    user_id: str | None = None,
 ) -> dict:
     """Retrieve memories by semantic query, keyword search, or hybrid (default).
 
@@ -327,7 +329,15 @@ async def weft_recall(
 
     retrieval_mode: 'face' (default — excludes codebase ingest noise), 'code' (includes ingest
     and code-context sources for agent-in-repo queries), or 'all' (no source filter).
+
+    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    Filters to user-owned rows OR truly-global rows (user_id IS NULL).
+    retrieval_mode and scope are orthogonal — user_id composes independently with both.
+    These are three independent knobs: retrieval_mode (face/code/all), scope (user/project/agent),
+    and user_id — none implies the other.
     """
+    if user_id is None:
+        user_id = get_user_id()
     try:
         cid = set_correlation_id()
         logger.debug("weft_recall start [%s] query=%r mode=%s", cid, query[:50], mode)
@@ -358,6 +368,7 @@ async def weft_recall(
                     project_id=project_id,
                     agent_id=agent_id,
                     sources=sources,
+                    user_id=user_id,
                 )
             elif mode == "hybrid":
                 results = await search_hybrid(
@@ -372,6 +383,7 @@ async def weft_recall(
                     project_id=project_id,
                     agent_id=agent_id,
                     sources=sources,
+                    user_id=user_id,
                 )
             else:  # semantic
                 results = await search_by_vector(
@@ -385,6 +397,7 @@ async def weft_recall(
                     project_id=project_id,
                     agent_id=agent_id,
                     sources=sources,
+                    user_id=user_id,
                 )
 
             # Touch accessed memories and enrich with entities
@@ -1439,12 +1452,20 @@ async def weft_behavior_match(
     agent_id: str | None = None,
     limit: int = 5,
     threshold: float = 0.3,
+    user_id: str | None = None,
 ) -> dict:
     """Find behavioral rules that match a described situation.
     If project_id is omitted, auto-detects from the client's working directory.
 
     situation: free-text description of the current context or task.
-    Returns behaviors ranked by relevance (similarity * confidence * priority)."""
+    Returns behaviors ranked by relevance (similarity * confidence * priority).
+
+    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    Filters to user-owned rows OR truly-global rows (user_id IS NULL).
+    retrieval_mode and scope are orthogonal — user_id composes independently with both.
+    """
+    if user_id is None:
+        user_id = get_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -1457,6 +1478,7 @@ async def weft_behavior_match(
                 threshold=threshold,
                 project_id=resolved_project,
                 agent_id=agent_id,
+                user_id=user_id,
             )
             # Touch matched behaviors to track usage
             for r in results:
@@ -1480,11 +1502,19 @@ async def weft_behavior_list(
     agent_id: str | None = None,
     enabled: bool | None = True,
     limit: int = 50,
+    user_id: str | None = None,
 ) -> dict:
     """List stored behavioral rules with optional filters.
     If project_id is omitted, auto-detects from the client's working directory.
 
-    Returns behaviors ordered by priority (highest first)."""
+    Returns behaviors ordered by priority (highest first).
+
+    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    Filters to user-owned rows OR truly-global rows (user_id IS NULL).
+    retrieval_mode and scope are orthogonal — user_id composes independently with both.
+    """
+    if user_id is None:
+        user_id = get_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -1497,6 +1527,7 @@ async def weft_behavior_list(
                 agent_id=agent_id,
                 enabled=enabled,
                 limit=limit,
+                user_id=user_id,
             )
             return {
                 "count": len(results),
@@ -1599,13 +1630,21 @@ async def weft_episode_timeline(
     project_id: str | None = None,
     agent_id: str | None = None,
     limit: int = 20,
+    user_id: str | None = None,
 ) -> dict:
     """Find episodes overlapping a time range.
 
     If start/end are omitted, defaults to the last N hours (default 24).
     start/end accept ISO timestamps or relative values like '2d', '1w'.
     If project_id is omitted, auto-detects from the client's working directory.
-    Open episodes (no end time) match any range after their start."""
+    Open episodes (no end time) match any range after their start.
+
+    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    Filters to user-owned rows OR truly-global rows (user_id IS NULL).
+    retrieval_mode and scope are orthogonal — user_id composes independently with both.
+    """
+    if user_id is None:
+        user_id = get_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -1628,6 +1667,7 @@ async def weft_episode_timeline(
                 project_id=resolved_project,
                 agent_id=agent_id,
                 limit=limit,
+                user_id=user_id,
             )
             return {
                 "start": parsed_start.isoformat(),
@@ -1814,11 +1854,19 @@ async def weft_entity_search(
     project_id: str | None = None,
     limit: int = 10,
     threshold: float = 0.3,
+    user_id: str | None = None,
 ) -> dict:
     """Search for entities by semantic similarity.
 
     If project_id is omitted, auto-detects from the client's working directory.
-    Returns entities ranked by relevance to the query."""
+    Returns entities ranked by relevance to the query.
+
+    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    Filters to user-owned rows OR truly-global rows (user_id IS NULL).
+    retrieval_mode and scope are orthogonal — user_id composes independently with both.
+    """
+    if user_id is None:
+        user_id = get_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -1831,6 +1879,7 @@ async def weft_entity_search(
                 project_id=resolved_project,
                 limit=limit,
                 threshold=threshold,
+                user_id=user_id,
             )
             return {
                 "query": query,
@@ -1944,16 +1993,23 @@ async def weft_mode_set(
 
 
 @mcp.tool()
-async def weft_mode_list(ctx: Context) -> dict:
+async def weft_mode_list(ctx: Context, user_id: str | None = None) -> dict:
     """List all saved retrieval modes for the current user.
 
-    Returns modes ordered by name with their weight configurations."""
+    Returns modes ordered by name with their weight configurations.
+
+    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    Filters to user-owned rows OR truly-global rows (user_id IS NULL).
+    retrieval_mode and scope are orthogonal — user_id composes independently with both.
+    """
+    if user_id is None:
+        user_id = get_user_id()
     try:
         from weft.modes import list_modes
 
         app: AppContext = ctx.request_context.lifespan_context
         async with acquire(app.pool):
-            modes = await list_modes(app.pool)
+            modes = await list_modes(app.pool, user_id=user_id)
             return {
                 "count": len(modes),
                 "modes": [m.to_dict() for m in modes],
