@@ -259,3 +259,45 @@ class TestMCPToolHandler:
         assert isinstance(serialized, str)
         assert d["evaluated_at"] == "2026-03-25T12:00:00+00:00"
         assert d["total_findings"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Integration: real-pool evaluators must not crash on import/config drift
+# ---------------------------------------------------------------------------
+#
+# The mocked tests above never exercise the bodies of _evaluate_checkin /
+# _evaluate_loom / _evaluate_hygiene — which is how a module-level import
+# drift (commit 62d7676 renamed threshold constants into dataclasses, but
+# health_check.py still imported the old names) shipped to prod undetected.
+# These tests run each evaluator against a real pool so future drift
+# surfaces in CI instead of as an ImportError at runtime.
+
+
+class TestEvaluatorsImportAndExecute:
+    @pytest.mark.asyncio
+    async def test_evaluate_checkin_runs_without_error(self, pool):
+        from weft.health_check import _evaluate_checkin
+        result = await _evaluate_checkin(pool)
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_evaluate_loom_runs_without_error(self, pool):
+        from weft.health_check import _evaluate_loom
+        result = await _evaluate_loom(pool)
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_evaluate_hygiene_runs_without_error(self, pool):
+        from weft.health_check import _evaluate_hygiene
+        result = await _evaluate_hygiene(pool)
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_run_all_evaluators_reports_zero_errors(self, pool):
+        """Real-pool end-to-end: the aggregator must have empty errors list."""
+        from weft.health_check import run_all_evaluators
+        summary = await run_all_evaluators(pool)
+        assert summary.errors == [], (
+            f"Evaluators raised: {summary.errors} — likely module-level "
+            f"import drift. Check health_check.py imports."
+        )

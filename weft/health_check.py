@@ -84,18 +84,14 @@ async def _evaluate_checkin(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     Calls analyze_all() for pattern detection, then evaluates thresholds
     locally — mirrors evaluate_check_in_alerts logic but skips create_alert.
     """
-    from weft.check_in_patterns import (
-        _ALERT_LOW_MOOD_STREAK,
-        _ALERT_LOW_SLEEP_DAYS,
-        _ALERT_LOW_SLEEP_HOURS,
-        analyze_all,
-    )
+    from weft.check_in_patterns import CheckInAlertConfig, analyze_all
     from weft.check_ins import list_check_ins
 
     check_ins = await list_check_ins(pool, limit=200)
     if not check_ins:
         return []
 
+    cfg = CheckInAlertConfig()
     report = analyze_all(check_ins, trend_days=90, rolling_days=30)
     findings: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
@@ -104,7 +100,7 @@ async def _evaluate_checkin(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     low_streaks = report["streaks"]["low_mood_streaks"]
     if low_streaks:
         longest = max(low_streaks, key=lambda s: s["length"])
-        if longest["length"] >= _ALERT_LOW_MOOD_STREAK:
+        if longest["length"] >= cfg.low_mood_streak:
             findings.append({
                 "source": "check_in_alerts",
                 "severity": "warning",
@@ -118,13 +114,13 @@ async def _evaluate_checkin(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     sorted_cis = sorted(check_ins, key=lambda ci: ci.logged_at, reverse=True)
     recent_sleep = [
         ci.sleep_hours
-        for ci in sorted_cis[:_ALERT_LOW_SLEEP_DAYS * 2]
+        for ci in sorted_cis[:cfg.low_sleep_days * 2]
         if ci.sleep_hours is not None
-        and ci.logged_at >= now - timedelta(days=_ALERT_LOW_SLEEP_DAYS + 1)
+        and ci.logged_at >= now - timedelta(days=cfg.low_sleep_days + 1)
     ]
-    if len(recent_sleep) >= _ALERT_LOW_SLEEP_DAYS:
+    if len(recent_sleep) >= cfg.low_sleep_days:
         avg_sleep = sum(recent_sleep) / len(recent_sleep)
-        if avg_sleep < _ALERT_LOW_SLEEP_HOURS:
+        if avg_sleep < cfg.low_sleep_hours:
             findings.append({
                 "source": "check_in_alerts",
                 "severity": "warning",
@@ -215,20 +211,16 @@ async def _evaluate_hygiene(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     Read-only — no create_alert calls.
     """
     from weft.db.connection import get_db
-    from weft.memory_hygiene_alerts import (
-        _CONSOLIDATION_OVERDUE_HOURS,
-        _MEMORY_COUNT_THRESHOLD,
-        _STALE_DECISION_CONFIDENCE,
-        _STALE_DECISION_DAYS,
-    )
+    from weft.memory_hygiene_alerts import MemoryHygieneConfig
 
+    cfg = MemoryHygieneConfig()
     findings: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
 
     # 1. Stale decisions
     from datetime import timedelta
 
-    stale_cutoff = now - timedelta(days=_STALE_DECISION_DAYS)
+    stale_cutoff = now - timedelta(days=cfg.stale_decision_days)
     try:
         overdue_rows = await get_db(pool).fetch(
             """
@@ -256,7 +248,7 @@ async def _evaluate_hygiene(pool: asyncpg.Pool) -> list[dict[str, Any]]:
             LIMIT 20
             """,
             stale_cutoff,
-            _STALE_DECISION_CONFIDENCE,
+            cfg.stale_decision_confidence,
         )
         total = len(overdue_rows) + len(old_low_rows)
         if total > 0:
@@ -288,7 +280,7 @@ async def _evaluate_hygiene(pool: asyncpg.Pool) -> list[dict[str, Any]]:
             if ran_at:
                 last_run = datetime.fromisoformat(ran_at)
                 hours_since = (now - last_run).total_seconds() / 3600
-                is_overdue = hours_since >= _CONSOLIDATION_OVERDUE_HOURS
+                is_overdue = hours_since >= cfg.consolidation_overdue_hours
 
         if is_overdue:
             msg = (
@@ -310,12 +302,12 @@ async def _evaluate_hygiene(pool: asyncpg.Pool) -> list[dict[str, Any]]:
         count = await get_db(pool).fetchval(
             "SELECT count(*) FROM memories WHERE status = 'active'"
         )
-        if count >= _MEMORY_COUNT_THRESHOLD:
+        if count >= cfg.memory_count_threshold:
             findings.append({
                 "source": "memory_hygiene",
                 "severity": "info",
-                "message": f"Active memory count: {count} (threshold: {_MEMORY_COUNT_THRESHOLD})",
-                "metadata": {"count": count, "threshold": _MEMORY_COUNT_THRESHOLD},
+                "message": f"Active memory count: {count} (threshold: {cfg.memory_count_threshold})",
+                "metadata": {"count": count, "threshold": cfg.memory_count_threshold},
             })
     except Exception:
         logger.warning("health_check.hygiene.memory_count failed", exc_info=True)
