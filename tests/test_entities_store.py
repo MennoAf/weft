@@ -124,6 +124,45 @@ async def test_list_entities_or_null_scoping(pool):
     assert "other-proj" not in names
 
 
+async def test_list_entities_user_id_none_returns_all(pool):
+    """user_id=None should return all entities (no filter)."""
+    await _make_entity(pool, "global")
+    await _make_entity(pool, "user-a-entity", user_id="user-a")
+    await _make_entity(pool, "user-b-entity", user_id="user-b")
+
+    results = await list_entities(pool, user_id=None)
+    names = {e.name for e in results}
+    assert len(names) == 3
+    assert "global" in names
+    assert "user-a-entity" in names
+    assert "user-b-entity" in names
+
+
+async def test_list_entities_user_id_scoping(pool):
+    """user_id='user-a' should return user-a rows + NULL rows, exclude others."""
+    await _make_entity(pool, "global")
+    await _make_entity(pool, "user-a-entity", user_id="user-a")
+    await _make_entity(pool, "user-b-entity", user_id="user-b")
+
+    results = await list_entities(pool, user_id="user-a")
+    names = {e.name for e in results}
+    assert "global" in names
+    assert "user-a-entity" in names
+    assert "user-b-entity" not in names
+
+
+async def test_list_entities_user_id_only_null_rows(pool):
+    """user_id='user-a' should return NULL rows even if no user-a rows exist."""
+    await _make_entity(pool, "global")
+    await _make_entity(pool, "user-b-entity", user_id="user-b")
+
+    results = await list_entities(pool, user_id="user-a")
+    names = {e.name for e in results}
+    assert "global" in names
+    assert "user-a-entity" not in names
+    assert "user-b-entity" not in names
+
+
 async def test_list_entities_ordered_by_mention_count(pool):
     e1 = await _make_entity(pool, "low")
     e2 = await _make_entity(pool, "high")
@@ -215,6 +254,35 @@ async def test_search_entities_project_scoped(pool):
     assert "global" in names
     assert "proj-1" in names
     assert "proj-2" not in names
+
+
+async def test_search_entities_user_id_none_returns_all(pool):
+    """user_id=None should return all entities (no filter)."""
+    embedding = [0.5] * 768
+    await store_entity(pool, EntityCreate(name="global"), embedding=embedding)
+    await store_entity(pool, EntityCreate(name="user-a-entity", user_id="user-a"), embedding=embedding)
+    await store_entity(pool, EntityCreate(name="user-b-entity", user_id="user-b"), embedding=embedding)
+
+    results = await search_entities(pool, embedding, user_id=None, threshold=0.0)
+    names = {e.name for e, _ in results}
+    assert len(names) == 3
+    assert "global" in names
+    assert "user-a-entity" in names
+    assert "user-b-entity" in names
+
+
+async def test_search_entities_user_id_scoping(pool):
+    """user_id='user-a' should return user-a rows + NULL rows, exclude others."""
+    embedding = [0.5] * 768
+    await store_entity(pool, EntityCreate(name="global"), embedding=embedding)
+    await store_entity(pool, EntityCreate(name="user-a-entity", user_id="user-a"), embedding=embedding)
+    await store_entity(pool, EntityCreate(name="user-b-entity", user_id="user-b"), embedding=embedding)
+
+    results = await search_entities(pool, embedding, user_id="user-a", threshold=0.0)
+    names = {e.name for e, _ in results}
+    assert "global" in names
+    assert "user-a-entity" in names
+    assert "user-b-entity" not in names
 
 
 # --- link_mention ---

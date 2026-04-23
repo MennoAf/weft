@@ -90,6 +90,7 @@ async def list_behaviors(
     scope: BehaviorScope | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     enabled: bool | None = True,
     status: str = "active",
     limit: int = 50,
@@ -97,7 +98,18 @@ async def list_behaviors(
 ) -> list[Behavior]:
     """List behaviors with optional filters.
 
-    Scoping uses OR-NULL logic on project_id/agent_id (matches value OR global).
+    Scoping uses OR-NULL logic on project_id/agent_id/user_id (matches value OR global).
+
+    Args:
+        pool: Database connection pool.
+        scope: Optional scope filter.
+        project_id: If provided, filters to behaviors owned by this project OR globally-scoped behaviors (project_id IS NULL). If None, returns all.
+        agent_id: If provided, filters to behaviors owned by this agent OR globally-scoped behaviors (agent_id IS NULL). If None, returns all.
+        user_id: If provided, filters to behaviors owned by this user OR globally-scoped behaviors (user_id IS NULL). If None, returns all.
+        enabled: If True, only enabled behaviors. If False, only disabled. If None, all.
+        status: Status filter (default "active").
+        limit: Max results (default 50).
+        offset: Offset for pagination (default 0).
     """
     conditions = []
     params: list = []
@@ -121,6 +133,11 @@ async def list_behaviors(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
         idx += 1
 
     if enabled is not None:
@@ -148,12 +165,23 @@ async def match_behaviors(
     threshold: float = 0.1,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     enabled: bool | None = True,
 ) -> list[BehaviorMatch]:
     """Match behaviors by vector similarity on trigger_pattern embedding.
 
     Results ranked by composite score: similarity * confidence * (1 + priority/10).
-    Uses OR-NULL scoping on project_id/agent_id.
+    Uses OR-NULL scoping on project_id/agent_id/user_id.
+
+    Args:
+        pool: Database connection pool.
+        embedding: Query embedding vector.
+        limit: Max results (default 10).
+        threshold: Similarity threshold (default 0.1).
+        project_id: If provided, filters to behaviors owned by this project OR globally-scoped behaviors (project_id IS NULL). If None, returns all.
+        agent_id: If provided, filters to behaviors owned by this agent OR globally-scoped behaviors (agent_id IS NULL). If None, returns all.
+        user_id: If provided, filters to behaviors owned by this user OR globally-scoped behaviors (user_id IS NULL). If None, returns all.
+        enabled: If True, only enabled behaviors. If False, only disabled. If None, all.
     """
     conditions = ["embedding IS NOT NULL", "status = 'active'"]
     params: list = []
@@ -175,6 +203,11 @@ async def match_behaviors(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
         idx += 1
 
     if enabled is not None:

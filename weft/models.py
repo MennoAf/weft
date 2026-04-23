@@ -228,6 +228,7 @@ class EntityCreate(BaseModel):
     description: str | None = None
     project_id: str | None = None
     agent_id: str | None = None
+    user_id: str | None = None
 
 
 class EpisodeStatus(str, Enum):
