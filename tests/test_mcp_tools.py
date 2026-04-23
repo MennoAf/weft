@@ -376,3 +376,215 @@ class TestDbFallback:
         if result["handoff"]:
             handoff_content = result["handoff"][0]["content"]
             assert len(handoff_content) < 20_000  # well under 200K+
+
+
+# ---------------------------------------------------------------------------
+# user_id filter tests — Phase 1 multi-user scoping
+# Orthogonality contract: retrieval_mode (face/code/all), scope (user/project/agent),
+# and user_id are THREE INDEPENDENT KNOBS. None implies the other.
+# ---------------------------------------------------------------------------
+
+
+class TestUserIdFiltering:
+    """
+    Tests that user_id is plumbed through to the underlying store/domain functions.
+
+    Orthogonality contract (load-bearing): retrieval_mode (face/code/all),
+    scope (user/project/agent), and user_id are THREE INDEPENDENT knobs —
+    no two imply the other; all three compose freely.
+    """
+
+    # ------------------------------------------------------------------
+    # weft_recall
+    # ------------------------------------------------------------------
+
+    async def test_recall_without_user_id_defaults_to_get_user_id(self, app, monkeypatch):
+        """Calling weft_recall without user_id uses get_user_id() automatically."""
+        from unittest.mock import AsyncMock, patch
+
+        from weft.mcp.tools import weft_recall
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "patched-uid")
+
+        captured = {}
+
+        original_search_hybrid = __import__("weft.store", fromlist=["search_hybrid"]).search_hybrid
+
+        async def spy_search_hybrid(pool, query, embedding, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original_search_hybrid(pool, query, embedding, **kwargs)
+
+        ctx = _make_ctx(app)
+        with patch("weft.mcp.tools.search_hybrid", side_effect=spy_search_hybrid):
+            await weft_recall(ctx, query="anything")
+
+        assert captured.get("user_id") == "patched-uid"
+
+    async def test_recall_explicit_none_defaults_to_get_user_id(self, app, monkeypatch):
+        """Passing user_id=None explicitly also falls through to get_user_id()."""
+        from unittest.mock import patch
+
+        from weft.mcp.tools import weft_recall
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "patched-uid-2")
+
+        captured = {}
+
+        original = __import__("weft.store", fromlist=["search_hybrid"]).search_hybrid
+
+        async def spy(pool, query, embedding, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original(pool, query, embedding, **kwargs)
+
+        ctx = _make_ctx(app)
+        with patch("weft.mcp.tools.search_hybrid", side_effect=spy):
+            await weft_recall(ctx, query="anything", user_id=None)
+
+        assert captured.get("user_id") == "patched-uid-2"
+
+    async def test_recall_byte_identical_default_vs_explicit(self, app, monkeypatch):
+        """Default user_id path produces same results as explicit user_id path."""
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "user-abc")
+
+        ctx = _make_ctx(app)
+        await weft_remember(ctx, content="Test memory for recall identity check", topic=["identity"])
+
+        result_default = await weft_recall(ctx, query="identity check", threshold=0.0)
+        result_explicit = await weft_recall(ctx, query="identity check", threshold=0.0, user_id="user-abc")
+
+        assert result_default["count"] == result_explicit["count"]
+
+    async def test_recall_retrieval_mode_and_user_id_compose(self, app, monkeypatch):
+        """retrieval_mode and user_id are orthogonal — both are applied independently."""
+        from unittest.mock import patch
+
+        from weft.mcp.tools import weft_recall
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "compose-uid")
+
+        captured = {}
+
+        original = __import__("weft.store", fromlist=["search_hybrid"]).search_hybrid
+
+        async def spy(pool, query, embedding, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            captured["sources"] = kwargs.get("sources")
+            return await original(pool, query, embedding, **kwargs)
+
+        ctx = _make_ctx(app)
+        with patch("weft.mcp.tools.search_hybrid", side_effect=spy):
+            await weft_recall(ctx, query="compose test", retrieval_mode="code", user_id="explicit-uid")
+
+        # Both filters applied: user_id is set AND sources is set (not None, for 'code' mode)
+        assert captured.get("user_id") == "explicit-uid"
+        assert captured.get("sources") is not None
+
+    # ------------------------------------------------------------------
+    # weft_behavior_list
+    # ------------------------------------------------------------------
+
+    async def test_behavior_list_without_user_id_defaults_to_get_user_id(self, app, monkeypatch):
+        """weft_behavior_list without user_id calls list_behaviors with get_user_id()."""
+        from unittest.mock import patch
+
+        from weft.mcp.tools import weft_behavior_list
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "behaviors-uid")
+
+        captured = {}
+
+        original = __import__("weft.behaviors", fromlist=["list_behaviors"]).list_behaviors
+
+        async def spy(pool, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original(pool, **kwargs)
+
+        ctx = _make_ctx(app)
+        with patch("weft.mcp.tools.list_behaviors_store", side_effect=spy):
+            await weft_behavior_list(ctx)
+
+        assert captured.get("user_id") == "behaviors-uid"
+
+    async def test_behavior_list_explicit_none_defaults_to_get_user_id(self, app, monkeypatch):
+        """Passing user_id=None to weft_behavior_list also falls through to get_user_id()."""
+        from unittest.mock import patch
+
+        from weft.mcp.tools import weft_behavior_list
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "behaviors-uid-2")
+
+        captured = {}
+
+        original = __import__("weft.behaviors", fromlist=["list_behaviors"]).list_behaviors
+
+        async def spy(pool, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original(pool, **kwargs)
+
+        ctx = _make_ctx(app)
+        with patch("weft.mcp.tools.list_behaviors_store", side_effect=spy):
+            await weft_behavior_list(ctx, user_id=None)
+
+        assert captured.get("user_id") == "behaviors-uid-2"
+
+    # ------------------------------------------------------------------
+    # weft_entity_search
+    # ------------------------------------------------------------------
+
+    async def test_entity_search_without_user_id_defaults_to_get_user_id(self, app, monkeypatch):
+        """weft_entity_search without user_id calls search_entities with get_user_id()."""
+        from unittest.mock import patch
+
+        from weft.mcp.tools import weft_entity_search
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "entities-uid")
+
+        captured = {}
+
+        original = __import__("weft.entities", fromlist=["search_entities"]).search_entities
+
+        async def spy(pool, embedding, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original(pool, embedding, **kwargs)
+
+        ctx = _make_ctx(app)
+        with patch("weft.mcp.tools.search_entities", side_effect=spy):
+            await weft_entity_search(ctx, query="test entity")
+
+        assert captured.get("user_id") == "entities-uid"
+
+    async def test_entity_search_explicit_none_defaults_to_get_user_id(self, app, monkeypatch):
+        """Passing user_id=None to weft_entity_search also falls through to get_user_id()."""
+        from unittest.mock import patch
+
+        from weft.mcp.tools import weft_entity_search
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "entities-uid-2")
+
+        captured = {}
+
+        original = __import__("weft.entities", fromlist=["search_entities"]).search_entities
+
+        async def spy(pool, embedding, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original(pool, embedding, **kwargs)
+
+        ctx = _make_ctx(app)
+        with patch("weft.mcp.tools.search_entities", side_effect=spy):
+            await weft_entity_search(ctx, query="test entity", user_id=None)
+
+        assert captured.get("user_id") == "entities-uid-2"
+
+    async def test_entity_search_byte_identical_default_vs_explicit(self, app, monkeypatch):
+        """Default user_id path produces same results as explicit user_id path for entities."""
+        from weft.mcp.tools import weft_entity_search
+
+        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "entity-id-match")
+
+        ctx = _make_ctx(app)
+        result_default = await weft_entity_search(ctx, query="some concept", threshold=0.0)
+        result_explicit = await weft_entity_search(ctx, query="some concept", threshold=0.0, user_id="entity-id-match")
+
+        assert result_default["count"] == result_explicit["count"]
