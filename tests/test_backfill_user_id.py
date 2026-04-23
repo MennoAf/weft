@@ -7,28 +7,8 @@ import pytest
 from weft.config.user_identity import get_user_id
 
 
-# ---------------------------------------------------------------------------
-# Per-test fixture: create audit_backfill_user_id table
-# (Real migration lives in loom-c0495cf2, landing after this script ships.)
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-async def audit_table(pool):
-    """Create the audit table before each test; drop after."""
-    await pool.execute(
-        """
-        CREATE TABLE IF NOT EXISTS audit_backfill_user_id (
-            id          SERIAL PRIMARY KEY,
-            source_table TEXT NOT NULL,
-            row_id      TEXT NOT NULL,
-            old_scope   TEXT NOT NULL,
-            new_scope   TEXT NOT NULL,
-            migrated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-        """
-    )
-    yield
-    await pool.execute("DROP TABLE IF EXISTS audit_backfill_user_id")
+# audit_backfill_user_id table is created by migration 32 and truncated by the
+# pool fixture; no per-test audit setup needed.
 
 
 # ---------------------------------------------------------------------------
