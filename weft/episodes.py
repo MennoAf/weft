@@ -89,11 +89,22 @@ async def list_episodes(
     *,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     status: EpisodeStatus | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Episode]:
-    """List episodes with optional filters. Uses OR-NULL scoping on project_id/agent_id."""
+    """List episodes with optional filters. Uses OR-NULL scoping on project_id/agent_id/user_id.
+
+    Args:
+        pool: asyncpg connection pool
+        project_id: If provided, filters to episodes owned by this project OR globally-scoped (project_id IS NULL). If None, returns all episodes.
+        agent_id: If provided, filters to episodes owned by this agent OR globally-scoped (agent_id IS NULL). If None, returns all episodes.
+        user_id: If provided, filters to episodes owned by this user OR globally-scoped (user_id IS NULL). If None, returns all episodes.
+        status: Filter to episodes with this status.
+        limit: Maximum number of results.
+        offset: Offset for pagination.
+    """
     conditions = []
     params: list = []
     idx = 1
@@ -111,6 +122,11 @@ async def list_episodes(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
@@ -246,6 +262,7 @@ async def timeline_query(
     *,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     status: EpisodeStatus | None = None,
     limit: int = 50,
 ) -> list[Episode]:
@@ -253,6 +270,16 @@ async def timeline_query(
 
     Open episodes (ended_at IS NULL) are treated as ongoing and match
     any range that starts before or at their started_at.
+
+    Args:
+        pool: asyncpg connection pool
+        start: Start of time range (exclusive).
+        end: End of time range (exclusive).
+        project_id: If provided, filters to episodes owned by this project OR globally-scoped (project_id IS NULL). If None, returns all episodes.
+        agent_id: If provided, filters to episodes owned by this agent OR globally-scoped (agent_id IS NULL). If None, returns all episodes.
+        user_id: If provided, filters to episodes owned by this user OR globally-scoped (user_id IS NULL). If None, returns all episodes.
+        status: Filter to episodes with this status.
+        limit: Maximum number of results.
     """
     conditions = [
         "started_at <= $1",
@@ -269,6 +296,11 @@ async def timeline_query(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
         idx += 1
 
     if status is not None:
@@ -386,12 +418,20 @@ async def get_working_memory(
     *,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     limit: int = 50,
 ) -> list[EpisodeWithMemories]:
     """Get active working memory — open episodes that haven't expired.
 
     Returns episodes with their linked memories, ordered by most recent first.
     Excludes episodes where expires_at has passed.
+
+    Args:
+        pool: asyncpg connection pool
+        project_id: If provided, filters to episodes owned by this project OR globally-scoped (project_id IS NULL). If None, returns all episodes.
+        agent_id: If provided, filters to episodes owned by this agent OR globally-scoped (agent_id IS NULL). If None, returns all episodes.
+        user_id: If provided, filters to episodes owned by this user OR globally-scoped (user_id IS NULL). If None, returns all episodes.
+        limit: Maximum number of results.
     """
     conditions = [
         "status = 'open'",
@@ -408,6 +448,11 @@ async def get_working_memory(
     if agent_id is not None:
         conditions.append(f"(agent_id = ${idx} OR agent_id IS NULL)")
         params.append(agent_id)
+        idx += 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions)

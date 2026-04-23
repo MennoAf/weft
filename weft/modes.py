@@ -97,11 +97,33 @@ async def get_mode(pool: asyncpg.Pool, name: str) -> Mode | None:
     return _row_to_mode(row) if row else None
 
 
-async def list_modes(pool: asyncpg.Pool) -> list[Mode]:
-    """List all modes for the current user, ordered by name."""
-    rows = await get_db(pool).fetch(
-        "SELECT * FROM modes ORDER BY name ASC"
-    )
+async def list_modes(
+    pool: asyncpg.Pool,
+    *,
+    user_id: str | None = None,
+) -> list[Mode]:
+    """List all modes, ordered by name.
+
+    Args:
+        pool: Database connection pool.
+        user_id: If provided, filters to modes owned by this user OR globally-scoped (user_id IS NULL). If None, returns all modes.
+    """
+    conditions = []
+    params: list = []
+    idx = 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
+        idx += 1
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT * FROM modes {where}
+        ORDER BY name ASC
+    """
+
+    rows = await get_db(pool).fetch(query, *params)
     return [_row_to_mode(r) for r in rows]
 
 

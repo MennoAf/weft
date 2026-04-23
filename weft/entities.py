@@ -28,15 +28,17 @@ async def store_entity(
     entity_id = _weft_id()
     now = datetime.now(timezone.utc)
 
+    # Use provided user_id if given, otherwise fall back to app context
+    user_id = create.user_id if create.user_id is not None else None
+
     await get_db(pool).execute(
         """
         INSERT INTO entities (
             id, name, entity_type, aliases, description,
             project_id, agent_id, user_id, status, mention_count,
             created_at, updated_at, embedding
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7,
-                  nullif(current_setting('app.user_id', true), ''),
-                  'active', 0, $8, $8, $9::vector)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                  'active', 0, $9, $9, $10::vector)
         """,
         entity_id,
         create.name,
@@ -45,6 +47,7 @@ async def store_entity(
         create.description,
         create.project_id,
         create.agent_id,
+        user_id,
         now,
         embedding,
     )
@@ -78,11 +81,26 @@ async def list_entities(
     entity_type: EntityType | None = None,
     project_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
     status: str = "active",
     limit: int = 50,
     offset: int = 0,
 ) -> list[Entity]:
-    """List entities with optional filters. Uses OR-NULL scoping on project_id/agent_id."""
+    """List entities with optional filters. Uses OR-NULL scoping on project_id/agent_id/user_id.
+
+    Args:
+        pool: Database connection pool.
+        entity_type: Filter to this entity type.
+        project_id: If provided, filters to entities owned by this project OR globally-scoped (project_id IS NULL).
+        agent_id: If provided, filters to entities owned by this agent OR globally-scoped (agent_id IS NULL).
+        user_id: If provided, filters to entities owned by this user OR globally-scoped (user_id IS NULL). If None, returns all entities.
+        status: Entity status to filter (default "active").
+        limit: Max results to return.
+        offset: Pagination offset.
+
+    Returns:
+        List of entities matching the filters.
+    """
     conditions = []
     params: list = []
     idx = 1
@@ -107,6 +125,11 @@ async def list_entities(
         params.append(agent_id)
         idx += 1
 
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
+        idx += 1
+
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     query = f"""
         SELECT * FROM entities {where}
@@ -125,10 +148,24 @@ async def search_entities(
     *,
     entity_type: EntityType | None = None,
     project_id: str | None = None,
+    user_id: str | None = None,
     limit: int = 10,
     threshold: float = 0.3,
 ) -> list[tuple[Entity, float]]:
-    """Search entities by vector similarity. Returns (entity, similarity) tuples."""
+    """Search entities by vector similarity. Returns (entity, similarity) tuples.
+
+    Args:
+        pool: Database connection pool.
+        embedding: Query embedding vector.
+        entity_type: Filter to this entity type.
+        project_id: If provided, filters to entities owned by this project OR globally-scoped (project_id IS NULL).
+        user_id: If provided, filters to entities owned by this user OR globally-scoped (user_id IS NULL). If None, returns all entities.
+        limit: Max results to return.
+        threshold: Minimum similarity score to include (0.0-1.0).
+
+    Returns:
+        List of (entity, similarity) tuples matching the filters.
+    """
     conditions = ["status = 'active'", "embedding IS NOT NULL"]
     params: list = [embedding]
     idx = 2
@@ -141,6 +178,11 @@ async def search_entities(
     if project_id is not None:
         conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
+        idx += 1
+
+    if user_id is not None:
+        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        params.append(user_id)
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions)
