@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,13 +52,26 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
     Graceful degradation: missing, invalid, or expired JWT tokens for user
     identity are silently ignored — the request proceeds with
     current_user_id=None (global-only visibility under RLS).
+
+    Single-tenant fallback: when ``default_user_id`` is set, API-key
+    authenticated requests to /mcp that carry no valid JWT are stamped
+    with it. Coupled to the api_key gate — a missing/invalid API key
+    means the default never applies, so anonymous traffic can't inherit
+    the owner's identity.
     """
 
-    def __init__(self, app, api_key: str | None = None):
+    def __init__(
+        self,
+        app,
+        api_key: str | None = None,
+        default_user_id: str | None = None,
+    ):
         super().__init__(app)
         self._api_key = api_key
+        self._default_user_id = default_user_id
 
     async def dispatch(self, request: Request, call_next):
+        api_key_authenticated = False
         # Enforce API key on /mcp endpoint in production
         if self._api_key and request.url.path.startswith("/mcp"):
             import hmac
@@ -68,6 +82,7 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
                     return JSONResponse(
                         {"error": "invalid api key"}, status_code=401,
                     )
+                api_key_authenticated = True
             else:
                 return JSONResponse(
                     {"error": "missing authorization header"}, status_code=401,
@@ -76,6 +91,9 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
         # Extract user identity from JWT (Supabase) — best-effort
         auth_header = request.REDACTEDget("authorization")
         user_id = extract_user_id_from_header(auth_header)
+        # Single-tenant fallback: only when the API key gate accepted the request.
+        if user_id is None and api_key_authenticated and self._default_user_id:
+            user_id = self._default_user_id
         token = current_user_id.set(user_id)
         try:
             return await call_next(request)
@@ -361,6 +379,7 @@ _config_for_middleware = load_config()
 user_identity_middleware = Middleware(
     UserIdentityMiddleware,
     api_key=_config_for_middleware.api_key if _config_for_middleware.is_production else None,
+    default_user_id=os.environ.get("WEFT_DEFAULT_USER_ID") or None,
 )
 
 mcp = FastMCP("weft", lifespan=lifespan)

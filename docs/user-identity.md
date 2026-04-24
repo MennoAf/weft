@@ -34,6 +34,16 @@ Authorization: Bearer <jwt>
 
 The JWT `sub` claim is the identity. No config file involved.
 
+**Single-tenant fallback.** While Supabase user auth isn't wired through
+the Claude Code MCP client (blocked on upstream OAuth token-exchange
+support), the server supports a `WEFT_DEFAULT_USER_ID` env var. When the
+API key gate accepts a request and no valid JWT is attached, writes are
+stamped with the default UUID. The fallback is coupled to API-key
+authentication — anonymous traffic never inherits the default identity.
+Clear or unset the variable the moment a second user arrives; JWT sub
+already takes precedence when present, so shipping real auth doesn't
+require pulling the fallback first.
+
 ## The binding problem
 
 Without coordination, the same human ends up with two distinct user_ids —
