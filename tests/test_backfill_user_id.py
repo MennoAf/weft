@@ -297,6 +297,30 @@ async def test_backfill_covers_memory_relationships_composite_pk(pool):
     assert audit["old_scope"] == "pure-user"
 
 
+def test_admin_backfill_cli_requires_user_id():
+    """`weft admin backfill` without --user-id must fail loudly."""
+    from click.testing import CliRunner
+
+    from weft.cli import cli
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["admin", "backfill"])
+    assert result.exit_code != 0
+    assert "--user-id" in result.output
+
+
+def test_admin_backfill_cli_help_mentions_dry_run_first():
+    """Help text must steer operators to the dry-run before mutating."""
+    from click.testing import CliRunner
+
+    from weft.cli import cli
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["admin", "backfill", "--help"])
+    assert result.exit_code == 0
+    assert "dry-run" in result.output.lower()
+
+
 async def test_tables_list_covers_all_user_scoped(pool):
     """Guard: _TABLES must enumerate every table that has a user_id column.
 

@@ -959,3 +959,47 @@ def admin_dry_run_backfill(user_id: str | None):
             )
 
     asyncio.run(_go())
+
+
+@admin.command("backfill")
+@click.option(
+    "--user-id",
+    required=True,
+    help="Identity to stamp onto NULL-user_id rows. Required — no implicit "
+         "resolution via get_user_id(), to keep prod-touching scripts safe.",
+)
+@click.option(
+    "--yes", is_flag=True,
+    help="Skip the interactive confirmation. Required for non-TTY contexts.",
+)
+def admin_backfill(user_id: str, yes: bool):
+    """Stamp the --user-id onto every NULL-user_id row across all scoped tables.
+
+    Run dry-run-backfill FIRST to inspect the landscape. This command mutates.
+    Idempotent — re-running stamps nothing because the NULL rows are gone.
+    """
+    from weft.config import load_config
+    from weft.db.backfill_user_id import backfill_user_id, dry_run_backfill_user_id
+    from weft.db.connection import create_pool
+
+    async def _go():
+        cfg = load_config()
+        pool = await create_pool(cfg)
+        try:
+            report = await dry_run_backfill_user_id(pool, user_id=user_id)
+            click.echo(
+                f"About to stamp user_id={user_id} onto "
+                f"{report.total_null_rows} rows across "
+                f"{sum(1 for info in report.per_table.values() if info['null_count'] > 0)}"
+                f" tables."
+            )
+            if not yes:
+                click.confirm("Proceed?", abort=True)
+
+            count = await backfill_user_id(pool, user_id=user_id)
+        finally:
+            await pool.close()
+
+        click.echo(f"Backfill complete: {count} rows migrated.")
+
+    asyncio.run(_go())
