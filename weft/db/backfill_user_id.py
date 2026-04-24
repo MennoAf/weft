@@ -1,5 +1,5 @@
 """One-time backfill: assign a canonical user_id to every row where user_id IS NULL
-across all 7 user-scoped tables. Idempotent — safe to re-run.
+across all 16 user-scoped tables. Idempotent — safe to re-run.
 
 Admin safety: accepts an explicit ``user_id`` override so operators can pass a
 deliberate identity (e.g. the JWT ``sub`` used by the hosted server) instead
@@ -8,8 +8,16 @@ A dry-run mode reports the landscape (distinct existing user_ids, NULL counts
 per table) without mutating anything — always inspect this first before
 running against production.
 
+Join tables (memory_relationships, episode_memories, entity_mentions) share
+their parent's user_id by design. In the single-tenant backfill case every
+parent row receives the same canonical id, so stamping join rows with that
+id is correct. A future multi-tenant backfill would need to copy the
+parent's user_id via JOIN instead of blanket assignment.
+
 Audit table ``audit_backfill_user_id`` is created by migration 32 and logs
 one row per backfilled source row (table name, row id, old_scope, new_scope).
+Composite-PK rows are audited with ``row_id`` serialized as
+``"pk1_val|pk2_val|..."``.
 """
 
 from __future__ import annotations
@@ -23,16 +31,31 @@ from weft.config.user_identity import get_user_id
 
 logger = logging.getLogger(__name__)
 
-# (table_name, pk_column, has_project_id)
-_TABLES: list[tuple[str, str, bool]] = [
-    ("behaviors", "id", True),
-    ("entities", "id", True),
-    ("episodes", "id", True),
-    ("modes", "id", True),
-    ("autonomy_policies", "id", True),
-    ("calibration_records", "id", True),
-    ("degradation_policies", "id", True),
+# (table_name, pk_columns, has_project_id)
+# pk_columns is a tuple — single-column PKs are just a 1-tuple.
+_TABLES: list[tuple[str, tuple[str, ...], bool]] = [
+    ("memories", ("id",), True),
+    ("behaviors", ("id",), True),
+    ("entities", ("id",), True),
+    ("episodes", ("id",), True),
+    ("modes", ("id",), True),
+    ("autonomy_policies", ("id",), True),
+    ("calibration_records", ("id",), True),
+    ("degradation_policies", ("id",), True),
+    ("triggers", ("id",), True),
+    ("cost_entries", ("id",), True),
+    ("alerts", ("id",), False),
+    ("check_ins", ("id",), False),
+    ("policy_calibration_events", ("id",), False),
+    ("memory_relationships", ("source_id", "target_id", "relation"), False),
+    ("episode_memories", ("episode_id", "memory_id"), False),
+    ("entity_mentions", ("entity_id", "memory_id"), False),
 ]
+
+
+def _serialize_pk(row: asyncpg.Record, pk_cols: tuple[str, ...]) -> str:
+    """Render a composite or single PK as a stable audit string."""
+    return "|".join(str(row[col]) for col in pk_cols)
 
 
 @dataclass
@@ -65,7 +88,7 @@ async def dry_run_backfill_user_id(
     report = BackfillDryRun(proposed_user_id=proposed_uid)
 
     async with conn.acquire() as c:
-        for table, _pk, _has_project in _TABLES:
+        for table, _pk_cols, _has_project in _TABLES:
             null_count = await c.fetchval(
                 f"SELECT COUNT(*) FROM {table} WHERE user_id IS NULL"
             )
@@ -110,21 +133,28 @@ async def backfill_user_id(
 
     async with conn.acquire() as c:
         async with c.transaction():
-            for table, pk_col, has_project_id in _TABLES:
+            for table, pk_cols, has_project_id in _TABLES:
+                select_cols = ", ".join(pk_cols)
                 if has_project_id:
-                    rows = await c.fetch(
-                        f"SELECT {pk_col}, project_id FROM {table} WHERE user_id IS NULL"
-                    )
-                else:
-                    rows = await c.fetch(
-                        f"SELECT {pk_col} FROM {table} WHERE user_id IS NULL"
-                    )
+                    select_cols = f"{select_cols}, project_id"
+                rows = await c.fetch(
+                    f"SELECT {select_cols} FROM {table} WHERE user_id IS NULL"
+                )
 
                 if not rows:
                     continue
 
+                # UPDATE WHERE for composite PK needs one placeholder per
+                # column plus $1 for the user_id. Build the WHERE clause once.
+                where_clause = " AND ".join(
+                    f"{col} = ${i + 2}" for i, col in enumerate(pk_cols)
+                )
+                update_sql = (
+                    f"UPDATE {table} SET user_id = $1 WHERE {where_clause}"
+                )
+
                 for row in rows:
-                    row_id = str(row[pk_col])
+                    row_id = _serialize_pk(row, pk_cols)
 
                     if has_project_id and row["project_id"] is not None:
                         old_scope = "dual-scoped"
@@ -132,8 +162,9 @@ async def backfill_user_id(
                         old_scope = "pure-user"
 
                     await c.execute(
-                        f"UPDATE {table} SET user_id = $1 WHERE {pk_col} = $2",
-                        uid, row[pk_col],
+                        update_sql,
+                        uid,
+                        *(row[col] for col in pk_cols),
                     )
 
                     await c.execute(

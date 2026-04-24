@@ -218,3 +218,108 @@ async def test_dry_run_proposed_user_id_defaults_to_get_user_id(pool):
 
     report = await dry_run_backfill_user_id(pool)
     assert report.proposed_user_id == get_user_id()
+
+
+# ---------------------------------------------------------------------------
+# Extended-coverage tables: memories (single PK) + composite-PK join tables
+# ---------------------------------------------------------------------------
+
+async def _insert_memory(pool, *, project_id=None, user_id=None) -> str:
+    import uuid
+    row_id = f"weft-{uuid.uuid4().hex[:8]}"
+    await pool.execute(
+        """
+        INSERT INTO memories (
+            id, type, topic, content, source, confidence,
+            token_count, created_at, updated_at, accessed_at,
+            access_count, project_id, status, pinned, user_id
+        ) VALUES (
+            $1, 'fact', '{}', 'test', 'conversation', 0.7,
+            5, now(), now(), now(), 0, $2, 'active', false, $3
+        )
+        """,
+        row_id, project_id, user_id,
+    )
+    return row_id
+
+
+async def test_backfill_covers_memories(pool):
+    """memories is now in _TABLES — a NULL row should be stamped + audited."""
+    from weft.db.backfill_user_id import backfill_user_id
+
+    mem_id = await _insert_memory(pool, project_id="proj-mem", user_id=None)
+
+    await backfill_user_id(pool, user_id="mem-backfill-user")
+
+    row = await pool.fetchrow("SELECT user_id FROM memories WHERE id = $1", mem_id)
+    assert row["user_id"] == "mem-backfill-user"
+
+    audit = await pool.fetchrow(
+        "SELECT old_scope FROM audit_backfill_user_id "
+        "WHERE source_table = 'memories' AND row_id = $1",
+        mem_id,
+    )
+    assert audit is not None
+    assert audit["old_scope"] == "dual-scoped"
+
+
+async def test_backfill_covers_memory_relationships_composite_pk(pool):
+    """memory_relationships has a 3-column PK — ensure stamp + composite audit row_id."""
+    from weft.db.backfill_user_id import backfill_user_id
+
+    src_id = await _insert_memory(pool, user_id="pre-seeded")
+    tgt_id = await _insert_memory(pool, user_id="pre-seeded")
+
+    await pool.execute(
+        """
+        INSERT INTO memory_relationships (source_id, target_id, relation, user_id)
+        VALUES ($1, $2, 'test-rel', NULL)
+        """,
+        src_id, tgt_id,
+    )
+
+    await backfill_user_id(pool, user_id="composite-pk-user")
+
+    row = await pool.fetchrow(
+        "SELECT user_id FROM memory_relationships "
+        "WHERE source_id = $1 AND target_id = $2 AND relation = 'test-rel'",
+        src_id, tgt_id,
+    )
+    assert row["user_id"] == "composite-pk-user"
+
+    expected_row_id = f"{src_id}|{tgt_id}|test-rel"
+    audit = await pool.fetchrow(
+        "SELECT row_id, old_scope FROM audit_backfill_user_id "
+        "WHERE source_table = 'memory_relationships' AND row_id = $1",
+        expected_row_id,
+    )
+    assert audit is not None
+    assert audit["old_scope"] == "pure-user"
+
+
+async def test_tables_list_covers_all_user_scoped(pool):
+    """Guard: _TABLES must enumerate every table that has a user_id column.
+
+    Queries information_schema and asserts no table is missed. Protects
+    against future migrations that add a user_id column without updating
+    the backfill list.
+    """
+    from weft.db.backfill_user_id import _TABLES
+
+    rows = await pool.fetch(
+        """
+        SELECT table_name FROM information_schema.columns
+        WHERE column_name = 'user_id' AND table_schema = 'public'
+        ORDER BY table_name
+        """
+    )
+    actual = {r["table_name"] for r in rows}
+    # audit_backfill_user_id itself doesn't have a user_id column (it logs
+    # about rows, it's not scoped by user). Filter any future audit-ish tables.
+    scoped = {t for t in actual if not t.startswith("audit_")}
+
+    listed = {t[0] for t in _TABLES}
+    missing = scoped - listed
+    extra = listed - scoped
+    assert not missing, f"_TABLES missing user-scoped tables: {missing}"
+    assert not extra, f"_TABLES references unknown tables: {extra}"
