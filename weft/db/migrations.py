@@ -1003,12 +1003,16 @@ MIGRATIONS: list[tuple[int, str, str]] = [
 
 async def _get_applied_versions(pool: asyncpg.Pool) -> set[int]:
     """Get set of already-applied migration versions."""
-    # Check if schema_migrations table exists
+    # Supabase ships its own ``auth.schema_migrations`` and
+    # ``storage.schema_migrations`` tables, so filter by current schema —
+    # otherwise a fresh Supabase DB reports the table as existing and the
+    # SELECT below blows up with UndefinedTableError on public.schema_migrations.
     exists = await pool.fetchval(
         """
         SELECT EXISTS (
             SELECT 1 FROM information_schema.tables
             WHERE table_name = 'schema_migrations'
+              AND table_schema = current_schema()
         )
         """
     )
