@@ -47,12 +47,12 @@ async def store_memory(
             id, type, topic, content, source, confidence,
             token_count, created_at, updated_at, accessed_at,
             access_count, project_id, agent_id, embedding, status, pinned,
-            review_after, user_id
+            review_after, workspace_id, user_id
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
             0, $9, $10, $11::vector, 'active', $12,
-            $13, nullif(current_setting('app.user_id', true), '')
+            $13, $14, nullif(current_setting('app.user_id', true), '')
         )
         """,
         memory_id,
@@ -68,6 +68,7 @@ async def store_memory(
         embedding,
         create.pinned,
         create.review_after,
+        create.workspace_id,
     )
 
     return Memory(
@@ -84,6 +85,7 @@ async def store_memory(
         access_count=0,
         project_id=create.project_id,
         agent_id=create.agent_id,
+        workspace_id=create.workspace_id,
         status=MemoryStatus.active,
         pinned=create.pinned,
         review_after=create.review_after,
@@ -160,7 +162,16 @@ async def list_memories(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
+        # Match owner-scoped + system-global rows, plus rows in workspaces
+        # where the caller is a member. Mirrors memories_select RLS (mig 36).
+        conditions.append(
+            f"(user_id = ${idx} OR user_id = ${idx + 1} OR ("
+            f"workspace_id IS NOT NULL AND EXISTS ("
+            f"SELECT 1 FROM workspace_members wm "
+            f"WHERE wm.workspace_id = memories.workspace_id "
+            f"AND wm.member_identity->>'user_id' = ${idx}"
+            f")))"
+        )
         params.append(user_id)
         params.append(SYSTEM_GLOBAL_USER_ID)
         idx += 2
@@ -250,7 +261,16 @@ async def search_by_vector(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
+        # Match owner-scoped + system-global rows, plus rows in workspaces
+        # where the caller is a member. Mirrors memories_select RLS (mig 36).
+        conditions.append(
+            f"(user_id = ${idx} OR user_id = ${idx + 1} OR ("
+            f"workspace_id IS NOT NULL AND EXISTS ("
+            f"SELECT 1 FROM workspace_members wm "
+            f"WHERE wm.workspace_id = memories.workspace_id "
+            f"AND wm.member_identity->>'user_id' = ${idx}"
+            f")))"
+        )
         params.append(user_id)
         params.append(SYSTEM_GLOBAL_USER_ID)
         idx += 2
@@ -343,7 +363,16 @@ async def search_by_keyword(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
+        # Match owner-scoped + system-global rows, plus rows in workspaces
+        # where the caller is a member. Mirrors memories_select RLS (mig 36).
+        conditions.append(
+            f"(user_id = ${idx} OR user_id = ${idx + 1} OR ("
+            f"workspace_id IS NOT NULL AND EXISTS ("
+            f"SELECT 1 FROM workspace_members wm "
+            f"WHERE wm.workspace_id = memories.workspace_id "
+            f"AND wm.member_identity->>'user_id' = ${idx}"
+            f")))"
+        )
         params.append(user_id)
         params.append(SYSTEM_GLOBAL_USER_ID)
         idx += 2
@@ -1227,6 +1256,7 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         access_count=row["access_count"],
         project_id=row["project_id"],
         agent_id=row["agent_id"],
+        workspace_id=row["workspace_id"] if row.get("workspace_id") is not None else None,
         status=MemoryStatus(row["status"]),
         pinned=bool(row["pinned"]) if row.get("pinned") is not None else False,
         usefulness_score=float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0,
