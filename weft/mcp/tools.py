@@ -55,7 +55,14 @@ from weft.models import (
     MemoryTypeLiteral,
     ModeCreate,
     ModeWeights,
+    NudgeMode,
+    NudgeModeLiteral,
     RelationType,
+    TrackerCreate,
+    TrackerKind,
+    TrackerKindLiteral,
+    TrackerState,
+    TrackerStateLiteral,
 )
 from weft.tokens import estimate_tokens
 from weft.session_tracking import boost_session_memories, log_memory_access
@@ -3431,3 +3438,330 @@ async def weft_workspace_list(ctx: Context) -> dict:
         return _input_error_response("weft_workspace_list", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_workspace_list", e)
+
+
+# ---------------------------------------------------------------------------
+# Tracker tools — open-loop primitive (Wick Phase 3, weft_v2_spec.md §3).
+# State machine: open ∈ {in_progress, awaiting_reply, blocked};
+#                terminal ∈ {done, abandoned}. Nudges fire on schedule;
+#                snooze suppresses; dismiss bumps; close terminates.
+# ---------------------------------------------------------------------------
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromisoformat(value)
+
+
+def _parse_interval(value: str | int | None) -> timedelta | None:
+    """Accept ISO duration ('PT1H'), shorthand ('30d', '2w', '3h'), or seconds."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return timedelta(seconds=value)
+    s = value.strip().lower()
+    if s.endswith("d"):
+        return timedelta(days=int(s[:-1]))
+    if s.endswith("w"):
+        return timedelta(weeks=int(s[:-1]))
+    if s.endswith("h"):
+        return timedelta(hours=int(s[:-1]))
+    if s.endswith("m"):
+        # treat 'm' as minutes here (review_after uses 'm' for months but
+        # interval semantics differ — minutes is the more useful unit for
+        # nudge intervals)
+        return timedelta(minutes=int(s[:-1]))
+    if s.endswith("s"):
+        return timedelta(seconds=int(s[:-1]))
+    # Fall back to ISO 8601 duration
+    raise ValueError(f"unrecognized interval: {value!r}")
+
+
+@mcp.tool()
+async def weft_tracker_create(
+    ctx: Context,
+    kind: TrackerKindLiteral,
+    title: str,
+    project_id: str | None = None,
+    entity_id: str | None = None,
+    state: TrackerStateLiteral = "in_progress",
+    context: dict | None = None,
+    nudge_mode: NudgeModeLiteral = "none",
+    nudge_after: str | None = None,
+    nudge_interval: str | None = None,
+) -> dict:
+    """Create a tracker — a lifecycle-aware open loop.
+
+    Use trackers for things memories can't track well: pitches awaiting
+    reply, follow-ups, shopping lists, meal plans, long-running orchestrator
+    traces. Memories are blob-shaped facts; trackers carry state that changes
+    and can be nudged.
+
+    nudge_after: ISO timestamp when the nudge should first fire.
+    nudge_interval: '7d' / '2w' / '3h' / '30m' — interval between recurring nudges."""
+    try:
+        from weft.trackers import create_tracker
+        app: AppContext = ctx.request_context.lifespan_context
+        create = TrackerCreate(
+            kind=TrackerKind(kind),
+            title=title,
+            project_id=project_id,
+            entity_id=entity_id,
+            state=TrackerState(state),
+            context=context or {},
+            nudge_mode=NudgeMode(nudge_mode),
+            nudge_after=_parse_dt(nudge_after),
+            nudge_interval=_parse_interval(nudge_interval),
+        )
+        async with acquire(app.pool):
+            tr = await create_tracker(app.pool, create)
+            return tr.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_create", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_create", e)
+
+
+@mcp.tool()
+async def weft_tracker_get(ctx: Context, tracker_id: str) -> dict:
+    """Fetch a single tracker by ID."""
+    try:
+        from weft.trackers import get_tracker
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tr = await get_tracker(app.pool, tracker_id)
+            if tr is None:
+                return {"error": "Not found", "tracker_id": tracker_id}
+            return tr.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_get", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_get", e)
+
+
+@mcp.tool()
+async def weft_tracker_update(
+    ctx: Context,
+    tracker_id: str,
+    title: str | None = None,
+    state: TrackerStateLiteral | None = None,
+    state_note: str | None = None,
+    context: dict | None = None,
+    nudge_mode: NudgeModeLiteral | None = None,
+    nudge_after: str | None = None,
+    nudge_interval: str | None = None,
+) -> dict:
+    """Update tracker fields. State transitions append to state_history.
+    Cannot transition out of terminal states (done, abandoned)."""
+    try:
+        from weft.trackers import update_tracker
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tr = await update_tracker(
+                app.pool, tracker_id,
+                title=title,
+                state=TrackerState(state) if state else None,
+                state_note=state_note,
+                context=context,
+                nudge_mode=NudgeMode(nudge_mode) if nudge_mode else None,
+                nudge_after=_parse_dt(nudge_after),
+                nudge_interval=_parse_interval(nudge_interval),
+            )
+            return tr.to_dict()
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_tracker_update"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_update", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_update", e)
+
+
+@mcp.tool()
+async def weft_tracker_close(
+    ctx: Context,
+    tracker_id: str,
+    final_state: TrackerStateLiteral = "done",
+    note: str | None = None,
+) -> dict:
+    """Terminal close. final_state must be 'done' or 'abandoned'."""
+    try:
+        from weft.trackers import close_tracker
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tr = await close_tracker(
+                app.pool, tracker_id,
+                final_state=TrackerState(final_state),
+                note=note,
+            )
+            return tr.to_dict()
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_tracker_close"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_close", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_close", e)
+
+
+@mcp.tool()
+async def weft_tracker_dismiss(ctx: Context, tracker_id: str) -> dict:
+    """One-click "thanks, I know" — bumps last_touch, rolls a recurring
+    nudge forward by nudge_interval, or silences a once-mode tracker."""
+    try:
+        from weft.trackers import dismiss_tracker
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tr = await dismiss_tracker(app.pool, tracker_id)
+            return tr.to_dict()
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_tracker_dismiss"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_dismiss", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_dismiss", e)
+
+
+@mcp.tool()
+async def weft_tracker_snooze(
+    ctx: Context,
+    tracker_id: str,
+    until: str,
+) -> dict:
+    """Suppress nudges until ISO timestamp. Mode unchanged — resumes after."""
+    try:
+        from weft.trackers import snooze_tracker
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tr = await snooze_tracker(
+                app.pool, tracker_id, _parse_dt(until),
+            )
+            return tr.to_dict()
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_tracker_snooze"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_snooze", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_snooze", e)
+
+
+@mcp.tool()
+async def weft_tracker_list(
+    ctx: Context,
+    kind: TrackerKindLiteral | None = None,
+    state: TrackerStateLiteral | None = None,
+    open_only: bool = False,
+    project_id: str | None = None,
+    entity_id: str | None = None,
+    limit: int = 100,
+) -> dict:
+    """List trackers, newest-touch first. Filter by kind, state, scope."""
+    try:
+        from weft.trackers import list_trackers
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            trs = await list_trackers(
+                app.pool,
+                kind=TrackerKind(kind) if kind else None,
+                state=TrackerState(state) if state else None,
+                open_only=open_only,
+                project_id=project_id,
+                entity_id=entity_id,
+                limit=limit,
+            )
+            return {"trackers": [t.to_dict() for t in trs], "count": len(trs)}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_list", e)
+
+
+@mcp.tool()
+async def weft_tracker_due(
+    ctx: Context,
+    limit: int = 100,
+) -> dict:
+    """Trackers with a nudge due now: open-state, non-snoozed, past nudge_after.
+    Use this for the daily-brief "open loops" section."""
+    try:
+        from weft.trackers import due_trackers
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            trs = await due_trackers(app.pool, limit=limit)
+            return {"trackers": [t.to_dict() for t in trs], "count": len(trs)}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_tracker_due", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_tracker_due", e)
+
+
+# --- List sugar — context.items helpers for kind=list / shopping_list / meal_plan / pantry ---
+
+
+@mcp.tool()
+async def weft_list_append(
+    ctx: Context,
+    tracker_id: str,
+    text: str,
+    checked: bool = False,
+    link: str | None = None,
+) -> dict:
+    """Append an item to a list-shaped tracker's context.items.
+    Item shape: {text, checked, link?}."""
+    try:
+        from weft.trackers import list_append
+        app: AppContext = ctx.request_context.lifespan_context
+        item: dict = {"text": text, "checked": checked}
+        if link is not None:
+            item["link"] = link
+        async with acquire(app.pool):
+            tr = await list_append(app.pool, tracker_id, item)
+            return tr.to_dict()
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_list_append"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_list_append", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_list_append", e)
+
+
+@mcp.tool()
+async def weft_list_check(
+    ctx: Context,
+    tracker_id: str,
+    index: int,
+    checked: bool = True,
+) -> dict:
+    """Toggle the checked flag on the item at ``index`` (0-based)."""
+    try:
+        from weft.trackers import list_check
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tr = await list_check(app.pool, tracker_id, index, checked=checked)
+            return tr.to_dict()
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_list_check"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_list_check", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_list_check", e)
+
+
+@mcp.tool()
+async def weft_list_remove(
+    ctx: Context,
+    tracker_id: str,
+    index: int,
+) -> dict:
+    """Remove the item at ``index`` from a list-shaped tracker."""
+    try:
+        from weft.trackers import list_remove
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            tr = await list_remove(app.pool, tracker_id, index)
+            return tr.to_dict()
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_list_remove"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_list_remove", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_list_remove", e)
