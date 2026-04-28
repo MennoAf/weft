@@ -213,12 +213,17 @@ async def weft_remember(
     confidence: float = 0.7,
     project_id: str | None = None,
     agent_id: str | None = None,
+    workspace_id: str | None = None,
     check_contradictions: bool = True,
     pinned: bool = False,
     review_after: str | None = None,
 ) -> dict:
     """Store a new memory with type, topics, content, confidence, and source.
     If project_id is omitted, auto-detects from the client's working directory.
+
+    workspace_id: optional shared-brain scope. When set, the caller must be
+    a member of that workspace; the resulting memory is readable by every
+    workspace member. Use ``weft_workspace_create`` first.
 
     review_after: optional lifecycle date. Accepts ISO timestamp or relative
     durations like '30d', '2w', '3m'. Memories past their review_after date
@@ -228,6 +233,15 @@ async def weft_remember(
         logger.debug("weft_remember start [%s]", cid)
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
+        if workspace_id is not None:
+            from weft.workspaces import is_member as _ws_is_member
+            caller_uid = get_user_id()
+            async with acquire(app.pool):
+                if not await _ws_is_member(app.pool, workspace_id, caller_uid):
+                    raise ValueError(
+                        f"caller {caller_uid} is not a member of workspace "
+                        f"{workspace_id}"
+                    )
         create = MemoryCreate(
             type=MemoryType(type),
             content=content,
@@ -236,6 +250,7 @@ async def weft_remember(
             confidence=confidence,
             project_id=resolved_project,
             agent_id=agent_id,
+            workspace_id=workspace_id,
             pinned=pinned,
             review_after=_parse_review_after(review_after),
         )
@@ -3294,3 +3309,125 @@ async def weft_trigger_delete(
         return _input_error_response("weft_trigger_delete", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_trigger_delete", e)
+
+
+# ---------------------------------------------------------------------------
+# Workspace tools — shared-brain primitive. Memories tagged with workspace_id
+# are readable by every workspace member (RLS subquery in migrations.py:1299).
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def weft_workspace_create(
+    ctx: Context,
+    name: str,
+    description: str | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    """Create a shared workspace. Caller becomes the owner and an admin member.
+
+    Use the returned ``id`` as the ``workspace_id`` parameter on
+    ``weft_remember`` to scope memories to this shared brain. Add other
+    user_ids with ``weft_workspace_add_member``."""
+    try:
+        from weft.workspaces import create_workspace
+        app: AppContext = ctx.request_context.lifespan_context
+        caller_uid = get_user_id()
+        async with acquire(app.pool):
+            ws = await create_workspace(
+                app.pool,
+                name=name,
+                created_by=caller_uid,
+                description=description,
+                metadata=metadata,
+            )
+            return ws.to_dict()
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_workspace_create", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_workspace_create", e)
+
+
+@mcp.tool()
+async def weft_workspace_add_member(
+    ctx: Context,
+    workspace_id: str,
+    user_id: str,
+    role: str = "member",
+) -> dict:
+    """Add a user to a workspace. Only the workspace owner can add members."""
+    try:
+        from weft.workspaces import add_member
+        app: AppContext = ctx.request_context.lifespan_context
+        caller_uid = get_user_id()
+        async with acquire(app.pool):
+            member = await add_member(
+                app.pool,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                added_by=caller_uid,
+                role=role,
+            )
+            return member.to_dict()
+    except PermissionError as e:
+        return {"error": "Permission denied", "detail": str(e), "tool": "weft_workspace_add_member"}
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_workspace_add_member"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_workspace_add_member", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_workspace_add_member", e)
+
+
+@mcp.tool()
+async def weft_workspace_remove_member(
+    ctx: Context,
+    workspace_id: str,
+    user_id: str,
+) -> dict:
+    """Remove a user from a workspace. Only the owner can remove members.
+    The owner cannot be removed — delete the workspace instead."""
+    try:
+        from weft.workspaces import remove_member
+        app: AppContext = ctx.request_context.lifespan_context
+        caller_uid = get_user_id()
+        async with acquire(app.pool):
+            removed = await remove_member(
+                app.pool,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                removed_by=caller_uid,
+            )
+            return {"workspace_id": workspace_id, "user_id": user_id, "removed": removed}
+    except PermissionError as e:
+        return {"error": "Permission denied", "detail": str(e), "tool": "weft_workspace_remove_member"}
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_workspace_remove_member"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_workspace_remove_member", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_workspace_remove_member", e)
+
+
+@mcp.tool()
+async def weft_workspace_list(ctx: Context) -> dict:
+    """List all workspaces the caller is a member of, newest first.
+    Includes workspaces where the caller is the owner."""
+    try:
+        from weft.workspaces import list_workspaces_for_user, list_members
+        app: AppContext = ctx.request_context.lifespan_context
+        caller_uid = get_user_id()
+        async with acquire(app.pool):
+            workspaces = await list_workspaces_for_user(app.pool, caller_uid)
+            out = []
+            for ws in workspaces:
+                members = await list_members(app.pool, ws.id)
+                d = ws.to_dict()
+                d["members"] = [m.to_dict() for m in members]
+                d["is_owner"] = ws.created_by == caller_uid
+                out.append(d)
+            return {"workspaces": out, "count": len(out)}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_workspace_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_workspace_list", e)

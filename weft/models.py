@@ -90,6 +90,7 @@ class Memory(BaseModel):
     access_count: int = 0
     project_id: str | None = None
     agent_id: str | None = None
+    workspace_id: str | None = None
     status: MemoryStatus = MemoryStatus.active
     pinned: bool = False
     usefulness_score: float = Field(default=0.7, ge=0.0, le=1.0)
@@ -127,8 +128,47 @@ class MemoryCreate(BaseModel):
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     project_id: str | None = None
     agent_id: str | None = None
+    workspace_id: str | None = None
     pinned: bool = False
     review_after: datetime | None = None
+
+
+class Workspace(BaseModel):
+    """A shared-brain primitive: a named bucket of memories that multiple
+    user_ids can read. The owner (created_by) plus members listed in
+    workspace_members can SELECT memories with matching workspace_id."""
+
+    id: str
+    name: str
+    description: str | None = None
+    created_by: str
+    install_pubkey: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class WorkspaceMember(BaseModel):
+    """A membership row. member_identity carries kind+id so federation can
+    later add remote-install members without a schema change."""
+
+    workspace_id: str
+    member_identity: dict[str, Any]
+    role: str = "member"
+    added_by: str
+    added_at: datetime = Field(default_factory=_now)
+
+    @property
+    def user_id(self) -> str | None:
+        if self.member_identity.get("kind") == "local_user":
+            return self.member_identity.get("user_id")
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
 
 
 class BehaviorScope(str, Enum):
