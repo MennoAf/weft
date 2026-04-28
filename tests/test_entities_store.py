@@ -15,6 +15,7 @@ from weft.entities import (
     unlink_mention,
 )
 from weft.models import EntityCreate, EntityType, MemoryCreate, MemoryType
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 from weft.store import store_memory
 
 
@@ -126,7 +127,7 @@ async def test_list_entities_or_null_scoping(pool):
 
 async def test_list_entities_user_id_none_returns_all(pool):
     """user_id=None should return all entities (no filter)."""
-    await _make_entity(pool, "global")
+    await _make_entity(pool, "global", user_id=SYSTEM_GLOBAL_USER_ID)
     await _make_entity(pool, "user-a-entity", user_id="user-a")
     await _make_entity(pool, "user-b-entity", user_id="user-b")
 
@@ -139,8 +140,8 @@ async def test_list_entities_user_id_none_returns_all(pool):
 
 
 async def test_list_entities_user_id_scoping(pool):
-    """user_id='user-a' should return user-a rows + NULL rows, exclude others."""
-    await _make_entity(pool, "global")
+    """user_id='user-a' should return user-a rows + sentinel rows, exclude others."""
+    await _make_entity(pool, "global", user_id=SYSTEM_GLOBAL_USER_ID)
     await _make_entity(pool, "user-a-entity", user_id="user-a")
     await _make_entity(pool, "user-b-entity", user_id="user-b")
 
@@ -152,8 +153,8 @@ async def test_list_entities_user_id_scoping(pool):
 
 
 async def test_list_entities_user_id_only_null_rows(pool):
-    """user_id='user-a' should return NULL rows even if no user-a rows exist."""
-    await _make_entity(pool, "global")
+    """user_id='user-a' should return sentinel rows even if no user-a rows exist."""
+    await _make_entity(pool, "global", user_id=SYSTEM_GLOBAL_USER_ID)
     await _make_entity(pool, "user-b-entity", user_id="user-b")
 
     results = await list_entities(pool, user_id="user-a")
@@ -259,7 +260,7 @@ async def test_search_entities_project_scoped(pool):
 async def test_search_entities_user_id_none_returns_all(pool):
     """user_id=None should return all entities (no filter)."""
     embedding = [0.5] * 768
-    await store_entity(pool, EntityCreate(name="global"), embedding=embedding)
+    await store_entity(pool, EntityCreate(name="global", user_id=SYSTEM_GLOBAL_USER_ID), embedding=embedding)
     await store_entity(pool, EntityCreate(name="user-a-entity", user_id="user-a"), embedding=embedding)
     await store_entity(pool, EntityCreate(name="user-b-entity", user_id="user-b"), embedding=embedding)
 
@@ -272,9 +273,9 @@ async def test_search_entities_user_id_none_returns_all(pool):
 
 
 async def test_search_entities_user_id_scoping(pool):
-    """user_id='user-a' should return user-a rows + NULL rows, exclude others."""
+    """user_id='user-a' should return user-a rows + sentinel rows, exclude others."""
     embedding = [0.5] * 768
-    await store_entity(pool, EntityCreate(name="global"), embedding=embedding)
+    await store_entity(pool, EntityCreate(name="global", user_id=SYSTEM_GLOBAL_USER_ID), embedding=embedding)
     await store_entity(pool, EntityCreate(name="user-a-entity", user_id="user-a"), embedding=embedding)
     await store_entity(pool, EntityCreate(name="user-b-entity", user_id="user-b"), embedding=embedding)
 

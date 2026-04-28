@@ -184,7 +184,7 @@ async def _batch_fetch_embeddings(
         rows = await pool.fetch(
             "SELECT id, embedding FROM memories"
             " WHERE status = $1 AND embedding IS NOT NULL"
-            " AND (user_id = $2 OR user_id IS NULL)",
+            " AND (user_id = $2 OR user_id = '__system_global_zathras__')",
             status.value,
             uid,
         )
@@ -270,7 +270,7 @@ async def find_duplicates(
                             if uid is not None:
                                 await conn.execute(
                                     "UPDATE memories SET status = $1, updated_at = now()"
-                                    " WHERE id = $2 AND (user_id = $3 OR user_id IS NULL)",
+                                    " WHERE id = $2 AND (user_id = $3 OR user_id = '__system_global_zathras__')",
                                     MemoryStatus.archived.value,
                                     archive.id,
                                     uid,
@@ -735,7 +735,7 @@ async def check_contradictions_on_store(
     uid = current_user_id.get(None)
     if uid is not None:
         new_row = await pool.fetchrow(
-            "SELECT content FROM memories WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)",
+            "SELECT content FROM memories WHERE id = $1 AND (user_id = $2 OR user_id = '__system_global_zathras__')",
             memory_id,
             uid,
         )

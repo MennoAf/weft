@@ -30,7 +30,13 @@ async def schema_pool():
     from tests.conftest import _pg_container
 
     dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
-    p = await asyncpg.create_pool(dsn, min_size=2, max_size=5, init=_pgvector_codec_init)
+
+    async def _setup(conn):
+        await conn.execute("SET app.user_id = 'test-user-default'")
+
+    p = await asyncpg.create_pool(
+        dsn, min_size=2, max_size=5, init=_pgvector_codec_init, setup=_setup,
+    )
     await run_migrations(p)
     # TRUNCATE to start clean
     await p.execute(

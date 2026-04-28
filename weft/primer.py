@@ -168,25 +168,25 @@ async def build_primer(
     12. cost — spending posture summary
     """
     from weft.modes import get_active_weights
-    from weft.primer_sections.anti_patterns import build_anti_patterns_section
-    from weft.primer_sections.behaviors import build_behaviors_section
+    from weft.primer_sections.anti_patterns import fetch_anti_patterns_section, pack_anti_patterns_section
+    from weft.primer_sections.autonomy import fetch_autonomy_section, pack_autonomy_section
+    from weft.primer_sections.behaviors import fetch_behaviors_section, pack_behaviors_section
+    from weft.primer_sections.calibration import fetch_calibration_section, pack_calibration_section
     from weft.primer_sections.changes_since import build_changes_since_section
-    from weft.primer_sections.context import PrimerContext, SectionResult
-    from weft.primer_sections.decisions import build_decisions_section
-    from weft.primer_sections.entities import build_entities_section
-    from weft.primer_sections.grounding import build_grounding_section
-    from weft.primer_sections.handoff import build_handoff_section
-    from weft.primer_sections.issues import build_issues_section
+    from weft.primer_sections.context import PrimerContext, SectionFetch, SectionResult
+    from weft.primer_sections.cost import fetch_cost_section, pack_cost_section
+    from weft.primer_sections.decisions import fetch_decisions_section, pack_decisions_section
+    from weft.primer_sections.degradation import fetch_degradation_section, pack_degradation_section
+    from weft.primer_sections.entities import fetch_entities_section, pack_entities_section
+    from weft.primer_sections.grounding import fetch_grounding_section, pack_grounding_section
+    from weft.primer_sections.handoff import fetch_handoff_section, pack_handoff_section
+    from weft.primer_sections.issues import fetch_issues_section, pack_issues_section
     from weft.primer_sections.onboarding import build_onboarding_section
-    from weft.primer_sections.recent_work import build_recent_work_section
-    from weft.primer_sections.rules import build_rules_section
-    from weft.primer_sections.autonomy import build_autonomy_section
-    from weft.primer_sections.calibration import build_calibration_section
-    from weft.primer_sections.cost import build_cost_section
-    from weft.primer_sections.degradation import build_degradation_section
-    from weft.primer_sections.triggers import build_triggers_section
+    from weft.primer_sections.recent_work import fetch_recent_work_section, pack_recent_work_section
+    from weft.primer_sections.rules import fetch_rules_section, pack_rules_section
+    from weft.primer_sections.triggers import fetch_triggers_section, pack_triggers_section
     from weft.primer_sections.wellness import build_wellness_section
-    from weft.primer_sections.working_memory import build_working_memory_section
+    from weft.primer_sections.working_memory import fetch_working_memory_section, pack_working_memory_section
 
     now = datetime.now(timezone.utc)
 
@@ -220,54 +220,84 @@ async def build_primer(
             disabled_sections = set()
 
     _skip = SectionResult(items=[], tokens_used=0, skipped=True, skip_reason="disabled")
+    _skipped_fetch = SectionFetch(skipped=True, skip_reason="disabled")
 
     def _enabled(name: str) -> bool:
         return name not in disabled_sections
 
-    # --- Phase 1: All sections in parallel ---
-    # Sections are independent (read-only ctx, asyncpg pool handles concurrency).
-    # Running them concurrently collapses 20-40 sequential DB round-trips into
-    # a handful of concurrent batches — critical for Fly.io latency.
-    async def _noop() -> SectionResult:
+    # --- Phase 1a: All DB fetches in parallel ---
+    # Fetches are pure I/O, read only immutable ctx fields, and return raw data.
+    # This collapses ~15 sequential Supabase round-trips into one concurrent batch.
+    # changes_since and wellness are independent of budget packing and run
+    # alongside the fetches as full single-shot builders.
+    async def _noop_fetch() -> SectionFetch:
+        return _skipped_fetch
+
+    async def _noop_result() -> SectionResult:
         return _skip
 
     (
-        grounding_result,
-        rules_result,
-        behaviors_result,
-        handoff_result,
-        recent_work_result,
-        issues_result,
-        anti_patterns_result,
-        decisions_result,
-        entities_result,
-        autonomy_result,
-        calibration_result,
-        degradation_result,
-        triggers_result,
-        cost_result,
-        working_memory_result,
+        grounding_fetch,
+        rules_fetch,
+        behaviors_fetch,
+        handoff_fetch,
+        recent_work_fetch,
+        issues_fetch,
+        anti_patterns_fetch,
+        decisions_fetch,
+        entities_fetch,
+        autonomy_fetch,
+        calibration_fetch,
+        degradation_fetch,
+        triggers_fetch,
+        cost_fetch,
+        working_memory_fetch,
         changes_result,
         wellness_result,
     ) = await asyncio.gather(
-        build_grounding_section(ctx) if _enabled("grounding") else _noop(),
-        build_rules_section(ctx) if _enabled("rules") else _noop(),
-        build_behaviors_section(ctx) if _enabled("behaviors") else _noop(),
-        build_handoff_section(ctx) if _enabled("handoff") else _noop(),
-        build_recent_work_section(ctx) if _enabled("recent_work") else _noop(),
-        build_issues_section(ctx) if _enabled("issues") else _noop(),
-        build_anti_patterns_section(ctx) if _enabled("anti_patterns") else _noop(),
-        build_decisions_section(ctx) if _enabled("decisions") else _noop(),
-        build_entities_section(ctx) if _enabled("entities") else _noop(),
-        build_autonomy_section(ctx) if _enabled("autonomy") else _noop(),
-        build_calibration_section(ctx) if _enabled("calibration") else _noop(),
-        build_degradation_section(ctx) if _enabled("degradation") else _noop(),
-        build_triggers_section(ctx) if _enabled("triggers") else _noop(),
-        build_cost_section(ctx) if _enabled("cost") else _noop(),
-        build_working_memory_section(ctx) if _enabled("working_memory") else _noop(),
-        build_changes_since_section(ctx) if _enabled("changes_since") else _noop(),
-        build_wellness_section(ctx) if _enabled("wellness") else _noop(),
+        fetch_grounding_section(ctx) if _enabled("grounding") else _noop_fetch(),
+        fetch_rules_section(ctx) if _enabled("rules") else _noop_fetch(),
+        fetch_behaviors_section(ctx) if _enabled("behaviors") else _noop_fetch(),
+        fetch_handoff_section(ctx) if _enabled("handoff") else _noop_fetch(),
+        fetch_recent_work_section(ctx) if _enabled("recent_work") else _noop_fetch(),
+        fetch_issues_section(ctx) if _enabled("issues") else _noop_fetch(),
+        fetch_anti_patterns_section(ctx) if _enabled("anti_patterns") else _noop_fetch(),
+        fetch_decisions_section(ctx) if _enabled("decisions") else _noop_fetch(),
+        fetch_entities_section(ctx) if _enabled("entities") else _noop_fetch(),
+        fetch_autonomy_section(ctx) if _enabled("autonomy") else _noop_fetch(),
+        fetch_calibration_section(ctx) if _enabled("calibration") else _noop_fetch(),
+        fetch_degradation_section(ctx) if _enabled("degradation") else _noop_fetch(),
+        fetch_triggers_section(ctx) if _enabled("triggers") else _noop_fetch(),
+        fetch_cost_section(ctx) if _enabled("cost") else _noop_fetch(),
+        fetch_working_memory_section(ctx) if _enabled("working_memory") else _noop_fetch(),
+        build_changes_since_section(ctx) if _enabled("changes_since") else _noop_result(),
+        build_wellness_section(ctx) if _enabled("wellness") else _noop_result(),
     )
+
+    # --- Phase 1b: Budget packing — sequential in priority order ---
+    # Sections mutate shared ctx state (used_tokens, seen_ids, excluded,
+    # section_tokens). Must run in priority order so higher-priority sections
+    # pack first and lower-priority ones see remaining budget.
+    def _pack(enabled: bool, packer, fetched: SectionFetch) -> SectionResult:
+        if not enabled:
+            return _skip
+        return packer(ctx, fetched)
+
+    grounding_result = _pack(_enabled("grounding"), pack_grounding_section, grounding_fetch)
+    rules_result = _pack(_enabled("rules"), pack_rules_section, rules_fetch)
+    behaviors_result = _pack(_enabled("behaviors"), pack_behaviors_section, behaviors_fetch)
+    handoff_result = _pack(_enabled("handoff"), pack_handoff_section, handoff_fetch)
+    recent_work_result = _pack(_enabled("recent_work"), pack_recent_work_section, recent_work_fetch)
+    issues_result = _pack(_enabled("issues"), pack_issues_section, issues_fetch)
+    anti_patterns_result = _pack(_enabled("anti_patterns"), pack_anti_patterns_section, anti_patterns_fetch)
+    decisions_result = _pack(_enabled("decisions"), pack_decisions_section, decisions_fetch)
+    entities_result = _pack(_enabled("entities"), pack_entities_section, entities_fetch)
+    autonomy_result = _pack(_enabled("autonomy"), pack_autonomy_section, autonomy_fetch)
+    calibration_result = _pack(_enabled("calibration"), pack_calibration_section, calibration_fetch)
+    degradation_result = _pack(_enabled("degradation"), pack_degradation_section, degradation_fetch)
+    triggers_result = _pack(_enabled("triggers"), pack_triggers_section, triggers_fetch)
+    cost_result = _pack(_enabled("cost"), pack_cost_section, cost_fetch)
+    working_memory_result = _pack(_enabled("working_memory"), pack_working_memory_section, working_memory_fetch)
 
     # --- Phase 3: Freshness calculation ---
     all_included: list[dict] = (

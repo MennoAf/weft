@@ -9,6 +9,7 @@ import pytest
 from weft.behaviors import list_behaviors, match_behaviors
 from weft.db.connection import get_db
 from weft.models import BehaviorScope, _weft_id
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 
 
 def _normalized_embedding(seed: float = 0.1) -> list[float]:
@@ -28,7 +29,13 @@ async def _insert_behavior(
     agent_id: str | None = None,
     embedding: list[float] | None = None,
 ):
-    """Helper to insert a behavior with explicit user_id (bypasses current_setting)."""
+    """Helper to insert a behavior with explicit user_id (bypasses current_setting).
+
+    Caller-side ``user_id=None`` means "global row" — stored as the
+    SYSTEM_GLOBAL_USER_ID sentinel under the post-mig-36 schema.
+    """
+    if user_id is None:
+        user_id = SYSTEM_GLOBAL_USER_ID
     behavior_id = _weft_id()
     now = datetime.now(timezone.utc)
     await get_db(pool).execute(

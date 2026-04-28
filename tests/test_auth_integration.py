@@ -14,6 +14,7 @@ import asyncio
 import time
 from unittest.mock import patch
 
+import asyncpg
 import jwt as pyjwt
 import pytest
 
@@ -117,19 +118,25 @@ async def test_store_memory_populates_user_id(pool):
         current_user_id.reset(tok)
 
 
-async def test_store_memory_null_user_id_when_unauthenticated(pool):
-    """store_memory without auth context → user_id is NULL."""
+async def test_store_memory_fails_when_unauthenticated(pool):
+    """store_memory without auth context → fails the NOT NULL + RLS check.
+
+    Replaces the legacy "user_id is NULL" implicit-global path. The pool
+    fixture's session-default app.user_id has to be cleared first,
+    otherwise the default kicks in and the write succeeds.
+    """
     assert current_user_id.get() is None
-
-    mem = await store_memory(
-        pool,
-        MemoryCreate(type=MemoryType.fact, content="unauthenticated memory"),
-    )
-
-    row = await pool.fetchrow(
-        "SELECT user_id FROM memories WHERE id = $1", mem.id
-    )
-    assert row["user_id"] is None
+    async with pool.acquire() as conn:
+        await conn.execute("RESET app.user_id")
+        with pytest.raises(
+            (asyncpg.NotNullViolationError, asyncpg.InsufficientPrivilegeError)
+        ):
+            await conn.execute(
+                """INSERT INTO memories (id, type, topic, content, source, confidence,
+                   token_count, created_at, updated_at, accessed_at, access_count, status, pinned)
+                   VALUES ('weft-unauth-test', 'fact', '{}', 'unauthenticated memory',
+                   'conversation', 0.7, 5, now(), now(), now(), 0, 'active', false)"""
+            )
 
 
 # --- Cross-user isolation ---
@@ -211,8 +218,10 @@ async def test_sequential_requests_no_cross_contamination(pool):
     finally:
         current_user_id.reset(tok2)
 
-    # Request 3: unauthenticated
+    # Request 3: unauthenticated. Reset the test fixture's session default
+    # to simulate a real unauthenticated connection with no GUC set.
     async with acquire(pool) as conn:
+        await conn.execute("RESET app.user_id")
         results.append(
             await conn.fetchval("SELECT current_setting('app.user_id', true)")
         )
@@ -281,6 +290,9 @@ async def test_malformed_jwt_degrades_to_null(pool, auth_header):
     assert current_user_id.get() is None
 
     async with acquire(pool) as conn:
+        # Clear the test fixture's session default to simulate a fresh
+        # unauthenticated connection.
+        await conn.execute("RESET app.user_id")
         val = await conn.fetchval(
             "SELECT current_setting('app.user_id', true)"
         )
@@ -298,6 +310,7 @@ async def test_expired_jwt_degrades_to_null(pool):
     assert user_id is None
 
     async with acquire(pool) as conn:
+        await conn.execute("RESET app.user_id")
         val = await conn.fetchval(
             "SELECT current_setting('app.user_id', true)"
         )
@@ -330,8 +343,10 @@ async def test_set_local_does_not_persist_after_transaction(pool):
     finally:
         current_user_id.reset(tok)
 
-    # Subsequent raw connection should NOT have the setting
+    # Subsequent raw connection should NOT have the SET LOCAL value (the
+    # transaction is over). Clear the fixture's session default to confirm.
     async with pool.acquire() as conn:
+        await conn.execute("RESET app.user_id")
         val = await conn.fetchval(
             "SELECT current_setting('app.user_id', true)"
         )
@@ -343,6 +358,7 @@ async def test_user_id_sanitization_rejects_injection(pool):
     tok = current_user_id.set("'; DROP TABLE memories; --")
     try:
         async with acquire(pool) as conn:
+            await conn.execute("RESET app.user_id")
             val = await conn.fetchval(
                 "SELECT current_setting('app.user_id', true)"
             )

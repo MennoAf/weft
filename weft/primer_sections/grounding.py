@@ -17,6 +17,7 @@ from weft.primer_sections.context import (
     GROUNDING_TOPIC,
     SECTION_BUDGETS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
 )
 from weft.store import list_memories
@@ -27,23 +28,25 @@ logger = logging.getLogger(__name__)
 _CAP = SECTION_BUDGETS["grounding"]
 
 
-async def build_grounding_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack the grounding one-liner.
-
-    Returns a SectionResult whose ``items`` is either empty or contains
-    a single dict ``{"grounding_line": "<content>"}``.  The orchestrator
-    extracts the string for the top-level ``grounding`` key.
-    """
+async def fetch_grounding_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch grounding memory (parallel-safe, no ctx mutation)."""
     if not ctx.project_id:
-        ctx.section_tokens["grounding"] = 0
-        return SectionResult(items=[], tokens_used=0, skipped=True,
-                             skip_reason="no project_id")
-
+        return SectionFetch(skipped=True, skip_reason="no project_id")
     raw = await list_memories(
         ctx.pool, project_id=ctx.project_id,
         topic=GROUNDING_TOPIC, status=MemoryStatus.active, limit=1,
     )
+    return SectionFetch(payload=raw)
 
+
+def pack_grounding_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack grounding line against the budget (sequential, mutates ctx)."""
+    if fetched.skipped:
+        ctx.section_tokens["grounding"] = 0
+        return SectionResult(items=[], tokens_used=0, skipped=True,
+                             skip_reason=fetched.skip_reason)
+
+    raw = fetched.payload or []
     if not raw:
         ctx.section_tokens["grounding"] = 0
         return SectionResult(items=[], tokens_used=0, skipped=False)
@@ -65,3 +68,8 @@ async def build_grounding_section(ctx: PrimerContext) -> SectionResult:
         tokens_used=cost,
         skipped=False,
     )
+
+
+async def build_grounding_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack grounding (single-shot wrapper)."""
+    return pack_grounding_section(ctx, await fetch_grounding_section(ctx))

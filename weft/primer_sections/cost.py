@@ -10,7 +10,12 @@ import logging
 from datetime import timedelta
 
 from weft.cost_tracking import get_cost_summary
-from weft.primer_sections.context import SECTION_BUDGETS, PrimerContext, SectionResult
+from weft.primer_sections.context import (
+    SECTION_BUDGETS,
+    PrimerContext,
+    SectionFetch,
+    SectionResult,
+)
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -19,19 +24,24 @@ _CAP = SECTION_BUDGETS["cost"]
 _WINDOW_HOURS = 24  # rolling window for cost summary
 
 
-async def build_cost_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack a cost posture summary."""
+async def fetch_cost_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch cost summary (parallel-safe, no ctx mutation)."""
     since = ctx.now - timedelta(hours=_WINDOW_HOURS)
     summary = await get_cost_summary(
-        ctx.pool,
-        since=since,
-        project_id=ctx.project_id,
+        ctx.pool, since=since, project_id=ctx.project_id,
     )
-
     if summary.total_entries == 0:
-        return SectionResult(items=[], tokens_used=0, skipped=True,
-                             skip_reason="No cost entries in window")
+        return SectionFetch(skipped=True, skip_reason="No cost entries in window")
+    return SectionFetch(payload=summary)
 
+
+def pack_cost_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack cost summary against the budget (sequential, mutates ctx)."""
+    if fetched.skipped:
+        return SectionResult(items=[], tokens_used=0, skipped=True,
+                             skip_reason=fetched.skip_reason)
+
+    summary = fetched.payload
     text = (
         f"Cost ({_WINDOW_HOURS}h): ${summary.total_cost_usd:.4f} "
         f"across {summary.total_entries} entries, "
@@ -54,3 +64,8 @@ async def build_cost_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["cost"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_cost_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack cost section (single-shot wrapper)."""
+    return pack_cost_section(ctx, await fetch_cost_section(ctx))

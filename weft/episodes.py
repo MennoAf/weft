@@ -14,6 +14,7 @@ import asyncpg
 from datetime import timedelta
 
 from weft.db.connection import get_db
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 from weft.models import (
     Episode,
     EpisodeCreate,
@@ -125,9 +126,10 @@ async def list_episodes(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     query = f"""
@@ -299,9 +301,10 @@ async def timeline_query(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     if status is not None:
         conditions.append(f"status = ${idx}")
@@ -451,9 +454,10 @@ async def get_working_memory(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     where = "WHERE " + " AND ".join(conditions)
     params.append(limit)

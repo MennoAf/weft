@@ -19,6 +19,7 @@ from weft.primer_sections.context import (
     SECTION_MAX_ITEMS,
     SIMILARITY_WEIGHT,
     PrimerContext,
+    SectionFetch,
     SectionResult,
     is_unscoped_ingest,
     unwrap_recall,
@@ -35,8 +36,11 @@ _MAX = SECTION_MAX_ITEMS["recent_work"]
 _RECENT_HOURS = 72
 
 
-async def build_recent_work_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack milestone memories from the last 72 hours."""
+async def fetch_recent_work_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch milestone memories (parallel-safe, no ctx mutation).
+
+    seen_ids filtering is deferred to pack phase.
+    """
     if ctx.biased:
         raw = await search_by_vector(
             ctx.pool, ctx.query_vec,
@@ -48,9 +52,12 @@ async def build_recent_work_section(ctx: PrimerContext) -> SectionResult:
             ctx.pool, memory_type=MemoryType.milestone, status=MemoryStatus.active,
             limit=10, **ctx.scope,
         )
+    return SectionFetch(payload=unwrap_recall(raw))
 
-    pairs = unwrap_recall(raw)
 
+def pack_recent_work_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack recent milestones against the budget (sequential, mutates ctx)."""
+    pairs = fetched.payload or []
     cutoff = ctx.now.timestamp() - (_RECENT_HOURS * 3600)
     candidates = [
         (m, sim) for m, sim in pairs
@@ -79,7 +86,6 @@ async def build_recent_work_section(ctx: PrimerContext) -> SectionResult:
     else:
         candidates.sort(key=lambda pair: pair[0].created_at, reverse=True)
 
-    # Pack
     items: list[dict] = []
     section_used = 0
     for mem, _sim in candidates:
@@ -104,3 +110,8 @@ async def build_recent_work_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["recent_work"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_recent_work_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack recent work (single-shot wrapper)."""
+    return pack_recent_work_section(ctx, await fetch_recent_work_section(ctx))

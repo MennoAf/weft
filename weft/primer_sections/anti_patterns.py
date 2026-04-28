@@ -19,6 +19,7 @@ from weft.primer_sections.context import (
     SECTION_MAX_ITEMS,
     SIMILARITY_WEIGHT,
     PrimerContext,
+    SectionFetch,
     SectionResult,
     is_unscoped_ingest,
     unwrap_recall,
@@ -32,8 +33,8 @@ _CAP = SECTION_BUDGETS["anti_patterns"]
 _MAX = SECTION_MAX_ITEMS["anti_patterns"]
 
 
-async def build_anti_patterns_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack anti-pattern memories."""
+async def fetch_anti_patterns_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch anti-pattern memories (parallel-safe, no ctx mutation)."""
     if ctx.biased:
         raw = await search_by_vector(
             ctx.pool, ctx.query_vec,
@@ -45,17 +46,18 @@ async def build_anti_patterns_section(ctx: PrimerContext) -> SectionResult:
             ctx.pool, memory_type=MemoryType.anti_pattern, status=MemoryStatus.active,
             limit=10, **ctx.scope,
         )
+    return SectionFetch(payload=unwrap_recall(raw))
 
-    pairs = unwrap_recall(raw)
 
-    # Filter
+def pack_anti_patterns_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack anti-patterns against the budget (sequential, mutates ctx)."""
+    pairs = fetched.payload or []
     candidates = [
         (m, sim) for m, sim in pairs
         if m.id not in ctx.seen_ids
         and not is_unscoped_ingest(m, ctx.project_id)
     ]
 
-    # Sort
     if ctx.biased:
         candidates.sort(
             key=lambda pair: (
@@ -70,7 +72,6 @@ async def build_anti_patterns_section(ctx: PrimerContext) -> SectionResult:
             reverse=True,
         )
 
-    # Pack
     items: list[dict] = []
     section_used = 0
     for i, (mem, _sim) in enumerate(candidates):
@@ -94,3 +95,8 @@ async def build_anti_patterns_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["anti_patterns"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_anti_patterns_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack anti-patterns (single-shot wrapper)."""
+    return pack_anti_patterns_section(ctx, await fetch_anti_patterns_section(ctx))

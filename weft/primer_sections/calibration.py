@@ -7,11 +7,17 @@ recent calibration history.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
 from weft.calibration import evaluate_tier_change, get_calibration_summary
-from weft.primer_sections.context import SECTION_BUDGETS, PrimerContext, SectionResult
+from weft.primer_sections.context import (
+    SECTION_BUDGETS,
+    PrimerContext,
+    SectionFetch,
+    SectionResult,
+)
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -21,24 +27,46 @@ _EVAL_WINDOW_DAYS = 30
 _MIN_RECORDS_TO_SHOW = 1  # Don't show section if fewer records exist
 
 
-async def build_calibration_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch calibration summary and tier change recommendations."""
+async def fetch_calibration_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch calibration summary + per-category evaluations (parallel-safe)."""
     since = ctx.now - timedelta(days=_EVAL_WINDOW_DAYS)
     summary = await get_calibration_summary(
-        ctx.pool,
-        project_id=ctx.project_id,
-        since=since,
+        ctx.pool, project_id=ctx.project_id, since=since,
     )
 
     total = summary["total"]
     if total < _MIN_RECORDS_TO_SHOW:
+        return SectionFetch(skipped=True, skip_reason="No calibration records in window")
+
+    # Evaluate each eligible category in parallel.
+    categories = [
+        c for c, cs in summary.get("by_category", {}).items()
+        if cs["total"] >= _MIN_RECORDS_TO_SHOW
+    ]
+    evaluations = await asyncio.gather(*[
+        evaluate_tier_change(ctx.pool, c, project_id=ctx.project_id)
+        for c in categories
+    ]) if categories else []
+
+    return SectionFetch(payload={
+        "summary": summary,
+        "evaluations": list(zip(categories, evaluations)),
+    })
+
+
+def pack_calibration_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack calibration summary + recommendations against budget."""
+    if fetched.skipped:
         return SectionResult(items=[], tokens_used=0, skipped=True,
-                             skip_reason="No calibration records in window")
+                             skip_reason=fetched.skip_reason)
+
+    payload = fetched.payload
+    summary = payload["summary"]
+    total = summary["total"]
 
     items: list[dict] = []
     section_used = 0
 
-    # Overall summary line
     overview = {
         "total": total,
         "approved": summary["approved"],
@@ -57,18 +85,9 @@ async def build_calibration_section(ctx: PrimerContext) -> SectionResult:
         ctx.used_tokens += cost
         section_used += cost
 
-    # Per-category evaluations (only for categories with records)
-    for category, cat_stats in summary.get("by_category", {}).items():
-        if cat_stats["total"] < _MIN_RECORDS_TO_SHOW:
-            continue
-        evaluation = await evaluate_tier_change(
-            ctx.pool,
-            category,
-            project_id=ctx.project_id,
-        )
+    for category, evaluation in payload["evaluations"]:
         if evaluation["recommendation"] == "no_change":
             continue
-
         rec = {
             "action_category": category,
             "recommendation": evaluation["recommendation"],
@@ -85,3 +104,8 @@ async def build_calibration_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["calibration"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_calibration_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack calibration section (single-shot wrapper)."""
+    return pack_calibration_section(ctx, await fetch_calibration_section(ctx))

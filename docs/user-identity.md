@@ -83,38 +83,21 @@ your `sub` is the `auth.users.id` UUID. Ways to retrieve it:
   decode a JWT via `python -c "import jwt; print(jwt.decode(<token>, options={'verify_signature': False})['sub'])"`.
 - Supabase dashboard → Authentication → Users → your row → `id`.
 
-## Backfilling legacy rows
+## Legacy NULL rows
 
-Rows written before user-scoping shipped (or before you bound your
-identity) have `user_id = NULL`. They're still visible via OR-NULL
-filtering, so the backfill is optional — but stamping them with your
-canonical identity makes future multi-user work cleaner.
+Rows written before user-scoping shipped had `user_id = NULL`. Migration
+36 (`Schema v1: SYSTEM_GLOBAL sentinel + NOT NULL user_id + RLS rewrite`)
+backfilled every NULL to the `__system_global_zathras__` sentinel and
+added `NOT NULL` to every user-scoped table — so going forward, a row
+with no owner is structurally impossible. Forgetting to set
+`app.user_id` becomes a fail-loud constraint violation rather than a
+silent global write.
 
-Always dry-run first:
-
-```python
-from weft.db.backfill_user_id import dry_run_backfill_user_id
-
-report = await dry_run_backfill_user_id(pool, user_id="<your-jwt-sub>")
-print(report.total_null_rows, "rows would be stamped")
-for table, info in report.per_table.items():
-    print(f"  {table}: {info['null_count']} NULL, "
-          f"distinct existing: {info['distinct_user_ids']}")
-```
-
-If the landscape looks right (no surprise existing identities you'd
-overwrite alongside your NULL rows), run the real backfill:
-
-```python
-from weft.db.backfill_user_id import backfill_user_id
-
-n = await backfill_user_id(pool, user_id="<your-jwt-sub>")
-print(f"migrated {n} rows")
-```
-
-The explicit `user_id` argument is strongly preferred for admin operations
-against shared DBs — it decouples the operation from whatever environment
-state `get_user_id()` would resolve.
+If you need to reassign legacy rows from the sentinel to your own
+identity (e.g. memories you wrote pre-identity-binding that should
+become yours rather than system-owned), do it as a one-off SQL
+operation with the explicit user_id you want to stamp. There is no
+automated tool — the deliberate friction is intentional.
 
 ## Why this design
 

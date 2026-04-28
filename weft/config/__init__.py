@@ -142,7 +142,36 @@ class WeftConfig(BaseModel):
     primer: PrimerConfig = Field(default_factory=PrimerConfig)
     api_key: str | None = None
     supabase_url: str | None = None
+    # Supabase anon (publishable) key — required for the consent page to
+    # boot the Supabase JS SDK and call ``supabase.auth.oauth.*``. Public
+    # by design; safe to embed in HTML.
+    supabase_anon_key: str | None = None
     log_level: str = "INFO"
+
+    # ------------------------------------------------------------------
+    # OAuth 2.1 authorization-server config (Phase 1 scaffold).
+    # All fields below are dormant unless ``oauth_enabled`` is True; when
+    # disabled the server behaves byte-identically to the known-good
+    # ``c965d49`` API-key-only snapshot.
+    # ------------------------------------------------------------------
+    oauth_enabled: bool = False
+    oauth_issuer: str = ""
+    oauth_jwt_private_key_pem: str | None = None
+    # Phase 4c — optional overlap key during rotation. When set, both
+    # keys are exposed in JWKS and the verifier accepts either. The
+    # primary PEM still signs new tokens until rotation is complete.
+    oauth_jwt_private_key_pem_next: str | None = None
+    oauth_jwt_kid: str = ""  # derived at load time from the public key
+    oauth_session_secret: str = ""
+    oauth_sole_user_sub: str | None = None
+    oauth_access_ttl_s: int = 3600
+    oauth_refresh_ttl_s: int = 2_592_000
+    # Phase 3: Supabase provider to pass to ``/auth/v1/authorize?provider=``.
+    # Default ``email`` uses magic-link auth which is available on any
+    # Supabase project with email auth enabled. For projects configured
+    # with a third-party provider (github, google, …), override via
+    # ``WEFT_SUPABASE_AUTH_PROVIDER``.
+    supabase_auth_provider: str = "email"
 
     @property
     def is_production(self) -> bool:
@@ -415,6 +444,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.api_key = api_key
     if supabase_url := os.environ.get("SUPABASE_URL"):
         config.supabase_url = supabase_url.rstrip("/")
+    if supabase_anon_key := os.environ.get("SUPABASE_ANON_KEY"):
+        config.supabase_anon_key = supabase_anon_key.strip()
     if poll_interval := os.environ.get("WEFT_ALERT_POLL_INTERVAL"):
         config.alert.poll_interval = int(poll_interval)
     if batch_size := os.environ.get("WEFT_ALERT_BATCH_SIZE"):
@@ -428,4 +459,35 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
     if brief_channel := os.environ.get("WEFT_DAILY_BRIEF_CHANNEL"):
         config.daily_brief.channel = brief_channel.strip()
 
+    # OAuth 2.1 authz-server env vars (optional unless WEFT_OAUTH_ENABLED=1).
+    # When disabled, every field below stays at its default and the OAuth
+    # module is never instantiated.
+    if oauth_flag := os.environ.get("WEFT_OAUTH_ENABLED"):
+        config.oauth_enabled = oauth_flag.lower() in ("1", "true", "yes")
+    if oauth_issuer := os.environ.get("OAUTH_ISSUER"):
+        config.oauth_issuer = oauth_issuer.rstrip("/")
+    if oauth_pem := os.environ.get("OAUTH_JWT_PRIVATE_KEY_PEM"):
+        config.oauth_jwt_private_key_pem = oauth_pem
+    if oauth_pem_next := os.environ.get("OAUTH_JWT_PRIVATE_KEY_PEM_NEXT"):
+        config.oauth_jwt_private_key_pem_next = oauth_pem_next
+    if oauth_session := os.environ.get("OAUTH_SESSION_SECRET"):
+        config.oauth_session_secret = oauth_session
+    if oauth_sole := os.environ.get("OAUTH_SOLE_USER_SUB"):
+        config.oauth_sole_user_sub = oauth_sole
+    if oauth_access_ttl := os.environ.get("OAUTH_ACCESS_TTL_S"):
+        try:
+            config.oauth_access_ttl_s = int(oauth_access_ttl)
+        except ValueError:
+            logger.warning("Invalid OAUTH_ACCESS_TTL_S=%r; using default", oauth_access_ttl)
+    if oauth_refresh_ttl := os.environ.get("OAUTH_REFRESH_TTL_S"):
+        try:
+            config.oauth_refresh_ttl_s = int(oauth_refresh_ttl)
+        except ValueError:
+            logger.warning("Invalid OAUTH_REFRESH_TTL_S=%r; using default", oauth_refresh_ttl)
+    if provider := os.environ.get("WEFT_SUPABASE_AUTH_PROVIDER"):
+        config.supabase_auth_provider = provider.strip()
+
+    # The legacy ``oauth_jwt_*`` fields exist for backwards compatibility
+    # with the prior Weft-as-OAuth-server deployment. In the new
+    # Supabase-as-OAuth-server architecture nothing reads them.
     return config

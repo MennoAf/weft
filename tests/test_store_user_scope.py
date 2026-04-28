@@ -8,6 +8,7 @@ import pytest
 
 from weft.db.connection import get_db
 from weft.models import MemoryCreate, MemorySource, MemoryType, _weft_id
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 from weft.store import (
     list_memories,
     search_by_keyword,
@@ -33,7 +34,13 @@ async def _insert_memory(
     agent_id: str | None = None,
     embedding: list[float] | None = None,
 ) -> str:
-    """Helper to insert a memory with explicit user_id (bypasses current_setting)."""
+    """Helper to insert a memory with explicit user_id (bypasses current_setting).
+
+    Caller-side ``user_id=None`` means "global row" — stored as the
+    SYSTEM_GLOBAL_USER_ID sentinel under the post-mig-36 schema.
+    """
+    if user_id is None:
+        user_id = SYSTEM_GLOBAL_USER_ID
     memory_id = _weft_id()
     now = datetime.now(timezone.utc)
     await get_db(pool).execute(

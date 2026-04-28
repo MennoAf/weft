@@ -16,6 +16,7 @@ from weft.primer_sections.context import (
     DICT_OVERHEAD_TOKENS,
     SECTION_BUDGETS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
     annotate_review_after,
 )
@@ -27,18 +28,22 @@ logger = logging.getLogger(__name__)
 _CAP = SECTION_BUDGETS["rules"]
 
 
-async def build_rules_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack pinned rule memories."""
+async def fetch_rules_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch pinned rule memories (parallel-safe, no ctx mutation)."""
     raw = await list_memories(
         ctx.pool, status=MemoryStatus.active, pinned=True, limit=100,
         **ctx.scope,
     )
-
     raw.sort(
         key=lambda m: (m.confidence, m.usefulness_score, m.created_at.timestamp()),
         reverse=True,
     )
+    return SectionFetch(payload=raw)
 
+
+def pack_rules_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack fetched rules against the budget (sequential, mutates ctx)."""
+    raw = fetched.payload or []
     items: list[dict] = []
     section_used = 0
     for mem in raw:
@@ -62,3 +67,8 @@ async def build_rules_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["rules"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_rules_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack pinned rule memories (single-shot wrapper)."""
+    return pack_rules_section(ctx, await fetch_rules_section(ctx))

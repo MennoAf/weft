@@ -12,6 +12,7 @@ import pytest
 
 from weft.modes import list_modes, upsert_mode
 from weft.models import ModeCreate, ModeWeights
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 
 
 # --- Helpers ---
@@ -23,7 +24,9 @@ async def _make_mode(
     user_id: str | None = None,
     **kwargs
 ) -> str:
-    """Create a mode. If user_id is provided, manually set it in DB."""
+    """Create a mode. Caller-side ``user_id=None`` means "global row" —
+    stamped with the SYSTEM_GLOBAL_USER_ID sentinel to satisfy the post-mig-36
+    NOT NULL constraint. Pass an explicit user_id to override."""
     create = ModeCreate(
         name=name,
         description=kwargs.get("description", f"Mode {name}"),
@@ -32,13 +35,12 @@ async def _make_mode(
         agent_id=kwargs.get("agent_id"),
     )
     mode = await upsert_mode(pool, create)
-    if user_id is not None:
-        # Manually override user_id in the database
-        await pool.execute(
-            "UPDATE modes SET user_id = $1 WHERE id = $2",
-            user_id,
-            mode.id,
-        )
+    target_user_id = user_id if user_id is not None else SYSTEM_GLOBAL_USER_ID
+    await pool.execute(
+        "UPDATE modes SET user_id = $1 WHERE id = $2",
+        target_user_id,
+        mode.id,
+    )
     return mode.id
 
 

@@ -125,7 +125,9 @@ async def test_backup_preserves_relationships(pool):
 
 @pytest.mark.asyncio
 async def test_backup_includes_user_id(pool):
-    """Backup should include user_id for each memory (None for global)."""
+    """Backup includes user_id for each memory. After migration 36 every row
+    has a non-NULL user_id; the test fixture's session default supplies one
+    when an INSERT doesn't specify one."""
     await _seed_test_data(pool)
 
     # Insert a user-scoped memory directly
@@ -139,10 +141,11 @@ async def test_backup_includes_user_id(pool):
     data = await backup_all(pool)
     user_ids = {m["id"]: m["user_id"] for m in data["memories"]}
     assert user_ids["weft-user1"] == "user-abc"
-    # Global memories should have None
+    # Other memories pick up the test fixture's default user_id from the
+    # column DEFAULT (no longer NULL).
     for m in data["memories"]:
         if m["id"] != "weft-user1":
-            assert m["user_id"] is None
+            assert m["user_id"] is not None
 
 
 @pytest.mark.asyncio

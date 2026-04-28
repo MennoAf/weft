@@ -146,11 +146,12 @@ async def test_get_active_weights_malformed_json(pool):
     """Malformed weights in DB should fall back to defaults, not raise."""
     from weft.modes import get_active_weights
 
-    # Insert directly with invalid weights shape
+    # Insert directly with invalid weights shape; user_id picks up the
+    # column DEFAULT (the test fixture's session app.user_id).
     await pool.execute(
         """
-        INSERT INTO modes (id, user_id, name, weights)
-        VALUES ('m-bad', NULL, 'broken', $1::jsonb)
+        INSERT INTO modes (id, name, weights)
+        VALUES ('m-bad', 'broken', $1::jsonb)
         """,
         json.dumps({"vector_weight": "not-a-number"}),
     )

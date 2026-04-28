@@ -9,6 +9,7 @@ Line numbers as-of commit 2955aed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from weft.git_utils import get_recent_commits
@@ -22,8 +23,19 @@ from weft.store import get_last_handoff_timestamp, get_memory_changes_since
 logger = logging.getLogger(__name__)
 
 
+async def _safe_recent_commits(since) -> list:
+    try:
+        return await get_recent_commits(since=since)
+    except Exception:
+        return []
+
+
 async def build_changes_since_section(ctx: PrimerContext) -> SectionResult:
-    """Compute changes since the last session handoff."""
+    """Compute changes since the last session handoff.
+
+    Doesn't participate in budget packing, so stays as a single-shot coroutine.
+    The orchestrator runs it in parallel with other section fetches.
+    """
     try:
         handoff_ts = await get_last_handoff_timestamp(
             ctx.pool, project_id=ctx.project_id,
@@ -32,13 +44,12 @@ async def build_changes_since_section(ctx: PrimerContext) -> SectionResult:
             return SectionResult(items=[], tokens_used=0, skipped=True,
                                  skip_reason="no handoff timestamp")
 
-        changes = await get_memory_changes_since(
-            ctx.pool, since=handoff_ts, project_id=ctx.project_id,
+        changes, commits = await asyncio.gather(
+            get_memory_changes_since(
+                ctx.pool, since=handoff_ts, project_id=ctx.project_id,
+            ),
+            _safe_recent_commits(handoff_ts),
         )
-        try:
-            commits = await get_recent_commits(since=handoff_ts)
-        except Exception:
-            commits = []
         changes["recent_commits"] = commits[:MAX_CHANGES_SINCE_COMMITS]
 
         return SectionResult(

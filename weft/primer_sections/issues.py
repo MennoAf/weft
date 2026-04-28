@@ -18,6 +18,7 @@ from weft.primer_sections.context import (
     SECTION_BUDGETS,
     SIMILARITY_WEIGHT,
     PrimerContext,
+    SectionFetch,
     SectionResult,
     is_unscoped_ingest,
     unwrap_recall,
@@ -30,8 +31,8 @@ logger = logging.getLogger(__name__)
 _CAP = SECTION_BUDGETS["issues"]
 
 
-async def build_issues_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack active issue memories."""
+async def fetch_issues_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch active issue memories (parallel-safe, no ctx mutation)."""
     if ctx.biased:
         raw = await search_by_vector(
             ctx.pool, ctx.query_vec,
@@ -43,9 +44,12 @@ async def build_issues_section(ctx: PrimerContext) -> SectionResult:
             ctx.pool, memory_type=MemoryType.issue, status=MemoryStatus.active,
             limit=20, **ctx.scope,
         )
+    return SectionFetch(payload=unwrap_recall(raw))
 
-    pairs = unwrap_recall(raw)
 
+def pack_issues_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack fetched issues against the budget (sequential, mutates ctx)."""
+    pairs = fetched.payload or []
     candidates = [
         (m, sim) for m, sim in pairs
         if m.id not in ctx.seen_ids
@@ -86,3 +90,8 @@ async def build_issues_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["issues"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_issues_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack issues (single-shot wrapper)."""
+    return pack_issues_section(ctx, await fetch_issues_section(ctx))

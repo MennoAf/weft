@@ -1,0 +1,44 @@
+# Staging Fly.io app — mirror of fly.toml with OAuth 2.1 enabled.
+#
+# Deploy with: `fly deploy -c fly.staging.toml`
+#
+# Staging is the first place WEFT_OAUTH_ENABLED runs with real clients.
+# Cutover to prod waits on anthropics/claude-ai-mcp#134 landing and a
+# green smoke test on this app. See DEPLOY.md §"Route 1 staging rollout"
+# for the full runbook.
+app = "weft-mcp-staging"
+primary_region = "iad"
+
+[deploy]
+  strategy = "bluegreen"
+
+[build]
+
+[env]
+  WEFT_ENV = "production"
+  WEFT_TRANSPORT = "streamable-http"
+  WEFT_REDIS_URL = ""
+  WEFT_LOG_LEVEL = "INFO"
+  PORT = "8000"
+  # Route 1 OAuth 2.1 — staging is where we validate the full dance
+  # before flipping the same flag on weft-mcp.
+  WEFT_OAUTH_ENABLED = "1"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "15s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

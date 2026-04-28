@@ -19,6 +19,7 @@ from weft.primer_sections.context import (
     SECTION_BUDGETS,
     SECTION_MAX_ITEMS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
 )
 from weft.tokens import estimate_tokens
@@ -29,10 +30,8 @@ _CAP = SECTION_BUDGETS["behaviors"]
 _MAX = SECTION_MAX_ITEMS["behaviors"]
 
 
-async def build_behaviors_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack behavioral rules/strategies."""
-    cap = max(0, int(_CAP * ctx.behavior_boost))
-
+async def fetch_behaviors_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch behavior rules (parallel-safe, no ctx mutation)."""
     if ctx.biased:
         raw = await match_behaviors(
             ctx.pool, ctx.query_vec, limit=_MAX * 2,
@@ -42,7 +41,13 @@ async def build_behaviors_section(ctx: PrimerContext) -> SectionResult:
         raw = await list_behaviors(
             ctx.pool, enabled=True, limit=_MAX * 2, **ctx.scope,
         )
+    return SectionFetch(payload=raw)
 
+
+def pack_behaviors_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack fetched behaviors against the budget (sequential, mutates ctx)."""
+    cap = max(0, int(_CAP * ctx.behavior_boost))
+    raw = fetched.payload or []
     items: list[dict] = []
     section_used = 0
     for item in raw:
@@ -70,3 +75,8 @@ async def build_behaviors_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["behaviors"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_behaviors_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack behaviors (single-shot wrapper)."""
+    return pack_behaviors_section(ctx, await fetch_behaviors_section(ctx))

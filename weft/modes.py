@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from weft.db.connection import get_db
 from weft.models import Mode, ModeCreate, ModeWeights, _weft_id
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 
 logger = logging.getLogger(__name__)
 
@@ -24,53 +25,35 @@ async def upsert_mode(pool: asyncpg.Pool, create: ModeCreate) -> Mode:
     weights_json = json.dumps(create.weights.model_dump())
 
     db = get_db(pool)
+    # Resolve user_id from session. If unset, the INSERT below fails the
+    # NOT NULL + RLS WITH CHECK — fail loud rather than silently writing
+    # to SYSTEM_GLOBAL. System-owned writes must explicitly SET LOCAL
+    # app.user_id = '__system_global_zathras__' first.
     user_id = await db.fetchval(
         "SELECT nullif(current_setting('app.user_id', true), '')"
     )
 
-    # Try update first (handles both NULL and non-NULL user_id)
-    if user_id is None:
-        row = await db.fetchrow(
-            """
-            UPDATE modes SET
-                description = $2,
-                weights = $3::jsonb,
-                project_id = $4,
-                agent_id = $5,
-                updated_at = now()
-            WHERE user_id IS NULL AND name = $1
-            RETURNING *
-            """,
-            create.name,
-            create.description,
-            weights_json,
-            create.project_id,
-            create.agent_id,
-        )
-    else:
-        row = await db.fetchrow(
-            """
-            UPDATE modes SET
-                description = $2,
-                weights = $3::jsonb,
-                project_id = $4,
-                agent_id = $5,
-                updated_at = now()
-            WHERE user_id = $6 AND name = $1
-            RETURNING *
-            """,
-            create.name,
-            create.description,
-            weights_json,
-            create.project_id,
-            create.agent_id,
-            user_id,
-        )
-
+    row = await db.fetchrow(
+        """
+        UPDATE modes SET
+            description = $2,
+            weights = $3::jsonb,
+            project_id = $4,
+            agent_id = $5,
+            updated_at = now()
+        WHERE user_id = $6 AND name = $1
+        RETURNING *
+        """,
+        create.name,
+        create.description,
+        weights_json,
+        create.project_id,
+        create.agent_id,
+        user_id,
+    )
     if row is not None:
         return _row_to_mode(row)
 
-    # Insert new
     row = await db.fetchrow(
         """
         INSERT INTO modes (id, user_id, name, description, weights, project_id, agent_id)
@@ -113,9 +96,10 @@ async def list_modes(
     idx = 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     query = f"""

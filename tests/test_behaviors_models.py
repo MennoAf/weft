@@ -255,7 +255,8 @@ async def test_behaviors_table_defaults(pool):
     assert row["status"] == "active"
     assert row["project_id"] is None
     assert row["agent_id"] is None
-    assert row["user_id"] is None
+    # Migration 34: user_id default fills from session app.user_id.
+    assert row["user_id"] == "test-user-default"
 
 
 async def test_behaviors_soft_delete(pool):
