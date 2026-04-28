@@ -214,7 +214,8 @@ async def test_autonomy_policies_table_columns(pool):
     assert columns["enabled"]["is_nullable"] == "NO"
     assert columns["description"]["is_nullable"] == "YES"
     assert columns["project_id"]["is_nullable"] == "YES"
-    assert columns["user_id"]["is_nullable"] == "YES"
+    # Migration 34 made user_id NOT NULL (kills implicit-global path).
+    assert columns["user_id"]["is_nullable"] == "NO"
 
 
 async def test_policy_calibration_events_table_columns(pool):
@@ -303,7 +304,10 @@ async def test_autonomy_policies_defaults(pool):
     assert json.loads(row["conditions"]) == {}
     assert row["description"] is None
     assert row["project_id"] is None
-    assert row["user_id"] is None
+    # Migration 34: user_id column DEFAULT picks up the session's
+    # app.user_id; in tests the pool's setup callback puts the
+    # DEFAULT_TEST_USER_ID there.
+    assert row["user_id"] == "test-user-default"
 
 
 async def test_autonomy_policies_conditions_jsonb(pool):

@@ -16,6 +16,7 @@ from weft.primer_sections.context import (
     SECTION_BUDGETS,
     SECTION_MAX_ITEMS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
 )
 from weft.tokens import estimate_tokens
@@ -26,12 +27,16 @@ _CAP = SECTION_BUDGETS["entities"]
 _MAX = SECTION_MAX_ITEMS["entities"]
 
 
-async def build_entities_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack known entities (people, projects, tools)."""
-    cap = max(0, int(_CAP * ctx.entity_boost))
-
+async def fetch_entities_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch known entities (parallel-safe, no ctx mutation)."""
     raw = await list_entities(ctx.pool, limit=_MAX, **ctx.scope)
+    return SectionFetch(payload=raw)
 
+
+def pack_entities_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack entities against the budget (sequential, mutates ctx)."""
+    cap = max(0, int(_CAP * ctx.entity_boost))
+    raw = fetched.payload or []
     items: list[dict] = []
     section_used = 0
     for ent in raw:
@@ -54,3 +59,8 @@ async def build_entities_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["entities"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_entities_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack entities (single-shot wrapper)."""
+    return pack_entities_section(ctx, await fetch_entities_section(ctx))

@@ -18,3 +18,8 @@ loom_suggestions.md
 .env
 .env.*
 weft-backup-*.json
+
+# OAuth staging/prod secret output files produced by
+# scripts/generate_oauth_secrets.sh. NEVER commit these.
+.oauth-*.env
+.oauth-*-secrets.env

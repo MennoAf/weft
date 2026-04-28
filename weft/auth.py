@@ -76,6 +76,27 @@ def _init_auth() -> None:
     logger.info("JWT auth: disabled (no SUPABASE_JWKS_URL, SUPABASE_URL, or SUPABASE_JWT_SECRET)")
 
 
+def _is_own_oauth_issuer(issuer: str) -> bool:
+    """Return ``True`` if *issuer* is Weft's own OAuth AS.
+
+    Phase-1 hardening (scope §9): once we start minting our own RS256
+    JWTs the two token families need to stay disjoint, otherwise a
+    confused deputy could present a Weft OAuth access token on a
+    Supabase-auth path and pick up a user identity. We already diverge
+    by ``kid`` (Supabase's JWKS won't list ours), but an explicit issuer
+    match is a cheap second line of defence — and it's robust to both
+    HS256 and unkeyed-JWKS misconfigurations.
+
+    ``OAUTH_ISSUER`` is set for the Weft MCP process in production; when
+    unset (e.g. local tests) this helper conservatively returns False so
+    legacy behaviour is preserved.
+    """
+    own_issuer = os.environ.get("OAUTH_ISSUER")
+    if not own_issuer:
+        return False
+    return issuer.rstrip("/") == own_issuer.rstrip("/")
+
+
 def extract_user_id(token: str) -> str | None:
     """Decode a Supabase JWT and return the ``sub`` claim, or None.
 
@@ -112,6 +133,19 @@ def extract_user_id(token: str) -> str | None:
                 algorithms=["HS256"],
                 options={"require": ["sub", "exp"], "verify_aud": False},
             )
+
+        # Harden against confused-deputy risk between our own OAuth access
+        # tokens (see weft/mcp/oauth/*) and Supabase-issued tokens. When
+        # ``OAUTH_ISSUER`` is configured and the token's ``iss`` matches it,
+        # the token is ours — never accept it here as a Supabase identity.
+        # Scope §9.
+        issuer = payload.get("iss")
+        if isinstance(issuer, str) and _is_own_oauth_issuer(issuer):
+            logger.warning(
+                "Rejecting Weft OAuth token presented on Supabase path (iss=%s)",
+                issuer,
+            )
+            return None
     except jwt.ExpiredSignatureError:
         logger.debug("JWT expired")
         return None

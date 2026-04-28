@@ -146,7 +146,7 @@ class TestConsolidationUserScoping:
         try:
             await pool.execute(
                 "UPDATE memories SET status = $1, updated_at = now()"
-                " WHERE id = $2 AND (user_id = $3 OR user_id IS NULL)",
+                " WHERE id = $2 AND (user_id = $3 OR user_id = '__system_global_zathras__')",
                 MemoryStatus.archived.value,
                 user_a_ids[0],
                 USER_A,
@@ -179,7 +179,7 @@ class TestConsolidationUserScoping:
         try:
             result = await pool.execute(
                 "UPDATE memories SET status = $1, updated_at = now()"
-                " WHERE id = $2 AND (user_id = $3 OR user_id IS NULL)",
+                " WHERE id = $2 AND (user_id = $3 OR user_id = '__system_global_zathras__')",
                 MemoryStatus.archived.value,
                 user_b_ids[0],
                 USER_A,  # user A trying to modify user B's row
@@ -226,10 +226,15 @@ class TestBackupRestoreUserIdRoundTrip:
         finally:
             current_user_id.reset(tok_b)
 
-        # Global memory (no user context)
-        await store_memory(pool, MemoryCreate(
-            type=MemoryType.fact, content="global backup test",
-        ))
+        # SYSTEM_GLOBAL memory: explicit elevation, mirrors how seeds run.
+        tok_g = current_user_id.set("__system_global_zathras__")
+        try:
+            async with acquire(pool):
+                await store_memory(pool, MemoryCreate(
+                    type=MemoryType.fact, content="global backup test",
+                ))
+        finally:
+            current_user_id.reset(tok_g)
 
         data = await backup_all(pool)
         assert data["memory_count"] == 3
@@ -237,7 +242,7 @@ class TestBackupRestoreUserIdRoundTrip:
         user_ids = {m["user_id"] for m in data["memories"]}
         assert USER_A in user_ids
         assert USER_B in user_ids
-        assert None in user_ids
+        assert "__system_global_zathras__" in user_ids
 
     async def test_restore_preserves_user_id(self, pool):
         """Restore round-trip preserves user_id for each memory."""
@@ -283,9 +288,14 @@ class TestPrimerRLSDiagnostic:
 
     async def test_diagnostic_not_when_memories_visible(self, pool):
         """Memories visible → no diagnostic."""
-        await store_memory(pool, MemoryCreate(
-            type=MemoryType.fact, content="visible fact", pinned=True,
-        ))
+        tok = current_user_id.set("__system_global_zathras__")
+        try:
+            async with acquire(pool):
+                await store_memory(pool, MemoryCreate(
+                    type=MemoryType.fact, content="visible fact", pinned=True,
+                ))
+        finally:
+            current_user_id.reset(tok)
         result = await build_primer(pool, budget_tokens=2400, disclosure="full")
         assert "rls_diagnostic" not in result["hints"]
 

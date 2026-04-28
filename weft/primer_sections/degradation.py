@@ -7,6 +7,7 @@ recently fired.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from weft.degradation import list_policies
@@ -15,6 +16,7 @@ from weft.primer_sections.context import (
     SECTION_BUDGETS,
     SECTION_MAX_ITEMS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
 )
 from weft.tokens import estimate_tokens
@@ -25,28 +27,31 @@ _CAP = SECTION_BUDGETS["degradation"]
 _MAX = SECTION_MAX_ITEMS["degradation"]
 
 
-async def build_degradation_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack active degradation policies."""
-    raw = await list_policies(
-        ctx.pool,
-        status=DegradationPolicyStatus.active,
-        project_id=ctx.project_id,
-        limit=_MAX * 2,
+async def fetch_degradation_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch active + recently-fired degradation policies (parallel-safe)."""
+    active, fired = await asyncio.gather(
+        list_policies(
+            ctx.pool, status=DegradationPolicyStatus.active,
+            project_id=ctx.project_id, limit=_MAX * 2,
+        ),
+        list_policies(
+            ctx.pool, status=DegradationPolicyStatus.fired,
+            project_id=ctx.project_id, limit=5,
+        ),
     )
-
-    # Also include recently-fired policies (still relevant context)
-    fired = await list_policies(
-        ctx.pool,
-        status=DegradationPolicyStatus.fired,
-        project_id=ctx.project_id,
-        limit=5,
-    )
-    raw.extend(fired)
-
+    raw = list(active) + list(fired)
     if not raw:
-        return SectionResult(items=[], tokens_used=0, skipped=True,
-                             skip_reason="No active degradation policies")
+        return SectionFetch(skipped=True, skip_reason="No active degradation policies")
+    return SectionFetch(payload=raw)
 
+
+def pack_degradation_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack degradation policies against the budget (sequential, mutates ctx)."""
+    if fetched.skipped:
+        return SectionResult(items=[], tokens_used=0, skipped=True,
+                             skip_reason=fetched.skip_reason)
+
+    raw = fetched.payload or []
     items: list[dict] = []
     section_used = 0
 
@@ -79,3 +84,8 @@ async def build_degradation_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["degradation"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_degradation_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack degradation section (single-shot wrapper)."""
+    return pack_degradation_section(ctx, await fetch_degradation_section(ctx))

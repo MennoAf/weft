@@ -39,6 +39,24 @@ class SectionResult:
     """Human-readable reason when skipped=True."""
 
 
+@dataclass
+class SectionFetch:
+    """Container for a section's pre-pack data.
+
+    Each section's fetch phase returns this. The payload is section-specific
+    (list of memories, aggregated dict, etc.). Fetch runs in parallel across
+    sections since it only reads immutable ctx fields; pack runs sequentially
+    in priority order and mutates ctx (used_tokens, seen_ids, etc.).
+    """
+
+    payload: Any = None
+    skipped: bool = False
+    skip_reason: str | None = None
+
+
+SKIPPED_FETCH = SectionFetch(skipped=True)
+
+
 # Per-section token caps — sourced from primer.py constants.
 # The orchestrator reads these; sections do not hardcode their own limits.
 SECTION_BUDGETS: dict[str, int] = {

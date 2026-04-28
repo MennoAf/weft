@@ -26,6 +26,9 @@ class TestSetUserContext:
         # Ensure contextvar is None (default)
         assert current_user_id.get() is None
         async with pool.acquire() as conn:
+            # Clear the test fixture's session default to simulate a real
+            # unauthenticated connection.
+            await conn.execute("RESET app.user_id")
             async with conn.transaction():
                 await set_user_context(conn)
                 val = await conn.fetchval(
@@ -49,8 +52,9 @@ class TestSetUserContext:
         finally:
             current_user_id.reset(tok)
 
-        # Next acquisition should NOT have the old user_id
+        # Next acquisition should NOT have the old user_id (transaction-scoped)
         async with pool.acquire() as conn:
+            await conn.execute("RESET app.user_id")
             val = await conn.fetchval(
                 "SELECT current_setting('app.user_id', true)"
             )
@@ -73,6 +77,7 @@ class TestAcquireContextManager:
         """When no user is set, acquire yields without extra transaction."""
         assert current_user_id.get() is None
         async with acquire(pool) as conn:
+            await conn.execute("RESET app.user_id")
             val = await conn.fetchval(
                 "SELECT current_setting('app.user_id', true)"
             )
@@ -102,6 +107,7 @@ class TestAcquireContextManager:
 
         # Unauthenticated after both
         async with acquire(pool) as conn:
+            await conn.execute("RESET app.user_id")
             val = await conn.fetchval(
                 "SELECT current_setting('app.user_id', true)"
             )

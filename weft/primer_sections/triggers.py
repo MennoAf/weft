@@ -14,6 +14,7 @@ from weft.primer_sections.context import (
     SECTION_BUDGETS,
     SECTION_MAX_ITEMS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
 )
 from weft.tokens import estimate_tokens
@@ -25,19 +26,24 @@ _CAP = SECTION_BUDGETS["triggers"]
 _MAX = SECTION_MAX_ITEMS["triggers"]
 
 
-async def build_triggers_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack enabled proactive triggers."""
+async def fetch_triggers_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch enabled proactive triggers (parallel-safe, no ctx mutation)."""
     raw = await list_triggers(
-        ctx.pool,
-        status=TriggerStatus.enabled,
-        project_id=ctx.project_id,
-        limit=_MAX * 2,
+        ctx.pool, status=TriggerStatus.enabled,
+        project_id=ctx.project_id, limit=_MAX * 2,
     )
-
     if not raw:
-        return SectionResult(items=[], tokens_used=0, skipped=True,
-                             skip_reason="No enabled triggers")
+        return SectionFetch(skipped=True, skip_reason="No enabled triggers")
+    return SectionFetch(payload=raw)
 
+
+def pack_triggers_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack triggers against the budget (sequential, mutates ctx)."""
+    if fetched.skipped:
+        return SectionResult(items=[], tokens_used=0, skipped=True,
+                             skip_reason=fetched.skip_reason)
+
+    raw = fetched.payload or []
     items: list[dict] = []
     section_used = 0
 
@@ -68,3 +74,8 @@ async def build_triggers_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["triggers"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_triggers_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack triggers (single-shot wrapper)."""
+    return pack_triggers_section(ctx, await fetch_triggers_section(ctx))

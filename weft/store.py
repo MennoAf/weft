@@ -22,6 +22,7 @@ from weft.models import (
     RelationType,
     _weft_id,
 )
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ async def list_memories(
     Omit both for brain-wide (unscoped) queries.
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
-    memories (user_id IS NULL). If None, returns all.
+    memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
     """
     conditions = []
     params: list = []
@@ -159,9 +160,10 @@ async def list_memories(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     if pinned is not None:
         conditions.append(f"pinned = ${idx}")
@@ -202,7 +204,7 @@ async def search_by_vector(
     Omit both for brain-wide (unscoped) queries.
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
-    memories (user_id IS NULL). If None, returns all.
+    memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
 
     exclude_ids: memory IDs to exclude from results (e.g., already surfaced
     by primer). Uses NOT id = ANY($N) for efficient filtering.
@@ -248,9 +250,10 @@ async def search_by_vector(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     if exclude_ids:
         conditions.append(f"NOT (id = ANY(${idx}::text[]))")
@@ -303,7 +306,7 @@ async def search_by_keyword(
     keyword matching including stemming and stop-word removal.
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
-    memories (user_id IS NULL). If None, returns all.
+    memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
     """
     conditions = ["search_tsv IS NOT NULL"]
     params: list = []
@@ -340,9 +343,10 @@ async def search_by_keyword(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     if exclude_ids:
         conditions.append(f"NOT (id = ANY(${idx}::text[]))")
@@ -411,7 +415,7 @@ async def search_hybrid(
     signal in the RRF formula: score = w / (k + rank).
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
-    memories (user_id IS NULL). If None, returns all.
+    memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
     """
     # Fetch broader candidate sets from both methods, then fuse
     candidate_limit = limit * 3  # over-fetch to ensure good fusion

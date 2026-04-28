@@ -17,6 +17,7 @@ from weft.primer_sections.context import (
     DICT_OVERHEAD_TOKENS,
     SECTION_BUDGETS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
 )
 from weft.store import list_memories
@@ -27,27 +28,38 @@ logger = logging.getLogger(__name__)
 _CAP = SECTION_BUDGETS["handoff"]
 
 
-async def build_handoff_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack the most recent session handoff."""
+async def fetch_handoff_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch most recent handoff (parallel-safe, no ctx mutation).
+
+    Tries typed (type=handoff) first; falls back to deprecated
+    topic="session-handoff" only when typed returns empty. seen_ids
+    filtering is deferred to pack.
+    """
     raw = await list_memories(
         ctx.pool, memory_type=MemoryType.handoff, status=MemoryStatus.active,
         limit=5, **ctx.scope,
     )
-
-    candidates = [m for m in raw if m.id not in ctx.seen_ids]
-
-    # Deprecated topic fallback for pre-typed-handoff memories.
-    if not candidates:
-        topic_raw = await list_memories(
+    used_fallback = False
+    if not raw:
+        raw = await list_memories(
             ctx.pool, topic="session-handoff", status=MemoryStatus.active,
             limit=5, **ctx.scope,
         )
-        candidates = [m for m in topic_raw if m.id not in ctx.seen_ids]
-        if candidates:
-            logger.warning(
-                "Handoff found via topic fallback — re-store with type=handoff "
-                "to silence this warning (fallback will be removed in v0.3)",
-            )
+        used_fallback = bool(raw)
+    return SectionFetch(payload={"raw": raw, "used_fallback": used_fallback})
+
+
+def pack_handoff_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack the most recent handoff against the budget (sequential, mutates ctx)."""
+    payload = fetched.payload or {"raw": [], "used_fallback": False}
+    raw = payload["raw"]
+    candidates = [m for m in raw if m.id not in ctx.seen_ids]
+
+    if payload["used_fallback"] and candidates:
+        logger.warning(
+            "Handoff found via topic fallback — re-store with type=handoff "
+            "to silence this warning (fallback will be removed in v0.3)",
+        )
 
     # Prefer project-scoped handoffs over global (NULL) ones, then most recent.
     candidates.sort(
@@ -86,3 +98,8 @@ async def build_handoff_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["handoff"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_handoff_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack handoff (single-shot wrapper)."""
+    return pack_handoff_section(ctx, await fetch_handoff_section(ctx))

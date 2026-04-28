@@ -20,21 +20,23 @@ from weft.episodes import (
     timeline_query,
 )
 from weft.models import EpisodeCreate, EpisodeStatus
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 
 
 # --- Helpers ---
 
 
 async def _make_episode(pool, title="test episode", user_id: str | None = None, **kwargs):
-    """Create an episode. If user_id is provided, manually set it in DB."""
+    """Create an episode. Caller-side ``user_id=None`` means "global row" —
+    stamped with the SYSTEM_GLOBAL_USER_ID sentinel to satisfy the post-mig-36
+    NOT NULL constraint. Pass an explicit user_id to override."""
     ep = await create_episode(pool, EpisodeCreate(title=title, **kwargs))
-    if user_id is not None:
-        # Manually override user_id in the database
-        await pool.execute(
-            "UPDATE episodes SET user_id = $1 WHERE id = $2",
-            user_id,
-            ep.id,
-        )
+    target_user_id = user_id if user_id is not None else SYSTEM_GLOBAL_USER_ID
+    await pool.execute(
+        "UPDATE episodes SET user_id = $1 WHERE id = $2",
+        target_user_id,
+        ep.id,
+    )
     return ep
 
 

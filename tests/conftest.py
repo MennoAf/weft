@@ -17,6 +17,15 @@ from testcontainers.redis import RedisContainer
 from weft.db.connection import _pgvector_codec_init, register_pgvector_codec
 from weft.db.migrations import run_migrations
 
+# Default test user. After migration 36 (NOT NULL user_id), tests cannot
+# rely on "no auth = global" — every write needs an explicit user_id. The
+# pool's ``setup`` callback issues ``SET app.user_id = ...`` on every pool
+# acquire so direct ``pool.execute()`` writes (which don't go through
+# ``acquire()``) satisfy the NOT NULL + RLS contract. Tests that exercise
+# the auth chain (or specific users) RESET this and set their own via
+# ``current_user_id.set(...)``.
+DEFAULT_TEST_USER_ID = "test-user-default"
+
 # Module-level containers — started once, shared across all tests
 _pg_container: PostgresContainer | None = None
 _redis_container: RedisContainer | None = None
@@ -69,11 +78,29 @@ def pytest_unconfigure(config):
         _redis_container.stop()
 
 
+async def _test_init(conn):
+    """Connection init — pgvector codec only."""
+    await _pgvector_codec_init(conn)
+
+
+async def _test_setup(conn):
+    """Connection setup — runs on every acquire (after asyncpg's DISCARD ALL).
+
+    Sets a session-level ``app.user_id`` so direct ``pool.execute()`` calls
+    (which don't go through ``acquire()``) still satisfy the migration-34
+    NOT NULL + RLS WITH CHECK contract. Tests that exercise the auth chain
+    explicitly RESET this when verifying unauthenticated semantics.
+    """
+    await conn.execute(f"SET app.user_id = '{DEFAULT_TEST_USER_ID}'")
+
+
 @pytest.fixture
 async def pool():
     """Function-scoped asyncpg pool — migrations + clean slate each test."""
     dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
-    p = await asyncpg.create_pool(dsn, min_size=2, max_size=5, init=_pgvector_codec_init)
+    p = await asyncpg.create_pool(
+        dsn, min_size=2, max_size=5, init=_test_init, setup=_test_setup,
+    )
     await run_migrations(p)
     await register_pgvector_codec(p)
     # TRUNCATE resets tables and HNSW index state cleanly (DELETE leaves

@@ -19,6 +19,7 @@ from weft.primer_sections.context import (
     SECTION_MAX_ITEMS,
     SIMILARITY_WEIGHT,
     PrimerContext,
+    SectionFetch,
     SectionResult,
     annotate_review_after,
     is_unscoped_ingest,
@@ -33,8 +34,8 @@ _CAP = SECTION_BUDGETS["decisions"]
 _MAX = SECTION_MAX_ITEMS["decisions"]
 
 
-async def build_decisions_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack closed decision memories."""
+async def fetch_decisions_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch closed decision memories (parallel-safe, no ctx mutation)."""
     if ctx.biased:
         raw = await search_by_vector(
             ctx.pool, ctx.query_vec,
@@ -46,16 +47,18 @@ async def build_decisions_section(ctx: PrimerContext) -> SectionResult:
             ctx.pool, memory_type=MemoryType.decision, status=MemoryStatus.active,
             limit=20, **ctx.scope,
         )
+    return SectionFetch(payload=unwrap_recall(raw))
 
-    pairs = unwrap_recall(raw)
 
+def pack_decisions_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack fetched decisions against the budget (sequential, mutates ctx)."""
+    pairs = fetched.payload or []
     candidates = [
         (m, sim) for m, sim in pairs
         if m.id not in ctx.seen_ids
         and not is_unscoped_ingest(m, ctx.project_id)
     ]
 
-    # Sort: project-scoped first, then by score.
     if ctx.biased:
         candidates.sort(
             key=lambda pair: (
@@ -102,3 +105,8 @@ async def build_decisions_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["decisions"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_decisions_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack decisions (single-shot wrapper)."""
+    return pack_decisions_section(ctx, await fetch_decisions_section(ctx))

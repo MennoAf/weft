@@ -25,6 +25,7 @@ from weft.db.migrations import run_migrations
 from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
+from weft.mcp.oauth_consent import handle_consent
 from weft.mcp.slack_commands import handle_slash_checkin
 from weft.scheduler import daily_brief_loop, loom_awareness_loop, memory_hygiene_loop, scheduler_loop, slack_sync_loop, trigger_evaluation_loop
 from weft.seed import seed_memories
@@ -45,50 +46,89 @@ _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
 class UserIdentityMiddleware(BaseHTTPMiddleware):
     """Extract user identity from Authorization header and set contextvar.
 
-    In production mode with an API key configured, also enforces bearer
-    token authentication on the /mcp endpoint (rejects 401 if missing/wrong).
-    Health checks and other endpoints are unauthenticated.
+    Two auth paths on ``/mcp``:
 
-    Graceful degradation: missing, invalid, or expired JWT tokens for user
-    identity are silently ignored — the request proceeds with
-    current_user_id=None (global-only visibility under RLS).
+    * **API-key fast path** — constant-time HMAC compare against
+      ``WEFT_API_KEY``. Used by Claude Code and any pre-OAuth client.
+    * **Supabase JWT path** — when ``oauth_enabled`` is True and the
+      bearer token isn't the API key, treat it as a Supabase-issued
+      OAuth access token and verify via the existing JWKS path in
+      :mod:`weft.auth`. The verified ``sub`` is pinned as the request
+      identity so RLS scopes correctly.
+
+    Health checks and other non-``/mcp`` endpoints are unauthenticated.
+    On those, JWT extraction is best-effort: missing or invalid tokens
+    silently fall through with ``current_user_id=None``.
 
     Single-tenant fallback: when ``default_user_id`` is set, API-key
-    authenticated requests to /mcp that carry no valid JWT are stamped
-    with it. Coupled to the api_key gate — a missing/invalid API key
-    means the default never applies, so anonymous traffic can't inherit
-    the owner's identity.
+    authenticated requests that carry no valid JWT are stamped with it.
+    Coupled to the api_key gate — a missing/invalid API key means the
+    default never applies, so anonymous traffic can't inherit the
+    owner's identity.
+
+    On 401, a ``WWW-Authenticate`` header points the client at our
+    protected-resource metadata document so MCP clients can discover
+    the Supabase authorization server (RFC 9728).
     """
 
     def __init__(
         self,
         app,
         api_key: str | None = None,
+        oauth_enabled: bool = False,
+        supabase_url: str | None = None,
         default_user_id: str | None = None,
     ):
         super().__init__(app)
         self._api_key = api_key
+        self._oauth_enabled = oauth_enabled
+        self._supabase_url = (supabase_url or "").rstrip("/")
         self._default_user_id = default_user_id
+
+    def _unauthorized(self, message: str) -> JSONResponse:
+        headers: dict[str, str] = {}
+        if self._oauth_enabled:
+            # Point the MCP client at the protected-resource metadata
+            # document. Per RFC 9728 the client follows that to discover
+            # the authorization server (Supabase) and start the OAuth
+            # dance.
+            headers["WWW-Authenticate"] = (
+                'Bearer realm="weft", '
+                'resource_metadata="/.well-known/oauth-protected-resource"'
+            )
+        return JSONResponse({"error": message}, status_code=401, headers=headers)
 
     async def dispatch(self, request: Request, call_next):
         api_key_authenticated = False
-        # Enforce API key on /mcp endpoint in production
-        if self._api_key and request.url.path.startswith("/mcp"):
+        # Enforce auth on /mcp whenever either auth path is configured.
+        # The MCP discovery flow depends on a 401 here so the client can
+        # follow the WWW-Authenticate hint to ``/.well-known/...``.
+        if (self._api_key or self._oauth_enabled) and request.url.path.startswith("/mcp"):
             import hmac
             auth_header = request.REDACTEDget("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:]
-                if not hmac.compare_digest(token, self._api_key):
-                    return JSONResponse(
-                        {"error": "invalid api key"}, status_code=401,
-                    )
+            if not auth_header.startswith("Bearer "):
+                return self._unauthorized("missing authorization header")
+            token = auth_header[7:]
+            if self._api_key and hmac.compare_digest(token, self._api_key):
+                # API-key fast path — accepted, fall through so the
+                # post-/mcp block can apply the single-tenant default.
                 api_key_authenticated = True
+            elif self._oauth_enabled:
+                # Supabase-issued OAuth access token. weft.auth verifies
+                # against Supabase JWKS and returns the sub on success;
+                # None on any failure (signature, expiry, audience).
+                user_id = extract_user_id_from_header(auth_header)
+                if not user_id:
+                    return self._unauthorized("invalid token")
+                ctx_token = current_user_id.set(user_id)
+                try:
+                    return await call_next(request)
+                finally:
+                    current_user_id.reset(ctx_token)
             else:
-                return JSONResponse(
-                    {"error": "missing authorization header"}, status_code=401,
-                )
+                return self._unauthorized("invalid token")
 
-        # Extract user identity from JWT (Supabase) — best-effort
+        # Best-effort identity extraction for non-MCP paths
         auth_header = request.REDACTEDget("authorization")
         user_id = extract_user_id_from_header(auth_header)
         # Single-tenant fallback: only when the API key gate accepted the request.
@@ -352,6 +392,17 @@ async def lifespan(server: FastMCP):
         trigger_evaluation_loop(pool)
     )
 
+    # OAuth in the new architecture is delegated to Supabase's OAuth 2.1
+    # server. Weft hosts only the consent page (see weft/mcp/oauth_consent.py)
+    # and validates incoming Supabase-issued tokens via the existing JWKS
+    # path in weft.auth. There's no per-process state to install here.
+    if config.oauth_enabled:
+        logger.info(
+            "OAuth 2.1 enabled — Supabase as authorization server "
+            "(supabase_url=%s)",
+            config.supabase_url or "<unset>",
+        )
+
     try:
         yield ctx
     finally:
@@ -376,9 +427,33 @@ class _AppCtxRef:
 _app_ctx_ref = _AppCtxRef()
 
 _config_for_middleware = load_config()
+
+# ---------------------------------------------------------------------------
+# OAuth bootstrap (module scope).
+# ---------------------------------------------------------------------------
+# Middleware. In the new architecture Weft is a pure resource server: when
+# OAuth is enabled, incoming bearer tokens are Supabase-issued JWTs and the
+# middleware delegates verification to ``weft.auth.extract_user_id_from_header``
+# (which already validates against Supabase JWKS). The API-key fast path is
+# preserved for legacy clients (Claude Code).
+# ---------------------------------------------------------------------------
+
+_middleware_api_key = (
+    _config_for_middleware.api_key
+    if _config_for_middleware.is_production
+    else None
+)
+logger.info(
+    "user_identity_middleware: api_key=%s oauth_enabled=%s is_production=%s",
+    "set" if _middleware_api_key else "unset",
+    _config_for_middleware.oauth_enabled,
+    _config_for_middleware.is_production,
+)
 user_identity_middleware = Middleware(
     UserIdentityMiddleware,
-    api_key=_config_for_middleware.api_key if _config_for_middleware.is_production else None,
+    api_key=_middleware_api_key,
+    oauth_enabled=_config_for_middleware.oauth_enabled,
+    supabase_url=_config_for_middleware.supabase_url,
     default_user_id=os.environ.get("WEFT_DEFAULT_USER_ID") or None,
 )
 
@@ -418,3 +493,55 @@ async def mcp_trailing_slash(request: Request) -> Response:
     scheme = request.REDACTEDget("x-forwarded-proto", request.url.scheme)
     url = request.url.replace(scheme=scheme, path="/mcp")
     return Response(status_code=307, headers={"Location": str(url)})
+
+
+# ---------------------------------------------------------------------------
+# OAuth 2.1 — Supabase OAuth Server architecture.
+# ---------------------------------------------------------------------------
+# In this architecture Supabase hosts the entire authorization server
+# (authorize/token/register/JWKS endpoints all live at
+# ``<project>.supabase.co/auth/v1/...``). Weft only:
+#
+#   * Publishes RFC 9728 protected-resource metadata pointing the MCP
+#     client at Supabase as the auth server.
+#   * Hosts the consent UI page Supabase redirects users to after they
+#     reach ``/auth/v1/oauth/authorize``. The Supabase dashboard's
+#     "Authorization URL Path" must be set to ``/oauth/consent``.
+#
+# When ``WEFT_OAUTH_ENABLED=0`` neither route is registered — the path
+# stays byte-identical to the API-key-only deployment.
+# ---------------------------------------------------------------------------
+
+if _config_for_middleware.oauth_enabled:
+
+    @mcp.custom_route(
+        "/.well-known/oauth-protected-resource", methods=["GET"],
+    )
+    async def _oauth_resource_metadata(request: Request) -> Response:
+        from weft.config import load_config
+
+        cfg = load_config()
+        # Resource = our public origin. Authorization server = Supabase's
+        # GoTrue mount, which is reached at ``<project>.supabase.co/auth/v1``.
+        # RFC 8414 clients fetch
+        # ``<authorization_servers[i]>/.well-known/oauth-authorization-server``,
+        # so the URL we publish must include the /auth/v1 suffix —
+        # Supabase does NOT mount discovery at the project root.
+        resource = (cfg.oauth_issuer or "").rstrip("/")
+        if not resource:
+            base = request.base_url
+            resource = f"{base.scheme}://{base.netloc}".rstrip("/")
+        supabase_root = (cfg.supabase_url or "").rstrip("/")
+        auth_servers = (
+            [f"{supabase_root}/auth/v1"] if supabase_root else []
+        )
+        return JSONResponse({
+            "resource": resource,
+            "authorization_servers": auth_servers,
+            "bearer_methods_supported": ["header"],
+            "scopes_supported": ["openid", "email"],
+        })
+
+    @mcp.custom_route("/oauth/consent", methods=["GET"])
+    async def _oauth_consent(request: Request) -> Response:
+        return await handle_consent(request)

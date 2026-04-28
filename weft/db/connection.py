@@ -112,15 +112,18 @@ async def set_user_context(conn: asyncpg.Connection) -> None:
     SET LOCAL is transaction-scoped, so the setting is automatically
     cleared when the transaction ends — no pool leakage.
 
-    When user_id is None (unauthenticated), no SET LOCAL is issued,
-    meaning ``current_setting('app.user_id', true)`` returns NULL.
-    RLS policies then show only global (user_id IS NULL) rows.
+    When user_id is None (unauthenticated), no SET LOCAL is issued.
+    ``current_setting('app.user_id', true)`` then returns the empty
+    string, which matches no row's user_id, so RLS policies expose
+    only the SYSTEM_GLOBAL sentinel rows.
     """
     user_id = _resolve_user_id()
     if user_id is not None:
         # SET is a utility command — doesn't support $1 parameterization.
-        # Sanitize by rejecting non-UUID-safe characters.
-        if not user_id.replace("-", "").isalnum():
+        # Sanitize by rejecting characters outside the safe set: alphanumeric,
+        # dashes (UUIDs), and underscores (for the SYSTEM_GLOBAL sentinel
+        # ``__system_global_zathras__`` and similar named identities).
+        if not user_id.replace("-", "").replace("_", "").isalnum():
             logger.warning("Rejecting suspicious user_id: %r", user_id)
             return
         await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
@@ -160,8 +163,9 @@ async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
             # SET LOCAL requires a transaction context.
             async with conn.transaction():
                 # SET is a utility command — doesn't support $1 parameterization.
-                # Sanitize by rejecting non-UUID-safe characters.
-                if not user_id.replace("-", "").isalnum():
+                # Allow alphanumerics, dashes (UUIDs), and underscores
+                # (sentinels like ``__system_global_zathras__``).
+                if not user_id.replace("-", "").replace("_", "").isalnum():
                     logger.warning("Rejecting suspicious user_id: %r", user_id)
                     token = _current_conn.set(conn)
                     try:

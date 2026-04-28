@@ -14,6 +14,7 @@ from weft.primer_sections.context import (
     SECTION_BUDGETS,
     SECTION_MAX_ITEMS,
     PrimerContext,
+    SectionFetch,
     SectionResult,
 )
 from weft.tokens import estimate_tokens
@@ -24,10 +25,15 @@ _CAP = SECTION_BUDGETS["autonomy"]
 _MAX = SECTION_MAX_ITEMS["autonomy"]
 
 
-async def build_autonomy_section(ctx: PrimerContext) -> SectionResult:
-    """Fetch and pack active autonomy policies."""
+async def fetch_autonomy_section(ctx: PrimerContext) -> SectionFetch:
+    """Fetch autonomy policies (parallel-safe, no ctx mutation)."""
     raw = await list_policies(ctx.pool, enabled_only=True, limit=_MAX * 2)
+    return SectionFetch(payload=raw)
 
+
+def pack_autonomy_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
+    """Pack autonomy policies against the budget (sequential, mutates ctx)."""
+    raw = fetched.payload or []
     items: list[dict] = []
     section_used = 0
     for policy in raw:
@@ -52,3 +58,8 @@ async def build_autonomy_section(ctx: PrimerContext) -> SectionResult:
 
     ctx.section_tokens["autonomy"] = section_used
     return SectionResult(items=items, tokens_used=section_used, skipped=False)
+
+
+async def build_autonomy_section(ctx: PrimerContext) -> SectionResult:
+    """Fetch and pack autonomy policies (single-shot wrapper)."""
+    return pack_autonomy_section(ctx, await fetch_autonomy_section(ctx))

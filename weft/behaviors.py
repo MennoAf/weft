@@ -13,6 +13,7 @@ import asyncpg
 
 from weft.db.connection import get_db
 from weft.models import Behavior, BehaviorCreate, BehaviorMatch, BehaviorScope, _weft_id
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 from weft.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -136,9 +137,10 @@ async def list_behaviors(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     if enabled is not None:
         conditions.append(f"enabled = ${idx}")
@@ -206,9 +208,10 @@ async def match_behaviors(
         idx += 1
 
     if user_id is not None:
-        conditions.append(f"(user_id = ${idx} OR user_id IS NULL)")
+        conditions.append(f"(user_id = ${idx} OR user_id = ${idx + 1})")
         params.append(user_id)
-        idx += 1
+        params.append(SYSTEM_GLOBAL_USER_ID)
+        idx += 2
 
     if enabled is not None:
         conditions.append(f"enabled = ${idx}")

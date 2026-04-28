@@ -170,11 +170,13 @@ async def test_alerts_rls_policies(pool):
 
 @pytest.mark.asyncio
 async def test_alerts_insert_and_read(pool):
-    """Basic insert/read round-trip."""
+    """Basic insert/read round-trip — relies on the user_id column default
+    (current_setting('app.user_id')) added in migration 36, which fills in
+    the test fixture's default user from the role-level GUC."""
     await pool.execute(
         """
-        INSERT INTO alerts (id, user_id, alert_type, title, trigger_at, status, channel, payload)
-        VALUES ('a-1', NULL, 'custom', 'Test', now(), 'pending', 'log', '{}')
+        INSERT INTO alerts (id, alert_type, title, trigger_at, status, channel, payload)
+        VALUES ('a-1', 'custom', 'Test', now(), 'pending', 'log', '{}')
         """
     )
     row = await pool.fetchrow("SELECT * FROM alerts WHERE id = 'a-1'")

@@ -998,6 +998,418 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON audit_backfill_user_id (source_table, row_id);
         """,
     ),
+    (
+        33,
+        "Create OAuth 2.1 tables (clients, codes, refresh tokens, revocations)",
+        """
+        -- OAuth dynamic-client registrations (RFC 7591)
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+            client_id                  TEXT PRIMARY KEY,
+            client_name                TEXT,
+            redirect_uris              TEXT[] NOT NULL,
+            grant_types                TEXT[] NOT NULL DEFAULT '{authorization_code,refresh_token}',
+            response_types             TEXT[] NOT NULL DEFAULT '{code}',
+            token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+            scope                      TEXT NOT NULL DEFAULT 'mcp.read mcp.write',
+            software_id                TEXT,
+            software_version           TEXT,
+            created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_used_at               TIMESTAMPTZ
+        );
+
+        -- Pending authorization codes (short-lived, ~10 min)
+        CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+            code                  TEXT PRIMARY KEY,
+            client_id             TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+            user_sub              TEXT NOT NULL,
+            redirect_uri          TEXT NOT NULL,
+            scope                 TEXT NOT NULL,
+            code_challenge        TEXT NOT NULL,
+            code_challenge_method TEXT NOT NULL,
+            expires_at            TIMESTAMPTZ NOT NULL,
+            consumed_at           TIMESTAMPTZ,
+            created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires
+            ON oauth_authorization_codes (expires_at);
+
+        -- Refresh tokens (longer-lived, rotated on use)
+        CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+            jti         TEXT PRIMARY KEY,
+            client_id   TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+            user_sub    TEXT NOT NULL,
+            scope       TEXT NOT NULL,
+            token_hash  TEXT NOT NULL,
+            issued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            expires_at  TIMESTAMPTZ NOT NULL,
+            revoked_at  TIMESTAMPTZ,
+            rotated_to  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_refresh_user
+            ON oauth_refresh_tokens (user_sub);
+        CREATE INDEX IF NOT EXISTS idx_oauth_refresh_expires
+            ON oauth_refresh_tokens (expires_at);
+
+        -- Access-token revocation blocklist (rare; most access tokens expire
+        -- before revoke)
+        CREATE TABLE IF NOT EXISTS oauth_access_revocations (
+            jti         TEXT PRIMARY KEY,
+            revoked_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            expires_at  TIMESTAMPTZ NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_access_rev_expires
+            ON oauth_access_revocations (expires_at);
+
+        -- OAuth tables are service-role only — not user-scoped via RLS.
+        -- Pattern mirrors migration 23 (schema_migrations, weft_metadata,
+        -- memory_access_log): USING (true) WITH CHECK (true) means RLS is
+        -- enforced structurally by restricting which connections can reach
+        -- these tables (service role, app.user_id='').
+        ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS oauth_clients_service ON oauth_clients;
+        CREATE POLICY oauth_clients_service ON oauth_clients
+            USING (true) WITH CHECK (true);
+
+        ALTER TABLE oauth_authorization_codes ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS oauth_authorization_codes_service ON oauth_authorization_codes;
+        CREATE POLICY oauth_authorization_codes_service ON oauth_authorization_codes
+            USING (true) WITH CHECK (true);
+
+        ALTER TABLE oauth_refresh_tokens ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS oauth_refresh_tokens_service ON oauth_refresh_tokens;
+        CREATE POLICY oauth_refresh_tokens_service ON oauth_refresh_tokens
+            USING (true) WITH CHECK (true);
+
+        ALTER TABLE oauth_access_revocations ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS oauth_access_revocations_service ON oauth_access_revocations;
+        CREATE POLICY oauth_access_revocations_service ON oauth_access_revocations
+            USING (true) WITH CHECK (true);
+        """,
+    ),
+    (
+        34,
+        "Schema v1: add federated-future columns to memories (additive)",
+        """
+        -- Federated-Future Schema v1: additive only. No behavior change.
+        -- See 2026-04-26-weft-federated-future-schema-v1.md.
+        --
+        -- schema_version  : dispatch field for future upgrade chain
+        -- author_identity : who wrote this row (survives sharing)
+        -- visibility      : private | global  ('shared' rejected by CHECK
+        --                   until workspace logic ships in v2)
+        -- provenance      : audit trail; lives ALONGSIDE the existing
+        --                   `source` column (do not unify — see opinion)
+        -- sharing_metadata: escape hatch for federation/ACL/expiry; empty in v1
+        -- workspace_id    : FK target for migration 35's workspaces table
+
+        ALTER TABLE memories
+            ADD COLUMN IF NOT EXISTS schema_version  INTEGER NOT NULL DEFAULT 1,
+            ADD COLUMN IF NOT EXISTS author_identity JSONB   NOT NULL DEFAULT '{"kind":"unknown"}'::jsonb,
+            ADD COLUMN IF NOT EXISTS visibility      TEXT    NOT NULL DEFAULT 'private',
+            ADD COLUMN IF NOT EXISTS provenance      JSONB   NOT NULL DEFAULT '{"source":"self"}'::jsonb,
+            ADD COLUMN IF NOT EXISTS sharing_metadata JSONB  NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS workspace_id    TEXT;
+
+        -- Backfill author_identity + visibility from existing user_id state.
+        -- Rows with user_id IS NULL = current "global by convention" rows
+        -- (system seeds, shared modes, etc.). Migration 36 will replace
+        -- the NULL convention with a SYSTEM_GLOBAL sentinel.
+        UPDATE memories
+        SET
+            author_identity = CASE
+                WHEN user_id IS NULL THEN '{"kind":"system","component":"seed"}'::jsonb
+                ELSE jsonb_build_object('kind', 'local_user', 'user_id', user_id)
+            END,
+            visibility = CASE
+                WHEN user_id IS NULL THEN 'global'
+                ELSE 'private'
+            END
+        WHERE author_identity = '{"kind":"unknown"}'::jsonb;
+
+        -- Fail-loud constraint: 'shared' is reserved but not honored by v1
+        -- logic. Reject writes until workspace primitive ships, so we never
+        -- silently treat would-be-shared rows as private.
+        ALTER TABLE memories
+            DROP CONSTRAINT IF EXISTS memories_visibility_check;
+        ALTER TABLE memories
+            ADD CONSTRAINT memories_visibility_check
+            CHECK (visibility IN ('private', 'global'));
+
+        CREATE INDEX IF NOT EXISTS idx_memories_workspace
+            ON memories (workspace_id) WHERE workspace_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_memories_visibility
+            ON memories (visibility);
+        """,
+    ),
+    (
+        35,
+        "Schema v1: workspaces + workspace_members tables",
+        """
+        -- Minimum workspace primitive. Two tables; no role hierarchy beyond
+        -- 'member'; no invitation flow; no expiry. Owner inserts members
+        -- directly. v1 use case: AIO Cleanroom shared brain with Brandon.
+        --
+        -- member_identity is JSONB so it can carry remote-install members
+        -- once federation lands ({"kind":"remote_install","install_pubkey":
+        -- "...","member_uuid":"..."}). For local users it's
+        -- {"kind":"local_user","user_id":"<uuid>"}.
+
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            description     TEXT,
+            created_by      TEXT NOT NULL,
+            install_pubkey  TEXT,
+            metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_workspaces_created_by
+            ON workspaces (created_by);
+
+        CREATE TABLE IF NOT EXISTS workspace_members (
+            workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            member_identity JSONB NOT NULL,
+            role            TEXT NOT NULL DEFAULT 'member',
+            added_by        TEXT NOT NULL,
+            added_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (workspace_id, member_identity)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workspace_members_user
+            ON workspace_members ((member_identity->>'user_id'))
+            WHERE member_identity->>'user_id' IS NOT NULL;
+
+        -- FK from memories.workspace_id (added in migration 34) to workspaces.
+        -- ON DELETE SET NULL: deleting a workspace orphans the memories back
+        -- to private/global scope rather than destroying them.
+        ALTER TABLE memories
+            DROP CONSTRAINT IF EXISTS memories_workspace_fk;
+        ALTER TABLE memories
+            ADD CONSTRAINT memories_workspace_fk
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL;
+
+        -- RLS: service-role for now. App layer enforces "who can read
+        -- workspace metadata" via tool-level checks. A v2 tightening pass
+        -- can scope these to "members only" via subquery policies.
+        ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS workspaces_service ON workspaces;
+        CREATE POLICY workspaces_service ON workspaces
+            USING (true) WITH CHECK (true);
+
+        ALTER TABLE workspace_members ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS workspace_members_service ON workspace_members;
+        CREATE POLICY workspace_members_service ON workspace_members
+            USING (true) WITH CHECK (true);
+
+        -- Extend memories RLS to include workspace membership. A row is
+        -- visible if (a) globally scoped, (b) user-owned, or (c) lives in a
+        -- workspace the current user is a member of. The workspace_members
+        -- subquery hits the service policy above (USING true) so it works
+        -- under the normal user connection.
+        DROP POLICY IF EXISTS memories_select ON memories;
+        CREATE POLICY memories_select ON memories FOR SELECT
+            USING (
+                user_id IS NULL
+                OR user_id = nullif(current_setting('app.user_id', true), '')
+                OR (
+                    workspace_id IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM workspace_members wm
+                        WHERE wm.workspace_id = memories.workspace_id
+                          AND wm.member_identity->>'user_id'
+                              = nullif(current_setting('app.user_id', true), '')
+                    )
+                )
+            );
+
+        -- INSERT/UPDATE/DELETE policies stay strict: only the row owner can
+        -- write. Workspace members can read but not directly mutate other
+        -- members' rows. Cross-member writes happen via app-level tools
+        -- that act as the row author.
+        """,
+    ),
+    (
+        36,
+        "Schema v1: SYSTEM_GLOBAL sentinel + NOT NULL user_id + RLS rewrite",
+        r"""
+        -- Kill the implicit-global path. Before this migration, ``user_id IS
+        -- NULL`` was the convention for "global / seed / system-owned" rows,
+        -- which meant any agent that forgot to set ``app.user_id`` silently
+        -- wrote a globally readable row. After: every row has a non-null
+        -- ``user_id``; the literal string ``__system_global_zathras__`` is
+        -- the sentinel for system-owned rows. Forgetting to set
+        -- ``app.user_id`` becomes a NOT NULL constraint violation — fail
+        -- loud, not silent leak. Named-string (not UUID) so an agent cannot
+        -- accidentally land on it via "just generate a UUID."
+
+        -- Step 1: backfill every NULL across all user-scoped tables.
+        UPDATE memories                  SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE memory_relationships      SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE behaviors                 SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE entities                  SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE entity_mentions           SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE episodes                  SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE episode_memories          SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE modes                     SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE alerts                    SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE check_ins                 SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE autonomy_policies         SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE policy_calibration_events SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE cost_entries              SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE triggers                  SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE calibration_records       SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+        UPDATE degradation_policies      SET user_id = '__system_global_zathras__' WHERE user_id IS NULL;
+
+        -- Step 2: NOT NULL on every user-scoped table, plus a column DEFAULT
+        -- so INSERTs that don't explicitly specify user_id pick up the
+        -- session's app.user_id. (When app.user_id is unset, the default
+        -- evaluates to NULL → NOT NULL violation → fail loud.) This keeps
+        -- the safety property while removing boilerplate from the call sites.
+        ALTER TABLE memories                  ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE memory_relationships      ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE behaviors                 ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE entities                  ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE entity_mentions           ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE episodes                  ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE episode_memories          ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE modes                     ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE alerts                    ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE check_ins                 ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE autonomy_policies         ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE policy_calibration_events ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE cost_entries              ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE triggers                  ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE calibration_records       ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE degradation_policies      ALTER COLUMN user_id SET DEFAULT nullif(current_setting('app.user_id', true), ''), ALTER COLUMN user_id SET NOT NULL;
+
+        -- Step 3: rewrite RLS policies. Old form was
+        --   user_id IS NULL OR user_id = current_setting
+        -- which silently passed for unauthenticated writes. New form is
+        --   user_id = current_setting OR user_id = SYSTEM_GLOBAL
+        -- where SYSTEM_GLOBAL is a literal string only writable when an
+        -- operator explicitly sets ``app.user_id`` to it. (current_setting
+        -- returns the empty string when unset, which matches nothing.)
+
+        -- memories: SELECT keeps the workspace-membership branch from migration 35.
+        DROP POLICY IF EXISTS memories_select ON memories;
+        CREATE POLICY memories_select ON memories FOR SELECT
+            USING (
+                user_id = '__system_global_zathras__'
+                OR user_id = nullif(current_setting('app.user_id', true), '')
+                OR (
+                    workspace_id IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM workspace_members wm
+                        WHERE wm.workspace_id = memories.workspace_id
+                          AND wm.member_identity->>'user_id'
+                              = nullif(current_setting('app.user_id', true), '')
+                    )
+                )
+            );
+
+        DROP POLICY IF EXISTS memories_insert ON memories;
+        CREATE POLICY memories_insert ON memories FOR INSERT
+            WITH CHECK (user_id = nullif(current_setting('app.user_id', true), ''));
+        DROP POLICY IF EXISTS memories_update ON memories;
+        CREATE POLICY memories_update ON memories FOR UPDATE
+            USING (user_id = nullif(current_setting('app.user_id', true), ''));
+        DROP POLICY IF EXISTS memories_delete ON memories;
+        CREATE POLICY memories_delete ON memories FOR DELETE
+            USING (user_id = nullif(current_setting('app.user_id', true), ''));
+
+        -- All other tables: simple sentinel-or-self policy. Generated via
+        -- a DO block to keep the migration short.
+        DO $rls$
+        DECLARE
+            t TEXT;
+            tables TEXT[] := ARRAY[
+                'memory_relationships',
+                'behaviors',
+                'entities',
+                'entity_mentions',
+                'episodes',
+                'episode_memories',
+                'modes',
+                'alerts',
+                'check_ins',
+                'autonomy_policies',
+                'policy_calibration_events',
+                'cost_entries',
+                'triggers',
+                'calibration_records',
+                'degradation_policies'
+            ];
+        BEGIN
+            FOREACH t IN ARRAY tables LOOP
+                EXECUTE format('DROP POLICY IF EXISTS %I_select ON %I', t, t);
+                EXECUTE format('DROP POLICY IF EXISTS %I_insert ON %I', t, t);
+                EXECUTE format('DROP POLICY IF EXISTS %I_update ON %I', t, t);
+                EXECUTE format('DROP POLICY IF EXISTS %I_delete ON %I', t, t);
+                -- Some legacy migrations used different policy names.
+                EXECUTE format('DROP POLICY IF EXISTS calibration_events_select ON %I', t);
+                EXECUTE format('DROP POLICY IF EXISTS calibration_events_insert ON %I', t);
+                EXECUTE format('DROP POLICY IF EXISTS calibration_events_update ON %I', t);
+                EXECUTE format('DROP POLICY IF EXISTS calibration_events_delete ON %I', t);
+
+                EXECUTE format($p$
+                    CREATE POLICY %I_select ON %I FOR SELECT
+                    USING (user_id = '__system_global_zathras__'
+                           OR user_id = nullif(current_setting('app.user_id', true), ''))
+                $p$, t, t);
+                EXECUTE format($p$
+                    CREATE POLICY %I_insert ON %I FOR INSERT
+                    WITH CHECK (user_id = nullif(current_setting('app.user_id', true), ''))
+                $p$, t, t);
+                EXECUTE format($p$
+                    CREATE POLICY %I_update ON %I FOR UPDATE
+                    USING (user_id = nullif(current_setting('app.user_id', true), ''))
+                $p$, t, t);
+                EXECUTE format($p$
+                    CREATE POLICY %I_delete ON %I FOR DELETE
+                    USING (user_id = nullif(current_setting('app.user_id', true), ''))
+                $p$, t, t);
+            END LOOP;
+        END
+        $rls$;
+
+        -- Drop the now-stale partial unique index on modes (was scoped to
+        -- ``WHERE user_id IS NULL``; after backfill nothing matches).
+        -- Replace with one keyed to the sentinel.
+        DROP INDEX IF EXISTS uq_modes_null_user_name;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_modes_global_user_name
+            ON modes (name) WHERE user_id = '__system_global_zathras__';
+        """,
+    ),
+    (
+        37,
+        "Schema v1: smart default for memories.author_identity",
+        """
+        -- Migration 34 added author_identity with a placeholder default of
+        -- ``{"kind":"unknown"}``. Now that user_id is NOT NULL with a
+        -- session-derived default (migration 36), we can compute a real
+        -- author_identity at INSERT time from the same session value.
+        --
+        -- Rows the SYSTEM_GLOBAL sentinel writes get ``{"kind":"system",...}``;
+        -- everything else gets ``{"kind":"local_user","user_id":"..."}``.
+        -- Call sites that want to override (e.g. to record an agent acting
+        -- on a user's behalf, ``{"kind":"agent","on_behalf_of":"..."}``)
+        -- can still pass author_identity explicitly.
+
+        ALTER TABLE memories
+            ALTER COLUMN author_identity SET DEFAULT
+            CASE
+                WHEN nullif(current_setting('app.user_id', true), '')
+                     = '__system_global_zathras__'
+                THEN '{"kind":"system","component":"runtime"}'::jsonb
+                WHEN nullif(current_setting('app.user_id', true), '') IS NOT NULL
+                THEN jsonb_build_object(
+                    'kind', 'local_user',
+                    'user_id', current_setting('app.user_id', true)
+                )
+                ELSE '{"kind":"unknown"}'::jsonb
+            END;
+        """,
+    ),
 ]
 
 

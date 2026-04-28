@@ -82,13 +82,17 @@ class TestMemoryUserIdPropagation:
 
         await _check_user_id(pool, "memories", "id", mem.id, TEST_USER)
 
-    async def test_store_memory_null_without_user(self, pool):
+    async def test_store_memory_uses_default_when_no_contextvar(self, pool):
+        """Without an explicit contextvar, store_memory writes against the
+        session's ``app.user_id`` (set by the test fixture's setup callback).
+        Migration 34 killed the legacy NULL = global path; the column DEFAULT
+        + NOT NULL constraint guarantee every row carries a real owner."""
         mem = await store_memory(
             pool,
             MemoryCreate(type=MemoryType.fact, content="no user memory"),
         )
         row = await pool.fetchrow("SELECT user_id FROM memories WHERE id = $1", mem.id)
-        assert row["user_id"] is None
+        assert row["user_id"] == "test-user-default"
 
 
 class TestBehaviorUserIdPropagation:
