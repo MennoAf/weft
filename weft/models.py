@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal, get_args
 
@@ -169,6 +169,111 @@ class WorkspaceMember(BaseModel):
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+
+class TrackerKind(str, Enum):
+    outreach = "outreach"
+    task = "task"
+    follow_up = "follow_up"
+    meal_plan = "meal_plan"
+    shopping_list = "shopping_list"
+    pantry = "pantry"
+    watch = "watch"
+    list = "list"
+    trace = "trace"
+
+
+TrackerKindLiteral = Literal[
+    "outreach", "task", "follow_up", "meal_plan",
+    "shopping_list", "pantry", "watch", "list", "trace",
+]
+
+
+class TrackerState(str, Enum):
+    in_progress = "in_progress"
+    awaiting_reply = "awaiting_reply"
+    blocked = "blocked"
+    done = "done"
+    abandoned = "abandoned"
+
+    @classmethod
+    def open_states(cls) -> set[str]:
+        return {"in_progress", "awaiting_reply", "blocked"}
+
+    @classmethod
+    def terminal_states(cls) -> set[str]:
+        return {"done", "abandoned"}
+
+
+TrackerStateLiteral = Literal[
+    "in_progress", "awaiting_reply", "blocked", "done", "abandoned",
+]
+
+
+class NudgeMode(str, Enum):
+    none = "none"
+    once = "once"
+    recur = "recur"
+
+
+NudgeModeLiteral = Literal["none", "once", "recur"]
+
+
+def _tracker_id() -> str:
+    return f"tr-{uuid.uuid4().hex[:10]}"
+
+
+class Tracker(BaseModel):
+    """A lifecycle-aware open-loop primitive. State changes over time;
+    nudges fire on schedule; can be snoozed, dismissed, or closed.
+
+    Wick Phase 3 — see weft_v2_spec.md §3 for the full design."""
+
+    id: str = Field(default_factory=_tracker_id)
+    user_id: str | None = None
+    project_id: str | None = None
+    entity_id: str | None = None
+    kind: TrackerKind
+    title: str
+    state: TrackerState = TrackerState.in_progress
+    state_history: list[dict[str, Any]] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)
+    last_touch: datetime = Field(default_factory=_now)
+    nudge_mode: NudgeMode = NudgeMode.none
+    nudge_after: datetime | None = None
+    nudge_interval: timedelta | None = None
+    snooze_until: datetime | None = None
+    trigger_ids: list[str] = Field(default_factory=list)
+    provenance: str = "supervisor"
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    def is_open(self) -> bool:
+        return self.state.value in TrackerState.open_states()
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self.model_dump(mode="json")
+        d["kind"] = self.kind.value
+        d["state"] = self.state.value
+        d["nudge_mode"] = self.nudge_mode.value
+        if self.nudge_interval is not None:
+            d["nudge_interval_seconds"] = int(self.nudge_interval.total_seconds())
+        return d
+
+
+class TrackerCreate(BaseModel):
+    """Input model for creating a tracker."""
+
+    kind: TrackerKind
+    title: str
+    project_id: str | None = None
+    entity_id: str | None = None
+    state: TrackerState = TrackerState.in_progress
+    context: dict[str, Any] = Field(default_factory=dict)
+    nudge_mode: NudgeMode = NudgeMode.none
+    nudge_after: datetime | None = None
+    nudge_interval: timedelta | None = None
+    provenance: str = "supervisor"
 
 
 class BehaviorScope(str, Enum):
