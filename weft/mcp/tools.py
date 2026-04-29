@@ -3853,3 +3853,226 @@ async def weft_list_remove(
         return _input_error_response("weft_list_remove", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_list_remove", e)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5 / L6 — bearer-token management over MCP.
+#
+# Mirror of the ``weft tokens`` CLI group. Every tool here is supervisor-only:
+# the whole point of the credential model is that an agent-mode caller cannot
+# escalate, so letting agent-mode mint or revoke tokens would round-trip the
+# entire defense to zero. The Phase-2 caller-mode gate is enforced in the
+# tool body, not at the MCP boundary, matching ``weft_quarantine_review``.
+#
+# Tokens are first-class auth credentials: each row binds a user_id to a
+# caller_mode at issuance time. Plaintext is returned ONCE on issue and then
+# only the SHA-256 hash is persisted. Revocation always takes the full hash —
+# we never accept plaintext on the revoke path because that re-introduces the
+# leak vector L1 was designed to close.
+# ---------------------------------------------------------------------------
+
+
+_SUPERVISOR_ONLY_TOKEN_TOOLS_ERROR = (
+    "weft_token_* tools are supervisor-only. Agent-mode callers cannot "
+    "mint, list, or revoke credentials (Phase 2.5 / L6)."
+)
+
+
+def _supervisor_gate(tool_name: str) -> dict | None:
+    """Return an error dict if the caller is in agent mode, else None.
+
+    Centralized so each token tool's first three lines look the same and a
+    future audit can grep for callers of this gate."""
+    from weft.auth import is_agent_caller
+    if is_agent_caller():
+        logger.warning(
+            "agent-mode caller blocked from %s (Phase 2.5 / L6 supervisor gate)",
+            tool_name,
+        )
+        return {"error": _SUPERVISOR_ONLY_TOKEN_TOOLS_ERROR, "tool": tool_name}
+    return None
+
+
+def _parse_expires_in_spec(spec: str | None) -> "timedelta | None":
+    """Mirror of weft.cli._parse_expires_in. Accepts 'Nd' / 'Nh' / 'Nm'.
+
+    Lives here as a private helper so the MCP layer doesn't import from
+    the click-based CLI module (cli.py pulls in heavy deps and click
+    decorators we don't want in the MCP path)."""
+    if not spec:
+        return None
+    spec = spec.strip().lower()
+    units = {"d": "days", "h": "hours", "m": "minutes"}
+    if spec[-1] not in units or not spec[:-1].isdigit():
+        raise ValueError(f"expires_in must be N(d|h|m), got {spec!r}")
+    return timedelta(**{units[spec[-1]]: int(spec[:-1])})
+
+
+@mcp.tool()
+async def weft_token_issue(
+    ctx: Context,
+    user_id: str,
+    caller_mode: Literal["supervisor", "agent"],
+    label: str | None = None,
+    expires_in: str | None = None,
+) -> dict:
+    """Mint a bearer token bound to ``(user_id, caller_mode)``.
+
+    Supervisor-only. The plaintext token is returned **once** in the
+    ``token`` field — store it immediately (1Password, env var, secret
+    manager) because there is no recovery path. Only the SHA-256
+    ``token_hash`` is persisted; future revocation goes through that hash.
+
+    Parameters
+    ----------
+    user_id:
+        The user this credential authenticates as. Cannot be empty.
+    caller_mode:
+        ``'supervisor'`` (full trust, can downgrade to agent via header for
+        testing) or ``'agent'`` (lower trust, agent floor — the header
+        cannot escalate). Stamped into the row at issuance and read by
+        :class:`UserIdentityMiddleware` on every request.
+    label:
+        Free-text operator note (e.g. ``'wick-runtime'``,
+        ``'face-2026-04'``). Surfaces in ``weft_token_list``.
+    expires_in:
+        Optional ``Nd`` / ``Nh`` / ``Nm`` spec, e.g. ``'30d'``. Omit for
+        a non-expiring credential.
+
+    Returns
+    -------
+    dict with: ``token`` (plaintext, one-time), ``token_hash``,
+    ``user_id``, ``caller_mode``, ``label``, ``expires_at`` (ISO or null).
+    """
+    blocked = _supervisor_gate("weft_token_issue")
+    if blocked is not None:
+        return blocked
+
+    try:
+        from weft.credentials import issue_token
+        delta = _parse_expires_in_spec(expires_in)
+        app: AppContext = ctx.request_context.lifespan_context
+        plaintext, row = await issue_token(
+            app.pool,
+            user_id=user_id,
+            caller_mode=caller_mode,
+            label=label,
+            expires_in=delta,
+        )
+        return {
+            "token": plaintext,
+            "token_hash": row.token_hash,
+            "user_id": row.user_id,
+            "caller_mode": row.caller_mode,
+            "label": row.label,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+            "warning": (
+                "Plaintext token will not be shown again — store it now. "
+                "Use the hash for revocation."
+            ),
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_token_issue", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_token_issue", e)
+
+
+@mcp.tool()
+async def weft_token_list(
+    ctx: Context,
+    user_id: str,
+    include_revoked: bool = False,
+) -> dict:
+    """List a user's tokens, newest first. Supervisor-only.
+
+    Each row carries the ``token_hash`` (full 64-char SHA-256 — pass to
+    ``weft_token_revoke``), caller_mode, label, created/last-used/expires
+    timestamps, and a derived ``status`` of ``active`` / ``revoked`` /
+    ``expired``. Plaintext is never returned — that ship sailed at issuance.
+
+    Defaults to live rows; pass ``include_revoked=True`` for audit /
+    forensics. Expired-but-not-revoked rows are always included so
+    operators see what aged out."""
+    blocked = _supervisor_gate("weft_token_list")
+    if blocked is not None:
+        return blocked
+
+    try:
+        from datetime import datetime, timezone
+        from weft.credentials import list_tokens
+        app: AppContext = ctx.request_context.lifespan_context
+        rows = await list_tokens(
+            app.pool, user_id, include_revoked=include_revoked,
+        )
+        now = datetime.now(timezone.utc)
+        items = []
+        for r in rows:
+            if r.revoked_at is not None:
+                status = "revoked"
+            elif r.expires_at is not None and r.expires_at <= now:
+                status = "expired"
+            else:
+                status = "active"
+            items.append({
+                "token_hash": r.token_hash,
+                "caller_mode": r.caller_mode,
+                "label": r.label,
+                "created_at": r.created_at.isoformat(),
+                "last_used_at": (
+                    r.last_used_at.isoformat() if r.last_used_at else None
+                ),
+                "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+                "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
+                "status": status,
+            })
+        return {"count": len(items), "tokens": items}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_token_list", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_token_list", e)
+
+
+@mcp.tool()
+async def weft_token_revoke(
+    ctx: Context,
+    token_hash: str,
+) -> dict:
+    """Revoke a token by its full 64-char SHA-256 hash. Supervisor-only.
+
+    Mirrors the CLI: partial hashes are deliberately rejected — the
+    ``weft_token_list`` response surfaces the full hash; revocation
+    requires the full value to keep operator intent unambiguous and to
+    avoid prefix-collision footguns.
+
+    Idempotent: ``revoked: false`` for unknown hashes and rows already
+    revoked. The two are not distinguished — same reason
+    ``lookup_token`` collapses unknown / revoked / expired into a single
+    None: probe-resistance."""
+    blocked = _supervisor_gate("weft_token_revoke")
+    if blocked is not None:
+        return blocked
+
+    if len(token_hash) != 64:
+        return {
+            "error": "Invalid input",
+            "detail": (
+                f"token_hash must be the full 64-char SHA-256 hex; "
+                f"got {len(token_hash)} chars"
+            ),
+            "tool": "weft_token_revoke",
+        }
+
+    try:
+        from weft.credentials import revoke_token
+        app: AppContext = ctx.request_context.lifespan_context
+        flipped = await revoke_token(app.pool, token_hash)
+        return {
+            "token_hash": token_hash,
+            "revoked": flipped,
+            "detail": (
+                "Token revoked." if flipped
+                else "No live token matched (unknown hash or already revoked)."
+            ),
+        }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_token_revoke", e)
