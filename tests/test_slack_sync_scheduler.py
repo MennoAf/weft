@@ -43,7 +43,7 @@ class TestSlackSyncLoop:
         mock_sync = AsyncMock(return_value=_FakeSyncResult())
 
         with (
-            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test", "WEFT_DEFAULT_USER_ID": "scheduler-test-user"}),
             patch("weft.scheduler.sync_slack_sdk", mock_sync, create=True),
             patch("asyncio.sleep", new_callable=AsyncMock, side_effect=_cancel_after(2)),
         ):
@@ -66,7 +66,7 @@ class TestSlackSyncLoop:
         )
 
         with (
-            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test", "WEFT_DEFAULT_USER_ID": "scheduler-test-user"}),
             patch("weft.slack.sync.sync_slack_sdk", mock_sync),
             patch("asyncio.sleep", new_callable=AsyncMock, side_effect=_cancel_after(2)),
             caplog.at_level(logging.ERROR),
@@ -101,6 +101,30 @@ class TestSlackSyncLoop:
         assert any("no_token" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
+    async def test_no_default_user_disables_loop(self, mock_pool, caplog):
+        """When SLACK_BOT_TOKEN is set but WEFT_DEFAULT_USER_ID is not,
+        the loop bails with a clear warning rather than entering a
+        sync cycle that would silently fail every store_memory on the
+        migration-34 NOT NULL on memories.user_id."""
+        import os
+
+        mock_sync = AsyncMock()
+        with (
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch("weft.slack.sync.sync_slack_sdk", mock_sync),
+            caplog.at_level(logging.WARNING),
+        ):
+            old = os.environ.pop("WEFT_DEFAULT_USER_ID", None)
+            try:
+                await slack_sync_loop(mock_pool, interval=300)
+            finally:
+                if old is not None:
+                    os.environ["WEFT_DEFAULT_USER_ID"] = old
+
+        mock_sync.assert_not_called()
+        assert any("no_default_user" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_immediate_first_call(self, mock_pool):
         """sync_slack_sdk is called before the first sleep."""
         call_order = []
@@ -115,7 +139,7 @@ class TestSlackSyncLoop:
             raise asyncio.CancelledError()
 
         with (
-            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test", "WEFT_DEFAULT_USER_ID": "scheduler-test-user"}),
             patch("weft.slack.sync.sync_slack_sdk", mock_sync),
             patch("asyncio.sleep", side_effect=mock_sleep),
         ):
@@ -136,7 +160,7 @@ class TestSlackSyncLoop:
         mock_sync = AsyncMock(return_value=_FakeSyncResult())
 
         with (
-            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test", "WEFT_DEFAULT_USER_ID": "scheduler-test-user"}),
             patch("weft.slack.sync.sync_slack_sdk", mock_sync),
             patch("asyncio.sleep", side_effect=capture_sleep),
         ):
@@ -157,7 +181,7 @@ class TestSlackSyncLoop:
         mock_sync = AsyncMock(return_value=_FakeSyncResult())
 
         with (
-            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test", "WEFT_DEFAULT_USER_ID": "scheduler-test-user"}),
             patch("weft.slack.sync.sync_slack_sdk", mock_sync),
             patch("asyncio.sleep", side_effect=capture_sleep),
         ):

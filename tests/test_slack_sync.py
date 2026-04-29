@@ -1,5 +1,6 @@
 """Tests for the Slack sync engine."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +16,22 @@ from weft.slack.sync import (
 )
 from weft.slack.config import ChannelMapping
 from weft.models import MemoryType
+
+
+@pytest.fixture(autouse=True)
+def _patch_acquire_for_mock_pools():
+    """The Phase-2.5 fix wraps store_memory / pool.execute in
+    weft.db.connection.acquire(), which expects a real asyncpg pool.
+    These unit tests use AsyncMock pools that don't model the acquire
+    contract; patch acquire to a no-op context manager so they keep
+    passing. The full-stack regression coverage lives in
+    tests/test_slack_sync_acquire.py against the real pool fixture."""
+    @asynccontextmanager
+    async def _noop_acquire(_pool):
+        yield None
+
+    with patch("weft.slack.sync.acquire", _noop_acquire):
+        yield
 
 
 def _make_message(ts, text="hello", user="U123", **kwargs):

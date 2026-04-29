@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 import asyncpg
 
+from weft.db.connection import acquire, get_db
 from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemoryCreate, MemorySource, MemoryType
 from weft.store import store_memory
@@ -486,7 +487,12 @@ async def _store_message_memory(
         source=MemorySource.ingest,
         confidence=mapping.confidence,
     )
-    memory = await store_memory(pool, create, embedding=embedding)
+    # acquire() so SET LOCAL app.user_id fires on the connection. Slack
+    # sync runs from a background scheduler task, so the contextvar is
+    # set at scheduler-loop entry (slack_sync_loop in weft.scheduler)
+    # rather than by the HTTP middleware.
+    async with acquire(pool):
+        memory = await store_memory(pool, create, embedding=embedding)
     return [memory.id]
 
 
@@ -517,9 +523,13 @@ async def _fetch_user_names_sdk(client) -> dict[str, str]:
 async def _archive_memory(pool: asyncpg.Pool, memory_id: str):
     """Archive a memory by ID."""
     try:
-        await pool.execute(
-            "UPDATE memories SET status = 'archived', updated_at = NOW() WHERE id = $1",
-            memory_id,
-        )
+        # acquire() so SET LOCAL app.user_id fires — without it the RLS
+        # WHERE predicate matches no rows under the non-superuser app
+        # role and the UPDATE silently no-ops.
+        async with acquire(pool):
+            await get_db(pool).execute(
+                "UPDATE memories SET status = 'archived', updated_at = NOW() WHERE id = $1",
+                memory_id,
+            )
     except Exception as exc:
         logger.warning("Failed to archive memory %s: %s", memory_id, exc)
