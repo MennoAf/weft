@@ -14,9 +14,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from weft import credentials as credentials_module
 from weft.credentials import (
+    LEGACY_ENV_KEY_LABEL,
     TOKEN_PREFIX,
     TokenRow,
+    bootstrap_legacy_api_key,
     issue_token,
     list_tokens,
     lookup_token,
@@ -254,3 +257,154 @@ async def test_lookup_constant_after_first_use_does_not_change_other_columns(poo
     assert found.created_at == original.created_at
     assert found.expires_at == original.expires_at
     assert found.revoked_at == original.revoked_at
+
+
+# --- L3: bootstrap legacy WEFT_API_KEY ---------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_legacy_warn_state():
+    """Each test starts with a clean rate-limiter so the WARNING fires
+    deterministically when we expect it."""
+    credentials_module._legacy_last_warned_at = None
+    yield
+    credentials_module._legacy_last_warned_at = None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_inserts_row_for_legacy_env_key(pool):
+    inserted = await bootstrap_legacy_api_key(
+        pool, api_key="weft-legacy-secret", default_user_id="u-bootstrap",
+    )
+    assert inserted is True
+
+    rows = await list_tokens(pool, "u-bootstrap")
+    assert len(rows) == 1
+    assert rows[0].label == LEGACY_ENV_KEY_LABEL
+    assert rows[0].caller_mode == "supervisor"
+
+    # And the hash matches what lookup_token would compute against the
+    # same plaintext — that's the contract L4 will rely on.
+    found = await lookup_token(pool, "weft-legacy-secret")
+    assert found is not None
+    assert found.token_hash == rows[0].token_hash
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_is_idempotent(pool):
+    first = await bootstrap_legacy_api_key(
+        pool, api_key="weft-legacy-secret", default_user_id="u-bootstrap",
+    )
+    second = await bootstrap_legacy_api_key(
+        pool, api_key="weft-legacy-secret", default_user_id="u-bootstrap",
+    )
+
+    assert first is True
+    assert second is False  # already present, no insert
+
+    rows = await list_tokens(pool, "u-bootstrap", include_revoked=True)
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_no_op_when_api_key_missing(pool):
+    inserted = await bootstrap_legacy_api_key(
+        pool, api_key=None, default_user_id="u-bootstrap",
+    )
+    assert inserted is False
+    rows = await pool.fetch("SELECT 1 FROM weft_tokens")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_no_op_when_default_user_id_missing(pool, caplog):
+    """Bootstrap can't write a row without a user_id (NOT NULL); it
+    must skip and warn rather than crash startup."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="weft.credentials"):
+        inserted = await bootstrap_legacy_api_key(
+            pool, api_key="weft-legacy-secret", default_user_id=None,
+        )
+
+    assert inserted is False
+    assert any("WEFT_DEFAULT_USER_ID" in r.message for r in caplog.records)
+    rows = await pool.fetch("SELECT 1 FROM weft_tokens")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_does_not_clobber_existing_row(pool):
+    """If an operator already minted a token whose plaintext happens
+    to equal WEFT_API_KEY (deeply unlikely but worth pinning), the
+    existing row wins via ON CONFLICT DO NOTHING — no caller_mode or
+    label drift."""
+    plaintext, original = await issue_token(
+        pool, user_id="u-real", caller_mode="agent", label="real-token",
+    )
+
+    inserted = await bootstrap_legacy_api_key(
+        pool, api_key=plaintext, default_user_id="u-bootstrap",
+    )
+    assert inserted is False
+
+    found = await lookup_token(pool, plaintext)
+    assert found is not None
+    assert found.user_id == "u-real"
+    assert found.caller_mode == "agent"
+    assert found.label == "real-token"
+    assert found.token_hash == original.token_hash
+
+
+@pytest.mark.asyncio
+async def test_lookup_emits_deprecation_warning_on_legacy_row(pool, caplog):
+    import logging
+
+    await bootstrap_legacy_api_key(
+        pool, api_key="weft-legacy-secret", default_user_id="u-bootstrap",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.credentials"):
+        found = await lookup_token(pool, "weft-legacy-secret")
+
+    assert found is not None
+    assert found.label == LEGACY_ENV_KEY_LABEL
+    assert any("Legacy WEFT_API_KEY" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_lookup_warning_is_rate_limited(pool, caplog):
+    """Two lookups in quick succession produce exactly one WARNING —
+    the rate limiter caps at once per process per hour."""
+    import logging
+
+    await bootstrap_legacy_api_key(
+        pool, api_key="weft-legacy-secret", default_user_id="u-bootstrap",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.credentials"):
+        await lookup_token(pool, "weft-legacy-secret")
+        await lookup_token(pool, "weft-legacy-secret")
+        await lookup_token(pool, "weft-legacy-secret")
+
+    legacy_warnings = [
+        r for r in caplog.records if "Legacy WEFT_API_KEY" in r.message
+    ]
+    assert len(legacy_warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_lookup_does_not_warn_for_non_legacy_rows(pool, caplog):
+    import logging
+
+    plaintext, _ = await issue_token(
+        pool, user_id="u-real", caller_mode="supervisor", label="warp-runtime",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="weft.credentials"):
+        await lookup_token(pool, plaintext)
+
+    legacy_warnings = [
+        r for r in caplog.records if "Legacy WEFT_API_KEY" in r.message
+    ]
+    assert legacy_warnings == []

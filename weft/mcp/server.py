@@ -301,6 +301,17 @@ async def lifespan(server: FastMCP):
         "Postgres",
     )
 
+    # Phase 2.5 L3: bootstrap a credential row for the legacy
+    # WEFT_API_KEY env var so existing clients keep working when L4
+    # flips middleware to lookup_token. Idempotent across restarts.
+    from weft.credentials import bootstrap_legacy_api_key
+
+    await bootstrap_legacy_api_key(
+        pool,
+        api_key=config.api_key,
+        default_user_id=os.environ.get("WEFT_DEFAULT_USER_ID") or None,
+    )
+
     # Self-heal vector dimensions if config changed since last run
     migrated_tables = await ensure_vector_dimensions(pool, config.embedding.dimensions)
 

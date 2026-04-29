@@ -49,6 +49,37 @@ _VALID_CALLER_MODES: frozenset[str] = frozenset({"supervisor", "agent"})
 TOKEN_PREFIX = "weft-"
 _TOKEN_RANDOM_BYTES = 32  # secrets.token_urlsafe(32) → 43 base64url chars
 
+# Marker label for the row created by :func:`bootstrap_legacy_api_key`.
+# Every lookup that resolves to a row with this label is using the
+# pre-Phase-2.5 ``WEFT_API_KEY`` env-var path; we want operators to see
+# that signal in production logs without flooding them.
+LEGACY_ENV_KEY_LABEL = "legacy-env-key"
+_LEGACY_WARN_INTERVAL_SECONDS = 3600  # once per process per hour
+_legacy_last_warned_at: float | None = None
+
+
+def _maybe_warn_legacy_env_key(row: TokenRow) -> None:
+    """Emit a deprecation WARNING if *row* came from the legacy
+    bootstrap path. Rate-limited once per process per hour so a
+    chatty client doesn't drown the log."""
+    if row.label != LEGACY_ENV_KEY_LABEL:
+        return
+    global _legacy_last_warned_at
+    import time
+
+    now_mono = time.monotonic()
+    if (
+        _legacy_last_warned_at is None
+        or now_mono - _legacy_last_warned_at >= _LEGACY_WARN_INTERVAL_SECONDS
+    ):
+        _legacy_last_warned_at = now_mono
+        logger.warning(
+            "Legacy WEFT_API_KEY env-var auth still in use (user=%s). "
+            "Mint per-client tokens via `weft tokens issue` and migrate "
+            "before the env-var path is removed.",
+            row.user_id,
+        )
+
 
 class TokenRow(BaseModel):
     """A row in ``weft_tokens``. Never carries the plaintext token —
@@ -194,7 +225,9 @@ async def lookup_token(
     )
     if row is None:
         return None
-    return _row_to_model(row)
+    model = _row_to_model(row)
+    _maybe_warn_legacy_env_key(model)
+    return model
 
 
 async def revoke_token(pool: asyncpg.Pool, token_hash: str) -> bool:
@@ -263,3 +296,74 @@ async def list_tokens(
             user_id,
         )
     return [_row_to_model(r) for r in rows]
+
+
+async def bootstrap_legacy_api_key(
+    pool: asyncpg.Pool,
+    *,
+    api_key: str | None,
+    default_user_id: str | None,
+) -> bool:
+    """Insert a token row for the legacy ``WEFT_API_KEY`` env var.
+
+    Phase 2.5's L4 will resolve every API-key auth through
+    :func:`lookup_token`. For deployments that still hand the server its
+    bearer credential via ``WEFT_API_KEY``, this bootstrap inserts a
+    matching row at startup so existing clients keep working without
+    operator intervention.
+
+    Behaviour matrix:
+
+    * ``api_key`` is None / empty → no-op, returns False. Local dev
+      mode and OAuth-only deployments take this path.
+    * ``api_key`` set but ``default_user_id`` is None → no-op, returns
+      False. The row needs a ``user_id``, and the existing
+      ``UserIdentityMiddleware`` already requires ``WEFT_DEFAULT_USER_ID``
+      for API-key clients to be scoped to a user; without it bootstrap
+      would create an unreachable row.
+    * Hash already present in ``weft_tokens`` → no-op, returns False.
+      Idempotent across restarts and across racing instances.
+    * Hash missing → INSERT a row tagged ``(default_user_id,
+      'supervisor', label='legacy-env-key')``, returns True.
+
+    The deprecation warning fires from :func:`lookup_token`, not here —
+    bootstrap itself is a one-line INFO log per cold start, not per
+    request.
+    """
+    if not api_key:
+        return False
+    if not default_user_id:
+        logger.warning(
+            "WEFT_API_KEY is set but WEFT_DEFAULT_USER_ID is not — "
+            "skipping legacy token bootstrap. API-key clients will "
+            "continue using the HMAC-compare path until L4 ships."
+        )
+        return False
+
+    token_hash = _hash_plaintext(api_key)
+    # ON CONFLICT DO NOTHING is the race-safe idempotency primitive —
+    # two server instances starting simultaneously can both call this
+    # function and only one row will land.
+    result = await pool.execute(
+        """
+        INSERT INTO weft_tokens (token_hash, user_id, caller_mode, label)
+        VALUES ($1, $2, 'supervisor', $3)
+        ON CONFLICT (token_hash) DO NOTHING
+        """,
+        token_hash,
+        default_user_id,
+        LEGACY_ENV_KEY_LABEL,
+    )
+    # asyncpg returns "INSERT <oid> <rowcount>" — the count is the last
+    # token, not the first whitespace split.
+    try:
+        inserted = int(result.rsplit(" ", 1)[-1]) > 0
+    except ValueError:
+        inserted = False
+    if inserted:
+        logger.info(
+            "bootstrapped legacy WEFT_API_KEY as token row "
+            "(user=%s, label=%s)",
+            default_user_id, LEGACY_ENV_KEY_LABEL,
+        )
+    return inserted
