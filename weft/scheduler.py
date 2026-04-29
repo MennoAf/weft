@@ -197,6 +197,7 @@ async def slack_sync_loop(
     for *interval* seconds between cycles. Naturally serialized — a slow
     sync delays the next cycle rather than overlapping.
     """
+    from weft.auth import current_user_id
     from weft.slack.sync import sync_slack_sdk
 
     interval = max(interval, _MIN_SYNC_INTERVAL)
@@ -206,7 +207,25 @@ async def slack_sync_loop(
         logger.warning("slack_sync.no_token — Slack sync loop disabled")
         return
 
-    logger.info("slack_sync.started", extra={"interval": interval})
+    # Background scheduler tasks have no HTTP middleware setting the
+    # request-scoped user identity. Slack-ingested memories belong to
+    # the deployment owner — same user the legacy bootstrap row binds
+    # to. Without this, every store_memory inside the sync would hit
+    # the migration-34 NOT NULL on memories.user_id and silently fail
+    # via per-message logger.warning.
+    default_uid = os.environ.get("WEFT_DEFAULT_USER_ID")
+    if not default_uid:
+        logger.warning(
+            "slack_sync.no_default_user — set WEFT_DEFAULT_USER_ID to "
+            "the deployment owner's UUID; sync loop disabled"
+        )
+        return
+    current_user_id.set(default_uid)
+
+    logger.info(
+        "slack_sync.started",
+        extra={"interval": interval, "user_id": default_uid},
+    )
     try:
         while True:
             t0 = time.monotonic()
