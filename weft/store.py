@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.auth import get_caller_mode
 from weft.db.connection import acquire, get_db
 from weft.models import (
     Memory,
@@ -22,6 +23,7 @@ from weft.models import (
     RelationType,
     _weft_id,
 )
+from weft.quarantine import looks_like_instruction
 from weft.schema import SYSTEM_GLOBAL_USER_ID
 from weft.tokens import estimate_tokens
 
@@ -35,10 +37,30 @@ async def store_memory(
     create: MemoryCreate,
     embedding: list[float] | None = None,
 ) -> Memory:
-    """Store a new memory. Returns the created Memory."""
+    """Store a new memory. Returns the created Memory.
+
+    Phase 2:
+    * Layer 1 — stamps ``write_provenance`` from the request's caller-mode
+      contextvar. Defaults to 'supervisor' when no HTTP middleware is in
+      play (CLI, scheduler, internal callers). Agent-container callers
+      that prepend ``X-Weft-Caller-Mode: agent`` get tagged 'agent'.
+    * Layer 3 — agent-mode writes whose content reads as an instruction
+      (URLs, git remotes, imperative verbs, "when X do Y" structure,
+      absolute system paths, API endpoints) land in
+      ``review_status='pending_review'`` and stay out of retrieval until
+      the supervisor reviews them via :mod:`weft.quarantine`.
+    """
     memory_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.content)
+    write_provenance = get_caller_mode()
+    review_status = "active"
+    if write_provenance == "agent" and looks_like_instruction(create.content):
+        review_status = "pending_review"
+        logger.info(
+            "quarantine: agent-provenance write flagged as pending_review (id=%s)",
+            memory_id,
+        )
 
     db = get_db(pool)
     await db.execute(
@@ -47,12 +69,12 @@ async def store_memory(
             id, type, topic, content, source, confidence,
             token_count, created_at, updated_at, accessed_at,
             access_count, project_id, agent_id, embedding, status, pinned,
-            review_after, workspace_id, user_id
+            review_after, workspace_id, user_id, write_provenance, review_status
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
             0, $9, $10, $11::vector, 'active', $12,
-            $13, $14, nullif(current_setting('app.user_id', true), '')
+            $13, $14, nullif(current_setting('app.user_id', true), ''), $15, $16
         )
         """,
         memory_id,
@@ -69,6 +91,8 @@ async def store_memory(
         create.pinned,
         create.review_after,
         create.workspace_id,
+        write_provenance,
+        review_status,
     )
 
     return Memory(
@@ -89,6 +113,8 @@ async def store_memory(
         status=MemoryStatus.active,
         pinned=create.pinned,
         review_after=create.review_after,
+        write_provenance=write_provenance,
+        review_status=review_status,
     )
 
 
@@ -111,6 +137,8 @@ async def list_memories(
     user_id: str | None = None,
     pinned: bool | None = None,
     exact_scope: bool = False,
+    include_agent_provenance: bool = True,
+    include_pending_review: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Memory]:
@@ -125,6 +153,15 @@ async def list_memories(
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
     memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
+
+    include_agent_provenance: Phase 2 / Layer 2 filter. ``False`` excludes
+    rows written in agent-mode — used by retrieval paths feeding agent
+    system prompts (mode='code'). ``True`` (default) preserves legacy
+    behavior; Face-context callers wrap agent rows at projection time
+    via ``retrieval_modes.wrap_untrusted_for_face``.
+
+    include_pending_review: Phase 2 / Layer 3 filter. ``False`` (default)
+    excludes quarantined writes; only ``weft_quarantine_review`` opts in.
     """
     conditions = []
     params: list = []
@@ -134,6 +171,11 @@ async def list_memories(
         conditions.append(f"status = ${idx}")
         params.append(status.value)
         idx += 1
+
+    if not include_agent_provenance:
+        conditions.append("write_provenance != 'agent'")
+    if not include_pending_review:
+        conditions.append("review_status = 'active'")
 
     if memory_type:
         conditions.append(f"type = ${idx}")
@@ -207,6 +249,8 @@ async def search_by_vector(
     user_id: str | None = None,
     exclude_ids: list[str] | None = None,
     sources: list[str] | None = None,
+    include_agent_provenance: bool = True,
+    include_pending_review: bool = False,
 ) -> list[MemoryRecall]:
     """Search memories by vector similarity (cosine distance).
 
@@ -222,6 +266,11 @@ async def search_by_vector(
 
     sources: allowlist of MemorySource values. None = no filter. Passed pre-ANN
     so top-K stays meaningful when excluded sources dominate the pool.
+
+    include_agent_provenance / include_pending_review: Phase 2 Layer 2/3
+    filters. See ``list_memories`` for semantics. Both filters are pushed
+    into the WHERE clause so the ANN top-K stays meaningful when agent /
+    quarantined rows dominate the pool.
     """
     conditions = ["embedding IS NOT NULL"]
     params: list = []
@@ -239,6 +288,11 @@ async def search_by_vector(
         conditions.append(f"status = ${idx}")
         params.append(status.value)
         idx += 1
+
+    if not include_agent_provenance:
+        conditions.append("write_provenance != 'agent'")
+    if not include_pending_review:
+        conditions.append("review_status = 'active'")
 
     if memory_type:
         conditions.append(f"type = ${idx}")
@@ -319,6 +373,8 @@ async def search_by_keyword(
     user_id: str | None = None,
     exclude_ids: list[str] | None = None,
     sources: list[str] | None = None,
+    include_agent_provenance: bool = True,
+    include_pending_review: bool = False,
 ) -> list[MemoryRecall]:
     """Search memories by full-text keyword match (BM25 ranking via ts_rank).
 
@@ -327,6 +383,8 @@ async def search_by_keyword(
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
     memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
+
+    include_agent_provenance / include_pending_review: see ``list_memories``.
     """
     conditions = ["search_tsv IS NOT NULL"]
     params: list = []
@@ -341,6 +399,11 @@ async def search_by_keyword(
         conditions.append(f"status = ${idx}")
         params.append(status.value)
         idx += 1
+
+    if not include_agent_provenance:
+        conditions.append("write_provenance != 'agent'")
+    if not include_pending_review:
+        conditions.append("review_status = 'active'")
 
     if memory_type:
         conditions.append(f"type = ${idx}")
@@ -433,6 +496,8 @@ async def search_hybrid(
     vector_weight: float = 0.5,
     keyword_weight: float = 0.5,
     sources: list[str] | None = None,
+    include_agent_provenance: bool = True,
+    include_pending_review: bool = False,
 ) -> list[MemoryRecall]:
     """Hybrid search combining vector similarity and BM25 keyword matching.
 
@@ -462,6 +527,8 @@ async def search_hybrid(
         user_id=user_id,
         exclude_ids=exclude_ids,
         sources=sources,
+        include_agent_provenance=include_agent_provenance,
+        include_pending_review=include_pending_review,
     )
 
     keyword_results = await search_by_keyword(
@@ -476,6 +543,8 @@ async def search_hybrid(
         user_id=user_id,
         exclude_ids=exclude_ids,
         sources=sources,
+        include_agent_provenance=include_agent_provenance,
+        include_pending_review=include_pending_review,
     )
 
     # Build rank maps (1-indexed)
@@ -535,6 +604,8 @@ async def search_cross_project(
     memory_type: MemoryType | None = None,
     exclude_ids: list[str] | None = None,
     sources: list[str] | None = None,
+    include_agent_provenance: bool = True,
+    include_pending_review: bool = False,
 ) -> list[MemoryRecall]:
     """Search memories from OTHER projects (cross-project insights).
 
@@ -575,6 +646,11 @@ async def search_cross_project(
         conditions.append(f"type = ${idx}")
         params.append(memory_type.value)
         idx += 1
+
+    if not include_agent_provenance:
+        conditions.append("write_provenance != 'agent'")
+    if not include_pending_review:
+        conditions.append("review_status = 'active'")
 
     if exclude_ids:
         conditions.append(f"NOT (id = ANY(${idx}::text[]))")
@@ -621,6 +697,8 @@ async def count_by_vector(
     project_id: str | None = None,
     agent_id: str | None = None,
     sources: list[str] | None = None,
+    include_agent_provenance: bool = True,
+    include_pending_review: bool = False,
 ) -> int:
     """Count total memories matching a vector search (same filters as search_by_vector, no LIMIT)."""
     conditions = ["embedding IS NOT NULL"]
@@ -638,6 +716,11 @@ async def count_by_vector(
         conditions.append(f"status = ${idx}")
         params.append(status.value)
         idx += 1
+
+    if not include_agent_provenance:
+        conditions.append("write_provenance != 'agent'")
+    if not include_pending_review:
+        conditions.append("review_status = 'active'")
 
     if memory_type:
         conditions.append(f"type = ${idx}")
@@ -1263,4 +1346,6 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         usefulness_count=row["usefulness_count"] if row["usefulness_count"] is not None else 0,
         last_boosted_at=row.get("last_boosted_at"),
         review_after=row["review_after"] if row.get("review_after") is not None else None,
+        write_provenance=row["write_provenance"] if row.get("write_provenance") is not None else "supervisor",
+        review_status=row["review_status"] if row.get("review_status") is not None else "active",
     )

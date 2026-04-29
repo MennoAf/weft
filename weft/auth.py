@@ -28,6 +28,54 @@ logger = logging.getLogger(__name__)
 # Request-scoped user identity. Set by middleware, read by connection layer.
 current_user_id: ContextVar[str | None] = ContextVar("current_user_id", default=None)
 
+# Request-scoped caller mode: 'supervisor' (Face / human / Orchestrator —
+# trusted) vs 'agent' (autonomous agent inside a Wick container — untrusted
+# write authority per Phase 2 / Q4 four-layer defense). Set by middleware
+# from the ``X-Weft-Caller-Mode`` request header. Defaults to 'supervisor'
+# so that pre-Phase-2 callers (and any path that doesn't go through the
+# HTTP middleware) keep their existing trust level — agent containers
+# explicitly opt in to the lower trust tier.
+CallerMode = str  # narrowed at runtime to {"supervisor", "agent"}
+_VALID_CALLER_MODES = {"supervisor", "agent"}
+DEFAULT_CALLER_MODE: CallerMode = "supervisor"
+
+current_caller_mode: ContextVar[CallerMode] = ContextVar(
+    "current_caller_mode", default=DEFAULT_CALLER_MODE,
+)
+
+
+def get_caller_mode() -> CallerMode:
+    """Return the current caller mode, defaulting to 'supervisor'.
+
+    Centralized so write paths don't have to know about the contextvar.
+    Anything other than the literal 'agent' falls back to 'supervisor' —
+    a malformed header can't accidentally upgrade trust.
+    """
+    mode = current_caller_mode.get()
+    if mode not in _VALID_CALLER_MODES:
+        return DEFAULT_CALLER_MODE
+    return mode
+
+
+def is_agent_caller() -> bool:
+    """Convenience predicate for Layer 1 enforcement."""
+    return get_caller_mode() == "agent"
+
+
+def parse_caller_mode_header(header_value: str | None) -> CallerMode:
+    """Normalize an ``X-Weft-Caller-Mode`` header into a known value.
+
+    Unknown / missing / malformed values resolve to 'supervisor'. Agent
+    containers must send the literal string 'agent' to enter the lower
+    trust tier — fail-closed against typos.
+    """
+    if not header_value:
+        return DEFAULT_CALLER_MODE
+    candidate = header_value.strip().lower()
+    if candidate in _VALID_CALLER_MODES:
+        return candidate
+    return DEFAULT_CALLER_MODE
+
 # Module-level JWKS client singleton — created once, reuses cached keys.
 _jwk_client: PyJWKClient | None = None
 _jwt_secret: str | None = None

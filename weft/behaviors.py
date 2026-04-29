@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.auth import is_agent_caller
 from weft.db.connection import get_db
 from weft.models import Behavior, BehaviorCreate, BehaviorMatch, BehaviorScope, _weft_id
 from weft.schema import SYSTEM_GLOBAL_USER_ID
@@ -26,7 +27,19 @@ async def store_behavior(
     create: BehaviorCreate,
     embedding: list[float] | None = None,
 ) -> Behavior:
-    """Store a new behavior. Returns the created Behavior."""
+    """Store a new behavior. Returns the created Behavior.
+
+    Phase 2 / Layer 1: behaviors are the highest-value memory-poisoning
+    target — they're retrieved as operating rules at the top of agent
+    context. Agent-mode callers cannot write behaviors in V1; promotion
+    is supervisor-only. Supervisor calls fall through and stamp
+    ``write_provenance='supervisor'``.
+    """
+    if is_agent_caller():
+        raise PermissionError(
+            "weft_behavior_add is supervisor-only — agent-mode callers cannot "
+            "create behaviors (Phase 2 / Layer 1)",
+        )
     behavior_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.trigger_pattern + " " + create.action)
@@ -37,12 +50,12 @@ async def store_behavior(
             id, trigger_pattern, action, confidence, scope,
             project_id, agent_id, user_id, priority, enabled,
             access_count, token_count, created_at, updated_at,
-            embedding, status
+            embedding, status, write_provenance
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, nullif(current_setting('app.user_id', true), ''), $8, $9,
             0, $10, $11, $11,
-            $12::vector, 'active'
+            $12::vector, 'active', 'supervisor'
         )
         """,
         behavior_id,
@@ -393,4 +406,7 @@ def _row_to_behavior(row: asyncpg.Record) -> Behavior:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         status=row["status"],
+        write_provenance=(
+            row["write_provenance"] if "write_provenance" in row.keys() else "supervisor"
+        ),
     )
