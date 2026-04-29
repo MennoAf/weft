@@ -522,6 +522,7 @@ async def weft_recall(
                     app.pool,
                     [r.memory.id for r in results],
                     "recall",
+                    retrieval_mode=retrieval_mode,
                 ),
                 name="weft-session-log-recall",
             )
@@ -1316,11 +1317,27 @@ async def weft_search_all(
         from weft.skills import search_all
 
         async with acquire(app.pool):
-            return await search_all(
+            result = await search_all(
                 app.pool, app.embedding,
                 query=query, topic=topic, memory_type=memory_type,
                 days=days, limit=limit, retrieval_mode=retrieval_mode,
             )
+
+        # Fire-and-forget read-side audit log (Phase 2 follow-on / mig 41).
+        # Brain-wide search returning a poisoned memory must be traceable
+        # the same way recall is — incident response shouldn't have to
+        # care whether the read came from weft_recall or weft_search_all.
+        import asyncio
+        result_ids = [r["id"] for r in result.get("results", []) if isinstance(r, dict) and "id" in r]
+        if result_ids:
+            asyncio.create_task(
+                log_memory_access(
+                    app.pool, result_ids, "search_all",
+                    retrieval_mode=retrieval_mode,
+                ),
+                name="weft-session-log-search-all",
+            )
+        return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_search_all", e)
 

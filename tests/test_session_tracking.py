@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from weft.auth import current_caller_mode, current_user_id
 from weft.models import MemoryCreate, MemorySource, MemoryType
 from weft.session_tracking import (
     IMPLICIT_ACCESS_BOOST,
@@ -260,6 +261,237 @@ async def test_get_session_memory_ids_empty_session(pool):
     """Empty session returns empty list."""
     ids = await get_session_memory_ids(pool, session_id="ses-none")
     assert ids == []
+
+
+# --- Read-side audit log (mig 41) ---
+
+
+@pytest.mark.asyncio
+async def test_log_access_stamps_reader_user_id_from_contextvar(pool):
+    """The audit row pulls reader_user_id from current_user_id contextvar."""
+    mem = await _create_memory(pool, "Audit reader stamp")
+    uid_token = current_user_id.set("user-incident-A")
+    try:
+        await log_memory_access(
+            pool, [mem.id], "recall", session_id="ses-audit-A",
+        )
+    finally:
+        current_user_id.reset(uid_token)
+
+    row = await pool.fetchrow(
+        """
+        SELECT reader_user_id, reader_caller_mode
+        FROM memory_access_log
+        WHERE session_id = $1 AND memory_id = $2
+        """,
+        "ses-audit-A", mem.id,
+    )
+    assert row["reader_user_id"] == "user-incident-A"
+    # No caller_mode set → defaults to supervisor (per get_caller_mode())
+    assert row["reader_caller_mode"] == "supervisor"
+
+
+@pytest.mark.asyncio
+async def test_log_access_stamps_caller_mode_agent(pool):
+    """An agent-mode caller's reads are tagged so a supervisor can filter for
+    agent-mode reads of a confirmed-poisoned memory during incident response."""
+    mem = await _create_memory(pool, "Audit agent-mode read")
+    uid_token = current_user_id.set("user-incident-B")
+    mode_token = current_caller_mode.set("agent")
+    try:
+        await log_memory_access(
+            pool, [mem.id], "recall", session_id="ses-audit-agent",
+            retrieval_mode="code",
+        )
+    finally:
+        current_caller_mode.reset(mode_token)
+        current_user_id.reset(uid_token)
+
+    row = await pool.fetchrow(
+        """
+        SELECT reader_user_id, reader_caller_mode, retrieval_mode
+        FROM memory_access_log
+        WHERE session_id = $1 AND memory_id = $2
+        """,
+        "ses-audit-agent", mem.id,
+    )
+    assert row["reader_user_id"] == "user-incident-B"
+    assert row["reader_caller_mode"] == "agent"
+    assert row["retrieval_mode"] == "code"
+
+
+@pytest.mark.asyncio
+async def test_log_access_records_retrieval_mode(pool):
+    """retrieval_mode flows through to the row so an audit query can
+    distinguish 'face' reads (Jason's queries) from 'code' reads (agent
+    in repo context)."""
+    mem = await _create_memory(pool, "retrieval_mode trace")
+    await log_memory_access(
+        pool, [mem.id], "recall", session_id="ses-mode-face",
+        retrieval_mode="face",
+    )
+    mode = await pool.fetchval(
+        """
+        SELECT retrieval_mode FROM memory_access_log
+        WHERE session_id = $1 AND memory_id = $2
+        """,
+        "ses-mode-face", mem.id,
+    )
+    assert mode == "face"
+
+
+@pytest.mark.asyncio
+async def test_log_access_unauthenticated_records_null_user(pool):
+    """If no auth context is set, reader_user_id is NULL — the row still
+    records the access for anomaly detection (a read with no caller_mode
+    binding is itself a signal)."""
+    mem = await _create_memory(pool, "No auth read")
+    # Explicitly clear auth context for this test
+    uid_token = current_user_id.set(None)
+    try:
+        await log_memory_access(
+            pool, [mem.id], "recall", session_id="ses-no-auth",
+        )
+    finally:
+        current_user_id.reset(uid_token)
+
+    row = await pool.fetchrow(
+        """
+        SELECT reader_user_id, reader_caller_mode
+        FROM memory_access_log
+        WHERE session_id = $1 AND memory_id = $2
+        """,
+        "ses-no-auth", mem.id,
+    )
+    assert row["reader_user_id"] is None
+    # caller_mode still gets a value (defaults to supervisor) because the
+    # contextvar always has a default — there's no "unset" state.
+    assert row["reader_caller_mode"] == "supervisor"
+
+
+@pytest.mark.asyncio
+async def test_log_access_dedup_keeps_first_caller_metadata(pool):
+    """Session-level dedup (existing PK semantics) means the FIRST caller's
+    metadata wins. This is intentional — for a poisoned memory, the first
+    reader is the one who pulled it into context. Subsequent reads in the
+    same session add no forensic value."""
+    mem = await _create_memory(pool, "Dedup audit metadata")
+    # First read: supervisor mode
+    uid_token = current_user_id.set("user-first")
+    try:
+        await log_memory_access(
+            pool, [mem.id], "recall", session_id="ses-dedup-meta",
+        )
+    finally:
+        current_user_id.reset(uid_token)
+
+    # Second read from same session, different metadata — should NOT overwrite
+    uid_token = current_user_id.set("user-second")
+    mode_token = current_caller_mode.set("agent")
+    try:
+        await log_memory_access(
+            pool, [mem.id], "context", session_id="ses-dedup-meta",
+        )
+    finally:
+        current_caller_mode.reset(mode_token)
+        current_user_id.reset(uid_token)
+
+    row = await pool.fetchrow(
+        """
+        SELECT reader_user_id, reader_caller_mode, tool_name
+        FROM memory_access_log
+        WHERE session_id = $1 AND memory_id = $2
+        """,
+        "ses-dedup-meta", mem.id,
+    )
+    # First write wins via ON CONFLICT DO NOTHING
+    assert row["reader_user_id"] == "user-first"
+    assert row["reader_caller_mode"] == "supervisor"
+    assert row["tool_name"] == "recall"
+
+
+@pytest.mark.asyncio
+async def test_audit_query_who_read_memory(pool):
+    """Incident-response query: given a poisoned memory, find every
+    (user_id, session_id, accessed_at) that read it. Uses the
+    idx_access_log_memory_recent index added in mig 41."""
+    mem = await _create_memory(pool, "Hot poisoned memory")
+
+    # Multiple users, multiple sessions read this memory
+    for uid, sid in [
+        ("user-X", "ses-X1"),
+        ("user-Y", "ses-Y1"),
+        ("user-X", "ses-X2"),
+    ]:
+        token = current_user_id.set(uid)
+        try:
+            await log_memory_access(
+                pool, [mem.id], "recall", session_id=sid,
+            )
+        finally:
+            current_user_id.reset(token)
+
+    rows = await pool.fetch(
+        """
+        SELECT reader_user_id, session_id, accessed_at
+        FROM memory_access_log
+        WHERE memory_id = $1
+        ORDER BY accessed_at DESC
+        """,
+        mem.id,
+    )
+    assert len(rows) == 3
+    readers = {(r["reader_user_id"], r["session_id"]) for r in rows}
+    assert readers == {
+        ("user-X", "ses-X1"),
+        ("user-Y", "ses-Y1"),
+        ("user-X", "ses-X2"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_audit_query_what_user_read(pool):
+    """Incident-response query: given a user_id, find everything they read
+    (across sessions) ordered by recency. Uses the
+    idx_access_log_user_recent partial index."""
+    mems = [await _create_memory(pool, f"User-X read {i}") for i in range(3)]
+
+    uid_token = current_user_id.set("user-trace-X")
+    try:
+        await log_memory_access(
+            pool, [m.id for m in mems], "recall",
+            session_id="ses-trace-X",
+        )
+    finally:
+        current_user_id.reset(uid_token)
+
+    rows = await pool.fetch(
+        """
+        SELECT memory_id FROM memory_access_log
+        WHERE reader_user_id = $1
+        ORDER BY accessed_at DESC
+        """,
+        "user-trace-X",
+    )
+    assert len(rows) == 3
+    assert {r["memory_id"] for r in rows} == {m.id for m in mems}
+
+
+@pytest.mark.asyncio
+async def test_caller_mode_check_constraint_rejects_invalid(pool):
+    """The CHECK constraint on reader_caller_mode rejects anything that
+    isn't supervisor / agent / NULL — defends against future mig drift."""
+    mem = await _create_memory(pool, "Constraint test")
+    import asyncpg
+    with pytest.raises(asyncpg.exceptions.CheckViolationError):
+        await pool.execute(
+            """
+            INSERT INTO memory_access_log
+                (session_id, memory_id, tool_name, reader_caller_mode)
+            VALUES ($1, $2, $3, $4)
+            """,
+            "ses-bad-mode", mem.id, "recall", "root",
+        )
 
 
 # --- Helper ---

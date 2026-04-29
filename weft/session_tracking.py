@@ -6,6 +6,13 @@ memories receive a small, session-deduplicated usefulness boost.
 
 Session ID is managed via contextvars so it threads through without
 polluting function signatures.
+
+Phase 2 follow-on (mig 41): the same write also records reader_user_id,
+reader_caller_mode, and retrieval_mode pulled from the auth contextvars,
+turning this table into the read-side audit log. The (session_id,
+memory_id) PK preserves session-deduplicated semantics for both the
+usefulness boost and the audit trail — first access wins, subsequent
+accesses in the same session add no forensic information.
 """
 
 from __future__ import annotations
@@ -15,6 +22,8 @@ import uuid
 from contextvars import ContextVar
 
 import asyncpg
+
+from weft.auth import current_user_id, get_caller_mode
 
 logger = logging.getLogger(__name__)
 
@@ -49,27 +58,43 @@ async def log_memory_access(
     memory_ids: list[str],
     tool_name: str,
     session_id: str | None = None,
+    retrieval_mode: str | None = None,
 ) -> None:
     """Log that memories were accessed in the current session.
 
     Fire-and-forget safe — never raises, logs warnings on failure.
     Uses INSERT ... ON CONFLICT DO NOTHING for session-level deduplication:
     accessing the same memory 5 times in one session records one row.
+
+    Phase 2 follow-on (mig 41): also stamps reader_user_id, reader_caller_mode,
+    and retrieval_mode from the auth contextvars so a supervisor can answer
+    "who read this poisoned memory and when?" during incident response.
+    Pulled from contextvars rather than passed explicitly because every
+    retrieval path goes through the same auth middleware — explicit args
+    would just be re-reading the same contextvars at every call site.
     """
     if not memory_ids:
         return
 
     sid = session_id or get_session_id()
+    reader_uid = current_user_id.get()
+    reader_mode = get_caller_mode()
 
     try:
         async with pool.acquire() as conn:
             await conn.executemany(
                 """
-                INSERT INTO memory_access_log (session_id, memory_id, tool_name)
-                VALUES ($1, $2, $3)
+                INSERT INTO memory_access_log (
+                    session_id, memory_id, tool_name,
+                    reader_user_id, reader_caller_mode, retrieval_mode
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (session_id, memory_id) DO NOTHING
                 """,
-                [(sid, mid, tool_name) for mid in memory_ids],
+                [
+                    (sid, mid, tool_name, reader_uid, reader_mode, retrieval_mode)
+                    for mid in memory_ids
+                ],
             )
     except Exception as e:
         logger.warning("memory_access_log write failed: %s", e)
