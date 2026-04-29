@@ -19,6 +19,7 @@ from typing import Any, Literal
 from anthropic import AsyncAnthropic
 
 from weft.date_parser import parse_dates
+from weft.db.connection import acquire
 
 logger = logging.getLogger(__name__)
 
@@ -414,21 +415,7 @@ async def route(
 
     for intent in intents:
         try:
-            # --- Resolve entities ---
-            entity_ids: dict[str, str] = {}
-            if intent.entities and embedding_provider:
-                entity_ids = await resolve_entities(
-                    intent.entities,
-                    pool,
-                    embedding_provider,
-                    project_id=project_id,
-                    _cache=entity_cache,
-                )
-                result.entities_created += sum(
-                    1 for _ in entity_ids.values()
-                )  # approximate; cache hits counted too
-
-            # --- Build memory ---
+            # --- Build memory inputs (HTTP / pure logic — outside acquire) ---
             mem_type_str = _INTENT_MEMORY_TYPE.get(intent.type, "fact")
             topics = [f"intent:{intent.type}"]
             if intent.entities:
@@ -442,51 +429,68 @@ async def route(
                 except Exception:
                     logger.warning("route.embed_failed for intent: %s", intent.type)
 
-            create = MemoryCreate(
-                type=MemoryType(mem_type_str),
-                content=intent.content,
-                topic=topics,
-                source=MemorySource(source) if source in MemorySource._value2member_map_ else MemorySource.ingest,
-                confidence=intent.confidence,
-                project_id=project_id,
-            )
-            memory = await store_memory(pool, create, embedding=embedding)
-            result.memories_created += 1
-
-            # --- Link entities to memory ---
-            for entity_name, entity_id in entity_ids.items():
-                try:
-                    await link_mention(pool, entity_id, memory.id)
-                    result.entities_linked += 1
-                except Exception:
-                    logger.exception(
-                        "route.link_error: entity=%s memory=%s",
-                        entity_id, memory.id,
+            # --- DB writes — must run inside acquire() so SET LOCAL
+            # app.user_id fires; without this the migration-34 NOT NULL on
+            # memories.user_id (and the equivalent on entities) trips.
+            async with acquire(pool):
+                # --- Resolve entities ---
+                entity_ids: dict[str, str] = {}
+                if intent.entities and embedding_provider:
+                    entity_ids = await resolve_entities(
+                        intent.entities,
+                        pool,
+                        embedding_provider,
+                        project_id=project_id,
+                        _cache=entity_cache,
                     )
+                    result.entities_created += sum(
+                        1 for _ in entity_ids.values()
+                    )  # approximate; cache hits counted too
 
-            # --- Create alert if applicable ---
-            alert_type_str = _INTENT_ALERT_TYPES.get(intent.type)
-            if alert_type_str:
-                if intent.dates:
-                    trigger_at = intent.dates[0]
-                else:
-                    trigger_at = datetime.now(timezone.utc) + timedelta(
-                        hours=_DEFAULT_ALERT_HOURS
-                    )
-                # Ensure timezone-aware
-                if trigger_at.tzinfo is None:
-                    trigger_at = trigger_at.replace(tzinfo=timezone.utc)
-
-                alert_create = AlertCreate(
-                    alert_type=AlertType(alert_type_str),
-                    title=intent.content[:200],
-                    body=intent.raw_text[:500] if intent.raw_text else None,
-                    trigger_at=trigger_at,
-                    channel=AlertChannel.log,
+                create = MemoryCreate(
+                    type=MemoryType(mem_type_str),
+                    content=intent.content,
+                    topic=topics,
+                    source=MemorySource(source) if source in MemorySource._value2member_map_ else MemorySource.ingest,
+                    confidence=intent.confidence,
                     project_id=project_id,
                 )
-                await create_alert(pool, alert_create)
-                result.alerts_created += 1
+                memory = await store_memory(pool, create, embedding=embedding)
+                result.memories_created += 1
+
+                # --- Link entities to memory ---
+                for entity_name, entity_id in entity_ids.items():
+                    try:
+                        await link_mention(pool, entity_id, memory.id)
+                        result.entities_linked += 1
+                    except Exception:
+                        logger.exception(
+                            "route.link_error: entity=%s memory=%s",
+                            entity_id, memory.id,
+                        )
+
+                # --- Create alert if applicable ---
+                alert_type_str = _INTENT_ALERT_TYPES.get(intent.type)
+                if alert_type_str:
+                    if intent.dates:
+                        trigger_at = intent.dates[0]
+                    else:
+                        trigger_at = datetime.now(timezone.utc) + timedelta(
+                            hours=_DEFAULT_ALERT_HOURS
+                        )
+                    if trigger_at.tzinfo is None:
+                        trigger_at = trigger_at.replace(tzinfo=timezone.utc)
+
+                    alert_create = AlertCreate(
+                        alert_type=AlertType(alert_type_str),
+                        title=intent.content[:200],
+                        body=intent.raw_text[:500] if intent.raw_text else None,
+                        trigger_at=trigger_at,
+                        channel=AlertChannel.log,
+                        project_id=project_id,
+                    )
+                    await create_alert(pool, alert_create)
+                    result.alerts_created += 1
 
         except Exception as exc:
             logger.exception(
