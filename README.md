@@ -422,7 +422,47 @@ weft obsidian init VAULT_PATH  Create vault folder structure and templates
 weft obsidian sync VAULT_PATH  Sync vault into Weft memories (--dry-run, --hash-store)
 weft config show               Display current configuration
 weft config set KEY VAL        Persist a config value to ~/.weft/config.toml
+weft tokens issue              Mint a bearer token (--user-id, --mode, --label, --expires-in)
+weft tokens list               List a user's tokens (--user-id, --include-revoked)
+weft tokens revoke HASH        Revoke a token by full SHA-256 hash
+weft identity show             Show resolved local user_id and source
+weft identity set USER_ID      Persist user_id to ~/.weft/user_id.json
 ```
+
+## Authentication
+
+The hosted MCP server (`weft-mcp.fly.dev`) authenticates each request via
+the `Authorization: Bearer <token>` header. Tokens are first-class
+credentials — each one is bound at issuance to a specific `user_id` and
+`caller_mode` (`supervisor` or `agent`). The middleware looks the bearer
+up by SHA-256 hash and refuses any request whose token doesn't resolve.
+
+Mint a token via the CLI on the host that holds the database, or via the
+`weft_token_issue` MCP tool from a supervisor session:
+
+```bash
+weft tokens issue \
+  --user-id <uuid> \
+  --mode supervisor \
+  --label face-2026-04 \
+  --expires-in 90d
+# Token: weft-...
+# Hash:  <64-char sha256>
+# Store this token now — it will not be shown again.
+```
+
+Pass the token as the `Authorization` header on every `/mcp` call.
+Revoke by hash with `weft tokens revoke <hash>` when rotating or
+retiring a credential. See `docs/user-identity.md` for the resolution
+chain, caller-mode semantics, and the agent-floor / non-escalation
+guarantee.
+
+**Legacy `WEFT_API_KEY`** still works: at lifespan startup the server
+auto-bootstraps a token row labeled `legacy-env-key` matching the env
+value, so existing clients keep authenticating through the same
+credential machinery. A deprecation warning fires on every successful
+resolution — migrate to issued tokens before the env-var path is
+removed.
 
 ## Configuration
 
@@ -442,6 +482,9 @@ Weft uses four-layer configuration with increasing precedence:
 | `WEFT_EMBEDDING_PROVIDER` | Embedding provider | `fastembed` |
 | `WEFT_EMBEDDING_MODEL` | Embedding model | `BAAI/bge-small-en-v1.5` |
 | `WEFT_LOG_LEVEL` | Log level | `INFO` |
+| `WEFT_API_KEY` | Hosted server bearer (legacy — auto-bootstraps a token row at startup; see Authentication) | unset |
+| `WEFT_DEFAULT_USER_ID` | UUID the legacy bootstrap row binds to. Required for the `weft_api_key` path and for background scheduler tasks (Slack sync) that have no HTTP request scope | unset |
+| `WEFT_OAUTH_ENABLED` | Enable Supabase JWT fallback when the bearer doesn't match a token row | `0` |
 
 ### Configurable keys
 
@@ -489,7 +532,7 @@ Both services include health checks. Data is persisted in named Docker volumes (
 
 ```bash
 uv sync                        # Install dependencies
-uv run pytest tests/ -v        # Run all tests (835 tests)
+uv run pytest tests/ -v        # Run all tests (2380+ tests)
 uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
