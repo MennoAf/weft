@@ -903,3 +903,190 @@ def identity_set(user_id: str):
             f"config file. Unset it to make the persisted value authoritative."
         )
 
+
+@cli.group()
+def tokens():
+    """Manage Weft bearer tokens (Phase 2.5 credential-bound auth).
+
+    Tokens are first-class auth credentials: each one binds a user to a
+    caller mode (supervisor or agent) at issuance time. The middleware
+    resolves Authorization headers through these rows, so an agent
+    holding a valid token cannot forge ``X-Weft-Caller-Mode: supervisor``.
+
+    Bootstrap flow for a new install:
+      weft tokens issue --user-id <UUID> --mode supervisor --label face
+      → copy the printed token, set as Authorization header on the client.
+    """
+    pass
+
+
+def _parse_expires_in(spec: str | None) -> "timedelta | None":
+    """Accept '30d', '12h', '60m'. None means no expiry."""
+    from datetime import timedelta
+
+    if not spec:
+        return None
+    spec = spec.strip().lower()
+    units = {"d": "days", "h": "hours", "m": "minutes"}
+    if spec[-1] not in units or not spec[:-1].isdigit():
+        raise click.BadParameter(
+            f"--expires-in must be N(d|h|m), got {spec!r}"
+        )
+    return timedelta(**{units[spec[-1]]: int(spec[:-1])})
+
+
+def _format_token_status(row) -> str:
+    if row.revoked_at is not None:
+        return "revoked"
+    if row.expires_at is not None and not row.is_active():
+        return "expired"
+    return "active"
+
+
+def _format_dt(dt) -> str:
+    if dt is None:
+        return "-"
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _short_hash(token_hash: str) -> str:
+    """First 12 chars of the SHA-256 hex — enough to disambiguate
+    in the listing without leaking enough material to be useful if
+    the table output ends up in a bug report."""
+    return token_hash[:12]
+
+
+@tokens.command("issue")
+@click.option("--user-id", required=True, help="User this token belongs to.")
+@click.option(
+    "--mode",
+    type=click.Choice(["supervisor", "agent"]),
+    required=True,
+    help="Caller mode the token is bound to.",
+)
+@click.option("--label", default=None, help="Operator-supplied free text.")
+@click.option(
+    "--expires-in",
+    default=None,
+    help="Optional expiry: N(d|h|m), e.g. 30d. Default: never expires.",
+)
+def tokens_issue(user_id: str, mode: str, label: str | None, expires_in: str | None):
+    """Mint a bearer token. Plaintext is printed ONCE — store it now."""
+    expires_delta = _parse_expires_in(expires_in)
+
+    async def _issue():
+        import asyncpg
+        from weft.credentials import issue_token
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        try:
+            return await issue_token(
+                pool,
+                user_id=user_id,
+                caller_mode=mode,
+                label=label,
+                expires_in=expires_delta,
+            )
+        finally:
+            await pool.close()
+
+    plaintext, row = asyncio.run(_issue())
+    click.echo(f"Token: {plaintext}")
+    click.echo(f"Hash:  {row.token_hash}")
+    click.echo(f"User:  {row.user_id}")
+    click.echo(f"Mode:  {row.caller_mode}")
+    if row.label:
+        click.echo(f"Label: {row.label}")
+    if row.expires_at:
+        click.echo(f"Expires: {_format_dt(row.expires_at)}")
+    click.echo("")
+    click.echo(
+        "Store this token now — it will not be shown again. "
+        "Use the hash to revoke later."
+    )
+
+
+@tokens.command("list")
+@click.option(
+    "--user-id",
+    required=True,
+    help="User whose tokens to list.",
+)
+@click.option(
+    "--include-revoked",
+    is_flag=True,
+    default=False,
+    help="Include revoked rows alongside live ones.",
+)
+def tokens_list(user_id: str, include_revoked: bool):
+    """List a user's tokens, newest first."""
+    async def _list():
+        import asyncpg
+        from weft.credentials import list_tokens
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        try:
+            return await list_tokens(
+                pool, user_id, include_revoked=include_revoked,
+            )
+        finally:
+            await pool.close()
+
+    rows = asyncio.run(_list())
+    if not rows:
+        click.echo("No tokens found.")
+        return
+
+    header = (
+        f"{'HASH':<14}{'MODE':<11}{'LABEL':<22}"
+        f"{'CREATED':<18}{'LAST USED':<18}{'STATUS':<9}"
+    )
+    click.echo(header)
+    click.echo("-" * len(header))
+    for row in rows:
+        click.echo(
+            f"{_short_hash(row.token_hash):<14}"
+            f"{row.caller_mode:<11}"
+            f"{(row.label or '-'):<22}"
+            f"{_format_dt(row.created_at):<18}"
+            f"{_format_dt(row.last_used_at):<18}"
+            f"{_format_token_status(row):<9}"
+        )
+
+
+@tokens.command("revoke")
+@click.argument("token_hash")
+def tokens_revoke(token_hash: str):
+    """Revoke a token by its full SHA-256 hash.
+
+    Get the hash from `weft tokens list` (the HASH column shows the
+    first 12 chars; pass the full 64-char value here to disambiguate
+    intent — partial hashes are deliberately not accepted)."""
+    if len(token_hash) != 64:
+        raise click.BadParameter(
+            f"token_hash must be the full 64-char SHA-256 hex, got {len(token_hash)} chars"
+        )
+
+    async def _revoke():
+        import asyncpg
+        from weft.credentials import revoke_token
+
+        config = load_config()
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        try:
+            return await revoke_token(pool, token_hash)
+        finally:
+            await pool.close()
+
+    flipped = asyncio.run(_revoke())
+    if flipped:
+        click.echo(f"Revoked {_short_hash(token_hash)}")
+    else:
+        click.echo(
+            f"No live token matched {_short_hash(token_hash)} "
+            "(unknown hash or already revoked).",
+            err=True,
+        )
+
