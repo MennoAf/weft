@@ -326,3 +326,39 @@ class TestEmptyBatch:
         assert report.flagged == 0
         assert report.errors == []
         assert client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Scheduler loop
+# ---------------------------------------------------------------------------
+
+
+class TestSchedulerLoop:
+    """quarantine_review_loop disables gracefully when there's no API key."""
+
+    async def test_loop_disables_without_api_key(self, pool, monkeypatch):
+        """No ANTHROPIC_API_KEY and no config.api_key → loop exits cleanly.
+
+        Layer 3 regex still applies in this scenario; the LLM catch-up just
+        doesn't run. The MCP server lifespan must not crash on the missing
+        credential.
+        """
+        from weft.scheduler import quarantine_review_loop
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        # Mock load_config to return a config with no api_key set.
+        import weft.scheduler as scheduler_mod
+        from weft.config import WeftConfig
+
+        def _no_key_config():
+            cfg = WeftConfig()
+            cfg.api_key = None
+            return cfg
+
+        # The function imports load_config locally; patch via the source.
+        import weft.config as config_mod
+        monkeypatch.setattr(config_mod, "load_config", _no_key_config)
+
+        # Loop must return (not raise) when no key is available.
+        await quarantine_review_loop(pool, interval=60)

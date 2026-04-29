@@ -33,7 +33,15 @@ from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.oauth_consent import handle_consent
 from weft.mcp.slack_commands import handle_slash_checkin
-from weft.scheduler import daily_brief_loop, loom_awareness_loop, memory_hygiene_loop, scheduler_loop, slack_sync_loop, trigger_evaluation_loop
+from weft.scheduler import (
+    daily_brief_loop,
+    loom_awareness_loop,
+    memory_hygiene_loop,
+    quarantine_review_loop,
+    scheduler_loop,
+    slack_sync_loop,
+    trigger_evaluation_loop,
+)
 from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
@@ -459,6 +467,17 @@ async def lifespan(server: FastMCP):
     ctx._trigger_eval_task = asyncio.create_task(
         trigger_evaluation_loop(pool)
     )
+    ctx._quarantine_review_task = None
+    if config.quarantine_review.enabled:
+        ctx._quarantine_review_task = asyncio.create_task(
+            quarantine_review_loop(
+                pool,
+                interval=config.quarantine_review.interval,
+                limit=config.quarantine_review.limit,
+                concurrency=config.quarantine_review.concurrency,
+                model=config.quarantine_review.model,
+            )
+        )
 
     # OAuth in the new architecture is delegated to Supabase's OAuth 2.1
     # server. Weft hosts only the consent page (see weft/mcp/oauth_consent.py)
@@ -475,7 +494,7 @@ async def lifespan(server: FastMCP):
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task):
+        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._quarantine_review_task):
             if task is not None:
                 task.cancel()
                 try:

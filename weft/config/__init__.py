@@ -128,6 +128,16 @@ class PrimerConfig(BaseModel):
     )
 
 
+class QuarantineReviewConfig(BaseModel):
+    """Layer 3.5 — periodic LLM review of agent-provenance writes."""
+
+    enabled: bool = True
+    interval: int = 21600  # 6h between cycles by default
+    limit: int = 100  # max memories per cycle
+    concurrency: int = 4  # bounded concurrent Anthropic calls
+    model: str = "claude-haiku-4-5-20251001"
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     project_name: str = "default"
@@ -139,6 +149,9 @@ class WeftConfig(BaseModel):
     alert: AlertConfig = Field(default_factory=AlertConfig)
     slack_sync: SlackSyncConfig = Field(default_factory=SlackSyncConfig)
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
+    quarantine_review: QuarantineReviewConfig = Field(
+        default_factory=QuarantineReviewConfig
+    )
     primer: PrimerConfig = Field(default_factory=PrimerConfig)
     api_key: str | None = None
     supabase_url: str | None = None
@@ -274,6 +287,7 @@ def _coerce_value(key: str, value: str) -> object:
         ("alert", AlertConfig),
         ("slack_sync", SlackSyncConfig),
         ("daily_brief", DailyBriefConfig),
+        ("quarantine_review", QuarantineReviewConfig),
         ("primer", PrimerConfig),
     ]:
         for field_name, field_info in section_model.model_fields.items():
@@ -333,6 +347,10 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
         for k, v in data["daily_brief"].items():
             if hasattr(config.daily_brief, k):
                 setattr(config.daily_brief, k, v)
+    if "quarantine_review" in data and isinstance(data["quarantine_review"], dict):
+        for k, v in data["quarantine_review"].items():
+            if hasattr(config.quarantine_review, k):
+                setattr(config.quarantine_review, k, v)
     if "primer" in data and isinstance(data["primer"], dict):
         for k, v in data["primer"].items():
             if hasattr(config.primer, k):
@@ -372,6 +390,8 @@ def _flatten_yaml(data: dict) -> dict:
         flat["slack_sync"] = SlackSyncConfig(**data["slack_sync"])
     if "daily_brief" in data:
         flat["daily_brief"] = DailyBriefConfig(**data["daily_brief"])
+    if "quarantine_review" in data:
+        flat["quarantine_review"] = QuarantineReviewConfig(**data["quarantine_review"])
     if "primer" in data:
         flat["primer"] = PrimerConfig(**data["primer"])
     if "logging" in data and "level" in data["logging"]:
