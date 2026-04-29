@@ -21,28 +21,60 @@ calls. It never reads it from anywhere else.
 
 ### Hosted MCP server
 
-The deployed server (`weft-mcp.fly.dev`) extracts `user_id` per-request
-from the caller's Supabase JWT. Flow:
+The deployed server resolves identity per-request through the
+Authorization header. Phase 2.5 made bearer tokens first-class
+credentials — each issued token binds a `user_id` AND a `caller_mode`
+('supervisor' or 'agent') at issuance time, persisted as a SHA-256 hash
+in `weft_tokens`. Resolution path:
 
 ```
-Authorization: Bearer <jwt>
-  → weft.auth.extract_user_id_from_header (decodes the sub claim)
-  → current_user_id ContextVar
-  → weft.db.connection.set_user_context (SET LOCAL app.user_id)
+Authorization: Bearer <token>
+  → weft.credentials.lookup_token (sha256 → row)
+  → row.user_id     → current_user_id ContextVar
+  → row.caller_mode → current_caller_mode ContextVar
+  → weft.db.connection.acquire (SET LOCAL app.user_id)
   → INSERTs use nullif(current_setting('app.user_id', true), '')
 ```
 
-The JWT `sub` claim is the identity. No config file involved.
+A token row is the identity. No JWT decode in the hot path.
 
-**Single-tenant fallback.** While Supabase user auth isn't wired through
-the Claude Code MCP client (blocked on upstream OAuth token-exchange
-support), the server supports a `WEFT_DEFAULT_USER_ID` env var. When the
-API key gate accepts a request and no valid JWT is attached, writes are
-stamped with the default UUID. The fallback is coupled to API-key
-authentication — anonymous traffic never inherits the default identity.
-Clear or unset the variable the moment a second user arrives; JWT sub
-already takes precedence when present, so shipping real auth doesn't
-require pulling the fallback first.
+**JWT fallback.** If the bearer doesn't match a token row and Supabase
+OAuth is enabled (`WEFT_OAUTH_ENABLED=1`), the server falls back to
+verifying the bearer as a Supabase JWT. The `sub` claim becomes the
+user_id and caller_mode defaults to 'supervisor' (until OAuth scope
+claims ship). A token row always wins over JWT — same bearer, same
+identity, predictable resolution.
+
+**Legacy WEFT_API_KEY.** Existing deployments that ship the server's
+bearer via the `WEFT_API_KEY` env var still work: at lifespan startup,
+Weft hashes the env value and inserts a matching token row labeled
+`legacy-env-key`, bound to `WEFT_DEFAULT_USER_ID` and supervisor mode.
+Idempotent across restarts. The credential then resolves through
+`lookup_token` like any other bearer; a deprecation warning fires on
+each successful resolution. Migrate to per-client issued tokens via
+`weft tokens issue` (or the `weft_token_issue` MCP tool) and rotate
+before the env-var path is removed.
+
+### Caller modes
+
+Every token is bound at issuance to one of two trust tiers:
+
+- **`supervisor`** — full write authority. The Face (Claude Code with
+  the human in the loop) and the operator's CLI. Supervisor tokens may
+  *downgrade* themselves to agent for testing by sending
+  `X-Weft-Caller-Mode: agent` on the request.
+- **`agent`** — agent containers (e.g. Wick) running autonomously.
+  Writes flagged as instruction-shaped by Layer 3 land in
+  `review_status='pending_review'` and stay invisible to recall until
+  the supervisor approves them via `weft_quarantine_review`. Agent
+  tokens **cannot escalate** — the row's `caller_mode` is the floor;
+  any `X-Weft-Caller-Mode: supervisor` header on an agent token is
+  ignored.
+
+The caller mode is a row-level fact. Read by `current_caller_mode` in
+`store_memory` (stamped into `memories.write_provenance`) and by
+`weft_quarantine_review` / `weft_token_*` (which reject agent-mode
+calls outright).
 
 ## The binding problem
 
