@@ -437,6 +437,92 @@ async def trigger_evaluation_loop(
         raise
 
 
+# --- Quarantine LLM-review loop (Layer 3.5) ---
+
+# Floor mirrors the existing Slack-sync minimum: a sub-minute interval
+# would only burn API calls.
+_MIN_QUARANTINE_REVIEW_INTERVAL = 60
+
+
+async def quarantine_review_loop(
+    pool: asyncpg.Pool,
+    *,
+    interval: int = 21600,  # 6h default — agent writes don't accumulate fast
+    limit: int = 100,
+    concurrency: int = 4,
+    model: str = "claude-haiku-4-5-20251001",
+) -> None:
+    """Periodic Layer 3.5 LLM review of agent-provenance writes.
+
+    Builds an ``AsyncAnthropic`` client once from the configured API key
+    and reuses it across cycles. Skips quietly (no exception) if no API
+    key is available — Layer 3 regex still applies. Per-cycle errors are
+    logged and the loop continues.
+
+    See ``weft.quarantine_review.llm_review_pending`` for the per-cycle
+    semantics.
+    """
+    from anthropic import AsyncAnthropic
+
+    from weft.config import load_config
+    from weft.quarantine_review import llm_review_pending
+
+    config = load_config()
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or config.api_key
+    if not api_key:
+        logger.warning(
+            "quarantine_review.no_api_key — Layer 3.5 LLM review disabled "
+            "(Layer 3 regex still applies)"
+        )
+        return
+
+    interval = max(interval, _MIN_QUARANTINE_REVIEW_INTERVAL)
+    client = AsyncAnthropic(api_key=api_key)
+    logger.info(
+        "quarantine_review.started",
+        extra={"interval": interval, "limit": limit, "concurrency": concurrency},
+    )
+    try:
+        while True:
+            t0 = time.monotonic()
+            try:
+                report = await llm_review_pending(
+                    pool, client,
+                    limit=limit,
+                    concurrency=concurrency,
+                    model=model,
+                )
+                elapsed = time.monotonic() - t0
+                if report.checked or report.flagged or report.errors:
+                    logger.info(
+                        "quarantine_review.cycle",
+                        extra={
+                            "checked": report.checked,
+                            "flagged": report.flagged,
+                            "ambiguous": report.ambiguous,
+                            "errors": len(report.errors),
+                            "elapsed_s": round(elapsed, 1),
+                        },
+                    )
+                if report.flagged:
+                    logger.warning(
+                        "quarantine_review.flagged_pending_review",
+                        extra={
+                            "flagged_count": report.flagged,
+                            "flagged_ids": report.flagged_ids,
+                        },
+                    )
+            except Exception:
+                logger.exception("quarantine_review.cycle_error")
+                # Loop continues — watermark is preserved on failure so the
+                # next cycle picks up where this one left off.
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("quarantine_review.stopped")
+        raise
+
+
 async def _post_brief_to_slack(channel: str, brief_result) -> None:
     """Post the assembled brief to Slack via Block Kit."""
     import ssl
