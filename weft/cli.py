@@ -498,6 +498,22 @@ def backup(output_file: str | None):
     click.echo(f"  Memories: {data['memory_count']}")
     click.echo(f"  Relationships: {data['relationship_count']}")
     click.echo(f"  With embeddings: {report['memories_with_embeddings']}")
+    # v1.2 sections — only show non-zero counts to keep the output tight.
+    for key in (
+        "behaviors_count",
+        "entities_count",
+        "entity_mentions_count",
+        "episodes_count",
+        "episode_memories_count",
+        "modes_count",
+        "trackers_count",
+        "workspaces_count",
+        "workspace_members_count",
+    ):
+        n = report.get(key, 0)
+        if n:
+            label = key.removesuffix("_count").replace("_", " ").title()
+            click.echo(f"  {label}: {n}")
     click.echo(f"  Checksum: {data['checksum'][:16]}...")
 
 
@@ -550,10 +566,24 @@ def restore(file: str, dry_run: bool, no_skip_duplicates: bool):
 
     prefix = "(dry run) " if dry_run else ""
     click.echo(f"\n{prefix}Restore Report:")
-    click.echo(f"  Memories restored: {result['memories_restored']}")
-    click.echo(f"  Memories skipped: {result['memories_skipped']}")
-    click.echo(f"  Relationships restored: {result['relationships_restored']}")
-    click.echo(f"  Relationships skipped: {result['relationships_skipped']}")
+    for section in (
+        "memories",
+        "relationships",
+        "behaviors",
+        "entities",
+        "entity_mentions",
+        "episodes",
+        "episode_memories",
+        "modes",
+        "trackers",
+        "workspaces",
+        "workspace_members",
+    ):
+        restored = result.get(f"{section}_restored", 0)
+        skipped = result.get(f"{section}_skipped", 0)
+        if restored or skipped:
+            label = section.replace("_", " ").title()
+            click.echo(f"  {label}: {restored} restored, {skipped} skipped")
     if result["errors"]:
         click.echo(f"  Errors: {len(result['errors'])}")
         for err in result["errors"]:
