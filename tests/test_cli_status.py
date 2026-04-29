@@ -1,11 +1,32 @@
 """Tests for ingest adapters (weft/ingest_adapters.py) and smart sync integration."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from weft.ingest_adapters import ADAPTERS, SlackAdapter, IngestAdapter
 from weft.ingest_pipeline import IngestResult
+
+
+@pytest.fixture(autouse=True)
+def _patch_acquire_for_mock_pools():
+    """Phase-2.5 wraps DB writes in weft.db.connection.acquire() in
+    both ingest_pipeline.route and slack.sync. The smart-sync
+    integration tests below run against AsyncMock pools that don't
+    model the acquire contract — patch acquire to a no-op in both
+    consumers so these tests keep exercising the routing logic.
+    Real-pool coverage lives in tests/test_ingest_pipeline_acquire.py
+    and tests/test_slack_sync_acquire.py."""
+    @asynccontextmanager
+    async def _noop_acquire(_pool):
+        yield None
+
+    with (
+        patch("weft.ingest_pipeline.acquire", _noop_acquire),
+        patch("weft.slack.sync.acquire", _noop_acquire),
+    ):
+        yield
 
 
 # --- SlackAdapter pre-filtering tests ---

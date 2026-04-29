@@ -5,6 +5,7 @@ with fully mocked LLM calls.
 """
 
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,24 @@ from weft.ingest_pipeline import (
     resolve_entities,
     route,
 )
+
+
+@pytest.fixture(autouse=True)
+def _patch_acquire_for_mock_pools():
+    """Phase-2.5 ingest_pipeline.route now wraps DB writes in
+    weft.db.connection.acquire(), which expects a real asyncpg pool.
+    These unit tests use AsyncMock pools that don't model the acquire
+    contract; patch acquire to a no-op context manager so they keep
+    exercising the classification + routing logic. Full-stack
+    coverage lives in tests/test_ingest_pipeline_acquire.py against
+    the real pool fixture."""
+    @asynccontextmanager
+    async def _noop_acquire(_pool):
+        yield None
+
+    with patch("weft.ingest_pipeline.acquire", _noop_acquire):
+        yield
+
 
 # --- Mock LLM response helpers ---
 
