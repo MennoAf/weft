@@ -136,12 +136,17 @@ async def search_all(
 ) -> dict:
     """Cross-project search combining semantic + filter queries."""
     from weft.models import MemoryType
-    from weft.retrieval_modes import sources_for_mode
+    from weft.retrieval_modes import (
+        include_agent_provenance,
+        sources_for_mode,
+        wrap_untrusted_for_face,
+    )
 
     if not any([query, topic, memory_type, days]):
         return {"error": "At least one filter required (query, topic, memory_type, or days)"}
 
     sources = sources_for_mode(retrieval_mode)
+    agent_provenance_ok = include_agent_provenance(retrieval_mode)
 
     # If we have a text query, use vector search
     if query and embedding_provider:
@@ -151,6 +156,7 @@ async def search_all(
             pool, embedding, limit=limit, topic=topic,
             memory_type=mt, project_id=None,  # brain-wide
             sources=sources,
+            include_agent_provenance=agent_provenance_ok,
         )
 
         # Post-filter by days if specified
@@ -158,17 +164,31 @@ async def search_all(
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             results = [r for r in results if r.memory.created_at >= cutoff]
 
+        projected = []
+        for r in results:
+            d = r.to_dict()
+            if retrieval_mode == "face":
+                d["content"] = wrap_untrusted_for_face(
+                    d["content"], r.memory.write_provenance,
+                )
+            projected.append(d)
+
         return {
             "query": query,
             "filters": {"topic": topic, "type": memory_type, "days": days},
             "count": len(results),
-            "results": [r.to_dict() for r in results],
+            "results": projected,
         }
 
     # Filter-only search (no semantic query)
     conditions = ["status = 'active'"]
     params: list = []
     idx = 1
+
+    # Phase 2 Layer 2/3 filters mirror the search_by_vector branch above.
+    if not agent_provenance_ok:
+        conditions.append("write_provenance != 'agent'")
+    conditions.append("review_status = 'active'")
 
     if topic:
         conditions.append(f"${idx} = ANY(topic)")
@@ -201,23 +221,27 @@ async def search_all(
     params.append(limit)
 
     rows = await pool.fetch(sql, *params)
+    items = []
+    for row in rows:
+        content = row["content"][:300]
+        if retrieval_mode == "face":
+            wp = row["write_provenance"] if "write_provenance" in row.keys() else "supervisor"
+            content = wrap_untrusted_for_face(content, wp)
+        items.append({
+            "id": row["id"],
+            "type": row["type"],
+            "content": content,
+            "topic": row["topic"] or [],
+            "source": row["source"],
+            "confidence": float(row["confidence"]),
+            "created_at": row["created_at"].isoformat(),
+            "project_id": row["project_id"],
+        })
     return {
         "query": query,
         "filters": {"topic": topic, "type": memory_type, "days": days},
         "count": len(rows),
-        "results": [
-            {
-                "id": row["id"],
-                "type": row["type"],
-                "content": row["content"][:300],
-                "topic": row["topic"] or [],
-                "source": row["source"],
-                "confidence": float(row["confidence"]),
-                "created_at": row["created_at"].isoformat(),
-                "project_id": row["project_id"],
-            }
-            for row in rows
-        ],
+        "results": items,
     }
 
 

@@ -64,6 +64,11 @@ from weft.models import (
     TrackerState,
     TrackerStateLiteral,
 )
+from weft.quarantine import (
+    approve_pending as approve_pending_quarantine,
+    list_pending as list_pending_quarantine,
+    reject_pending as reject_pending_quarantine,
+)
 from weft.tokens import estimate_tokens
 from weft.session_tracking import boost_session_memories, log_memory_access
 from weft.store import (
@@ -370,8 +375,17 @@ async def weft_recall(
         if mode not in ("semantic", "keyword", "hybrid"):
             mode = "hybrid"
 
-        from weft.retrieval_modes import sources_for_mode
+        from weft.retrieval_modes import (
+            include_agent_provenance,
+            sources_for_mode,
+            wrap_untrusted_for_face,
+        )
         sources = sources_for_mode(retrieval_mode)
+        # Phase 2 Layer 2: agent-context retrieval (mode='code') default-
+        # excludes agent-provenance rows; Face/all retrieval keeps them
+        # and the projection below wraps them with the untrusted-write
+        # prefix so Jason can tell what came from an agent.
+        agent_provenance_ok = include_agent_provenance(retrieval_mode)
 
         # Keyword mode doesn't need an embedding
         embedding = None
@@ -391,6 +405,7 @@ async def weft_recall(
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
+                    include_agent_provenance=agent_provenance_ok,
                 )
             elif mode == "hybrid":
                 results = await search_hybrid(
@@ -406,6 +421,7 @@ async def weft_recall(
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
+                    include_agent_provenance=agent_provenance_ok,
                 )
             else:  # semantic
                 results = await search_by_vector(
@@ -420,13 +436,22 @@ async def weft_recall(
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
+                    include_agent_provenance=agent_provenance_ok,
                 )
 
-            # Touch accessed memories and enrich with entities
+            # Touch accessed memories and enrich with entities. When the
+            # caller is reading in Face mode, agent-provenance rows are
+            # included but their content is wrapped with the untrusted-
+            # write prefix so an injected memory cannot impersonate a
+            # self-authored fact (Phase 2 / Layer 2).
             enriched = []
             for r in results:
                 await touch_memory(app.pool, r.memory.id)
                 d = r.to_dict()
+                if retrieval_mode == "face":
+                    d["content"] = wrap_untrusted_for_face(
+                        d["content"], r.memory.write_provenance,
+                    )
                 try:
                     from weft.entities import get_memory_entities
                     ents = await get_memory_entities(app.pool, r.memory.id)
@@ -449,6 +474,7 @@ async def weft_recall(
                     project_id=project_id,
                     agent_id=agent_id,
                     sources=sources,
+                    include_agent_provenance=agent_provenance_ok,
                 )
 
             response: dict = {"query": query, "mode": mode, "count": len(results), "results": enriched}
@@ -475,6 +501,7 @@ async def weft_recall(
                                 memory_type=memory_type,
                                 exclude_ids=list(main_ids),
                                 sources=sources,
+                                include_agent_provenance=agent_provenance_ok,
                             )
                             if cross_results:
                                 response["cross_project"] = [
@@ -525,6 +552,67 @@ async def weft_forget(
             return {"memory_id": memory_id, "deleted": deleted, "hard": hard}
     except _DB_ERRORS as e:
         return _db_error_response("weft_forget", e)
+
+
+@mcp.tool()
+async def weft_quarantine_review(
+    ctx: Context,
+    action: Literal["list", "approve", "reject"] = "list",
+    memory_id: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Phase 2 / Layer 3 — review agent-provenance writes flagged as
+    instruction-shaped at write-time.
+
+    Actions:
+    * ``list`` (default): return pending memories with their content,
+      provenance, and origin so the supervisor can decide.
+    * ``approve``: re-provenance the row to 'supervisor' and flip
+      ``review_status`` back to 'active'. Surfaces normally afterwards.
+    * ``reject``: hard-delete the row. Use when the heuristic correctly
+      caught injected / poisoned content.
+
+    This tool is supervisor-only at the trust-tier level — calling it
+    from agent-mode context defeats the whole layer. The Phase 2 gate
+    is enforced here in the tool body, not at the MCP boundary.
+    """
+    try:
+        if action == "list":
+            app: AppContext = ctx.request_context.lifespan_context
+            async with acquire(app.pool):
+                items = await list_pending_quarantine(app.pool, limit=limit)
+            return {"count": len(items), "pending": items}
+
+        if memory_id is None:
+            return {"error": f"memory_id required for action='{action}'"}
+
+        from weft.auth import is_agent_caller
+        if is_agent_caller():
+            # An agent-mode caller approving its own quarantined writes
+            # would round-trip the entire defense to zero. Refuse loudly.
+            return {
+                "error": (
+                    "weft_quarantine_review approve/reject are supervisor-only "
+                    "(Phase 2 / Layer 3)"
+                ),
+            }
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            if action == "approve":
+                ok = await approve_pending_quarantine(app.pool, memory_id)
+                if ok:
+                    await app.cache.invalidate_memory(memory_id)
+                return {"memory_id": memory_id, "approved": ok}
+            if action == "reject":
+                ok = await reject_pending_quarantine(app.pool, memory_id)
+                if ok:
+                    await app.cache.invalidate_memory(memory_id)
+                return {"memory_id": memory_id, "rejected": ok}
+
+        return {"error": f"unknown action: {action}"}
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_quarantine_review", e)
 
 
 @mcp.tool()

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
+from weft.auth import get_caller_mode
 from weft.db.connection import get_db
 from weft.models import (
     Trigger,
@@ -34,10 +35,17 @@ async def create_trigger(
     pool: asyncpg.Pool,
     create: TriggerCreate,
 ) -> Trigger:
-    """Create a new trigger. Returns the created Trigger."""
+    """Create a new trigger. Returns the created Trigger.
+
+    Phase 2 / Layer 1: stamps ``write_provenance`` from caller mode.
+    Agent-provenance triggers may be created freely, but cross-system
+    actions (Loom task creation, messaging, git ops) at fire-time must
+    be gated against this column — supervisor promotion required.
+    """
     trigger_id = _weft_id()
     now = datetime.now(timezone.utc)
     condition_json = json.dumps(create.condition)
+    write_provenance = get_caller_mode()
 
     row = await get_db(pool).fetchrow(
         """
@@ -45,12 +53,12 @@ async def create_trigger(
             id, name, condition_type, condition, action,
             status, cooldown_hours, max_fires,
             project_id, agent_id, user_id,
-            created_at, updated_at
+            created_at, updated_at, write_provenance
         ) VALUES (
             $1, $2, $3, $4::jsonb, $5,
             'enabled', $6, $7,
             $8, $9, nullif(current_setting('app.user_id', true), ''),
-            $10, $10
+            $10, $10, $11
         )
         RETURNING *
         """,
@@ -64,6 +72,7 @@ async def create_trigger(
         create.project_id,
         create.agent_id,
         now,
+        write_provenance,
     )
     return _row_to_trigger(row)
 
@@ -354,4 +363,7 @@ def _row_to_trigger(row: asyncpg.Record) -> Trigger:
         agent_id=row["agent_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        write_provenance=(
+            row["write_provenance"] if "write_provenance" in row.keys() else "supervisor"
+        ),
     )

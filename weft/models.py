@@ -97,6 +97,8 @@ class Memory(BaseModel):
     usefulness_count: int = 0
     last_boosted_at: datetime | None = None
     review_after: datetime | None = None
+    write_provenance: str = "supervisor"
+    review_status: str = "active"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""
@@ -300,6 +302,7 @@ class Behavior(BaseModel):
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
     status: str = "active"
+    write_provenance: str = "supervisor"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""
@@ -649,6 +652,7 @@ class Trigger(BaseModel):
     agent_id: str | None = None
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+    write_provenance: str = "supervisor"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""

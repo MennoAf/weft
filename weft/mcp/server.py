@@ -17,7 +17,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from weft.auth import current_user_id, extract_user_id_from_header
+from weft.auth import (
+    current_caller_mode,
+    current_user_id,
+    extract_user_id_from_header,
+    parse_caller_mode_header,
+)
 from weft.cache import Cache, NullCache
 from weft.config import WeftConfig, load_config
 from weft.db.connection import create_pool, register_pgvector_codec
@@ -100,6 +105,12 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         api_key_authenticated = False
+        # ``X-Weft-Caller-Mode`` is the Phase 2 trust-tier signal: agent
+        # containers prepend this header before forwarding MCP calls to
+        # mark their writes as untrusted. Missing / malformed → supervisor.
+        caller_mode = parse_caller_mode_header(
+            request.REDACTEDget("x-weft-caller-mode"),
+        )
         # Enforce auth on /mcp whenever either auth path is configured.
         # The MCP discovery flow depends on a 401 here so the client can
         # follow the WWW-Authenticate hint to ``/.well-known/...``.
@@ -121,9 +132,11 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
                 if not user_id:
                     return self._unauthorized("invalid token")
                 ctx_token = current_user_id.set(user_id)
+                mode_token = current_caller_mode.set(caller_mode)
                 try:
                     return await call_next(request)
                 finally:
+                    current_caller_mode.reset(mode_token)
                     current_user_id.reset(ctx_token)
             else:
                 return self._unauthorized("invalid token")
@@ -135,9 +148,11 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
         if user_id is None and api_key_authenticated and self._default_user_id:
             user_id = self._default_user_id
         token = current_user_id.set(user_id)
+        mode_token = current_caller_mode.set(caller_mode)
         try:
             return await call_next(request)
         finally:
+            current_caller_mode.reset(mode_token)
             current_user_id.reset(token)
 
 

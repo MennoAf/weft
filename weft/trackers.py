@@ -28,6 +28,7 @@ from typing import Any
 
 import asyncpg
 
+from weft.auth import get_caller_mode
 from weft.db.connection import get_db
 from weft.models import (
     NudgeMode,
@@ -49,6 +50,24 @@ logger = logging.getLogger(__name__)
 async def create_tracker(
     pool: asyncpg.Pool, create: TrackerCreate,
 ) -> Tracker:
+    """Create a tracker.
+
+    Phase 2 / Layer 1:
+    * ``provenance`` is stamped from the caller-mode contextvar — the
+      ``create.provenance`` field is intentionally ignored so untrusted
+      callers can't self-attest as 'supervisor'.
+    * ``kind=trace`` is supervisor-only. Trace trackers are Orchestrator
+      promotions of long-running agent context windows; they implicitly
+      exit the trust boundary, so an agent-mode caller minting one would
+      let an attacker write directly into the supervisor's working set.
+    """
+    write_provenance = get_caller_mode()
+    if create.kind == TrackerKind.trace and write_provenance != "supervisor":
+        raise PermissionError(
+            "kind=trace trackers are supervisor-only — the Orchestrator is "
+            "the trusted writer (Phase 2 / Layer 1)",
+        )
+
     tid = _tracker_id()
     now = datetime.now(timezone.utc)
     history = [{
@@ -86,7 +105,7 @@ async def create_tracker(
         create.nudge_mode.value,
         create.nudge_after,
         create.nudge_interval,
-        create.provenance,
+        write_provenance,
     )
     return _row_to_tracker(row)
 
