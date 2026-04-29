@@ -591,6 +591,101 @@ def restore(file: str, dry_run: bool, no_skip_duplicates: bool):
 
 
 @cli.group()
+def quarantine():
+    """Layer 3 / 3.5 quarantine review commands for agent-provenance writes."""
+    pass
+
+
+@quarantine.command(name="review-llm")
+@click.option(
+    "--limit", default=50, type=int,
+    help="Max memories to classify per run.",
+)
+@click.option(
+    "--concurrency", default=4, type=int,
+    help="Max concurrent LLM calls.",
+)
+@click.option(
+    "--since", "since_iso", default=None,
+    help=(
+        "Override the persistent watermark with an ISO-8601 timestamp. "
+        "Useful for ad-hoc backfills."
+    ),
+)
+@click.option(
+    "--no-watermark", is_flag=True,
+    help="Do not advance the persisted watermark — useful for dry diagnosis.",
+)
+@click.option(
+    "--model", default="claude-haiku-4-5-20251001",
+    help="Anthropic model to use (Haiku by default for cost).",
+)
+def quarantine_review_llm(
+    limit: int,
+    concurrency: int,
+    since_iso: str | None,
+    no_watermark: bool,
+    model: str,
+):
+    """Run an LLM-review pass on agent-provenance memories that bypassed Layer 3.
+
+    Reads memories with ``write_provenance='agent'`` and
+    ``review_status='active'`` newer than the stored watermark, asks Haiku
+    to classify each as FACT or INSTRUCTION, and flips the
+    INSTRUCTION-verdict rows to ``pending_review`` for supervisor review.
+    """
+    async def _run():
+        import asyncpg
+        from anthropic import AsyncAnthropic
+
+        from weft.quarantine_review import llm_review_pending
+
+        config = load_config()
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or config.api_key
+        if not api_key:
+            click.echo(
+                "Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.",
+                err=True,
+            )
+            sys.exit(1)
+        client = AsyncAnthropic(api_key=api_key)
+        pool = await asyncpg.create_pool(
+            config.database.url, min_size=1, max_size=2,
+        )
+        since = (
+            datetime.fromisoformat(since_iso) if since_iso else None
+        )
+        try:
+            return await llm_review_pending(
+                pool, client,
+                since=since,
+                limit=limit,
+                concurrency=concurrency,
+                model=model,
+                advance_watermark=not no_watermark,
+            )
+        finally:
+            await pool.close()
+
+    report = asyncio.run(_run())
+    click.echo("Quarantine LLM review:")
+    click.echo(f"  Checked:    {report.checked}")
+    click.echo(f"  Flagged:    {report.flagged}")
+    click.echo(f"  Ambiguous:  {report.ambiguous}")
+    click.echo(f"  Errors:     {len(report.errors)}")
+    if report.flagged_ids:
+        click.echo("  Flagged IDs:")
+        for mid in report.flagged_ids:
+            click.echo(f"    - {mid}")
+    if report.errors:
+        click.echo("  Error details:")
+        for err in report.errors:
+            click.echo(f"    - {err}")
+    click.echo(f"  Watermark before: {report.watermark_before}")
+    click.echo(f"  Watermark after:  {report.watermark_after}")
+
+
+@cli.group()
 def obsidian():
     """Obsidian vault sync commands."""
     pass
