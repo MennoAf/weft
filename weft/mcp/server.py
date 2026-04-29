@@ -8,6 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import asyncpg
 import redis.asyncio as aioredis
@@ -49,27 +50,38 @@ _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
 
 
 class UserIdentityMiddleware(BaseHTTPMiddleware):
-    """Extract user identity from Authorization header and set contextvar.
+    """Extract user identity + caller mode from Authorization header.
 
-    Two auth paths on ``/mcp``:
+    Phase 2.5 (commit-bound caller mode): the Authorization header is
+    resolved through :func:`weft.credentials.lookup_token` and the
+    resolved row is the authoritative source for both ``user_id`` and
+    ``caller_mode``. The ``X-Weft-Caller-Mode`` header is no longer
+    trusted on its own — an agent holding a valid token can no longer
+    forge ``caller_mode=supervisor`` and bypass the Phase 2 poisoning
+    defense.
 
-    * **API-key fast path** — constant-time HMAC compare against
-      ``WEFT_API_KEY``. Used by Claude Code and any pre-OAuth client.
-    * **Supabase JWT path** — when ``oauth_enabled`` is True and the
-      bearer token isn't the API key, treat it as a Supabase-issued
-      OAuth access token and verify via the existing JWKS path in
-      :mod:`weft.auth`. The verified ``sub`` is pinned as the request
-      identity so RLS scopes correctly.
+    Two auth paths on ``/mcp``, in order:
+
+    1. **Token row lookup.** sha256 of the bearer is matched against
+       ``weft_tokens``. Hit → row owns the request: ``current_user_id``
+       comes from ``row.user_id``, ``current_caller_mode`` from
+       ``row.caller_mode``. Legacy ``WEFT_API_KEY`` clients land here
+       too via the L3 bootstrap row.
+    2. **Supabase JWT (when ``oauth_enabled`` is True).** If no row
+       matches, try JWKS-verified Supabase JWT decode (same as today).
+       On success, ``current_user_id = sub`` and
+       ``current_caller_mode = 'supervisor'`` until a future change
+       adds a scope claim that distinguishes agent-issued tokens.
+
+    Header narrowing: ``X-Weft-Caller-Mode`` is honoured **only** when
+    the resolved credential mode is ``supervisor`` — Jason can downgrade
+    himself to ``agent`` locally for testing without minting a real
+    agent token. When the credential mode is ``agent``, the header is
+    ignored. This is the change that closes the escalation path.
 
     Health checks and other non-``/mcp`` endpoints are unauthenticated.
     On those, JWT extraction is best-effort: missing or invalid tokens
     silently fall through with ``current_user_id=None``.
-
-    Single-tenant fallback: when ``default_user_id`` is set, API-key
-    authenticated requests that carry no valid JWT are stamped with it.
-    Coupled to the api_key gate — a missing/invalid API key means the
-    default never applies, so anonymous traffic can't inherit the
-    owner's identity.
 
     On 401, a ``WWW-Authenticate`` header points the client at our
     protected-resource metadata document so MCP clients can discover
@@ -79,16 +91,19 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app,
-        api_key: str | None = None,
         oauth_enabled: bool = False,
         supabase_url: str | None = None,
-        default_user_id: str | None = None,
+        pool_getter: "Callable[[], asyncpg.Pool | None] | None" = None,
+        auth_required: bool = True,
     ):
         super().__init__(app)
-        self._api_key = api_key
         self._oauth_enabled = oauth_enabled
         self._supabase_url = (supabase_url or "").rstrip("/")
-        self._default_user_id = default_user_id
+        self._pool_getter = pool_getter
+        # ``auth_required`` mirrors the prior ``api_key or oauth_enabled``
+        # gate: in local-dev mode (``WEFT_ENV != production`` and OAuth
+        # off) anonymous traffic is still allowed through unauthenticated.
+        self._auth_required = auth_required
 
     def _unauthorized(self, message: str) -> JSONResponse:
         headers: dict[str, str] = {}
@@ -103,50 +118,77 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
             )
         return JSONResponse({"error": message}, status_code=401, headers=headers)
 
-    async def dispatch(self, request: Request, call_next):
-        api_key_authenticated = False
-        # ``X-Weft-Caller-Mode`` is the Phase 2 trust-tier signal: agent
-        # containers prepend this header before forwarding MCP calls to
-        # mark their writes as untrusted. Missing / malformed → supervisor.
-        caller_mode = parse_caller_mode_header(
+    def _resolve_caller_mode(
+        self, credential_mode: str, request: Request
+    ) -> str:
+        """Apply the L4 header-narrowing rule.
+
+        * Credential mode is the floor. An agent credential **always**
+          resolves to ``agent`` regardless of any header — that's the
+          rule that closes the X-Weft-Caller-Mode escalation.
+        * For supervisor credentials, the header is allowed to
+          downgrade the request (supervisor → agent) so Jason can
+          locally test agent code paths without minting an agent
+          token.
+        """
+        if credential_mode != "supervisor":
+            return credential_mode
+        return parse_caller_mode_header(
             request.REDACTEDget("x-weft-caller-mode"),
         )
-        # Enforce auth on /mcp whenever either auth path is configured.
-        # The MCP discovery flow depends on a 401 here so the client can
-        # follow the WWW-Authenticate hint to ``/.well-known/...``.
-        if (self._api_key or self._oauth_enabled) and request.url.path.startswith("/mcp"):
-            import hmac
+
+    async def dispatch(self, request: Request, call_next):
+        from weft.credentials import lookup_token
+
+        is_mcp_path = request.url.path.startswith("/mcp")
+
+        if self._auth_required and is_mcp_path:
             auth_header = request.REDACTEDget("authorization", "")
             if not auth_header.startswith("Bearer "):
                 return self._unauthorized("missing authorization header")
-            token = auth_header[7:]
-            if self._api_key and hmac.compare_digest(token, self._api_key):
-                # API-key fast path — accepted, fall through so the
-                # post-/mcp block can apply the single-tenant default.
-                api_key_authenticated = True
+            bearer = auth_header[7:]
+
+            pool = self._pool_getter() if self._pool_getter else None
+            row = None
+            if pool is not None:
+                row = await lookup_token(pool, bearer)
+
+            if row is not None:
+                user_id = row.user_id
+                effective_mode = self._resolve_caller_mode(
+                    row.caller_mode, request,
+                )
             elif self._oauth_enabled:
-                # Supabase-issued OAuth access token. weft.auth verifies
-                # against Supabase JWKS and returns the sub on success;
-                # None on any failure (signature, expiry, audience).
+                # Supabase-issued OAuth access token. Falls back to None
+                # on any failure (signature, expiry, audience). OAuth
+                # tokens currently always resolve as supervisor — a
+                # follow-up will add a scope claim that distinguishes
+                # agent-issued OAuth tokens.
                 user_id = extract_user_id_from_header(auth_header)
                 if not user_id:
                     return self._unauthorized("invalid token")
-                ctx_token = current_user_id.set(user_id)
-                mode_token = current_caller_mode.set(caller_mode)
-                try:
-                    return await call_next(request)
-                finally:
-                    current_caller_mode.reset(mode_token)
-                    current_user_id.reset(ctx_token)
+                effective_mode = self._resolve_caller_mode(
+                    "supervisor", request,
+                )
             else:
                 return self._unauthorized("invalid token")
 
-        # Best-effort identity extraction for non-MCP paths
+            ctx_token = current_user_id.set(user_id)
+            mode_token = current_caller_mode.set(effective_mode)
+            try:
+                return await call_next(request)
+            finally:
+                current_caller_mode.reset(mode_token)
+                current_user_id.reset(ctx_token)
+
+        # Non-/mcp paths and unauthenticated mode: best-effort identity
+        # extraction from a JWT if present, header-driven caller mode
+        # (no credential to clamp against).
         auth_header = request.REDACTEDget("authorization")
         user_id = extract_user_id_from_header(auth_header)
-        # Single-tenant fallback: only when the API key gate accepted the request.
-        if user_id is None and api_key_authenticated and self._default_user_id:
-            user_id = self._default_user_id
+        caller_mode = parse_caller_mode_header(
+            request.REDACTEDget("x-weft-caller-mode"),
+        )
         token = current_user_id.set(user_id)
         mode_token = current_caller_mode.set(caller_mode)
         try:
@@ -455,32 +497,47 @@ _app_ctx_ref = _AppCtxRef()
 _config_for_middleware = load_config()
 
 # ---------------------------------------------------------------------------
-# OAuth bootstrap (module scope).
+# Middleware wiring (module scope).
 # ---------------------------------------------------------------------------
-# Middleware. In the new architecture Weft is a pure resource server: when
-# OAuth is enabled, incoming bearer tokens are Supabase-issued JWTs and the
-# middleware delegates verification to ``weft.auth.extract_user_id_from_header``
-# (which already validates against Supabase JWKS). The API-key fast path is
-# preserved for legacy clients (Claude Code).
+# Phase 2.5: every Authorization header is resolved through
+# ``weft.credentials.lookup_token``. Legacy ``WEFT_API_KEY`` clients still
+# work because :func:`bootstrap_legacy_api_key` (called from lifespan)
+# inserts a row matching the env-var on cold start. OAuth JWTs remain a
+# fallback when no token row matches and ``oauth_enabled`` is True.
 # ---------------------------------------------------------------------------
 
-_middleware_api_key = (
-    _config_for_middleware.api_key
-    if _config_for_middleware.is_production
-    else None
+
+def _middleware_pool_getter() -> asyncpg.Pool | None:
+    """Return the live pool, or None if lifespan hasn't installed it.
+
+    Pre-lifespan request paths (a startup health probe slipping in
+    before ``run_migrations`` finishes) get None here, which makes the
+    middleware skip the credential lookup. With ``auth_required=True``
+    that resolves to a 401 — fail-closed — until the pool comes up."""
+    ctx = _app_ctx_ref.ctx
+    if ctx is None:
+        return None
+    return ctx.pool
+
+
+# Auth is required in production OR whenever OAuth is on. Local dev with
+# neither stays unauthenticated so ``uv run python -m weft`` keeps
+# working without setting a key.
+_auth_required = (
+    _config_for_middleware.is_production or _config_for_middleware.oauth_enabled
 )
 logger.info(
-    "user_identity_middleware: api_key=%s oauth_enabled=%s is_production=%s",
-    "set" if _middleware_api_key else "unset",
+    "user_identity_middleware: auth_required=%s oauth_enabled=%s is_production=%s",
+    _auth_required,
     _config_for_middleware.oauth_enabled,
     _config_for_middleware.is_production,
 )
 user_identity_middleware = Middleware(
     UserIdentityMiddleware,
-    api_key=_middleware_api_key,
     oauth_enabled=_config_for_middleware.oauth_enabled,
     supabase_url=_config_for_middleware.supabase_url,
-    default_user_id=os.environ.get("WEFT_DEFAULT_USER_ID") or None,
+    pool_getter=_middleware_pool_getter,
+    auth_required=_auth_required,
 )
 
 mcp = FastMCP("weft", lifespan=lifespan)
