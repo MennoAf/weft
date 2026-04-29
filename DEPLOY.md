@@ -13,8 +13,16 @@ fly launch --no-deploy
 
 # Set secrets (never put these in fly.toml)
 fly secrets set DATABASE_URL="postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
-fly secrets set WEFT_API_KEY="your-secret-api-key"
+fly secrets set WEFT_API_KEY="your-bootstrap-secret"
 ```
+
+`WEFT_API_KEY` is the **bootstrap-only** credential — it auto-creates a
+single supervisor token row on first request so a brand-new deployment
+has at least one usable REDACTED From there, mint per-client tokens
+via `weft tokens issue` (see "Connecting MCP Clients" below) and stop
+handing the bootstrap key out. The env-var fallback stays available
+through Phase 5 / public Wick launch and will be removed once
+deprecation logs show zero hits for two weeks.
 
 ### Supabase Connection Notes
 
@@ -48,12 +56,13 @@ curl https://weft-mcp.fly.dev/healthz
 | Environment Variable | Required | Default | Description |
 |---------------------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | — | Supabase Postgres connection string |
-| `WEFT_API_KEY` | Yes (prod) | — | Bearer token for legacy MCP clients (Claude Code). Coexists with the OAuth path. |
+| `WEFT_API_KEY` | Yes (prod, bootstrap) | — | Auto-bootstraps one supervisor token row on first authenticated request. Use it to mint real per-client tokens via `weft tokens issue`, then stop sharing it. Coexists with OAuth and bearer-token paths. |
+| `WEFT_DEFAULT_USER_ID` | No | — | Single-tenant fallback `user_id` for hosted deployments without OAuth. Most installs do not need this. |
+| `WEFT_OAUTH_ENABLED` | No | `0` | Publish RFC 9728 protected-resource metadata + serve consent page. See OAuth section below. |
 | `WEFT_ENV` | No | `production` | `local` or `production` |
 | `WEFT_TRANSPORT` | No | `streamable-http` | `stdio`, `sse`, or `streamable-http` |
 | `WEFT_REDIS_URL` | No | `""` (disabled) | Redis URL for caching (optional, uses NullCache if empty) |
 | `PORT` | No | `8000` | HTTP port |
-| `WEFT_OAUTH_ENABLED` | No | `0` | Set to `1` to publish RFC 9728 protected-resource metadata and serve the consent page. When off, the service stays byte-identical to the API-key-only build. |
 | `OAUTH_ISSUER` | Only if OAuth on | — | Absolute base URL of this deployment (e.g. `https://weft-mcp.fly.dev`). Used as the `resource` field in the protected-resource doc. |
 | `SUPABASE_URL` | Only if OAuth on | — | Base URL of the Supabase project (e.g. `https://abc.supabase.co`). Used to build the `authorization_servers` URL and embedded into the consent page so the JS SDK can boot. |
 | `SUPABASE_ANON_KEY` | Only if OAuth on | — | Supabase anon (publishable) key. Public-by-design; embedded in the HTML consent page. The `sb_publishable_*` and legacy `eyJ...` JWT formats both work. |
@@ -82,7 +91,7 @@ section in the dashboard, it may need to be enabled per project.
 
 ## Connecting MCP Clients
 
-Two paths, both supported simultaneously.
+Three paths, all supported simultaneously.
 
 **OAuth (Claude app, claude.ai, anything with discovery)** — just point
 the connector at the MCP URL. The client follows the
@@ -93,8 +102,20 @@ and uses the resulting Supabase token:
 https://weft-mcp.fly.dev/mcp
 ```
 
-**API key (Claude Code, scripts, anything pre-OAuth)** — set the
-bearer token to your `WEFT_API_KEY`:
+**Issued bearer tokens (recommended for Claude Code, scripts, agents,
+Wick containers)** — mint a token per client via the CLI, with the
+caller mode bound to the credential at issuance time:
+
+```bash
+# Supervisor token for your own Face / Claude Code:
+weft tokens issue --user-id <your-uuid> --mode supervisor --label face --expires-in 365d
+
+# Agent-mode token for a Wick container or background worker:
+weft tokens issue --user-id <your-uuid> --mode agent --label wick-cleanroom --expires-in 30d
+```
+
+The plaintext token prints **once**. Configure the client with it as
+the bearer:
 
 ```json
 {
@@ -102,12 +123,25 @@ bearer token to your `WEFT_API_KEY`:
     "weft": {
       "url": "https://weft-mcp.fly.dev/mcp",
       "headers": {
-        "Authorization": "Bearer YOUR_WEFT_API_KEY"
+        "Authorization": "Bearer wf_..."
       }
     }
   }
 }
 ```
+
+`caller_mode` is determined by the token row, not by the
+`X-Weft-Caller-Mode` header. An agent-mode token cannot escalate to
+supervisor by sending the header — at most a supervisor can
+**downgrade** itself to agent for testing. Rotate by minting a new
+token, redeploying, then `weft tokens revoke <id>` on the old one.
+
+**Bootstrap key (legacy / single-shared-secret)** — `WEFT_API_KEY` is
+auto-treated as a supervisor token row on first request. Useful for
+the very first deployment before the CLI is reachable, but every
+production setup should mint per-client tokens and stop sharing it.
+The env-var fallback emits a deprecation log line on each use and
+will be removed once those logs go quiet.
 
 ## Operations
 
@@ -121,8 +155,14 @@ fly ssh console
 # Scale memory (if needed)
 fly scale memory 1024
 
-# Rotate a secret (triggers rolling restart)
-fly secrets set WEFT_API_KEY="new-key-value"
+# Rotate a per-client token (no Fly restart needed):
+weft tokens issue --user-id <uuid> --mode <supervisor|agent> --label <client>
+# Update the client config with the new token, then:
+weft tokens revoke <old-token-id>
+
+# Rotate the bootstrap key (triggers rolling restart, only useful
+# if the bootstrap key itself was leaked):
+fly secrets set WEFT_API_KEY="new-bootstrap-secret"
 ```
 
 ## OAuth flow at runtime
@@ -156,8 +196,11 @@ End-to-end with Supabase as the OAuth 2.1 authorization server:
     JWT via Supabase JWKS (existing `weft.auth` path) and pins the
     `sub` as the request identity.
 
-The `WEFT_API_KEY` path stays available in parallel — Claude Code and
-other legacy clients keep working with their static bearer token.
+Bearer-token clients (Claude Code, agents, Wick containers) use the
+`weft tokens issue` flow described above instead of the OAuth dance —
+the credential row carries both `user_id` and `caller_mode`, so no
+discovery round trip is needed. Both paths coexist on the same
+deployment.
 
 ## Bringing up a new environment
 
@@ -197,8 +240,9 @@ curl -i -X POST https://<your-app>.fly.dev/mcp
 
 Rollback at any point: `fly secrets unset WEFT_OAUTH_ENABLED -a
 <your-app> && fly deploy -a <your-app>`. The middleware drops the
-401 gate and the consent + protected-resource routes stop registering
-— legacy `WEFT_API_KEY` clients keep working unchanged.
+401 discovery gate and the consent + protected-resource routes stop
+registering — bearer-token clients (issued tokens + the legacy
+`WEFT_API_KEY` bootstrap path) keep working unchanged.
 
 ## Staging environment
 
