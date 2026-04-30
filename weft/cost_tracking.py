@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -243,6 +244,78 @@ async def check_budget(
         within_budget=spent <= daily_limit_usd,
         pct_used=pct,
         remaining_usd=max(0.0, daily_limit_usd - spent),
+    )
+
+
+@dataclass
+class SpendTrend:
+    """Daily-brief friendly spend snapshot: recent 7d vs prior 7d."""
+
+    recent_total_usd: float
+    prior_total_usd: float
+    daily_avg_recent: float
+    daily_avg_prior: float
+    trend: str  # "improving ↓", "rising ↑", "stable →", or "insufficient data"
+    today_usd: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "recent_total_usd": round(self.recent_total_usd, 4),
+            "prior_total_usd": round(self.prior_total_usd, 4),
+            "daily_avg_recent": round(self.daily_avg_recent, 4),
+            "daily_avg_prior": round(self.daily_avg_prior, 4),
+            "trend": self.trend,
+            "today_usd": round(self.today_usd, 4),
+        }
+
+
+async def get_spend_trend(
+    pool: asyncpg.Pool,
+    *,
+    as_of: datetime | None = None,
+    window_days: int = 7,
+) -> SpendTrend:
+    """7d-vs-prior-7d spend trend plus today's running total.
+
+    Trend semantics here are inverted from mood/sleep — a higher number is
+    *worse* (more $ burned), so an upward jump becomes "rising ↑" while a
+    downward shift becomes "improving ↓".
+    """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    today_start = as_of.replace(hour=0, minute=0, second=0, microsecond=0)
+    recent_start = as_of - timedelta(days=window_days)
+    prior_start = as_of - timedelta(days=window_days * 2)
+
+    today_summary = await get_cost_summary(pool, since=today_start, until=as_of)
+    recent_summary = await get_cost_summary(pool, since=recent_start, until=as_of)
+    prior_summary = await get_cost_summary(pool, since=prior_start, until=recent_start)
+
+    recent = recent_summary.total_cost_usd
+    prior = prior_summary.total_cost_usd
+    daily_recent = recent / window_days if window_days else 0.0
+    daily_prior = prior / window_days if window_days else 0.0
+
+    if recent_summary.total_entries == 0 and prior_summary.total_entries == 0:
+        trend = "insufficient data"
+    else:
+        delta = daily_recent - daily_prior
+        # 10% of prior daily avg, with a $0.50 floor so trivial bumps don't flap.
+        threshold = max(0.5, abs(daily_prior) * 0.10)
+        if delta > threshold:
+            trend = "rising ↑"
+        elif delta < -threshold:
+            trend = "improving ↓"
+        else:
+            trend = "stable →"
+
+    return SpendTrend(
+        recent_total_usd=recent,
+        prior_total_usd=prior,
+        daily_avg_recent=daily_recent,
+        daily_avg_prior=daily_prior,
+        trend=trend,
+        today_usd=today_summary.total_cost_usd,
     )
 
 

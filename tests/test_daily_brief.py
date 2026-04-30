@@ -11,11 +11,13 @@ import pytest
 
 from weft.daily_brief import (
     BRIEF_MAX_ITEMS_PER_SECTION,
+    SECTION_GROUPS,
     SECTION_META,
     BriefResult,
     _SLACK_TEXT_LIMIT,
     assemble_daily_brief,
     compute_trend,
+    extract_next_step,
     format_markdown,
     format_slack_blocks,
 )
@@ -28,10 +30,12 @@ from weft.daily_brief import (
 def populated_sections():
     return {
         "calendar": ["All day: Team offsite", "09:00 Standup", "14:00 Design review"],
+        "checkin_trends": ["Mood: 3.5/5 (stable →)", "Sleep: 7.2h (improving ↑)", "Energy: 4.0/5 (stable →)"],
+        "birthdays": [],
+        "active_projects": ["**weft** (5 commits, 1 handoff) — next: ship the brief"],
+        "daily_spend": ["Today: $0.42", "7d total: $3.10 (daily avg $0.44) vs prior 7d $5.20 (improving ↓)"],
         "review_queue": ["[decision] Review pricing model… (review due 2024-01-15)"],
         "handoffs": ["Session completed Epic 5, deployed to Fly.io"],
-        "checkin_trends": ["Mood: 3.5/5 (stable →)", "Sleep: 7.2h (improving ↑)", "Energy: 4.0/5 (stable →)"],
-        "ready_tasks": ["[p0] Build daily brief assembly"],
         "alerts": ["[follow_up] Check deployment (due 09:00)"],
     }
 
@@ -72,10 +76,18 @@ class TestFormatMarkdown:
         now = datetime(2024, 1, 15, 8, 0, tzinfo=timezone.utc)
         md = format_markdown(populated_sections, now)
         assert "## 🌅 Daily Brief" in md
-        assert "### 📋 Review Queue" in md
-        assert "### 💤 Check-in Trends" in md
+        # Group headers
+        assert "### 👤 Personal" in md
+        assert "### 💻 Code" in md
+        # Subsections under groups
+        assert "#### 📋 Review Queue" in md
+        assert "#### 💤 Check-in Trends" in md
+        assert "#### 🔥 Top Active Projects" in md
+        assert "#### 💰 Daily Spend" in md
         assert "pricing model" in md
-        assert "- [p0]" in md
+        assert "weft" in md
+        # Personal must appear before Code
+        assert md.index("Personal") < md.index("Code")
 
     def test_empty_shows_all_clear(self, empty_sections):
         now = datetime(2024, 1, 15, 8, 0, tzinfo=timezone.utc)
@@ -122,14 +134,17 @@ class TestFormatSlackBlocks:
             "review_queue": ["item 1"],
             "handoffs": [],
             "checkin_trends": [],
-            "ready_tasks": [],
+            "active_projects": [],
+            "daily_spend": [],
             "alerts": [],
         }
         now = datetime(2024, 1, 15, 8, 0, tzinfo=timezone.utc)
         blocks = format_slack_blocks(sections, now)
         section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
-        assert len(section_texts) == 1
-        assert "Review Queue" in section_texts[0]
+        # One group header (Code) + one subsection (Review Queue) = 2
+        assert len(section_texts) == 2
+        assert any("Review Queue" in t for t in section_texts)
+        assert any("💻 Code" in t for t in section_texts)
 
     def test_truncates_long_sections(self):
         items = [f"Item {i}: " + "x" * 50 for i in range(100)]
@@ -148,40 +163,111 @@ class TestFormatSlackBlocks:
         assert len(blocks) <= 50
 
 
+# --- extract_next_step ---
+
+
+class TestExtractNextStep:
+    def test_bold_inline(self):
+        body = (
+            "## Session Handoff\n\n"
+            "**Summary:** shipped the thing.\n\n"
+            "**Next Steps:** Pick up loom-c47075b3 (audit-log MCP tool, p2). "
+            "Then move on to the Wick INTERCHANGE.\n\n"
+            "**Blockers:** none."
+        )
+        out = extract_next_step(body)
+        assert out is not None
+        assert "loom-c47075b3" in out
+        assert "Blockers" not in out
+
+    def test_h2_section(self):
+        body = "## Next Steps\n\nDo the next thing.\n\n## Other\n\nIgnored."
+        out = extract_next_step(body)
+        assert out is not None
+        assert "Do the next thing" in out
+        assert "Ignored" not in out
+
+    def test_truncates_long_body(self):
+        body = "**Next Steps:** " + ("very long step " * 100)
+        out = extract_next_step(body, max_chars=50)
+        assert out is not None
+        assert len(out) <= 51  # +1 for ellipsis
+        assert out.endswith("…")
+
+    def test_no_section_returns_none(self):
+        assert extract_next_step("just some prose, no section") is None
+
+    def test_empty_input(self):
+        assert extract_next_step("") is None
+        assert extract_next_step(None) is None  # type: ignore[arg-type]
+
+
 # --- assemble_daily_brief ---
+
+
+def _patch_all_queries(**overrides):
+    """Helper: patch every _query_* function used by assemble_daily_brief.
+
+    Default returns are empty lists. Override any subset by name (no leading
+    underscore), e.g. _patch_all_queries(handoffs=["x"]).
+    """
+    from contextlib import ExitStack
+
+    # Map friendly name -> actual private function name in weft.daily_brief.
+    # Calendar's underlying helper is _query_calendar_events.
+    name_map = {
+        "calendar": "_query_calendar_events",
+        "review_queue": "_query_review_queue",
+        "handoffs": "_query_handoffs",
+        "checkin_trends": "_query_checkin_trends",
+        "birthdays": "_query_birthdays",
+        "active_projects": "_query_active_projects",
+        "daily_spend": "_query_daily_spend",
+        "alerts": "_query_alerts",
+    }
+    defaults = {key: [] for key in name_map}
+    defaults.update(overrides)
+
+    stack = ExitStack()
+    patches = {}
+    for name, value in defaults.items():
+        target = f"weft.daily_brief.{name_map[name]}"
+        if isinstance(value, Exception):
+            p = patch(target, new_callable=AsyncMock, side_effect=value)
+        else:
+            p = patch(target, new_callable=AsyncMock, return_value=value)
+        patches[name] = stack.enter_context(p)
+    return stack, patches
 
 
 class TestAssembleDailyBrief:
     @pytest.mark.asyncio
     async def test_happy_path(self):
         mock_pool = MagicMock()
-
-        with (
-            patch("weft.daily_brief._query_review_queue", new_callable=AsyncMock, return_value=["review item"]),
-            patch("weft.daily_brief._query_handoffs", new_callable=AsyncMock, return_value=["handoff item"]),
-            patch("weft.daily_brief._query_checkin_trends", new_callable=AsyncMock, return_value=["Mood: 3.5/5"]),
-            patch("weft.daily_brief._query_loom_tasks", new_callable=AsyncMock, return_value=["[p0] task"]),
-            patch("weft.daily_brief._query_alerts", new_callable=AsyncMock, return_value=["[custom] alert"]),
-        ):
+        stack, patches = _patch_all_queries(
+            review_queue=["review item"],
+            handoffs=["handoff item"],
+            checkin_trends=["Mood: 3.5/5"],
+            active_projects=["**weft** (3 commits, 1 handoff) — next: ship the brief"],
+            daily_spend=["Today: $0.42"],
+            alerts=["[custom] alert"],
+        )
+        with stack:
             result = await assemble_daily_brief(mock_pool)
 
         assert isinstance(result, BriefResult)
         assert "review item" in result.markdown
         assert "handoff item" in result.markdown
+        assert "weft" in result.markdown
+        assert "$0.42" in result.markdown
         assert len(result.slack_blocks) > 0
         assert isinstance(result.generated_at, datetime)
 
     @pytest.mark.asyncio
     async def test_all_sources_empty(self):
         mock_pool = MagicMock()
-
-        with (
-            patch("weft.daily_brief._query_review_queue", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_handoffs", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_checkin_trends", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_loom_tasks", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_alerts", new_callable=AsyncMock, return_value=[]),
-        ):
+        stack, _ = _patch_all_queries()
+        with stack:
             result = await assemble_daily_brief(mock_pool)
 
         assert "all clear" in result.markdown.lower()
@@ -189,35 +275,25 @@ class TestAssembleDailyBrief:
     @pytest.mark.asyncio
     async def test_partial_failure_still_assembles(self):
         mock_pool = MagicMock()
-
-        with (
-            patch("weft.daily_brief._query_review_queue", new_callable=AsyncMock, side_effect=Exception("db down")),
-            patch("weft.daily_brief._query_handoffs", new_callable=AsyncMock, return_value=["handoff"]),
-            patch("weft.daily_brief._query_checkin_trends", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_loom_tasks", new_callable=AsyncMock, side_effect=Exception("loom gone")),
-            patch("weft.daily_brief._query_alerts", new_callable=AsyncMock, return_value=[]),
-        ):
+        stack, _ = _patch_all_queries(
+            review_queue=Exception("db down"),
+            handoffs=["handoff"],
+            active_projects=Exception("git gone"),
+        )
+        with stack:
             result = await assemble_daily_brief(mock_pool)
 
-        # Should still have the handoff data
         assert "handoff" in result.markdown
 
     @pytest.mark.asyncio
     async def test_custom_date(self):
         mock_pool = MagicMock()
         target = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
-
-        with (
-            patch("weft.daily_brief._query_review_queue", new_callable=AsyncMock, return_value=[]) as mock_rq,
-            patch("weft.daily_brief._query_handoffs", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_checkin_trends", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_loom_tasks", new_callable=AsyncMock, return_value=[]),
-            patch("weft.daily_brief._query_alerts", new_callable=AsyncMock, return_value=[]),
-        ):
+        stack, patches = _patch_all_queries()
+        with stack:
             result = await assemble_daily_brief(mock_pool, target_date=target)
 
-        # The review queue was called with our target date
-        mock_rq.assert_called_once_with(mock_pool, target)
+        patches["review_queue"].assert_called_once_with(mock_pool, target)
         assert "June" in result.markdown
 
 
