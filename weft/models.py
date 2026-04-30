@@ -741,11 +741,12 @@ class DegradationTriggerType(str, Enum):
     low_confidence = "low_confidence"      # Memory confidence drops below threshold
     api_error = "api_error"                # Repeated API/embedding failures
     context_decay = "context_decay"        # Context window saturation or staleness
-    budget_breach = "budget_breach"        # Token/cost budget exceeded
+    budget_breach = "budget_breach"        # Token budget exceeded
+    cost_breach = "cost_breach"            # Cost (USD) budget % exceeded
 
 
 DegradationTriggerTypeLiteral = Literal[
-    "low_confidence", "api_error", "context_decay", "budget_breach",
+    "low_confidence", "api_error", "context_decay", "budget_breach", "cost_breach",
 ]
 
 
@@ -842,6 +843,17 @@ class DegradationPolicyCreate(BaseModel):
                 )
             if not isinstance(c["max_tokens"], int) or c["max_tokens"] <= 0:
                 raise ValueError("max_tokens must be a positive integer")
+
+        elif tt == DegradationTriggerType.cost_breach:
+            if "pct_used" not in c:
+                raise ValueError(
+                    "cost_breach trigger requires 'pct_used' in condition"
+                )
+            if (
+                not isinstance(c["pct_used"], (int, float))
+                or c["pct_used"] <= 0
+            ):
+                raise ValueError("pct_used must be a positive number")
 
 
 class DegradationPolicy(BaseModel):

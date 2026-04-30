@@ -33,6 +33,7 @@ from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.oauth_consent import handle_consent
 from weft.mcp.slack_commands import handle_slash_checkin
+from weft.cost_enforcement import cost_enforcement_loop
 from weft.scheduler import (
     daily_brief_loop,
     loom_awareness_loop,
@@ -478,6 +479,11 @@ async def lifespan(server: FastMCP):
                 model=config.quarantine_review.model,
             )
         )
+    ctx._cost_enforcement_task = None
+    if config.cost_enforcement.enabled and config.cost_enforcement.daily_limit_usd > 0:
+        ctx._cost_enforcement_task = asyncio.create_task(
+            cost_enforcement_loop(pool, config=config.cost_enforcement)
+        )
 
     # OAuth in the new architecture is delegated to Supabase's OAuth 2.1
     # server. Weft hosts only the consent page (see weft/mcp/oauth_consent.py)
@@ -494,7 +500,7 @@ async def lifespan(server: FastMCP):
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._quarantine_review_task):
+        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._quarantine_review_task, ctx._cost_enforcement_task):
             if task is not None:
                 task.cancel()
                 try:

@@ -401,4 +401,10 @@ def _evaluate_condition(
         if current is not None and current >= max_tokens:
             return f"tokens_used {current} >= max_tokens {max_tokens}"
 
+    elif tt == DegradationTriggerType.cost_breach:
+        threshold_pct = c.get("pct_used", 100.0)
+        current = metrics.get("cost_pct_used")
+        if current is not None and current >= threshold_pct:
+            return f"cost_pct_used {current:.1f} >= pct_used {threshold_pct:.1f}"
+
     return None
