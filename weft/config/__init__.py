@@ -138,6 +138,58 @@ class QuarantineReviewConfig(BaseModel):
     model: str = "claude-haiku-4-5-20251001"
 
 
+# Cost-enforcement config types live here (not in weft.cost_enforcement)
+# because weft.db.connection imports WeftConfig at module-load time, which
+# is loaded by every cost_enforcement dependency — a circular cycle if
+# the types lived alongside their consumer module. Keeping the dataclasses
+# co-located with the rest of the config also matches the pattern for
+# AlertConfig, SlackSyncConfig, etc.
+
+
+class CostThresholdLiteral(str, Enum):
+    """String enum for autonomy tier values — duplicated locally to avoid
+    importing weft.autonomy at config-load time. Values must match
+    AutonomyTier exactly. Kept in sync via the test
+    test_cost_threshold_tier_enum_matches_autonomy_tier."""
+
+    never = "never"
+    earned = "earned"
+    always = "always"
+
+
+class CostThreshold(BaseModel):
+    """One band on the cost-enforcement ladder. See weft.cost_enforcement."""
+
+    pct_used: float
+    demote_actions: list[str] = Field(default_factory=list)
+    demote_to: CostThresholdLiteral = CostThresholdLiteral.earned
+    feed_degradation: bool = True
+    notify: bool = True
+
+
+class CostEnforcementConfig(BaseModel):
+    """Runtime config for the cost enforcement loop."""
+
+    enabled: bool = False
+    interval_seconds: int = 300
+    daily_limit_usd: float = 50.0
+    thresholds: list[CostThreshold] = Field(
+        default_factory=lambda: [
+            CostThreshold(pct_used=75.0, notify=True),
+            CostThreshold(
+                pct_used=90.0,
+                demote_actions=["*"],
+                demote_to=CostThresholdLiteral.earned,
+            ),
+            CostThreshold(
+                pct_used=100.0,
+                demote_actions=["*"],
+                demote_to=CostThresholdLiteral.never,
+            ),
+        ]
+    )
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     project_name: str = "default"
@@ -151,6 +203,9 @@ class WeftConfig(BaseModel):
     daily_brief: DailyBriefConfig = Field(default_factory=DailyBriefConfig)
     quarantine_review: QuarantineReviewConfig = Field(
         default_factory=QuarantineReviewConfig
+    )
+    cost_enforcement: CostEnforcementConfig = Field(
+        default_factory=CostEnforcementConfig
     )
     primer: PrimerConfig = Field(default_factory=PrimerConfig)
     api_key: str | None = None
@@ -288,6 +343,7 @@ def _coerce_value(key: str, value: str) -> object:
         ("slack_sync", SlackSyncConfig),
         ("daily_brief", DailyBriefConfig),
         ("quarantine_review", QuarantineReviewConfig),
+        ("cost_enforcement", CostEnforcementConfig),
         ("primer", PrimerConfig),
     ]:
         for field_name, field_info in section_model.model_fields.items():
@@ -351,6 +407,15 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
         for k, v in data["quarantine_review"].items():
             if hasattr(config.quarantine_review, k):
                 setattr(config.quarantine_review, k, v)
+    if "cost_enforcement" in data and isinstance(data["cost_enforcement"], dict):
+        # ``thresholds`` is a list of structured dicts; everything else is scalar.
+        for k, v in data["cost_enforcement"].items():
+            if k == "thresholds" and isinstance(v, list):
+                config.cost_enforcement.thresholds = [
+                    CostThreshold(**t) if isinstance(t, dict) else t for t in v
+                ]
+            elif hasattr(config.cost_enforcement, k):
+                setattr(config.cost_enforcement, k, v)
     if "primer" in data and isinstance(data["primer"], dict):
         for k, v in data["primer"].items():
             if hasattr(config.primer, k):
@@ -392,6 +457,15 @@ def _flatten_yaml(data: dict) -> dict:
         flat["daily_brief"] = DailyBriefConfig(**data["daily_brief"])
     if "quarantine_review" in data:
         flat["quarantine_review"] = QuarantineReviewConfig(**data["quarantine_review"])
+    if "cost_enforcement" in data:
+        ce = data["cost_enforcement"]
+        if isinstance(ce.get("thresholds"), list):
+            ce = dict(ce)
+            ce["thresholds"] = [
+                CostThreshold(**t) if isinstance(t, dict) else t
+                for t in ce["thresholds"]
+            ]
+        flat["cost_enforcement"] = CostEnforcementConfig(**ce)
     if "primer" in data:
         flat["primer"] = PrimerConfig(**data["primer"])
     if "logging" in data and "level" in data["logging"]:
