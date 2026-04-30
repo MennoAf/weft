@@ -199,12 +199,20 @@ class TestContradictionAlert:
         assert result["alert_type"] == AlertType.memory_contradiction.value
 
     @pytest.mark.asyncio
-    async def test_dedup(self, pool):
+    async def test_dedup_per_memory(self, pool):
+        # V2 (Epic 7): contradiction alerts dedup per-new_memory_id rather
+        # than per-alert-type. m1 and m2 are different memories, so both
+        # fire. A repeat call for m1 within the cooldown is suppressed.
+        # The per-type independence here is the operative change vs. V1.
         contradictions = [{"memory_id": "weft-x", "content_preview": "x", "similarity": 0.9}]
         r1 = await create_contradiction_alert(pool, new_memory_id="m1", contradictions=contradictions)
         assert r1 is not None
         r2 = await create_contradiction_alert(pool, new_memory_id="m2", contradictions=contradictions)
-        assert r2 is None
+        assert r2 is not None
+        r1_again = await create_contradiction_alert(
+            pool, new_memory_id="m1", contradictions=contradictions,
+        )
+        assert r1_again is None
 
     @pytest.mark.asyncio
     async def test_empty_contradictions(self, pool):

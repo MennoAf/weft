@@ -2331,6 +2331,94 @@ async def weft_alert_dismiss(ctx: Context, alert_id: str) -> dict:
         return _db_error_response("weft_alert_dismiss", e)
 
 
+@mcp.tool()
+async def weft_alert_suppress(
+    ctx: Context,
+    alert_type: str,
+    dedup_key: str,
+    hours: float = 24.0,
+    reason: str | None = None,
+) -> dict:
+    """Mute (alert_type, dedup_key) for *hours* hours. Survives cooldown.
+
+    alert_type: one of the AlertType values (e.g. 'loom_stale_claim').
+    dedup_key:  producer-specific scope key, typically 'task:<id>',
+                'project:<id>', 'memory:<id>', or 'global' for singletons.
+                Use weft_alert_list to inspect existing keys.
+    hours:      how long to suppress; must be > 0.
+    reason:     optional human-readable reason ('on vacation', 'flapping').
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        from weft.alert_dedup import suppress
+        from weft.models import AlertType
+
+        valid_types = [t.value for t in AlertType]
+        if alert_type not in valid_types:
+            return _input_error_response(
+                "weft_alert_suppress",
+                ValueError(f"Invalid alert_type '{alert_type}'. Valid: {valid_types}"),
+            )
+        if hours <= 0:
+            return _input_error_response(
+                "weft_alert_suppress",
+                ValueError("hours must be > 0"),
+            )
+        if not dedup_key:
+            return _input_error_response(
+                "weft_alert_suppress",
+                ValueError("dedup_key must be a non-empty string"),
+            )
+
+        until = datetime.now(timezone.utc) + timedelta(hours=hours)
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            state = await suppress(
+                app.pool, AlertType(alert_type), dedup_key,
+                until=until, reason=reason,
+            )
+            return {"success": True, "state": state.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_alert_suppress", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_alert_suppress", e)
+
+
+@mcp.tool()
+async def weft_alert_unsuppress(
+    ctx: Context,
+    alert_type: str,
+    dedup_key: str,
+) -> dict:
+    """Lift any active suppression for (alert_type, dedup_key).
+
+    Returns success=True if a suppression was cleared (or no row existed
+    with one), success=False if no state row found at all.
+    """
+    try:
+        from weft.alert_dedup import clear_suppression
+        from weft.models import AlertType
+
+        valid_types = [t.value for t in AlertType]
+        if alert_type not in valid_types:
+            return _input_error_response(
+                "weft_alert_unsuppress",
+                ValueError(f"Invalid alert_type '{alert_type}'. Valid: {valid_types}"),
+            )
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            cleared = await clear_suppression(
+                app.pool, AlertType(alert_type), dedup_key,
+            )
+            return {"success": cleared, "alert_type": alert_type, "dedup_key": dedup_key}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_alert_unsuppress", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_alert_unsuppress", e)
+
+
 # ── Check-in tools ──────────────────────────────────────────────────
 
 
