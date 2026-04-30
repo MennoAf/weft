@@ -118,6 +118,14 @@ class DailyBriefConfig(BaseModel):
     timezone: str = "America/New_York"  # IANA timezone for brief schedule
     channel: str = ""  # Slack channel ID or name; empty = skip Slack delivery
     calendar_id: str = "primary"  # Google Calendar ID to query
+    # Map project_id (the slug used in handoff memories) to an absolute repo
+    # path. Used by the "active projects" section to count git commits per
+    # project in the activity window. Projects not in this map still surface
+    # via handoff memories but contribute zero commit signal.
+    project_repos: dict[str, str] = Field(default_factory=dict)
+    # Top-N active projects to surface. Activity = commits + handoffs in window.
+    active_projects_top_n: int = 3
+    active_projects_window_hours: int = 24
 
 
 class PrimerConfig(BaseModel):

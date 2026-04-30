@@ -15,8 +15,10 @@ from weft.cost_tracking import (
     CostEntryCreate,
     CostEntryType,
     CostSummary,
+    SpendTrend,
     check_budget,
     get_cost_summary,
+    get_spend_trend,
     list_cost_entries,
     record_cost,
 )
@@ -206,6 +208,80 @@ class TestGetCostSummary:
         summary = await get_cost_summary(pool, entry_type=CostEntryType.task)
         assert summary.total_entries == 1
         assert summary.total_tokens == 100
+
+
+class TestGetSpendTrend:
+    """7d-vs-prior-7d trend computation. Backdates created_at via raw SQL
+    because record_cost stamps with now() unconditionally.
+    """
+
+    async def _insert_at(self, pool, *, days_ago: float, cost: float) -> None:
+        ts = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        await pool.execute(
+            """
+            INSERT INTO cost_entries (
+                id, entry_type, total_tokens, estimated_cost_usd, metadata,
+                created_at, user_id
+            )
+            VALUES (
+                $1, 'session', 0, $2, '{}'::jsonb, $3,
+                nullif(current_setting('app.user_id', true), '')
+            )
+            """,
+            f"weft-{days_ago}-{cost}",
+            cost,
+            ts,
+        )
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data(self, pool):
+        trend = await get_spend_trend(pool)
+        assert isinstance(trend, SpendTrend)
+        assert trend.trend == "insufficient data"
+        assert trend.recent_total_usd == 0.0
+        assert trend.today_usd == 0.0
+
+    @pytest.mark.asyncio
+    async def test_rising_trend(self, pool):
+        # Prior 7d: $1 total. Recent 7d: $10 total. Should rise.
+        await self._insert_at(pool, days_ago=10, cost=1.0)
+        await self._insert_at(pool, days_ago=3, cost=5.0)
+        await self._insert_at(pool, days_ago=1, cost=5.0)
+
+        trend = await get_spend_trend(pool)
+        assert trend.recent_total_usd == pytest.approx(10.0)
+        assert trend.prior_total_usd == pytest.approx(1.0)
+        assert trend.trend == "rising ↑"
+
+    @pytest.mark.asyncio
+    async def test_improving_trend(self, pool):
+        # Prior 7d: $20. Recent 7d: $2. Should improve.
+        await self._insert_at(pool, days_ago=10, cost=10.0)
+        await self._insert_at(pool, days_ago=8, cost=10.0)
+        await self._insert_at(pool, days_ago=2, cost=2.0)
+
+        trend = await get_spend_trend(pool)
+        assert trend.trend == "improving ↓"
+
+    @pytest.mark.asyncio
+    async def test_stable_trend(self, pool):
+        # Both windows ~equal.
+        await self._insert_at(pool, days_ago=10, cost=5.0)
+        await self._insert_at(pool, days_ago=2, cost=5.0)
+
+        trend = await get_spend_trend(pool)
+        assert trend.trend == "stable →"
+
+    @pytest.mark.asyncio
+    async def test_today_usd_subset_of_recent(self, pool):
+        await self._insert_at(pool, days_ago=0.05, cost=2.5)  # ~1h ago
+        await self._insert_at(pool, days_ago=3, cost=4.0)
+        # Need prior data so we don't hit insufficient_data short-circuit
+        await self._insert_at(pool, days_ago=10, cost=1.0)
+
+        trend = await get_spend_trend(pool)
+        assert trend.today_usd == pytest.approx(2.5)
+        assert trend.recent_total_usd == pytest.approx(6.5)
 
 
 class TestCheckBudget:
