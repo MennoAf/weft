@@ -190,6 +190,47 @@ class CostEnforcementConfig(BaseModel):
     )
 
 
+class AlertCooldownConfig(BaseModel):
+    """Per-AlertType cooldown windows in minutes.
+
+    Replaces the V1 single ``dedup_hours=24`` constant. Producers call
+    ``alert_dedup.should_fire(alert_type, dedup_key, cooldown_minutes=...)``
+    where the cooldown comes from this config. Sensible defaults: short
+    for things that matter immediately (contradictions), long for things
+    that recur on weekly cadence (consolidation, count thresholds).
+
+    Use ``minutes_for(alert_type)`` to look up a cooldown with the
+    ``default_minutes`` fallback so unrecognized types still have a
+    sane window.
+    """
+
+    default_minutes: float = 1440.0  # 24h fallback for unrecognized types
+    by_type: dict[str, float] = Field(
+        default_factory=lambda: {
+            # Loom awareness — per-task/project/epic dedup means we can be
+            # more aggressive than the old single-bucket 24h.
+            "loom_stale_claim": 720.0,         # 12h per task
+            "loom_blocked_pile_up": 240.0,     # 4h per project
+            "loom_epic_ready": 720.0,          # 12h per epic
+            # Memory hygiene — these recur on weekly+ cadence.
+            "stale_decision": 10080.0,         # 1 week per memory
+            "memory_consolidation_overdue": 1440.0,  # 24h (singleton)
+            "memory_count_threshold": 4320.0,  # 3 days (singleton)
+            # Contradictions matter immediately — short cooldown.
+            "memory_contradiction": 60.0,      # 1h per memory
+            # Check-in derived alerts.
+            "check_in_low_mood": 1440.0,
+            "check_in_low_sleep": 1440.0,
+            "check_in_declining_trend": 4320.0,
+        }
+    )
+
+    def minutes_for(self, alert_type: object) -> float:
+        """Look up cooldown for an AlertType (or its .value), with fallback."""
+        key = getattr(alert_type, "value", alert_type)
+        return self.by_type.get(str(key), self.default_minutes)
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     project_name: str = "default"
@@ -206,6 +247,9 @@ class WeftConfig(BaseModel):
     )
     cost_enforcement: CostEnforcementConfig = Field(
         default_factory=CostEnforcementConfig
+    )
+    alert_cooldowns: AlertCooldownConfig = Field(
+        default_factory=AlertCooldownConfig
     )
     primer: PrimerConfig = Field(default_factory=PrimerConfig)
     api_key: str | None = None
@@ -344,6 +388,7 @@ def _coerce_value(key: str, value: str) -> object:
         ("daily_brief", DailyBriefConfig),
         ("quarantine_review", QuarantineReviewConfig),
         ("cost_enforcement", CostEnforcementConfig),
+        ("alert_cooldowns", AlertCooldownConfig),
         ("primer", PrimerConfig),
     ]:
         for field_name, field_info in section_model.model_fields.items():
@@ -416,6 +461,16 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
                 ]
             elif hasattr(config.cost_enforcement, k):
                 setattr(config.cost_enforcement, k, v)
+    if "alert_cooldowns" in data and isinstance(data["alert_cooldowns"], dict):
+        for k, v in data["alert_cooldowns"].items():
+            if k == "by_type" and isinstance(v, dict):
+                # Merge user overrides into defaults rather than replacing — TOML
+                # users almost always want to tune one type, not redeclare all.
+                merged = dict(config.alert_cooldowns.by_type)
+                merged.update({str(kk): float(vv) for kk, vv in v.items()})
+                config.alert_cooldowns.by_type = merged
+            elif hasattr(config.alert_cooldowns, k):
+                setattr(config.alert_cooldowns, k, v)
     if "primer" in data and isinstance(data["primer"], dict):
         for k, v in data["primer"].items():
             if hasattr(config.primer, k):
@@ -466,6 +521,8 @@ def _flatten_yaml(data: dict) -> dict:
                 for t in ce["thresholds"]
             ]
         flat["cost_enforcement"] = CostEnforcementConfig(**ce)
+    if "alert_cooldowns" in data:
+        flat["alert_cooldowns"] = AlertCooldownConfig(**data["alert_cooldowns"])
     if "primer" in data:
         flat["primer"] = PrimerConfig(**data["primer"])
     if "logging" in data and "level" in data["logging"]:
