@@ -40,9 +40,9 @@ async def schema_pool():
     await run_migrations(p)
     # TRUNCATE to start clean
     await p.execute(
-        "TRUNCATE memory_access_log, entity_mentions, episode_memories, "
-        "memory_relationships, entities, episodes, memories, behaviors, "
-        "weft_metadata CASCADE"
+        "TRUNCATE memory_access_log, entity_mentions, episode_turns, "
+        "episode_memories, memory_relationships, entities, episodes, "
+        "memories, behaviors, weft_metadata CASCADE"
     )
     yield p
     # Restore schema by re-running migrations (idempotent CREATE IF NOT EXISTS
@@ -87,21 +87,21 @@ class TestDimensionMismatch:
 
 class TestValidateDimensions:
     def test_all_match(self):
-        discovered = {"memories": 768, "behaviors": 768, "entities": 768}
+        discovered = {"memories": 768, "behaviors": 768, "entities": 768, "episode_turns": 768}
         assert validate_dimensions(discovered, 768) == []
 
     def test_single_mismatch(self):
-        discovered = {"memories": 384, "behaviors": 768, "entities": 768}
+        discovered = {"memories": 384, "behaviors": 768, "entities": 768, "episode_turns": 768}
         mismatches = validate_dimensions(discovered, 768)
         assert len(mismatches) == 1
         assert mismatches[0] == DimensionMismatch("memories", 384, 768)
 
     def test_all_mismatch(self):
-        discovered = {"memories": 384, "behaviors": 384, "entities": 384}
+        discovered = {"memories": 384, "behaviors": 384, "entities": 384, "episode_turns": 384}
         mismatches = validate_dimensions(discovered, 768)
-        assert len(mismatches) == 3
+        assert len(mismatches) == 4
         tables = {m.table for m in mismatches}
-        assert tables == {"memories", "behaviors", "entities"}
+        assert tables == {"memories", "behaviors", "entities", "episode_turns"}
 
     def test_empty_discovered(self):
         assert validate_dimensions({}, 768) == []
@@ -128,16 +128,22 @@ class TestValidateDimensions:
 class TestDiscoverVectorDimensions:
     @pytest.mark.asyncio
     async def test_returns_correct_dims(self, pool):
-        """After migrations, all three tables should have vector(768)."""
+        """After migrations, all four vector tables should have vector(768)."""
         async with pool.acquire() as conn:
             result = await discover_vector_dimensions(conn)
-        assert result == {"memories": 768, "behaviors": 768, "entities": 768}
+        assert result == {
+            "memories": 768,
+            "behaviors": 768,
+            "entities": 768,
+            "episode_turns": 768,
+        }
 
     @pytest.mark.asyncio
     async def test_partial_tables(self, schema_pool):
-        """Drop behaviors and entities — only memories should be discovered."""
+        """Drop behaviors, entities, and episode_turns — only memories should be discovered."""
         async with schema_pool.acquire() as conn:
             await conn.execute("DROP TABLE IF EXISTS entity_mentions CASCADE")
+            await conn.execute("DROP TABLE IF EXISTS episode_turns CASCADE")
             await conn.execute("DROP TABLE IF EXISTS episode_memories CASCADE")
             await conn.execute("DROP TABLE IF EXISTS entities CASCADE")
             await conn.execute("DROP TABLE IF EXISTS behaviors CASCADE")
@@ -150,6 +156,7 @@ class TestDiscoverVectorDimensions:
         """Drop all vector tables — should return empty dict."""
         async with schema_pool.acquire() as conn:
             await conn.execute("DROP TABLE IF EXISTS entity_mentions CASCADE")
+            await conn.execute("DROP TABLE IF EXISTS episode_turns CASCADE")
             await conn.execute("DROP TABLE IF EXISTS episode_memories CASCADE")
             await conn.execute("DROP TABLE IF EXISTS entities CASCADE")
             await conn.execute("DROP TABLE IF EXISTS behaviors CASCADE")
@@ -182,14 +189,14 @@ class TestGetDimensionStatus:
     async def test_matching(self, pool):
         async with pool.acquire() as conn:
             discovered, mismatches = await get_dimension_status(conn, 768)
-        assert len(discovered) == 3
+        assert len(discovered) == 4
         assert mismatches == []
 
     @pytest.mark.asyncio
     async def test_mismatch(self, pool):
         async with pool.acquire() as conn:
             discovered, mismatches = await get_dimension_status(conn, 384)
-        assert len(mismatches) == 3
+        assert len(mismatches) == 4
         assert all(m.expected_dim == 384 for m in mismatches)
 
 
@@ -328,7 +335,139 @@ class TestEnsureVectorDimensions:
             )
         migrated = await ensure_vector_dimensions(schema_pool, 768)
         assert migrated == ["memories"]
-        # behaviors and entities should still be 768 (untouched)
+        # behaviors, entities, and episode_turns should still be 768 (untouched)
         async with schema_pool.acquire() as conn:
             discovered = await discover_vector_dimensions(conn)
-        assert discovered == {"memories": 768, "behaviors": 768, "entities": 768}
+        assert discovered == {
+            "memories": 768,
+            "behaviors": 768,
+            "entities": 768,
+            "episode_turns": 768,
+        }
+
+
+# ---------------------------------------------------------------------------
+# v45_episode_turns: schema, RLS, FK cascade, idempotence
+# ---------------------------------------------------------------------------
+
+
+class TestEpisodeTurnsMigration:
+    @pytest.mark.asyncio
+    async def test_table_and_indexes_exist(self, pool):
+        async with pool.acquire() as conn:
+            cols = {
+                r["column_name"]: r["data_type"]
+                for r in await conn.fetch(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_name = 'episode_turns'"
+                )
+            }
+        assert {
+            "id",
+            "episode_id",
+            "turn_index",
+            "role",
+            "content",
+            "occurred_at",
+            "embedding",
+            "trace_id",
+            "importance_score",
+            "token_count",
+            "user_id",
+            "created_at",
+        } <= set(cols)
+        # user_id is NOT NULL (post-mig-36 fail-loud convention)
+        async with pool.acquire() as conn:
+            nullable = await conn.fetchval(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'episode_turns' AND column_name = 'user_id'"
+            )
+        assert nullable == "NO"
+
+    @pytest.mark.asyncio
+    async def test_indexes_present(self, pool):
+        async with pool.acquire() as conn:
+            idx = {
+                r["indexname"]
+                for r in await conn.fetch(
+                    "SELECT indexname FROM pg_indexes WHERE tablename = 'episode_turns'"
+                )
+            }
+        assert "idx_episode_turns_episode_index" in idx
+        assert "idx_episode_turns_occurred" in idx
+        assert "idx_episode_turns_trace" in idx
+        assert "idx_episode_turns_user" in idx
+        assert "idx_episode_turns_embedding_hnsw" in idx
+
+    @pytest.mark.asyncio
+    async def test_rls_enabled_and_policies_present(self, pool):
+        async with pool.acquire() as conn:
+            rls_enabled = await conn.fetchval(
+                "SELECT relrowsecurity FROM pg_class WHERE relname = 'episode_turns'"
+            )
+            policies = {
+                r["polname"]
+                for r in await conn.fetch(
+                    "SELECT polname FROM pg_policy "
+                    "WHERE polrelid = 'episode_turns'::regclass"
+                )
+            }
+        assert rls_enabled is True
+        assert policies == {
+            "episode_turns_select",
+            "episode_turns_insert",
+            "episode_turns_update",
+            "episode_turns_delete",
+        }
+
+    @pytest.mark.asyncio
+    async def test_fk_cascade_from_episodes(self, pool):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO episodes (id, title, started_at) "
+                "VALUES ('ep-cascade-1', 't', now())"
+            )
+            await conn.execute(
+                "INSERT INTO episode_turns (id, episode_id, turn_index, role, content) "
+                "VALUES ('et-cascade-1', 'ep-cascade-1', 0, 'user', 'hello')"
+            )
+            await conn.execute("DELETE FROM episodes WHERE id = 'ep-cascade-1'")
+            row = await conn.fetchrow(
+                "SELECT id FROM episode_turns WHERE id = 'et-cascade-1'"
+            )
+        assert row is None
+
+    @pytest.mark.asyncio
+    async def test_unique_episode_turn_index(self, pool):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO episodes (id, title, started_at) "
+                "VALUES ('ep-uniq-1', 't', now())"
+            )
+            await conn.execute(
+                "INSERT INTO episode_turns (id, episode_id, turn_index, role, content) "
+                "VALUES ('et-uniq-1', 'ep-uniq-1', 0, 'user', 'a')"
+            )
+            with pytest.raises(asyncpg.UniqueViolationError):
+                await conn.execute(
+                    "INSERT INTO episode_turns (id, episode_id, turn_index, role, content) "
+                    "VALUES ('et-uniq-2', 'ep-uniq-1', 0, 'user', 'b')"
+                )
+            await conn.execute(
+                "DELETE FROM episodes WHERE id = 'ep-uniq-1'"
+            )
+
+    @pytest.mark.asyncio
+    async def test_migration_idempotent(self, schema_pool):
+        # schema_pool.teardown re-runs migrations; the fact that v45 uses
+        # CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS / DROP POLICY
+        # IF EXISTS means re-running it on an already-migrated DB is a no-op.
+        # Run it twice in succession to confirm.
+        await run_migrations(schema_pool)
+        await run_migrations(schema_pool)
+        async with schema_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_name = 'episode_turns'"
+            )
+        assert count == 1

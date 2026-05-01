@@ -20,7 +20,7 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 # Tables that carry a vector 'embedding' column.
-VECTOR_TABLES: tuple[str, ...] = ("memories", "behaviors", "entities")
+VECTOR_TABLES: tuple[str, ...] = ("memories", "behaviors", "entities", "episode_turns")
 
 # HNSW index parameters — must match what migrations use.
 HNSW_M = 16
