@@ -47,6 +47,7 @@ SCOPED_CRUD_TABLES: tuple[str, ...] = (
     "entity_mentions",
     "episodes",
     "episode_memories",
+    "episode_turns",
     "modes",
     "alerts",
     "check_ins",
