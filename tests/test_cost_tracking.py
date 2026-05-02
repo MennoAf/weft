@@ -215,8 +215,16 @@ class TestGetSpendTrend:
     because record_cost stamps with now() unconditionally.
     """
 
-    async def _insert_at(self, pool, *, days_ago: float, cost: float) -> None:
-        ts = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    async def _insert_at(
+        self,
+        pool,
+        *,
+        days_ago: float,
+        cost: float,
+        anchor: datetime | None = None,
+    ) -> None:
+        base = anchor if anchor is not None else datetime.now(timezone.utc)
+        ts = base - timedelta(days=days_ago)
         await pool.execute(
             """
             INSERT INTO cost_entries (
@@ -274,12 +282,18 @@ class TestGetSpendTrend:
 
     @pytest.mark.asyncio
     async def test_today_usd_subset_of_recent(self, pool):
-        await self._insert_at(pool, days_ago=0.05, cost=2.5)  # ~1h ago
-        await self._insert_at(pool, days_ago=3, cost=4.0)
+        # Pin as_of to a fixed mid-UTC-day moment so "today" (UTC midnight →
+        # as_of) deterministically contains the ~1h-ago entry, regardless of
+        # what UTC hour the test runs at.
+        as_of = datetime.now(timezone.utc).replace(
+            hour=12, minute=0, second=0, microsecond=0,
+        )
+        await self._insert_at(pool, days_ago=0.05, cost=2.5, anchor=as_of)
+        await self._insert_at(pool, days_ago=3, cost=4.0, anchor=as_of)
         # Need prior data so we don't hit insufficient_data short-circuit
-        await self._insert_at(pool, days_ago=10, cost=1.0)
+        await self._insert_at(pool, days_ago=10, cost=1.0, anchor=as_of)
 
-        trend = await get_spend_trend(pool)
+        trend = await get_spend_trend(pool, as_of=as_of)
         assert trend.today_usd == pytest.approx(2.5)
         assert trend.recent_total_usd == pytest.approx(6.5)
 
