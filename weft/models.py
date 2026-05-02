@@ -440,6 +440,58 @@ class EpisodeWithMemories(BaseModel):
         return d
 
 
+class TurnRole(str, Enum):
+    user = "user"
+    assistant = "assistant"
+    tool = "tool"
+    system = "system"
+
+
+TurnRoleLiteral = Literal["user", "assistant", "tool", "system"]
+
+
+def _turn_id() -> str:
+    return f"et-{uuid.uuid4().hex[:10]}"
+
+
+class EpisodeTurn(BaseModel):
+    """A single conversational turn inside an episode — raw dialogue trace.
+
+    Lives alongside Episode + EpisodeMemory, never replacing them. Each turn
+    carries its own embedding for retrieval, its own occurred_at for temporal
+    queries, and an optional trace_id mapping to Wick's run_id. The
+    importance_score is the Face hook for retention gating; populated async
+    post-hoc, gates behavior at graduation rather than ingest.
+    """
+
+    id: str = Field(default_factory=_turn_id)
+    episode_id: str
+    turn_index: int
+    role: TurnRole
+    content: str
+    occurred_at: datetime = Field(default_factory=_now)
+    trace_id: str | None = None
+    importance_score: float | None = None
+    token_count: int = 0
+    user_id: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self.model_dump(mode="json")
+        d["role"] = self.role.value
+        return d
+
+
+class EpisodeTurnCreate(BaseModel):
+    """Input model for appending a turn to an episode."""
+
+    episode_id: str
+    role: TurnRole
+    content: str
+    occurred_at: datetime | None = None
+    trace_id: str | None = None
+
+
 class ModeWeights(BaseModel):
     """Retrieval weight overrides for a named mode/persona.
 
