@@ -27,3 +27,9 @@ weft-backup-*.json
 # Benchmark run artifacts — regeneratable, large, and per-run timestamped.
 # Source code under benchmarks/ IS tracked; only the results dir is excluded.
 benchmarks/**/results/
+
+# Local-only personal acceptance cases — seeded from real Weft data, never
+# committed. The README in that directory IS tracked so the convention
+# survives even on a fresh clone.
+tests/acceptance/cases_local/*
+!tests/acceptance/cases_local/README.md
