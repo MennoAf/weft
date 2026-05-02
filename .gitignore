@@ -23,3 +23,7 @@ weft-backup-*.json
 # scripts/generate_oauth_secrets.sh. NEVER commit these.
 .oauth-*.env
 .oauth-*-secrets.env
+
+# Benchmark run artifacts — regeneratable, large, and per-run timestamped.
+# Source code under benchmarks/ IS tracked; only the results dir is excluded.
+benchmarks/**/results/
