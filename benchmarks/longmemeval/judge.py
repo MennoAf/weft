@@ -355,6 +355,11 @@ def cli(
         level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Mirror adapter.py: load standard Weft .env locations so OPENAI_API_KEY
+    # in ~/.weft/.env "just works" without per-invocation prefixing.
+    from dotenv import load_dotenv
+    load_dotenv()
+    load_dotenv(Path.home() / ".weft" / ".env")
     try:
         metrics = run_judge(
             hyp_path=hyp_path,
