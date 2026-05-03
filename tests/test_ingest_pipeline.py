@@ -273,7 +273,55 @@ class TestClassify:
 
         assert len(result) == 1
         assert result[0].type == "general_note"
-        assert result[0].confidence == 0.0
+
+    @pytest.mark.asyncio
+    async def test_markdown_fenced_json_is_parsed(self):
+        """Claude wraps long-input responses in ```json ... ``` fences despite
+        the system prompt forbidding markdown. The classifier must strip the
+        fence before parsing or every long multi-turn input degrades to a
+        single conf=0.0 general_note (LongMemEval multi-session questions
+        regressed silently because of this — see commit history)."""
+        fenced = (
+            '```json\n'
+            '[{"type": "person_fact", "content": "Bob is CEO", '
+            '"confidence": 0.9, "entities": [], "dates": []}]\n'
+            '```'
+        )
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=fenced)]
+
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify("a long conversation about Bob the CEO")
+
+        assert len(result) == 1
+        assert result[0].type == "person_fact"
+        assert result[0].content == "Bob is CEO"
+        # Specifically NOT the conf=0.0 fallback.
+        assert result[0].confidence == 0.9
+
+    @pytest.mark.asyncio
+    async def test_bare_fence_json_is_parsed(self):
+        """Some Claude responses use bare ``` (no language tag). Strip both."""
+        fenced = (
+            '```\n'
+            '{"type": "general_note", "content": "noted", '
+            '"confidence": 0.8, "entities": [], "dates": []}\n'
+            '```'
+        )
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=fenced)]
+
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify("something worth noting")
+
+        assert len(result) == 1
+        assert result[0].confidence == 0.8
 
     @pytest.mark.asyncio
     async def test_unknown_intent_type_coerced(self):
