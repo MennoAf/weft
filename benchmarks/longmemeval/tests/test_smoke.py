@@ -176,6 +176,66 @@ async def test_no_cleanup_leaves_memories(
 
 
 @pytest.mark.asyncio
+async def test_question_type_filter_processes_only_matching(
+    pool, tmp_path: Path, tiny_dataset_path: Path
+) -> None:
+    """--question-type filter restricts the run to matching instances only."""
+    output = tmp_path / "filtered.jsonl"
+    embedder = get_provider("fastembed", dimensions=768)
+    reader = _stub_reader("stub")
+
+    stats = await run_benchmark(
+        dataset_path=tiny_dataset_path,
+        output_path=output,
+        mode="raw",
+        top_k=5,
+        cleanup=True,
+        question_types=frozenset({"multi-session"}),
+        pool=pool,
+        embedder=embedder,
+        reader=reader,
+    )
+
+    # Only the multi-session question (smoke-002) should be processed.
+    assert stats.questions_total == 1
+    assert stats.questions_done == 1
+
+    parsed = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [row["question_id"] for row in parsed] == ["smoke-002"]
+
+    # Stats sidecar records the filter for traceability.
+    stats_payload = json.loads(
+        output.with_suffix(output.suffix + ".stats.json").read_text()
+    )
+    assert stats_payload["question_types"] == ["multi-session"]
+
+
+@pytest.mark.asyncio
+async def test_question_type_filter_with_no_matches_runs_zero(
+    pool, tmp_path: Path, tiny_dataset_path: Path
+) -> None:
+    """An unknown question_type filter yields a zero-question run, not an error."""
+    output = tmp_path / "empty.jsonl"
+    embedder = get_provider("fastembed", dimensions=768)
+    reader = _stub_reader("stub")
+
+    stats = await run_benchmark(
+        dataset_path=tiny_dataset_path,
+        output_path=output,
+        mode="raw",
+        top_k=5,
+        cleanup=True,
+        question_types=frozenset({"does-not-exist"}),
+        pool=pool,
+        embedder=embedder,
+        reader=reader,
+    )
+    assert stats.questions_total == 0
+    assert stats.questions_done == 0
+    assert not output.read_text().strip()
+
+
+@pytest.mark.asyncio
 async def test_recall_finds_evidence_session_in_raw_mode(
     pool, tmp_path: Path, tiny_dataset_path: Path
 ) -> None:

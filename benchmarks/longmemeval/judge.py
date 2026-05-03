@@ -82,20 +82,27 @@ def _resolve_longmemeval_root() -> Path:
 def _default_ref_for(hyp_path: Path, longmemeval_root: Path) -> Path:
     """Infer the reference dataset from the hypothesis filename.
 
-    Hypothesis files follow ``<split>_<mode>_<timestamp>.jsonl`` (see
-    adapter.py). We strip the trailing ``_<mode>_<timestamp>`` to recover
-    the split name and look it up in the LongMemEval ``data/`` folder.
+    Hypothesis files follow ``<split>_<mode>[_<filter-slug>]_<timestamp>.jsonl``
+    (see adapter.py). The split name is everything before the mode marker
+    (``raw`` / ``extracted``); whatever sits between the mode and the
+    trailing timestamp (a question-type slug, ``filteredN``, etc.) is
+    metadata about the run, not part of the split name.
     """
-    # Filename layout: longmemeval_oracle_extracted_20260430T204018Z.jsonl
-    # → split = longmemeval_oracle
+    # Layouts handled:
+    #   longmemeval_oracle_extracted_20260430T204018Z.jsonl
+    #   longmemeval_oracle_extracted_multi-session_20260502T233202Z.jsonl
     stem = hyp_path.stem  # drops .jsonl
     parts = stem.split("_")
-    if len(parts) < 3:
+    mode_idx = next(
+        (i for i, p in enumerate(parts) if p in ("raw", "extracted")), -1,
+    )
+    if mode_idx <= 0:
         raise ValueError(
             f"hypothesis filename {hyp_path.name!r} does not match the "
-            f"<split>_<mode>_<timestamp> convention; pass --ref explicitly"
+            f"<split>_<mode>[_<filter>]_<timestamp> convention; "
+            f"pass --ref explicitly"
         )
-    split = "_".join(parts[:-2])
+    split = "_".join(parts[:mode_idx])
     ref = longmemeval_root / "data" / f"{split}.json"
     if not ref.exists():
         raise FileNotFoundError(
