@@ -204,6 +204,16 @@ async def classify(
         raw_json = response.content[0].text.strip()
         logger.debug("classify.response: %s", raw_json)
 
+        # Strip markdown code fences. Despite "Return ONLY valid JSON. No
+        # markdown" in the system prompt, Claude wraps responses in
+        # ```json ... ``` for long conversational inputs (multi-turn
+        # dialogues). Without this strip, json.loads sees the leading
+        # backticks and throws JSONDecodeError, falling back to a
+        # single conf=0.0 general_note — losing all extracted intents.
+        if raw_json.startswith("```"):
+            raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json)
+            raw_json = re.sub(r"\s*```$", "", raw_json).strip()
+
         # Parse JSON — handle both array and single object
         parsed = json.loads(raw_json)
         if isinstance(parsed, dict):
