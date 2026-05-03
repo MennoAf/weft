@@ -205,6 +205,7 @@ async def run_benchmark(
     top_k: int = DEFAULT_TOP_K,
     cleanup: bool = True,
     limit: int | None = None,
+    question_types: frozenset[str] | None = None,
     pool: asyncpg.Pool | None = None,
     embedder: EmbeddingProvider | None = None,
     reader: Reader | None = None,
@@ -223,7 +224,13 @@ async def run_benchmark(
             recording the hypothesis. Recommended for dev loops; disable
             if you want to inspect the DB after the run.
         limit: Stop after this many questions (None = full split). Useful
-            for smoke tests against a small slice.
+            for smoke tests against a small slice. Applied AFTER the
+            question_types filter.
+        question_types: If provided, only process instances whose
+            ``question_type`` is in this set. Exact-match — abstention
+            variants like ``"multi-session_abs"`` must be listed
+            explicitly. Used for cheap subset A/B runs (e.g., iterate on
+            the router for multi-session only).
         pool / embedder / reader: Inject dependencies for testing. If
             omitted, defaults are constructed from WeftConfig + env.
 
@@ -237,6 +244,13 @@ async def run_benchmark(
         raise FileNotFoundError(f"dataset not found: {dataset_path}")
 
     instances = load_split(dataset_path)
+    if question_types:
+        before = len(instances)
+        instances = [i for i in instances if i.question_type in question_types]
+        logger.info(
+            "question_type filter %s: %d → %d instances",
+            sorted(question_types), before, len(instances),
+        )
     if limit is not None:
         instances = instances[:limit]
 
@@ -305,6 +319,7 @@ async def run_benchmark(
                 "mode": mode,
                 "top_k": top_k,
                 "dataset": str(dataset_path),
+                "question_types": sorted(question_types) if question_types else None,
             },
             indent=2,
         ),
@@ -354,6 +369,17 @@ async def run_benchmark(
     help="Only run the first N questions (smoke testing).",
 )
 @click.option(
+    "--question-type",
+    "question_types",
+    multiple=True,
+    default=(),
+    help=(
+        "Only process instances of this question_type. Repeatable; exact-"
+        "match (pass 'multi-session' AND 'multi-session_abs' for both). "
+        "Cheap A/B subset runs — e.g. router tuning on multi-session only."
+    ),
+)
+@click.option(
     "--no-cleanup",
     is_flag=True,
     default=False,
@@ -371,6 +397,7 @@ def cli(
     output_dir: Path,
     top_k: int,
     limit: int | None,
+    question_types: tuple[str, ...],
     no_cleanup: bool,
     log_level: str,
 ) -> None:
@@ -393,7 +420,14 @@ def cli(
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     split_name = dataset_path.stem  # e.g. "longmemeval_oracle"
-    output_path = output_dir / f"{split_name}_{mode}_{timestamp}.jsonl"
+    qt_set = frozenset(question_types) if question_types else None
+    if qt_set and len(qt_set) == 1:
+        slug = f"_{next(iter(qt_set))}"
+    elif qt_set:
+        slug = f"_filtered{len(qt_set)}"
+    else:
+        slug = ""
+    output_path = output_dir / f"{split_name}_{mode}{slug}_{timestamp}.jsonl"
 
     stats = asyncio.run(
         run_benchmark(
@@ -403,6 +437,7 @@ def cli(
             top_k=top_k,
             cleanup=not no_cleanup,
             limit=limit,
+            question_types=qt_set,
         )
     )
 
@@ -449,6 +484,15 @@ def cli(
 #    uv run python -m benchmarks.longmemeval.adapter \
 #        --dataset ../LongMemEval/data/longmemeval_oracle.json \
 #        --mode extracted
+#
+# 3a. Subset run on a single question type — cheap A/B for router tuning
+#     (~$2–4 instead of ~$15 for the full Oracle split). Pass each type
+#     explicitly; abstention variants are not auto-included.
+#    uv run python -m benchmarks.longmemeval.adapter \
+#        --dataset ../LongMemEval/data/longmemeval_oracle.json \
+#        --mode extracted \
+#        --question-type multi-session \
+#        --question-type multi-session_abs
 #
 # 4. Score the resulting JSONL with the LongMemEval judge wrapper. This
 #    runs the upstream evaluator inside an ephemeral uv env (no Weft dep
