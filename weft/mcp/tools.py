@@ -333,6 +333,74 @@ async def weft_remember(
         return _db_error_response("weft_remember", e)
 
 
+async def _weft_recall_turns(
+    ctx: Context,
+    *,
+    query: str,
+    project_id: str | None,
+    limit: int,
+) -> dict:
+    """Turn-tier dispatch for ``weft_recall(tier='turns'|'auto'→turns)``.
+
+    Multi-anchor queries get the per-anchor split (``anchors`` map);
+    everything else is a single hybrid recall keyed under the query.
+    Resolves the project_id the same way the belief path does so the
+    same default-detection rules apply.
+    """
+    try:
+        cid = set_correlation_id()
+        logger.debug("weft_recall.turns start [%s] query=%r", cid, query[:50])
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.turn_recall import temporal_anchor
+
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        async with acquire(app.pool):
+            anchored = await temporal_anchor(
+                app.pool, query,
+                project_id=resolved_project,
+                top_k_per_anchor=max(1, limit // 2),
+                embedder=app.embedding,
+            )
+
+        # Flatten dedup'd turns for a single ``turns`` array (the most
+        # common consumer shape), and surface the per-anchor mapping for
+        # callers that want to do anchored arithmetic.
+        seen: set[str] = set()
+        flat: list[dict] = []
+        for turns in anchored.values():
+            for t in turns:
+                if t.id in seen:
+                    continue
+                seen.add(t.id)
+                flat.append(t.to_dict())
+                if len(flat) >= limit:
+                    break
+            if len(flat) >= limit:
+                break
+
+        response: dict = {
+            "query": query,
+            "tier": "turns",
+            "count": len(flat),
+            "turns": flat,
+        }
+        # Only include the anchors map when the planner actually split the
+        # query — for single-recall fallback the map is just {query: [...]}
+        # which is redundant with `turns` and just costs tokens.
+        if len(anchored) > 1 or (
+            len(anchored) == 1 and next(iter(anchored)) != query
+        ):
+            response["anchors"] = {
+                anchor: [t.to_dict() for t in turns]
+                for anchor, turns in anchored.items()
+            }
+        return response
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_recall", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_recall", e)
+
+
 @mcp.tool()
 async def weft_recall(
     ctx: Context,
@@ -347,6 +415,7 @@ async def weft_recall(
     mode: str = "hybrid",
     retrieval_mode: str = "face",
     user_id: str | None = None,
+    tier: str = "auto",
 ) -> dict:
     """Retrieve memories by semantic query, keyword search, or hybrid (default).
 
@@ -362,9 +431,38 @@ async def weft_recall(
     retrieval_mode and scope are orthogonal — user_id composes independently with both.
     These are three independent knobs: retrieval_mode (face/code/all), scope (user/project/agent),
     and user_id — none implies the other.
+
+    tier: 'belief' (default belief-tier semantic recall over `memories`), 'turns' (turn-tier
+    raw dialogue trace over `episode_turns`, with multi-anchor splitting on temporal queries),
+    or 'auto' (regex-based query planner routes temporal markers to turns, everything else to
+    belief). When the chosen tier is 'turns', the response carries `tier: "turns"` and a `turns`
+    array instead of `results`; multi-anchor temporal queries also include an `anchors` mapping
+    from anchor phrase → returned turns so a Reader can do anchored arithmetic.
     """
     if user_id is None:
         user_id = get_user_id()
+
+    # Tier dispatch happens FIRST. The turns path doesn't reuse the
+    # belief-tier helpers below — it has its own scoring, response shape,
+    # and (for multi-anchor queries) splits the query into sub-recalls.
+    if tier not in ("auto", "belief", "turns"):
+        return _input_error_response(
+            "weft_recall",
+            ValueError(
+                f"tier must be 'auto', 'belief', or 'turns'; got {tier!r}"
+            ),
+        )
+    if tier == "auto":
+        from weft.turn_recall import route_query_to_tier
+        tier = route_query_to_tier(query)
+    if tier == "turns":
+        return await _weft_recall_turns(
+            ctx,
+            query=query,
+            project_id=project_id,
+            limit=limit,
+        )
+
     try:
         cid = set_correlation_id()
         logger.debug("weft_recall start [%s] query=%r mode=%s", cid, query[:50], mode)
@@ -4181,3 +4279,109 @@ async def weft_token_revoke(
         }
     except _DB_ERRORS as e:
         return _db_error_response("weft_token_revoke", e)
+
+
+@mcp.tool()
+async def weft_turn_append(
+    ctx: Context,
+    episode_id: str,
+    role: str,
+    content: str,
+    occurred_at: str | None = None,
+    trace_id: str | None = None,
+) -> dict:
+    """Append one dialogue turn to an existing episode (turn-tier write).
+
+    Wick's per-completion fire-and-forget hook: each user/assistant exchange
+    becomes one turn so the raw trace is queryable later. Race-safe under
+    concurrent appenders to the same episode (advisory lock keyed by
+    episode_id; turn_index assigned inside the same transaction).
+
+    role: one of "user", "assistant", "tool", "system".
+    occurred_at: ISO-8601 timestamp; defaults to now() if omitted.
+    trace_id: optional Wick run_id for cross-system correlation.
+
+    Returns ``{turn_id, episode_id, turn_index, occurred_at}``. Embedding
+    is computed inline before insert, matching the ``weft_remember`` →
+    ``store_memory`` pattern; on embedding failure the turn is still
+    written (searchable by turn_index/timestamp, not vector) and the
+    response carries a ``warning`` field.
+    """
+    try:
+        cid = set_correlation_id()
+        logger.debug("weft_turn_append start [%s]", cid)
+        app: AppContext = ctx.request_context.lifespan_context
+
+        # Validate role early so a typo from Wick surfaces as an input
+        # error, not a 422-ish enum failure later.
+        from weft.models import EpisodeTurnCreate, TurnRole
+        try:
+            role_enum = TurnRole(role)
+        except ValueError:
+            valid = ", ".join(r.value for r in TurnRole)
+            raise ValueError(
+                f"role must be one of [{valid}]; got {role!r}"
+            )
+
+        parsed_at: datetime | None = None
+        if occurred_at is not None:
+            try:
+                parsed_at = datetime.fromisoformat(occurred_at)
+            except ValueError as exc:
+                raise ValueError(
+                    f"occurred_at must be ISO-8601 (e.g. "
+                    f"'2026-05-02T12:34:56+00:00'); got {occurred_at!r} "
+                    f"({exc})"
+                )
+            if parsed_at.tzinfo is None:
+                parsed_at = parsed_at.replace(tzinfo=timezone.utc)
+
+        create = EpisodeTurnCreate(
+            episode_id=episode_id,
+            role=role_enum,
+            content=content,
+            occurred_at=parsed_at,
+            trace_id=trace_id,
+        )
+
+        # Verify the episode exists before locking the row — gives Wick a
+        # clean "episode not found" instead of a foreign-key violation
+        # surfaced as a generic DB error.
+        async with acquire(app.pool):
+            episode_row = await app.pool.fetchrow(
+                "SELECT id FROM episodes WHERE id = $1", episode_id,
+            )
+            if episode_row is None:
+                raise ValueError(f"episode not found: {episode_id!r}")
+
+        embedding = None
+        embedding_failed = False
+        try:
+            embedding = await app.embedding.embed(content)
+        except Exception as embed_err:
+            logger.warning(
+                "Embedding failed for weft_turn_append, storing without "
+                "vector: %s", embed_err,
+            )
+            embedding_failed = True
+
+        from weft.episode_turns import append_turn
+        async with acquire(app.pool):
+            turn = await append_turn(app.pool, create, embedding=embedding)
+
+        result = {
+            "turn_id": turn.id,
+            "episode_id": turn.episode_id,
+            "turn_index": turn.turn_index,
+            "occurred_at": turn.occurred_at.isoformat(),
+        }
+        if embedding_failed:
+            result["warning"] = (
+                "Turn saved but embedding failed — not searchable by "
+                "semantic similarity until next re-embed cycle."
+            )
+        return result
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_turn_append", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_turn_append", e)

@@ -255,7 +255,194 @@ async def delete_turns_for_graduated_episode(
     return int(result.split()[-1])
 
 
+# --- Recall ---
+
+
+# RRF "k" constant — a value of 60 is the standard from Cormack et al. and
+# is what weft.store.search_hybrid uses. Same value here to keep behavior
+# consistent across tiers.
+_RRF_K = 60
+
+
+async def recall_turns(
+    pool: asyncpg.Pool,
+    query: str,
+    *,
+    project_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    top_k: int = 20,
+    embedding: list[float] | None = None,
+    vector_weight: float = 0.5,
+    keyword_weight: float = 0.5,
+) -> list[EpisodeTurn]:
+    """Hybrid (vector + BM25) recall over episode_turns.
+
+    Filters apply BEFORE scoring: ``project_id`` joins through ``episodes``,
+    ``since`` / ``until`` constrain ``occurred_at``. Vector similarity uses
+    cosine distance against the inline embedding column; keyword scoring
+    uses Postgres FTS (``to_tsvector('english', content)``) — there is no
+    persisted tsvector column on episode_turns yet, so this path is
+    unindexed for now. Acceptable at Wick scale (one user's dialogue
+    trace); add a stored search_tsv column + GIN index when a single
+    installation crosses ~100k turns.
+
+    RRF fusion mirrors ``weft.store.search_hybrid`` so callers can reason
+    about belief-tier and turn-tier results in the same rank space.
+
+    Args:
+        embedding: precomputed query embedding. If None, the caller is
+            responsible for skipping vector search (we don't reach into
+            the embedding provider from this layer to keep the store
+            module dependency-free).
+    """
+    candidate_limit = top_k * 3
+    sql_filter, params = _build_turn_filters(
+        project_id=project_id, since=since, until=until,
+    )
+
+    db = get_db(pool)
+
+    # --- Vector half (skipped if embedding is None) ---
+    vector_rows: list[asyncpg.Record] = []
+    if embedding is not None:
+        vector_sql = f"""
+            SELECT t.*
+              FROM episode_turns t
+              {_join_episodes_if_needed(project_id)}
+              WHERE t.embedding IS NOT NULL
+                {sql_filter}
+              ORDER BY t.embedding <=> $1::vector
+              LIMIT ${len(params) + 2}
+        """
+        vector_rows = await db.fetch(vector_sql, embedding, *params, candidate_limit)
+
+    # --- Keyword half ---
+    keyword_sql = f"""
+        SELECT t.*
+          FROM episode_turns t
+          {_join_episodes_if_needed(project_id)}
+          WHERE to_tsvector('english', t.content)
+                @@ websearch_to_tsquery('english', $1)
+            {sql_filter}
+          ORDER BY ts_rank(
+              to_tsvector('english', t.content),
+              websearch_to_tsquery('english', $1)
+          ) DESC
+          LIMIT ${len(params) + 2}
+    """
+    keyword_rows = await db.fetch(keyword_sql, query, *params, candidate_limit)
+
+    # --- RRF fuse ---
+    return _rrf_fuse_turn_rows(
+        vector_rows, keyword_rows,
+        candidate_limit=candidate_limit,
+        top_k=top_k,
+        vector_weight=vector_weight,
+        keyword_weight=keyword_weight,
+    )
+
+
+async def list_recent_turns(
+    pool: asyncpg.Pool,
+    *,
+    project_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 20,
+) -> list[EpisodeTurn]:
+    """Time-ordered recent turns — used as a fallback when query has no
+    keyword/vector signal (e.g., a temporal-anchor probe with anchor
+    text that nothing matches semantically)."""
+    sql_filter, params = _build_turn_filters(
+        project_id=project_id, since=since, until=until,
+    )
+    db = get_db(pool)
+    sql = f"""
+        SELECT t.*
+          FROM episode_turns t
+          {_join_episodes_if_needed(project_id)}
+          WHERE 1=1
+            {sql_filter}
+          ORDER BY t.occurred_at DESC
+          LIMIT ${len(params) + 1}
+    """
+    rows = await db.fetch(sql, *params, limit)
+    return [_row_to_turn(r) for r in rows]
+
+
 # --- Helpers ---
+
+
+def _join_episodes_if_needed(project_id: str | None) -> str:
+    """Episodes JOIN only required for project scoping; cheaper to skip otherwise."""
+    return "JOIN episodes e ON t.episode_id = e.id" if project_id is not None else ""
+
+
+def _build_turn_filters(
+    *,
+    project_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[str, list]:
+    """Compose AND-joined WHERE fragments; param numbering is offset by the
+    caller's leading positional args (embedding or query string)."""
+    fragments: list[str] = []
+    params: list = []
+    # Param numbering convention: caller's leading args are $1 (and $2 if
+    # embedding+query both pre-bound). We emit fragments using $2, $3, ...
+    # by counting from len(caller_leading_args) + 1 — the caller passes the
+    # full param list to fetch().
+    base = 2  # one leading arg (embedding OR query)
+    if since is not None:
+        fragments.append(f"AND t.occurred_at >= ${base + len(params)}")
+        params.append(since)
+    if until is not None:
+        fragments.append(f"AND t.occurred_at <= ${base + len(params)}")
+        params.append(until)
+    if project_id is not None:
+        fragments.append(f"AND e.project_id = ${base + len(params)}")
+        params.append(project_id)
+    return (" ".join(fragments), params)
+
+
+def _rrf_fuse_turn_rows(
+    vector_rows: list[asyncpg.Record],
+    keyword_rows: list[asyncpg.Record],
+    *,
+    candidate_limit: int,
+    top_k: int,
+    vector_weight: float,
+    keyword_weight: float,
+) -> list[EpisodeTurn]:
+    """Reciprocal Rank Fusion over two sorted candidate lists.
+
+    Mirrors weft.store.search_hybrid's behavior: missing-from-half rows
+    get an absent-rank penalty equal to candidate_limit + 1 so a turn that
+    appears in only one half can still surface if its rank is high.
+    """
+    vector_ranks: dict[str, int] = {
+        r["id"]: i + 1 for i, r in enumerate(vector_rows)
+    }
+    keyword_ranks: dict[str, int] = {
+        r["id"]: i + 1 for i, r in enumerate(keyword_rows)
+    }
+    all_rows: dict[str, asyncpg.Record] = {}
+    for r in vector_rows:
+        all_rows[r["id"]] = r
+    for r in keyword_rows:
+        all_rows.setdefault(r["id"], r)
+
+    absent = candidate_limit + 1
+    scores: dict[str, float] = {}
+    for tid in all_rows:
+        v = vector_ranks.get(tid, absent)
+        k = keyword_ranks.get(tid, absent)
+        scores[tid] = (
+            vector_weight / (_RRF_K + v) + keyword_weight / (_RRF_K + k)
+        )
+    sorted_ids = sorted(scores, key=lambda i: scores[i], reverse=True)[:top_k]
+    return [_row_to_turn(all_rows[tid]) for tid in sorted_ids]
 
 
 def _short_id() -> str:
