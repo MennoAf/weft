@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from weft.extract import extract_behaviors, extract_candidates
+from weft.extract import extract_behaviors, extract_candidates, validate_memory_content
 
 
 def test_extract_preference():
@@ -242,3 +242,95 @@ def test_extract_behavior_has_source_line():
     results = extract_behaviors(text)
     assert len(results) == 1
     assert "source_line" in results[0]
+
+
+# --- Regressions for the 2026-05-04 behavior-fragmentation audit ---
+
+
+def test_no_extract_after_a_fragment():
+    """Reproduces weft-715b809b: 'after a test failure. Lesson: ...' must
+    not produce trigger='after a' / action='test failure. ...'.
+
+    The non-greedy capture used to grab a single determiner before the
+    period; we now require a comma boundary AND reject triggers that
+    end in a determiner.
+    """
+    text = "after a test failure. **Lesson: when two heuristics share semantic ground, share the input list.**"
+    results = extract_behaviors(text)
+    for r in results:
+        assert r["trigger_pattern"].lower() != "after a"
+        last = r["trigger_pattern"].split()[-1].lower().strip(".,;:")
+        assert last not in {"a", "an", "the", "every"}
+
+
+def test_no_extract_after_every_fragment():
+    """Reproduces weft-c335c36f: 'after every release. To make ...' must
+    not produce trigger='after every'."""
+    text = "after every release. To make a session-level GUC survive, use setup= callback."
+    results = extract_behaviors(text)
+    for r in results:
+        assert r["trigger_pattern"].lower() != "after every"
+
+
+def test_required_comma_in_before_after():
+    """The before/after pattern requires a comma now. Without one,
+    the pattern shouldn't match (was producing fragments before)."""
+    text = "after a long deploy run health checks against staging"
+    results = extract_behaviors(text)
+    # No comma → no match. The regex used to fire with `,?` optional.
+    assert all(r["trigger_pattern"].lower() != "after a" for r in results)
+
+
+# --- validate_memory_content (door-stop for weft_remember) ---
+
+
+def test_validate_accepts_normal_memory():
+    ok, reason = validate_memory_content(
+        "We pin asyncpg to 0.30 because the setup= callback is required."
+    )
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_rejects_too_short():
+    ok, reason = validate_memory_content("ok")
+    assert ok is False
+    assert reason == "content_too_short"
+
+
+def test_validate_rejects_bare_heading():
+    """Reproduces weft-8264fac3 / weft-da90bac1 / weft-f05b4d63 — agents
+    chunked docs by markdown heading and stored each title alone."""
+    for heading in [
+        "### .gitignore pattern for env templates",
+        "### PRD_06 §3 Quick Hits — pattern for LLM-narrative scaffolding",
+        "## Bootstrap-exception pattern for process docs",
+        "# A top-level heading by itself",
+    ]:
+        ok, reason = validate_memory_content(heading)
+        assert ok is False, f"should reject: {heading!r}"
+        assert reason == "heading_only"
+
+
+def test_validate_accepts_heading_with_body():
+    """A heading is fine when it has a body — only bare headings get rejected."""
+    content = "### Bootstrap-exception pattern\n\nUse this when the install order would otherwise create a chicken-and-egg."
+    ok, reason = validate_memory_content(content)
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_rejects_trailing_colon():
+    """Reproduces weft-ffd96aaa: '**Bool-vs-int validation pattern is now
+    canonical** (applied 3x in atomic.py):' — body got truncated upstream."""
+    content = "**Bool-vs-int validation pattern is now canonical** (applied 3x in atomic.py):"
+    ok, reason = validate_memory_content(content)
+    assert ok is False
+    assert reason == "trailing_colon"
+
+
+def test_validate_rejects_empty():
+    ok, reason = validate_memory_content("")
+    assert ok is False
+    ok2, reason2 = validate_memory_content("   \n\n  ")
+    assert ok2 is False
