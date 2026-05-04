@@ -91,10 +91,11 @@ def _default_ref_for(hyp_path: Path, longmemeval_root: Path) -> Path:
     # Layouts handled:
     #   longmemeval_oracle_extracted_20260430T204018Z.jsonl
     #   longmemeval_oracle_extracted_multi-session_20260502T233202Z.jsonl
+    #   longmemeval_oracle_turns_tier-turns_filtered4_20260504T015042Z.jsonl
     stem = hyp_path.stem  # drops .jsonl
     parts = stem.split("_")
     mode_idx = next(
-        (i for i, p in enumerate(parts) if p in ("raw", "extracted")), -1,
+        (i for i, p in enumerate(parts) if p in ("raw", "extracted", "turns")), -1,
     )
     if mode_idx <= 0:
         raise ValueError(

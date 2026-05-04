@@ -44,8 +44,17 @@ from typing import Literal
 import asyncpg
 
 from weft.embeddings.base import EmbeddingProvider
+from weft.episode_turns import append_turn
+from weft.episodes import create_episode
 from weft.ingest_pipeline import IngestItem, process as pipeline_process
-from weft.models import MemoryCreate, MemorySource, MemoryType
+from weft.models import (
+    EpisodeCreate,
+    EpisodeTurnCreate,
+    MemoryCreate,
+    MemorySource,
+    MemoryType,
+    TurnRole,
+)
 from weft.store import store_memory
 
 from benchmarks.longmemeval.dataset import Instance, Session
@@ -53,7 +62,7 @@ from benchmarks.longmemeval.dataset import Instance, Session
 logger = logging.getLogger(__name__)
 
 
-IngestMode = Literal["raw", "extracted"]
+IngestMode = Literal["raw", "extracted", "turns"]
 
 
 def project_id_for(question_id: str) -> str:
@@ -137,6 +146,71 @@ async def _ingest_session_extracted(
         )
 
 
+_ROLE_MAP: dict[str, TurnRole] = {
+    "user": TurnRole.user,
+    "assistant": TurnRole.assistant,
+    "system": TurnRole.system,
+    "tool": TurnRole.tool,
+}
+
+
+async def _ingest_haystack_turns(
+    pool: asyncpg.Pool,
+    embedder: EmbeddingProvider,
+    instance: Instance,
+    project_id: str,
+) -> None:
+    """Write the haystack as one episode of dialogue turns (turn-tier).
+
+    Creates a single episode for the question, then appends every
+    user/assistant turn from every session as one ``episode_turns`` row
+    with ``occurred_at`` set from the session date. Each turn carries its
+    own embedding so ``recall_turns`` can run hybrid (vector + BM25) over
+    the dialogue trace.
+
+    Branch A of the 2026-05-02 roadmap uses this path to test whether the
+    turn tier preserves enough fidelity to claw back the multi-session
+    and single-session-assistant losses observed under belief-tier
+    extraction (see ``project_longmemeval_baseline.md``).
+    """
+    episode = await create_episode(
+        pool,
+        EpisodeCreate(
+            title=f"longmemeval/{instance.question_id}",
+            summary=f"Haystack for question {instance.question_id} ({instance.question_type})",
+            project_id=project_id,
+        ),
+    )
+    for session in instance.sessions:
+        occurred_at = _parse_session_date(session.date)
+        for turn in session.turns:
+            role = _ROLE_MAP.get(turn.role)
+            if role is None:
+                logger.warning(
+                    "skipping turn with unknown role %r in session %s",
+                    turn.role, session.session_id,
+                )
+                continue
+            try:
+                embedding = await embedder.embed(turn.content)
+            except Exception as exc:
+                logger.warning(
+                    "embed failed on turn (session=%s): %s — storing without vector",
+                    session.session_id, exc,
+                )
+                embedding = None
+            await append_turn(
+                pool,
+                EpisodeTurnCreate(
+                    episode_id=episode.id,
+                    role=role,
+                    content=turn.content,
+                    occurred_at=occurred_at,
+                ),
+                embedding=embedding,
+            )
+
+
 async def load_haystack(
     pool: asyncpg.Pool,
     embedder: EmbeddingProvider,
@@ -149,8 +223,10 @@ async def load_haystack(
         pool: asyncpg pool connected to the Weft Postgres instance.
         embedder: Embedding provider (typically FastEmbed BGE-small).
         instance: The benchmark question + its haystack.
-        mode: "raw" (write sessions verbatim) or "extracted"
-            (run Weft's LLM extraction pipeline).
+        mode: "raw" (write sessions verbatim), "extracted"
+            (run Weft's LLM extraction pipeline), or "turns"
+            (write each conversational turn as an ``episode_turns`` row
+            for turn-tier hybrid recall — Branch A of the roadmap).
 
     Returns:
         Count of sessions ingested. Memory count may be higher (extracted
@@ -161,6 +237,10 @@ async def load_haystack(
         ValueError: If mode is not one of the supported literals.
     """
     project_id = project_id_for(instance.question_id)
+    if mode == "turns":
+        await _ingest_haystack_turns(pool, embedder, instance, project_id)
+        return len(instance.sessions)
+
     handler = {
         "raw": _ingest_session_raw,
         "extracted": _ingest_session_extracted,
@@ -174,10 +254,11 @@ async def load_haystack(
 
 
 async def cleanup_haystack(pool: asyncpg.Pool, instance: Instance) -> int:
-    """Delete every memory written for one benchmark question.
+    """Delete every memory + episode written for one benchmark question.
 
     Useful between dev iterations so the database does not grow unboundedly.
-    Returns the number of rows deleted.
+    Returns the count of memory rows deleted; episodes/turns also pruned
+    (turns cascade from episodes via the v45 ``ON DELETE CASCADE`` FK).
     """
     project_id = project_id_for(instance.question_id)
     # Hard delete (not Weft's soft-delete) so re-runs start clean.
@@ -185,6 +266,7 @@ async def cleanup_haystack(pool: asyncpg.Pool, instance: Instance) -> int:
         "SELECT COUNT(*) FROM memories WHERE project_id = $1", project_id,
     )
     await pool.execute("DELETE FROM memories WHERE project_id = $1", project_id)
+    await pool.execute("DELETE FROM episodes WHERE project_id = $1", project_id)
     return int(count or 0)
 
 
