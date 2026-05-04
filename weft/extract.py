@@ -58,9 +58,12 @@ _BEHAVIOR_PATTERNS = [
         r"if\s+(.+?),\s*(?:then\s+)?(?:always |you should |we should )?(.+)",
         re.IGNORECASE,
     ), 0.7),
-    # "before/after X, always Y"
+    # "before/after X, always Y" — comma required to anchor the trigger.
+    # Without it, non-greedy (.+?) collapses to a single determiner ("a",
+    # "every") and the action grabs the rest of the sentence — see
+    # weft-715b809b / weft-c335c36f for the production failure mode.
     (re.compile(
-        r"(before|after)\s+(.+?),?\s+(?:always |you should |we should |I |we )?(.+)",
+        r"(before|after)\s+(.+?),\s+(?:always |you should |we should |I |we )?(.+)",
         re.IGNORECASE,
     ), 0.75),
     # "always X when Y"
@@ -84,6 +87,68 @@ ALL_PATTERNS = (
     _PREFERENCE_PATTERNS + _SOLUTION_PATTERNS + _FACT_PATTERNS
     + _PATTERN_PATTERNS + _ARCHITECTURE_PATTERNS
 )
+
+# Trailing tokens that signal the trigger phrase got truncated mid-noun-phrase.
+# A trigger ending in a determiner ("after a", "after every") almost always
+# means the regex grabbed the head of a noun phrase but missed the noun.
+_TRIGGER_TRAIL_DETERMINERS = frozenset({
+    "a", "an", "the", "every", "each", "some", "any", "all",
+    "this", "that", "these", "those", "my", "our", "your", "their",
+})
+
+# Minimum trigger/action lengths. Kept low so legitimate compact triggers
+# like "writing tests" or "deploy" still pass; the load-bearing guard is
+# the determiner-tail check below, which catches the over-match shapes.
+_MIN_TRIGGER_LEN = 5
+_MIN_ACTION_LEN = 5
+
+
+# Minimum content length for a stored memory. Below this, the content is
+# almost always a chunked-doc heading, a stray prefix, or a ghost write.
+_MIN_MEMORY_CONTENT_LEN = 15
+
+
+def validate_memory_content(content: str) -> tuple[bool, str | None]:
+    """Gate for weft_remember. Returns (ok, reason).
+
+    Catches the production fragment shapes seen in audit:
+    - bare markdown headings stored as standalone memories
+      (e.g. "### .gitignore pattern for env templates" — no body)
+    - trailing-colon content where the body got truncated upstream
+      (e.g. "**Bool-vs-int validation pattern is now canonical** (...):")
+    - sub-15-char strings that can't carry useful context
+
+    Returns (False, reason_code) on rejection so callers can surface a
+    specific error to the writing agent. Reason codes are stable:
+    content_too_short, heading_only, trailing_colon.
+    """
+    stripped = content.strip() if content else ""
+    if len(stripped) < _MIN_MEMORY_CONTENT_LEN:
+        return False, "content_too_short"
+    non_empty_lines = [ln for ln in stripped.split("\n") if ln.strip()]
+    if len(non_empty_lines) == 1 and re.match(r"^#{1,6}\s+\S", non_empty_lines[0]):
+        return False, "heading_only"
+    if stripped.endswith(":"):
+        return False, "trailing_colon"
+    return True, None
+
+
+def _is_valid_behavior_pair(trigger: str, action: str) -> bool:
+    """Reject behavior candidates that look like regex over-match artifacts.
+
+    Production failure mode: the "before/after" pattern produced triggers
+    like "after a" with the rest of the sentence as the action. These slip
+    past a naive length check because the action half is long. Validate the
+    trigger is a plausible noun-phrase boundary instead.
+    """
+    if len(trigger) < _MIN_TRIGGER_LEN or len(action) < _MIN_ACTION_LEN:
+        return False
+    trigger_words = trigger.split()
+    if not trigger_words:
+        return False
+    if trigger_words[-1].lower().strip(".,;:") in _TRIGGER_TRAIL_DETERMINERS:
+        return False
+    return True
 
 
 def _extract_topics(text: str) -> list[str]:
@@ -141,8 +206,7 @@ def extract_behaviors(
                 else:
                     continue
 
-                # Skip if too short to be meaningful
-                if len(trigger) < 5 or len(action) < 5:
+                if not _is_valid_behavior_pair(trigger, action):
                     continue
 
                 key = (trigger.lower(), action.lower())

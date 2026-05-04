@@ -243,6 +243,19 @@ async def weft_remember(
     try:
         cid = set_correlation_id()
         logger.debug("weft_remember start [%s]", cid)
+        from weft.extract import validate_memory_content
+        ok, reason = validate_memory_content(content)
+        if not ok:
+            return _input_error_response(
+                "weft_remember",
+                ValueError(
+                    f"content rejected: {reason}. "
+                    "weft_remember requires a meaningful memory body — "
+                    "bare headings and trailing-colon fragments are rejected "
+                    "to prevent recall pollution. Include the body in the "
+                    "content field, or call weft_behavior_add for short rules."
+                ),
+            )
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
         if workspace_id is not None:

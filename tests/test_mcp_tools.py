@@ -82,14 +82,18 @@ class TestWeftRemember:
     async def test_invalid_type(self, ctx):
         from weft.mcp.tools import weft_remember
 
-        result = await weft_remember(ctx, content="test", type="not_a_real_type")
+        result = await weft_remember(
+            ctx, content="A long enough memory body", type="not_a_real_type",
+        )
         assert "error" in result
         assert result["error"] == "Invalid input"
 
     async def test_invalid_source(self, ctx):
         from weft.mcp.tools import weft_remember
 
-        result = await weft_remember(ctx, content="test", source="not_a_source")
+        result = await weft_remember(
+            ctx, content="A long enough memory body", source="not_a_source",
+        )
         assert "error" in result
         assert result["error"] == "Invalid input"
 
@@ -98,7 +102,7 @@ class TestWeftRemember:
 
         result = await weft_remember(
             ctx,
-            content="coercion test",
+            content="A coercion test memory body for topic JSON",
             topic='["postgres", "testing"]',
         )
         assert "id" in result
@@ -156,7 +160,7 @@ class TestWeftRecall:
     async def test_with_filters(self, ctx):
         from weft.mcp.tools import weft_recall, weft_remember
 
-        await weft_remember(ctx, content="Test pattern", type="pattern", topic=["testing"])
+        await weft_remember(ctx, content="Test pattern memory body", type="pattern", topic=["testing"])
 
         result = await weft_recall(ctx, query="test", type="pattern")
         assert "results" in result
@@ -281,7 +285,7 @@ class TestWeftForget:
     async def test_soft_delete(self, ctx):
         from weft.mcp.tools import weft_forget, weft_remember
 
-        mem = await weft_remember(ctx, content="Temporary note")
+        mem = await weft_remember(ctx, content="Temporary note for soft-delete test")
         result = await weft_forget(ctx, memory_id=mem["id"])
         assert result["deleted"] is True
         assert result["hard"] is False
