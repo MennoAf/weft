@@ -57,7 +57,7 @@ from benchmarks.longmemeval.ingest import (
     project_id_for,
 )
 from benchmarks.longmemeval.reader import Reader
-from benchmarks.longmemeval.router import policy_for, retrieve
+from benchmarks.longmemeval.router import Tier, policy_for, retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,7 @@ async def _run_one(
     *,
     mode: IngestMode,
     top_k: int,
+    tier: Tier = "belief",
 ) -> tuple[str, dict]:
     """Run the full pipeline for one question.
 
@@ -170,6 +171,7 @@ async def _run_one(
         question_type=instance.question_type,
         project_id=project_id,
         policy=policy,
+        tier=tier,
     )
 
     # 4. Read — Claude synthesizes the answer.
@@ -206,6 +208,7 @@ async def run_benchmark(
     cleanup: bool = True,
     limit: int | None = None,
     question_types: frozenset[str] | None = None,
+    tier: Tier = "belief",
     pool: asyncpg.Pool | None = None,
     embedder: EmbeddingProvider | None = None,
     reader: Reader | None = None,
@@ -272,7 +275,7 @@ async def run_benchmark(
                 try:
                     hypothesis, telemetry = await _run_one(
                         pool, embedder, reader, instance,
-                        mode=mode, top_k=top_k,
+                        mode=mode, top_k=top_k, tier=tier,
                     )
                 except Exception as exc:
                     logger.exception(
@@ -317,6 +320,7 @@ async def run_benchmark(
                 "output_tokens": stats.output_tokens,
                 "elapsed_seconds": stats.elapsed(),
                 "mode": mode,
+                "tier": tier,
                 "top_k": top_k,
                 "dataset": str(dataset_path),
                 "question_types": sorted(question_types) if question_types else None,
@@ -343,10 +347,26 @@ async def run_benchmark(
 )
 @click.option(
     "--mode",
-    type=click.Choice(["raw", "extracted"]),
+    type=click.Choice(["raw", "extracted", "turns"]),
     default="raw",
     show_default=True,
-    help="Ingest mode: 'raw' writes sessions verbatim; 'extracted' runs Weft's LLM pipeline.",
+    help=(
+        "Ingest mode: 'raw' writes sessions verbatim; 'extracted' runs "
+        "Weft's LLM pipeline; 'turns' writes each conversational turn into "
+        "episode_turns for turn-tier hybrid recall (Branch A)."
+    ),
+)
+@click.option(
+    "--tier",
+    type=click.Choice(["belief", "turns", "auto"]),
+    default="belief",
+    show_default=True,
+    help=(
+        "Retrieval tier. 'belief' (default) hits hybrid recall over memories. "
+        "'turns' queries episode_turns directly (use with --mode turns). "
+        "'auto' routes multi-session and temporal-reasoning to turns; "
+        "everything else stays on belief."
+    ),
 )
 @click.option(
     "--output-dir",
@@ -394,6 +414,7 @@ async def run_benchmark(
 def cli(
     dataset_path: Path,
     mode: IngestMode,
+    tier: Tier,
     output_dir: Path,
     top_k: int,
     limit: int | None,
@@ -427,7 +448,10 @@ def cli(
         slug = f"_filtered{len(qt_set)}"
     else:
         slug = ""
-    output_path = output_dir / f"{split_name}_{mode}{slug}_{timestamp}.jsonl"
+    # Suffix the tier into the filename when it's not the default belief
+    # path so A/B comparison runs don't fight over filenames.
+    tier_slug = "" if tier == "belief" else f"_tier-{tier}"
+    output_path = output_dir / f"{split_name}_{mode}{tier_slug}{slug}_{timestamp}.jsonl"
 
     stats = asyncio.run(
         run_benchmark(
@@ -438,6 +462,7 @@ def cli(
             cleanup=not no_cleanup,
             limit=limit,
             question_types=qt_set,
+            tier=tier,
         )
     )
 
