@@ -33,3 +33,6 @@ benchmarks/**/results/
 # survives even on a fresh clone.
 tests/acceptance/cases_local/*
 !tests/acceptance/cases_local/README.md
+
+# Drafts / personal writing — kept local until ready to publish.
+posts/
