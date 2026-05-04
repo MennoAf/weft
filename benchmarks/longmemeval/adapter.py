@@ -199,6 +199,45 @@ async def _run_one(
 # ----------------------------------------------------------------------
 
 
+def _stratified_sample(
+    instances: list[Instance],
+    *,
+    frac: float,
+    seed: int = 0,
+) -> list[Instance]:
+    """Take a stratified sample preserving question-type proportions.
+
+    Splits ``instances`` by ``question_type`` (abstention and non-abstention
+    variants are treated as distinct strata, since the Reader's prompt
+    differs and they're functionally separate categories), then takes
+    ``ceil(frac * |stratum|)`` from each stratum using a deterministic
+    seeded shuffle so re-runs sample the same questions.
+
+    A fixed seed is the right default for benchmark sampling: identical
+    samples across runs make subset numbers comparable. Pass a different
+    seed only when you specifically want a fresh draw.
+    """
+    import math
+    import random
+    if not 0.0 < frac <= 1.0:
+        raise ValueError(f"frac must be in (0, 1]; got {frac}")
+    by_type: dict[str, list[Instance]] = {}
+    for inst in instances:
+        by_type.setdefault(inst.question_type, []).append(inst)
+    rng = random.Random(seed)
+    sampled: list[Instance] = []
+    for qtype, group in by_type.items():
+        n_take = max(1, math.ceil(len(group) * frac))
+        n_take = min(n_take, len(group))
+        shuffled = group.copy()
+        rng.shuffle(shuffled)
+        sampled.extend(shuffled[:n_take])
+    # Preserve original order so JSONL output and judge inputs line up
+    # with intuitions from the full split (helpful when scanning logs).
+    sampled_ids = {inst.question_id for inst in sampled}
+    return [inst for inst in instances if inst.question_id in sampled_ids]
+
+
 async def run_benchmark(
     *,
     dataset_path: Path,
@@ -208,6 +247,8 @@ async def run_benchmark(
     cleanup: bool = True,
     limit: int | None = None,
     question_types: frozenset[str] | None = None,
+    stratified_frac: float | None = None,
+    sample_seed: int = 0,
     tier: Tier = "belief",
     pool: asyncpg.Pool | None = None,
     embedder: EmbeddingProvider | None = None,
@@ -253,6 +294,15 @@ async def run_benchmark(
         logger.info(
             "question_type filter %s: %d → %d instances",
             sorted(question_types), before, len(instances),
+        )
+    if stratified_frac is not None:
+        before = len(instances)
+        instances = _stratified_sample(
+            instances, frac=stratified_frac, seed=sample_seed,
+        )
+        logger.info(
+            "stratified sample (frac=%.3f, seed=%d): %d → %d instances",
+            stratified_frac, sample_seed, before, len(instances),
         )
     if limit is not None:
         instances = instances[:limit]
@@ -400,6 +450,24 @@ async def run_benchmark(
     ),
 )
 @click.option(
+    "--stratified-frac",
+    type=float,
+    default=None,
+    help=(
+        "Take a stratified sample by question_type, keeping the original "
+        "proportions (e.g. 0.1 = 10% of each type). Deterministic via "
+        "--sample-seed so re-runs hit the same questions. Applied AFTER "
+        "--question-type, BEFORE --limit."
+    ),
+)
+@click.option(
+    "--sample-seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Seed for the stratified-frac sampler.",
+)
+@click.option(
     "--no-cleanup",
     is_flag=True,
     default=False,
@@ -419,6 +487,8 @@ def cli(
     top_k: int,
     limit: int | None,
     question_types: tuple[str, ...],
+    stratified_frac: float | None,
+    sample_seed: int,
     no_cleanup: bool,
     log_level: str,
 ) -> None:
@@ -448,6 +518,8 @@ def cli(
         slug = f"_filtered{len(qt_set)}"
     else:
         slug = ""
+    if stratified_frac is not None:
+        slug = f"{slug}_strat{int(round(stratified_frac * 100))}s{sample_seed}"
     # Suffix the tier into the filename when it's not the default belief
     # path so A/B comparison runs don't fight over filenames.
     tier_slug = "" if tier == "belief" else f"_tier-{tier}"
@@ -462,6 +534,8 @@ def cli(
             cleanup=not no_cleanup,
             limit=limit,
             question_types=qt_set,
+            stratified_frac=stratified_frac,
+            sample_seed=sample_seed,
             tier=tier,
         )
     )

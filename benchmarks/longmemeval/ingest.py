@@ -44,9 +44,10 @@ from typing import Literal
 import asyncpg
 
 from weft.embeddings.base import EmbeddingProvider
-from weft.episode_turns import append_turn
+from weft.episode_turns import _short_id, append_turn
 from weft.episodes import create_episode
 from weft.ingest_pipeline import IngestItem, process as pipeline_process
+from weft.tokens import estimate_tokens
 from weft.models import (
     EpisodeCreate,
     EpisodeTurnCreate,
@@ -153,6 +154,11 @@ _ROLE_MAP: dict[str, TurnRole] = {
     "tool": TurnRole.tool,
 }
 
+# OpenAI's embeddings endpoint accepts up to 2048 inputs per call; 100 is a
+# conservative chunk size that keeps individual requests responsive and
+# avoids hitting the 8192-token-per-input ceiling on long-turn batches.
+_EMBED_BATCH_SIZE = 100
+
 
 async def _ingest_haystack_turns(
     pool: asyncpg.Pool,
@@ -168,6 +174,12 @@ async def _ingest_haystack_turns(
     own embedding so ``recall_turns`` can run hybrid (vector + BM25) over
     the dialogue trace.
 
+    Embeddings are computed in batches of ``_EMBED_BATCH_SIZE`` so a
+    single haystack of ~500 turns finishes in a handful of API calls
+    instead of 500 sequential awaits. On batch failure we fall back to
+    per-turn embed so a single bad input doesn't poison the whole
+    question's ingest.
+
     Branch A of the 2026-05-02 roadmap uses this path to test whether the
     turn tier preserves enough fidelity to claw back the multi-session
     and single-session-assistant losses observed under belief-tier
@@ -181,6 +193,10 @@ async def _ingest_haystack_turns(
             project_id=project_id,
         ),
     )
+
+    # Flatten the haystack into a single list of (role, content, occurred_at)
+    # so embedding calls can batch across session boundaries.
+    pending: list[tuple[TurnRole, str, datetime]] = []
     for session in instance.sessions:
         occurred_at = _parse_session_date(session.date)
         for turn in session.turns:
@@ -191,24 +207,84 @@ async def _ingest_haystack_turns(
                     turn.role, session.session_id,
                 )
                 continue
-            try:
-                embedding = await embedder.embed(turn.content)
-            except Exception as exc:
-                logger.warning(
-                    "embed failed on turn (session=%s): %s — storing without vector",
-                    session.session_id, exc,
-                )
-                embedding = None
-            await append_turn(
-                pool,
-                EpisodeTurnCreate(
-                    episode_id=episode.id,
-                    role=role,
-                    content=turn.content,
-                    occurred_at=occurred_at,
-                ),
-                embedding=embedding,
+            pending.append((role, turn.content, occurred_at))
+
+    embeddings: list[list[float] | None] = [None] * len(pending)
+    for start in range(0, len(pending), _EMBED_BATCH_SIZE):
+        chunk = pending[start : start + _EMBED_BATCH_SIZE]
+        texts = [content for _, content, _ in chunk]
+        try:
+            batch_vecs = await embedder.embed_batch(texts)
+            for i, vec in enumerate(batch_vecs):
+                embeddings[start + i] = vec
+        except Exception as exc:
+            logger.warning(
+                "embed_batch failed for chunk %d-%d (q=%s): %s — falling back per-turn",
+                start, start + len(chunk), instance.question_id, exc,
             )
+            for i, text in enumerate(texts):
+                try:
+                    embeddings[start + i] = await embedder.embed(text)
+                except Exception as inner_exc:
+                    logger.warning(
+                        "embed failed on turn %d (q=%s): %s — storing without vector",
+                        start + i, instance.question_id, inner_exc,
+                    )
+
+    await _bulk_append_turns(pool, episode.id, pending, embeddings)
+
+
+async def _bulk_append_turns(
+    pool: asyncpg.Pool,
+    episode_id: str,
+    pending: list[tuple[TurnRole, str, datetime]],
+    embeddings: list[list[float] | None],
+) -> None:
+    """Bulk-insert all turns of one episode in a single executemany call.
+
+    The production ``append_turn`` path takes a per-row advisory lock and
+    derives ``turn_index`` from ``MAX(...) + 1`` so concurrent writers to
+    the same episode serialize cleanly. Benchmark ingest is single-writer
+    per question with a fresh episode, so neither guard is needed; we can
+    pre-allocate sequential ``turn_index`` values and skip the lock,
+    dropping ingest from one round-trip per turn (~0.5s × N) to one
+    prepared-statement batch.
+
+    The pgvector codec is registered on the pool (init=_pgvector_codec_init)
+    so list[float] parameters are encoded into the vector type natively.
+    Pass the list straight through; explicit ``::vector`` casts collide
+    with the codec's binary encoding under ``executemany``.
+    """
+    if not pending:
+        return
+
+    rows: list[tuple] = []
+    for idx, ((role, content, occurred_at), embedding) in enumerate(zip(pending, embeddings)):
+        token_count = estimate_tokens(content)
+        rows.append(
+            (
+                f"et-{_short_id()}",
+                episode_id,
+                idx,
+                role.value,
+                content,
+                occurred_at,
+                embedding,
+                token_count,
+            )
+        )
+
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO episode_turns (
+                id, episode_id, turn_index, role, content,
+                occurred_at, embedding, token_count
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            rows,
+        )
 
 
 async def load_haystack(
