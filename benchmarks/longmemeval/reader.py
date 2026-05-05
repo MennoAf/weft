@@ -65,8 +65,14 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
         "past session. Find the matching session and answer directly."
     ),
     "single-session-preference": (
-        "This question is about a user preference stated in a single session. "
-        "Quote or paraphrase the preference exactly."
+        "This question is about a user preference. The relevant preference may "
+        "have been stated about a RELATED topic in a prior session — preferences "
+        "from a Seattle trip apply to a Miami trip; preferences about baking "
+        "with one ingredient apply to baking with another. Identify the "
+        "preference signal even when the question's topic is not literal-match "
+        "in memory, and answer in terms of how that preference applies to the "
+        "current question. Abstain only if no preference is present anywhere "
+        "in memory."
     ),
     "multi-session": (
         "This question requires synthesizing information across multiple past "
