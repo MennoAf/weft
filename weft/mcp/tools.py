@@ -1654,20 +1654,34 @@ async def weft_behavior_add(
     priority: int = 0,
 ) -> dict:
     """Store a persistent behavioral rule for agents.
-    If project_id is omitted, auto-detects from the client's working directory.
 
     trigger_pattern: describes WHEN this behavior should activate (embedded for semantic matching).
     action: describes WHAT the agent should do when the trigger matches.
     scope: 'global' (all projects), 'project' (specific project), or 'agent' (specific agent).
-    priority: higher values override lower-priority behaviors (default 0)."""
+    priority: higher values override lower-priority behaviors (default 0).
+
+    project_id resolution: scope='global' forces project_id=NULL so the
+    behavior fires across every project (auto-detect from CWD would
+    silently bind it to the calling project, defeating global scope).
+    scope='project' or 'agent' auto-detects from the client's working
+    directory if project_id is omitted.
+    """
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        behavior_scope = BehaviorScope(scope)
+        if behavior_scope == BehaviorScope.global_:
+            # Global scope must not bind to a project; honoring the
+            # auto-detected CWD here would scope the row to that project
+            # and silently break cross-project firing. Caller-supplied
+            # project_id is also ignored — global means global.
+            resolved_project = None
+        else:
+            resolved_project = await _resolve_project_id(ctx, project_id)
         create = BehaviorCreate(
             trigger_pattern=trigger_pattern,
             action=action,
             confidence=confidence,
-            scope=BehaviorScope(scope),
+            scope=behavior_scope,
             project_id=resolved_project,
             agent_id=agent_id,
             priority=priority,

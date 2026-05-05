@@ -14,6 +14,7 @@ from weft.behaviors import (
     update_behavior,
 )
 from weft.models import BehaviorCreate, BehaviorScope
+from weft.schema import SYSTEM_GLOBAL_USER_ID
 
 
 # --- Helpers ---
@@ -396,3 +397,131 @@ async def test_touch_behavior_increments_access_count(pool):
     found = await get_behavior(pool, b.id)
     assert found.access_count == 2
     assert found.updated_at > b.updated_at
+
+
+# --- store_behavior user_id resolution ---
+
+
+async def test_store_behavior_falls_back_to_system_global_when_guc_empty():
+    """When app.user_id GUC is empty AND no explicit user_id is supplied,
+    store_behavior must default to the SYSTEM_GLOBAL sentinel — not NULL.
+
+    Without this fallback a supervisor caller with no GUC would write a
+    row that's invisible to its own subsequent match/list queries
+    (the user_id filter excludes "neither mine nor sentinel").
+
+    Builds a dedicated pool whose setup callback does NOT pre-populate
+    the GUC, so we can exercise the empty-GUC code path that the default
+    test pool's setup hides.
+    """
+    import asyncpg
+
+    from weft.db.connection import _pgvector_codec_init, register_pgvector_codec
+    from weft.db.migrations import run_migrations
+    from tests.conftest import _pg_container
+
+    dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
+
+    async def _no_op_setup(conn):
+        # Intentionally do NOT set app.user_id — leaves it at its
+        # default (empty), which is what we want to test.
+        pass
+
+    p = await asyncpg.create_pool(
+        dsn, min_size=1, max_size=2,
+        init=_pgvector_codec_init, setup=_no_op_setup,
+    )
+    try:
+        await run_migrations(p)
+        await register_pgvector_codec(p)
+        await p.execute("TRUNCATE behaviors CASCADE")
+
+        bc = BehaviorCreate(
+            trigger_pattern="empty-guc fallback",
+            action="land on sentinel",
+        )
+        b = await store_behavior(p, bc)
+        assert b.user_id == SYSTEM_GLOBAL_USER_ID
+
+        # Confirm at the DB row level too.
+        row = await p.fetchrow(
+            "SELECT user_id FROM behaviors WHERE id = $1", b.id,
+        )
+        assert row["user_id"] == SYSTEM_GLOBAL_USER_ID
+    finally:
+        await p.close()
+
+
+async def test_store_behavior_explicit_user_id_takes_precedence(pool):
+    """When BehaviorCreate.user_id is set, that value wins over the GUC."""
+    bc = BehaviorCreate(
+        trigger_pattern="explicit-user trigger",
+        action="a",
+        user_id="explicit-user-id",
+    )
+    b = await store_behavior(pool, bc)
+    assert b.user_id == "explicit-user-id"
+
+    # Verify at the DB level too, not just the returned object.
+    row = await pool.fetchrow(
+        "SELECT user_id FROM behaviors WHERE id = $1", b.id,
+    )
+    assert row["user_id"] == "explicit-user-id"
+
+
+async def test_store_behavior_uses_guc_when_no_explicit_user_id(pool):
+    """When BehaviorCreate.user_id is None, store falls through to the GUC.
+
+    The pool fixture's setup callback sets app.user_id='test-user-default',
+    so a behavior stored here should land under that user.
+    """
+    bc = BehaviorCreate(trigger_pattern="guc-fallback", action="a")
+    b = await store_behavior(pool, bc)
+    assert b.user_id == "test-user-default"
+
+
+# --- truly-global behavior fires across project_ids ---
+
+
+async def test_match_behaviors_truly_global_fires_cross_project(pool):
+    """A behavior with scope='global', project_id=NULL, user_id=SYSTEM_GLOBAL
+    must surface for match_behaviors callers in any project_id.
+
+    Regression: scope='global' rules silently bound to their birth-project
+    when ``weft_behavior_add`` auto-resolved project_id from CWD. The
+    fix sets project_id=NULL for scope='global' so cross-project firing
+    works as the docstring promises.
+    """
+    emb = _normalized_embedding(0.1)
+
+    bc = BehaviorCreate(
+        trigger_pattern="user says save this finding",
+        action="weft_remember",
+        scope=BehaviorScope.global_,
+        user_id=SYSTEM_GLOBAL_USER_ID,
+        # project_id intentionally None — truly global
+    )
+    stored = await store_behavior(pool, bc, embedding=emb)
+    assert stored.project_id is None
+    assert stored.user_id == SYSTEM_GLOBAL_USER_ID
+
+    # Querying from project_id="warp" with a different user_id should
+    # still surface the global rule.
+    results = await match_behaviors(
+        pool, emb,
+        project_id="warp",
+        user_id="warp-user-id",
+        threshold=0.0,
+    )
+    triggers = {r.behavior.trigger_pattern for r in results}
+    assert "user says save this finding" in triggers
+
+    # Querying from a third project_id should also surface it.
+    results_muttr = await match_behaviors(
+        pool, emb,
+        project_id="muttr",
+        user_id="muttr-user-id",
+        threshold=0.0,
+    )
+    triggers_muttr = {r.behavior.trigger_pattern for r in results_muttr}
+    assert "user says save this finding" in triggers_muttr
