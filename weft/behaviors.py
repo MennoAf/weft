@@ -44,7 +44,14 @@ async def store_behavior(
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.trigger_pattern + " " + create.action)
 
-    await get_db(pool).execute(
+    # user_id resolution: explicit create.user_id wins; otherwise the
+    # session GUC (set by RLS middleware) is consulted; if neither is
+    # available, fall back to the SYSTEM_GLOBAL sentinel so the row is
+    # readable across users (the post-mig-36 invariant — never NULL).
+    # Without this fallback, a supervisor caller with no GUC would
+    # write a row that's invisible to its own match/list queries
+    # because the user_id filter excludes "neither mine nor sentinel."
+    row = await get_db(pool).fetchrow(
         """
         INSERT INTO behaviors (
             id, trigger_pattern, action, confidence, scope,
@@ -53,10 +60,17 @@ async def store_behavior(
             embedding, status, write_provenance
         ) VALUES (
             $1, $2, $3, $4, $5,
-            $6, $7, nullif(current_setting('app.user_id', true), ''), $8, $9,
-            0, $10, $11, $11,
-            $12::vector, 'active', 'supervisor'
+            $6, $7,
+            coalesce(
+                $8,
+                nullif(current_setting('app.user_id', true), ''),
+                $9
+            ),
+            $10, $11,
+            0, $12, $13, $13,
+            $14::vector, 'active', 'supervisor'
         )
+        RETURNING user_id
         """,
         behavior_id,
         create.trigger_pattern,
@@ -65,12 +79,15 @@ async def store_behavior(
         create.scope.value,
         create.project_id,
         create.agent_id,
+        create.user_id,
+        SYSTEM_GLOBAL_USER_ID,
         create.priority,
         create.enabled,
         token_count,
         now,
         embedding,
     )
+    resolved_user_id = row["user_id"] if row else create.user_id
 
     return Behavior(
         id=behavior_id,
@@ -80,7 +97,7 @@ async def store_behavior(
         scope=create.scope,
         project_id=create.project_id,
         agent_id=create.agent_id,
-        user_id=create.user_id,
+        user_id=resolved_user_id,
         priority=create.priority,
         enabled=create.enabled,
         access_count=0,
@@ -112,14 +129,18 @@ async def list_behaviors(
 ) -> list[Behavior]:
     """List behaviors with optional filters.
 
-    Scoping uses OR-NULL logic on project_id/agent_id/user_id (matches value OR global).
+    Scoping uses OR-NULL logic on project_id/agent_id (matches value OR
+    NULL = globally-scoped). user_id uses sentinel-or-self logic — owned
+    by the supplied user_id OR by the SYSTEM_GLOBAL sentinel — because
+    post-mig-36 user_id is NOT NULL and SYSTEM_GLOBAL is the named
+    string for system-owned rows.
 
     Args:
         pool: Database connection pool.
         scope: Optional scope filter.
         project_id: If provided, filters to behaviors owned by this project OR globally-scoped behaviors (project_id IS NULL). If None, returns all.
         agent_id: If provided, filters to behaviors owned by this agent OR globally-scoped behaviors (agent_id IS NULL). If None, returns all.
-        user_id: If provided, filters to behaviors owned by this user OR globally-scoped behaviors (user_id IS NULL). If None, returns all.
+        user_id: If provided, filters to behaviors owned by this user OR by the SYSTEM_GLOBAL sentinel. If None, returns all.
         enabled: If True, only enabled behaviors. If False, only disabled. If None, all.
         status: Status filter (default "active").
         limit: Max results (default 50).
@@ -186,7 +207,9 @@ async def match_behaviors(
     """Match behaviors by vector similarity on trigger_pattern embedding.
 
     Results ranked by composite score: similarity * confidence * (1 + priority/10).
-    Uses OR-NULL scoping on project_id/agent_id/user_id.
+    Uses OR-NULL scoping on project_id/agent_id; user_id uses
+    sentinel-or-self (matches the supplied user_id OR the
+    SYSTEM_GLOBAL sentinel — see list_behaviors).
 
     Args:
         pool: Database connection pool.
@@ -195,7 +218,7 @@ async def match_behaviors(
         threshold: Similarity threshold (default 0.1).
         project_id: If provided, filters to behaviors owned by this project OR globally-scoped behaviors (project_id IS NULL). If None, returns all.
         agent_id: If provided, filters to behaviors owned by this agent OR globally-scoped behaviors (agent_id IS NULL). If None, returns all.
-        user_id: If provided, filters to behaviors owned by this user OR globally-scoped behaviors (user_id IS NULL). If None, returns all.
+        user_id: If provided, filters to behaviors owned by this user OR by the SYSTEM_GLOBAL sentinel. If None, returns all.
         enabled: If True, only enabled behaviors. If False, only disabled. If None, all.
     """
     conditions = ["embedding IS NOT NULL", "status = 'active'"]
