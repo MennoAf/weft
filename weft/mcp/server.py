@@ -32,6 +32,7 @@ from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.oauth_consent import handle_consent
+from weft.mcp.oauth_metadata import handle_authorization_server_metadata
 from weft.mcp.slack_commands import handle_slash_checkin
 from weft.cost_enforcement import cost_enforcement_loop
 from weft.scheduler import (
@@ -649,6 +650,18 @@ if _config_for_middleware.oauth_enabled:
             "bearer_methods_supported": ["header"],
             "scopes_supported": ["openid", "email"],
         })
+
+    @mcp.custom_route(
+        "/.well-known/oauth-authorization-server", methods=["GET"],
+    )
+    async def _oauth_authorization_server_metadata(
+        request: Request,
+    ) -> Response:
+        # Mirror of Supabase's RFC 8414 metadata at our origin — works
+        # around MCP OAuth clients that skip RFC 9728's protected-resource
+        # redirection and look for auth-server metadata at the resource
+        # origin directly. See weft/mcp/oauth_metadata.py for the why.
+        return await handle_authorization_server_metadata(request)
 
     @mcp.custom_route("/oauth/consent", methods=["GET"])
     async def _oauth_consent(request: Request) -> Response:
