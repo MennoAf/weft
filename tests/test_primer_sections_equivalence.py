@@ -31,6 +31,7 @@ from weft.primer_sections.entities import build_entities_section
 from weft.primer_sections.grounding import build_grounding_section
 from weft.primer_sections.handoff import build_handoff_section
 from weft.primer_sections.issues import build_issues_section
+from weft.primer_sections.recent_memories import build_recent_memories_section
 from weft.primer_sections.recent_work import build_recent_work_section
 from weft.primer_sections.rules import build_rules_section
 from weft.store import store_memory
@@ -288,6 +289,7 @@ async def test_full_pipeline_token_equivalence(populated_pool):
     await build_rules_section(ctx)
     await build_behaviors_section(ctx)
     await build_handoff_section(ctx)
+    await build_recent_memories_section(ctx)
     await build_recent_work_section(ctx)
     await build_issues_section(ctx)
     await build_anti_patterns_section(ctx)
@@ -308,6 +310,7 @@ async def test_empty_db_equivalence(pool):
     await build_rules_section(ctx)
     await build_behaviors_section(ctx)
     await build_handoff_section(ctx)
+    await build_recent_memories_section(ctx)
     await build_recent_work_section(ctx)
     await build_issues_section(ctx)
     await build_anti_patterns_section(ctx)

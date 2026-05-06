@@ -182,6 +182,10 @@ async def build_primer(
     from weft.primer_sections.handoff import fetch_handoff_section, pack_handoff_section
     from weft.primer_sections.issues import fetch_issues_section, pack_issues_section
     from weft.primer_sections.onboarding import build_onboarding_section
+    from weft.primer_sections.recent_memories import (
+        fetch_recent_memories_section,
+        pack_recent_memories_section,
+    )
     from weft.primer_sections.recent_work import fetch_recent_work_section, pack_recent_work_section
     from weft.primer_sections.rules import fetch_rules_section, pack_rules_section
     from weft.primer_sections.triggers import fetch_triggers_section, pack_triggers_section
@@ -241,6 +245,7 @@ async def build_primer(
         rules_fetch,
         behaviors_fetch,
         handoff_fetch,
+        recent_memories_fetch,
         recent_work_fetch,
         issues_fetch,
         anti_patterns_fetch,
@@ -259,6 +264,7 @@ async def build_primer(
         fetch_rules_section(ctx) if _enabled("rules") else _noop_fetch(),
         fetch_behaviors_section(ctx) if _enabled("behaviors") else _noop_fetch(),
         fetch_handoff_section(ctx) if _enabled("handoff") else _noop_fetch(),
+        fetch_recent_memories_section(ctx) if _enabled("recent_memories") else _noop_fetch(),
         fetch_recent_work_section(ctx) if _enabled("recent_work") else _noop_fetch(),
         fetch_issues_section(ctx) if _enabled("issues") else _noop_fetch(),
         fetch_anti_patterns_section(ctx) if _enabled("anti_patterns") else _noop_fetch(),
@@ -287,6 +293,14 @@ async def build_primer(
     rules_result = _pack(_enabled("rules"), pack_rules_section, rules_fetch)
     behaviors_result = _pack(_enabled("behaviors"), pack_behaviors_section, behaviors_fetch)
     handoff_result = _pack(_enabled("handoff"), pack_handoff_section, handoff_fetch)
+    # recent_memories runs right after handoff so its dedup against
+    # the surfaced handoff is automatic via ctx.seen_ids, and so its
+    # tier-1 budget is reserved before any tier-2 section eats it.
+    recent_memories_result = _pack(
+        _enabled("recent_memories"),
+        pack_recent_memories_section,
+        recent_memories_fetch,
+    )
     recent_work_result = _pack(_enabled("recent_work"), pack_recent_work_section, recent_work_fetch)
     issues_result = _pack(_enabled("issues"), pack_issues_section, issues_fetch)
     anti_patterns_result = _pack(_enabled("anti_patterns"), pack_anti_patterns_section, anti_patterns_fetch)
@@ -314,6 +328,7 @@ async def build_primer(
         "rules": len(rules_result.items),
         "behaviors": len(behaviors_result.items),
         "handoff": len(handoff_result.items),
+        "recent_memories": len(recent_memories_result.items),
         "recent_work": len(recent_work_result.items),
         "issues": len(issues_result.items),
         "decisions": len(decisions_result.items),
@@ -345,7 +360,10 @@ async def build_primer(
 
         tier1_tokens = sum(
             ctx.section_tokens.get(s, 0)
-            for s in ("grounding", "rules", "handoff", "issues", "anti_patterns")
+            for s in (
+                "grounding", "rules", "handoff", "recent_memories",
+                "issues", "anti_patterns",
+            )
         )
 
         result = {
@@ -356,6 +374,7 @@ async def build_primer(
                 "Use weft_focus(intent=...) to load behavioral rules.",
             ),
             "handoff": handoff_result.items,
+            "recent_memories": recent_memories_result.items,
             "recent_work": _deferred(
                 recent_work_result.items,
                 "Use weft_focus(intent=...) to load recent work.",
@@ -414,6 +433,7 @@ async def build_primer(
         "rules": rules_result.items,
         "behaviors": behaviors_result.items,
         "handoff": handoff_result.items,
+        "recent_memories": recent_memories_result.items,
         "recent_work": recent_work_result.items,
         "issues": {"count": len(issues_result.items), "items": issues_result.items},
         "anti_patterns": anti_patterns_result.items,
