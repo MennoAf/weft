@@ -269,6 +269,80 @@ async def test_recall_turns_project_scope_isolates(pool):
     assert a_only[0].episode_id == ep_a.id
 
 
+async def test_recall_turns_reranks_by_usefulness(pool):
+    """Two turns with similar BM25/cosine scores but diverging
+    ``usefulness_score`` should rank high-useful first after the P1.A3
+    rerank step."""
+    ep = await create_episode(pool, EpisodeCreate(title="rerank", project_id="proj-rerank"))
+    embedding = [0.1] * 768
+
+    # Two turns w/ identical text → identical RRF rank-space contribution.
+    # Same occurred_at → identical recency. The only diverging factor is
+    # usefulness_score (mutated post-insert to bypass model defaults).
+    same_when = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    low_turn = await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content="rerankprobe sentinel content",
+            occurred_at=same_when,
+        ),
+        embedding=embedding,
+    )
+    high_turn = await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content="rerankprobe sentinel content",
+            occurred_at=same_when,
+        ),
+        embedding=embedding,
+    )
+
+    # Diverge usefulness_score post-insert.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE episode_turns SET usefulness_score = $1 WHERE id = $2",
+            0.2, low_turn.id,
+        )
+        await conn.execute(
+            "UPDATE episode_turns SET usefulness_score = $1, last_boosted_at = now() "
+            "WHERE id = $2",
+            1.0, high_turn.id,
+        )
+
+    results = await recall_turns(
+        pool,
+        "rerankprobe",
+        project_id="proj-rerank",
+        top_k=5,
+    )
+    assert len(results) == 2
+    # High-useful should outrank low-useful.
+    assert results[0].id == high_turn.id
+    assert results[1].id == low_turn.id
+
+
+async def test_recall_turns_populates_usefulness_columns(pool, episode_with_turns):
+    """``_row_to_turn`` should hydrate the v46 boost-loop columns onto the
+    EpisodeTurn model so callers can introspect them (e.g., for
+    diagnostics)."""
+    results = await recall_turns(
+        pool, "launch",
+        project_id=episode_with_turns.project_id,
+        top_k=5,
+    )
+    assert results
+    # Defaults from v46: usefulness_score=0.7, usefulness_count=0.
+    for t in results:
+        assert hasattr(t, "usefulness_score")
+        assert 0.0 <= t.usefulness_score <= 1.0
+        assert hasattr(t, "usefulness_count")
+        assert hasattr(t, "last_boosted_at")
+
+
 async def test_recall_turns_no_embedding_falls_back_to_keyword(pool, episode_with_turns):
     """Skipping the embedding arg should still return BM25 results."""
     results = await recall_turns(

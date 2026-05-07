@@ -333,14 +333,19 @@ async def recall_turns(
     """
     keyword_rows = await db.fetch(keyword_sql, query, *params, candidate_limit)
 
-    # --- RRF fuse ---
-    return _rrf_fuse_turn_rows(
+    # --- RRF fuse → rerank by usefulness × recency (P1.A3) ---
+    fused = _rrf_fuse_turn_rows(
         vector_rows, keyword_rows,
         candidate_limit=candidate_limit,
         top_k=top_k,
         vector_weight=vector_weight,
         keyword_weight=keyword_weight,
     )
+    # Late import: relevance imports models, which we already loaded.
+    # Done at call time to keep the store layer's import graph minimal.
+    from weft.relevance import rank_turns
+    ranked = rank_turns(fused)
+    return [s.turn for s in ranked]
 
 
 async def list_recent_turns(
@@ -414,12 +419,19 @@ def _rrf_fuse_turn_rows(
     top_k: int,
     vector_weight: float,
     keyword_weight: float,
-) -> list[EpisodeTurn]:
+) -> list[tuple[EpisodeTurn, float]]:
     """Reciprocal Rank Fusion over two sorted candidate lists.
 
     Mirrors weft.store.search_hybrid's behavior: missing-from-half rows
     get an absent-rank penalty equal to candidate_limit + 1 so a turn that
     appears in only one half can still surface if its rank is high.
+
+    Returns ``(turn, rrf_score)`` pairs in RRF-descending order, capped at
+    ``top_k``. Caller may rerank within the returned window using
+    :func:`weft.relevance.rank_turns` (which is what ``recall_turns`` does
+    today). Returning the score keeps the rerank step honest — without
+    it, downstream layers would have to recompute RRF or rerank against
+    rank-position, both of which lose information.
     """
     vector_ranks: dict[str, int] = {
         r["id"]: i + 1 for i, r in enumerate(vector_rows)
@@ -442,7 +454,7 @@ def _rrf_fuse_turn_rows(
             vector_weight / (_RRF_K + v) + keyword_weight / (_RRF_K + k)
         )
     sorted_ids = sorted(scores, key=lambda i: scores[i], reverse=True)[:top_k]
-    return [_row_to_turn(all_rows[tid]) for tid in sorted_ids]
+    return [(_row_to_turn(all_rows[tid]), scores[tid]) for tid in sorted_ids]
 
 
 def _short_id() -> str:
@@ -457,6 +469,15 @@ def _short_id() -> str:
 
 
 def _row_to_turn(row: asyncpg.Record) -> EpisodeTurn:
+    # Boost-loop columns landed in v46 — read defensively so old fixtures
+    # / pre-migration callers don't trip if a row predates the migration.
+    def _opt(key: str, default):
+        try:
+            v = row[key]
+        except (KeyError, IndexError):
+            return default
+        return default if v is None else v
+
     return EpisodeTurn(
         id=row["id"],
         episode_id=row["episode_id"],
@@ -469,4 +490,7 @@ def _row_to_turn(row: asyncpg.Record) -> EpisodeTurn:
         token_count=row["token_count"],
         user_id=row["user_id"],
         created_at=row["created_at"],
+        usefulness_score=float(_opt("usefulness_score", 0.7)),
+        usefulness_count=int(_opt("usefulness_count", 0)),
+        last_boosted_at=_opt("last_boosted_at", None),
     )
