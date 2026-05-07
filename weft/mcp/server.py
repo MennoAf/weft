@@ -422,6 +422,24 @@ async def lifespan(server: FastMCP):
         except Exception as exc:
             logger.warning("Auto re-embed failed (will retry on next query): %s", exc)
 
+    # P2.1: backfill episodes.embedding for rows added before the column
+    # existed (or rows whose embedding generation failed previously).
+    # ``reembed_table`` is idempotent — once every row has an embedding,
+    # this becomes a cheap empty SELECT on subsequent boots. Uses the
+    # episode-tier embedder helper so a future ``WEFT_EPISODE_EMBEDDER``
+    # override picks up automatically.
+    try:
+        from weft.db.reembed import (
+            reembed_table,
+            resolve_episode_embedder,
+        )
+        episode_embedder = resolve_episode_embedder(config)
+        backfilled = await reembed_table(pool, "episodes", episode_embedder)
+        if backfilled:
+            logger.info("Backfilled episode embeddings for %d rows", backfilled)
+    except Exception as exc:
+        logger.warning("Episode embedding backfill failed (non-fatal): %s", exc)
+
     # Seed memories on fresh installs (best-effort, never blocks startup)
     try:
         seeded = await seed_memories(pool, embedding)

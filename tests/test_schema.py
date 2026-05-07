@@ -128,7 +128,7 @@ class TestValidateDimensions:
 class TestDiscoverVectorDimensions:
     @pytest.mark.asyncio
     async def test_returns_correct_dims(self, pool):
-        """After migrations, all four vector tables should have vector(768)."""
+        """After migrations, every vector table should have vector(768)."""
         async with pool.acquire() as conn:
             result = await discover_vector_dimensions(conn)
         assert result == {
@@ -136,15 +136,17 @@ class TestDiscoverVectorDimensions:
             "behaviors": 768,
             "entities": 768,
             "episode_turns": 768,
+            "episodes": 768,
         }
 
     @pytest.mark.asyncio
     async def test_partial_tables(self, schema_pool):
-        """Drop behaviors, entities, and episode_turns — only memories should be discovered."""
+        """Drop everything except memories — only memories should be discovered."""
         async with schema_pool.acquire() as conn:
             await conn.execute("DROP TABLE IF EXISTS entity_mentions CASCADE")
             await conn.execute("DROP TABLE IF EXISTS episode_turns CASCADE")
             await conn.execute("DROP TABLE IF EXISTS episode_memories CASCADE")
+            await conn.execute("DROP TABLE IF EXISTS episodes CASCADE")
             await conn.execute("DROP TABLE IF EXISTS entities CASCADE")
             await conn.execute("DROP TABLE IF EXISTS behaviors CASCADE")
             result = await discover_vector_dimensions(conn)
@@ -158,6 +160,7 @@ class TestDiscoverVectorDimensions:
             await conn.execute("DROP TABLE IF EXISTS entity_mentions CASCADE")
             await conn.execute("DROP TABLE IF EXISTS episode_turns CASCADE")
             await conn.execute("DROP TABLE IF EXISTS episode_memories CASCADE")
+            await conn.execute("DROP TABLE IF EXISTS episodes CASCADE")
             await conn.execute("DROP TABLE IF EXISTS entities CASCADE")
             await conn.execute("DROP TABLE IF EXISTS behaviors CASCADE")
             await conn.execute("DROP TABLE IF EXISTS memory_relationships CASCADE")
@@ -189,14 +192,14 @@ class TestGetDimensionStatus:
     async def test_matching(self, pool):
         async with pool.acquire() as conn:
             discovered, mismatches = await get_dimension_status(conn, 768)
-        assert len(discovered) == 4
+        assert len(discovered) == len(VECTOR_TABLES)
         assert mismatches == []
 
     @pytest.mark.asyncio
     async def test_mismatch(self, pool):
         async with pool.acquire() as conn:
             discovered, mismatches = await get_dimension_status(conn, 384)
-        assert len(mismatches) == 4
+        assert len(mismatches) == len(VECTOR_TABLES)
         assert all(m.expected_dim == 384 for m in mismatches)
 
 
@@ -335,7 +338,7 @@ class TestEnsureVectorDimensions:
             )
         migrated = await ensure_vector_dimensions(schema_pool, 768)
         assert migrated == ["memories"]
-        # behaviors, entities, and episode_turns should still be 768 (untouched)
+        # All other vector tables should still be 768 (untouched)
         async with schema_pool.acquire() as conn:
             discovered = await discover_vector_dimensions(conn)
         assert discovered == {
@@ -343,6 +346,7 @@ class TestEnsureVectorDimensions:
             "behaviors": 768,
             "entities": 768,
             "episode_turns": 768,
+            "episodes": 768,
         }
 
 
