@@ -1,82 +1,52 @@
 # Weft
 
-Persistent memory system for AI agents. Replaces flat-file memory with a queryable knowledge base supporting semantic retrieval, confidence tracking, relationship mapping, and automatic decay.
+> Shared persistent brain for you and your agents.
 
-Part of the trilogy: **Loom** (orchestration) &rarr; **Warp** (builder agent) &rarr; **Weft** (memory).
+Weft replaces flat-file agent memory (`MEMORY.md`, scattered notes) with a queryable knowledge base that any MCP-compatible agent can read from and write to. Semantic search via pgvector, structured types with distinct lifecycles, confidence + decay, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity.
+
+Part of the trilogy: **Loom** (orchestration) → **Warp** (builder agent) → **Weft** (memory).
 
 ## Why Weft
 
-Current agent memory is a flat markdown file with no structure, no retrieval beyond grep, no decay, and no way to distinguish high-confidence knowledge from speculation. Weft treats memory as a first-class data system:
+Default agent memory is a flat file the agent grep-reads at session start. That works for a while, then it doesn't:
 
-- **Semantic search** via pgvector embeddings
-- **Memory types** with distinct lifecycles (preferences, facts, patterns, architecture decisions)
-- **Confidence & decay** so stale knowledge fades and useful knowledge rises
-- **Pinned memories** for critical conventions that should always be loaded
-- **Cross-project sharing** with isolation (global memories visible everywhere, project-scoped memories stay private)
-- **Token-budget context assembly** so sessions start with the right 5% of knowledge
-- **Feedback loop** that adjusts relevance based on whether memories were actually helpful
-- **Post-task learning** that captures gotchas and patterns from completed work
-- **Obsidian vault sync** that ingests personal notes, tasks, recipes, contacts, and more
-- **Fallback resilience** so agents still have memory access when infrastructure is down
+- One agent can't read another agent's memories
+- No retrieval beyond grep — semantic similarity, time-aware ranking, and provenance all live in the agent's head
+- No decay, no confidence, no way to distinguish a load-bearing convention from a one-off observation
+- No cross-session continuity beyond the user re-pasting context
 
-## Installation
-
-### Prerequisites
-
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Docker Desktop (for Postgres + Redis infrastructure)
-
-### Option 1: System-wide install with pipx (recommended for users)
-
-```bash
-# Install pipx if you don't have it
-brew install pipx  # or: pip install pipx
-
-# Install weft system-wide
-pipx install git+https://github.com/MennoAf/weft-memory.git
-
-# Verify
-weft --help
-```
-
-### Option 2: System-wide install with uv tool
-
-```bash
-# Install as a global uv tool
-uv tool install git+https://github.com/MennoAf/weft-memory.git
-
-# Verify
-weft --help
-```
-
-### Option 3: Local development install
-
-```bash
-# Clone and install in editable mode
-git clone https://github.com/MennoAf/weft-memory.git && cd weft-memory
-uv sync
-
-# All commands below use 'uv run weft' instead of 'weft'
-uv run weft --help
-```
+Weft treats memory as a first-class data system. Multiple agents (Claude Code, custom MCP clients, Claude API apps, Warp, etc.) read and write the same brain. A handoff at session end shows up in the next session's prime — same agent, different agent, different machine, doesn't matter.
 
 ## Quickstart
 
-### 1. Start infrastructure
+Five steps, ~5 minutes.
+
+### 1. Install
 
 ```bash
-# Start Postgres (pgvector) + Redis and run migrations
+# Recommended: pipx for system-wide availability
+pipx install git+https://github.com/MennoAf/weft-memory.git
+
+# Or as a uv tool
+uv tool install git+https://github.com/MennoAf/weft-memory.git
+
+# Or local development install
+git clone https://github.com/MennoAf/weft-memory.git && cd weft-memory && uv sync
+```
+
+Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker Desktop.
+
+### 2. Start infrastructure
+
+```bash
 weft up
 ```
 
-This launches two Docker containers (Postgres 16 with pgvector on port 5433, Redis 7 on port 6380) and runs database migrations automatically.
+This launches Postgres 16 (with pgvector) on port 5433 and Redis 7 on port 6380, then runs migrations.
 
-### 2. Register as MCP server
+### 3. Register Weft as an MCP server
 
-Add to your project's `.mcp.json` (or Claude Desktop config):
-
-**If installed via pipx/uv tool:**
+Add to your project's `.mcp.json` (or Claude Desktop's MCP config):
 
 ```json
 {
@@ -89,72 +59,33 @@ Add to your project's `.mcp.json` (or Claude Desktop config):
 }
 ```
 
-**If using a local development install:**
+Use `command: "uv"` with `args: ["run", "--directory", "/path/to/weft-memory", "python", "-m", "weft.mcp"]` if you installed locally instead.
 
-```json
-{
-  "mcpServers": {
-    "weft": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/weft-memory", "python", "-m", "weft.mcp"]
-    }
-  }
-}
-```
+### 4. Wire your agent
 
-### 3. Import existing memories (optional)
+The agent needs to know to use Weft instead of flat files. Drop in the templates:
 
 ```bash
-# Import from a MEMORY.md file (deduplicates automatically)
-weft import ~/.claude/memory/MEMORY.md
+# Memory protocol — append to ~/.claude/CLAUDE.md
+cat templates/CLAUDE.md >> ~/.claude/CLAUDE.md
 
-# Or scope to a project
-weft import MEMORY.md --project-id my-project
+# Slash commands
+mkdir -p ~/.claude/commands
+cp templates/commands/prime.md ~/.claude/commands/
+cp templates/commands/handoff.md ~/.claude/commands/
 ```
 
-### 4. Sync an Obsidian vault (optional)
+Now every Claude Code session in any project will use Weft. Type `/prime` at session start to load context, `/handoff` before ending. The full guide with verification steps is at [docs/wiring-your-agent.md](docs/wiring-your-agent.md).
 
-```bash
-# Create a vault with Weft-optimized folder structure and templates
-weft obsidian init ~/Documents/MyVault
+### 5. First session
 
-# Sync vault contents into Weft as memories
-weft obsidian sync ~/Documents/MyVault
+Start a Claude Code session and type `/prime`. The agent will call `weft_prime`, find no prior context (you're new), and ask what you're working on. Save something:
 
-# Preview what would be synced
-weft obsidian sync ~/Documents/MyVault --dry-run
-```
+> Save: I prefer test descriptions in the form "test_<thing>_<condition>_<outcome>"
 
-See the [Obsidian Integration](#obsidian-integration) section for details on vault structure and supported features.
+It will call `weft_remember` with type `preference`. Then `/handoff` and end the session.
 
-### 5. Query memories
-
-```bash
-# Semantic search from the CLI
-weft recall "database configuration patterns"
-
-# View memory stats
-weft status
-```
-
-### 6. Add Weft instructions to your CLAUDE.md
-
-Add the following to your project's `CLAUDE.md` so the agent knows how to use Weft:
-
-```markdown
-## Weft Memory
-
-Call `weft_prime` at the start of every session to load context.
-Use `weft_remember` to store important facts, patterns, and preferences.
-Save immediately: architecture decisions, user preferences, solutions, session summaries.
-Wait for confirmation: behavioral patterns (2-3 occurrences), inferences about intent.
-Rule of thumb: if you'd want to know it next session, save it now.
-Use `weft_learn` after completing tasks to capture what was learned.
-Use `weft_handoff` before ending a session to preserve continuity for the next agent.
-Use `weft_feedback(memory_id, helpful=true/false)` to improve future recall.
-```
-
-See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all tools documented.
+Open a new session in any project, `/prime` again. The handoff lands at the top, the preference is in the prime — your agent is now working with persistent context across sessions.
 
 ## Architecture
 
@@ -165,17 +96,15 @@ See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all to
 │  weft_revise    weft_forget   weft_feedback      │
 │  weft_relate    weft_consolidate                 │
 │  weft_prime     weft_status   weft_extract       │
-│  weft_pin       weft_learn    weft_feedback_gen  │
-│  weft_handoff                                    │
+│  weft_pin       weft_learn    weft_handoff       │
 ├──────────────────────────────────────────────────┤
 │              Business Logic                      │
-│  store  relevance  context  primer               │
-│  consolidation  importer  exporter               │
-│  extract  fallback  revise                       │
+│  store · relevance · context · primer            │
+│  consolidation · importer · exporter             │
+│  extract · fallback · revise                     │
 ├──────────────────────────────────────────────────┤
 │              Ingestion                           │
-│  Obsidian vault sync (parser, hash store)        │
-│  Codebase ingest (file summaries, architecture)  │
+│  Obsidian vault sync · codebase ingest           │
 ├──────────────────────────────────────────────────┤
 │              Infrastructure                      │
 │  PostgreSQL + pgvector  │  Redis cache           │
@@ -183,361 +112,50 @@ See this project's own [CLAUDE.md](CLAUDE.md) for a complete example with all to
 └──────────────────────────────────────────────────┘
 ```
 
-## MCP Tool Reference
-
-### weft_remember
-
-Store a new memory.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `content` | `str` | *required* | Memory content |
-| `type` | `str` | `"fact"` | One of: `preference`, `fact`, `pattern`, `relationship`, `solution`, `architecture`, `user_model` |
-| `topic` | `list[str]` | `[]` | Topic tags for filtering |
-| `source` | `str` | `"conversation"` | One of: `conversation`, `code`, `documentation`, `inference` |
-| `confidence` | `float` | `0.7` | Confidence score (0.0-1.0) |
-| `project_id` | `str` | `null` | Scope to a project (null = global) |
-| `agent_id` | `str` | `null` | Originating agent identifier |
-| `check_contradictions` | `bool` | `true` | Check for contradicting memories on store |
-| `pinned` | `bool` | `false` | Pin this memory (always included in prime/context) |
-
-### weft_recall
-
-Retrieve memories by semantic query. Results include `similarity`, `confidence`, and `relevance_score` for trust assessment.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `query` | `str` | *required* | Natural language search query |
-| `topic` | `str` | `null` | Filter by topic |
-| `type` | `str` | `null` | Filter by memory type |
-| `status` | `str` | `"active"` | Filter by status: `active`, `archived`, `decayed` |
-| `project_id` | `str` | `null` | Filter by project |
-| `limit` | `int` | `10` | Max results |
-| `threshold` | `float` | `0.3` | Minimum similarity score |
-
-### weft_context
-
-Budget-aware context loading. Returns the best memories for a situation within a token budget.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `query` | `str` | *required* | Context query |
-| `budget_tokens` | `int` | `4000` | Maximum tokens to return |
-| `topic` | `str` | `null` | Filter by topic |
-| `type` | `str` | `null` | Filter by memory type |
-| `project_id` | `str` | `null` | Filter by project |
-| `max_per_topic` | `int` | `3` | Maximum memories per topic |
-
-### weft_prime
-
-Session primer: assemble structured context for session startup. Returns prioritized sections within a token budget.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `project_id` | `str` | `null` | Scope to project (auto-detected from working directory if omitted) |
-| `agent_id` | `str` | `null` | Scope to agent |
-| `budget_tokens` | `int` | `2400` | Token budget for the assembled context |
-| `query` | `str` | `null` | Optional intent string to bias which items are surfaced |
-
-Returns `{ grounding, rules, behaviors, handoff, recent_work, issues, decisions, entities, total_tokens, budget_tokens, budget_remaining, excluded, freshness_hours, section_tokens, hints }`.
-
-### weft_revise
-
-Update a memory's content, creating a new version that supersedes the old one.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `memory_id` | `str` | *required* | ID of memory to revise |
-| `new_content` | `str` | *required* | Updated content |
-| `new_confidence` | `float` | `null` | Updated confidence |
-| `new_topic` | `list[str]` | `null` | Updated topics |
-
-### weft_forget
-
-Archive or permanently delete a memory.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `memory_id` | `str` | *required* | ID of memory to forget |
-| `hard` | `bool` | `false` | Hard-delete instead of archive |
-
-### weft_feedback
-
-Record whether a memory was helpful. Adjusts the usefulness score for future ranking via exponential moving average.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `memory_id` | `str` | *required* | Memory that was used |
-| `helpful` | `bool` | *required* | Was the memory helpful? |
-
-### weft_pin
-
-Pin or unpin a memory. Pinned memories are always included in `weft_prime` and `weft_context` results, and are protected from decay and deduplication.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `memory_id` | `str` | *required* | Memory to pin/unpin |
-| `pinned` | `bool` | `true` | Pin (true) or unpin (false) |
-
-### weft_learn
-
-Capture lessons learned from completed work. Extracts memory candidates from free-text notes (gotchas, fixes, patterns) and auto-stores them.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `content` | `str` | *required* | Free-text notes about what was learned |
-| `task_id` | `str` | `null` | Associated task ID (tagged as `task:<id>` topic) |
-| `project_id` | `str` | `null` | Scope to a project |
-| `agent_id` | `str` | `null` | Originating agent |
-| `min_confidence` | `float` | `0.7` | Minimum confidence to auto-store |
-
-### weft_handoff
-
-Session handoff: capture context for the next session before clearing. The next `weft_prime` call surfaces the most recent handoff prominently for continuity.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `summary` | `str` | *required* | What was accomplished this session |
-| `in_progress` | `str` | `null` | What's partially done or needs follow-up |
-| `next_steps` | `str` | `null` | Recommended next actions and why |
-| `open_questions` | `str` | `null` | Unresolved decisions or things to investigate |
-| `project_id` | `str` | `null` | Scope to a project (auto-detected if omitted) |
-| `agent_id` | `str` | `null` | Originating agent identifier |
-
-### weft_relate
-
-Manage relationships between memories.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `action` | `str` | *required* | `add`, `get`, or `remove` |
-| `memory_id` | `str` | *required* | Source memory ID |
-| `target_id` | `str` | `null` | Target memory ID (for add/remove) |
-| `relation` | `str` | `null` | Relation type: `supersedes`, `related_to`, `contradicts`, `derived_from` |
-
-### weft_consolidate
-
-Run the consolidation pipeline: decay stale memories, merge duplicates, flag contradictions.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `dry_run` | `bool` | `false` | Preview changes without applying |
-
-### weft_extract
-
-Extract memory candidates from a block of text using heuristic pattern matching. Returns proposals for review -- does NOT auto-store. Use `weft_learn` for auto-storing.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `text` | `str` | *required* | Text to extract candidates from |
-| `min_confidence` | `float` | `0.5` | Minimum confidence threshold for candidates |
-
-### weft_feedback_general
-
-Submit general product feedback about Weft itself — friction points, feature requests, or praise. Unlike `weft_feedback` (per-memory ratings), this captures product-level observations from agents using Weft in the field. Feedback is stored as a memory tagged with `weft-feedback` for review.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `feedback` | `str` | *required* | The feedback content |
-| `category` | `str` | `"suggestion"` | One of: `suggestion`, `friction`, `praise`, `bug` |
-| `agent_id` | `str` | `null` | Originating agent identifier |
-
-### weft_status
-
-Return memory statistics: total count, breakdown by type/topic/status, recently accessed.
-
-*No parameters.*
-
-## Obsidian Integration
-
-Weft can sync an Obsidian vault into memories, making your personal notes, tasks, contacts, recipes, and more available to AI agents via semantic search.
-
-### Vault structure
-
-`weft obsidian init` creates an opinionated folder structure with frontmatter templates:
-
-```
-vault/
-  inbox/              Quick capture (lower confidence)
-  notes/              Reminders, misc notes
-  journal/daily/      Daily notes
-  people/             Contacts (stored as user_model type)
-  wktw/               Side business
-    clients/
-    meetings/
-    ideas/
-    finances/
-    operations/
-  recipes/            Meals (with lissy_approved field)
-  media/              Book/show/movie reviews
-  writing/
-    ideas/            Creative writing concepts
-    blog/             Blog posts and drafts
-  assets/             Images, attachments (ignored)
-  templates/          Frontmatter templates (ignored)
-```
-
-Folders map to Weft memory types and topics automatically. Frontmatter `type:` and `confidence:` fields override the defaults.
-
-### Obsidian Tasks plugin
-
-Weft parses [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) checkboxes with full emoji support:
-
-| Emoji | Field |
-|-------|-------|
-| 📅 | Due date |
-| ⏳ | Scheduled date |
-| 🛫 | Start date |
-| ➕ | Created date |
-| ✅ | Done date |
-| ❌ | Cancelled date |
-| 🔁 | Recurrence |
-| 🔺 ⏫ 🔼 🔽 ⏬ | Priority (highest to lowest) |
-
-Open tasks are included in the memory content with their dates and priority, making them available for summary prompts and planning.
-
-### Sync behavior
-
-- **Hash-based change detection** — re-running sync skips unchanged files
-- **Modified files** — old memories archived, new ones created
-- **Deleted files** — memories archived on next sync
-- **Large files** — split by heading hierarchy (falls back to paragraphs)
-- **Frontmatter** — wikilinks, tags, dates, and type-specific fields (recipes, contacts, media) are extracted and included in memory content
-
-## CLI Reference
-
-```
-weft mcp                       Start the MCP server (stdio transport)
-weft up                        Start Postgres + Redis, run migrations
-weft down                      Stop containers
-weft status                    Show memory statistics
-weft recall QUERY              Semantic search (--limit, --topic)
-weft import FILE               Import MEMORY.md (--dry-run, --project-id)
-weft export                    Export memories (--format md|json, --type, --topic, --status, --output)
-weft ingest PATH               Ingest a codebase as memories (--project-id, --depth)
-weft consolidate               Run decay/dedup/contradiction pipeline (--dry-run)
-weft backup                    Create full backup (--output)
-weft restore FILE              Restore from backup (--dry-run)
-weft obsidian init VAULT_PATH  Create vault folder structure and templates
-weft obsidian sync VAULT_PATH  Sync vault into Weft memories (--dry-run, --hash-store)
-weft config show               Display current configuration
-weft config set KEY VAL        Persist a config value to ~/.weft/config.toml
-weft tokens issue              Mint a bearer token (--user-id, --mode, --label, --expires-in)
-weft tokens list               List a user's tokens (--user-id, --include-revoked)
-weft tokens revoke HASH        Revoke a token by full SHA-256 hash
-weft identity show             Show resolved local user_id and source
-weft identity set USER_ID      Persist user_id to ~/.weft/user_id.json
-```
-
-## Authentication
-
-The hosted MCP server (`weft-mcp.fly.dev`) authenticates each request via
-the `Authorization: Bearer <token>` header. Tokens are first-class
-credentials — each one is bound at issuance to a specific `user_id` and
-`caller_mode` (`supervisor` or `agent`). The middleware looks the bearer
-up by SHA-256 hash and refuses any request whose token doesn't resolve.
-
-Mint a token via the CLI on the host that holds the database, or via the
-`weft_token_issue` MCP tool from a supervisor session:
-
-```bash
-weft tokens issue \
-  --user-id <uuid> \
-  --mode supervisor \
-  --label face-2026-04 \
-  --expires-in 90d
-# Token: weft-...
-# Hash:  <64-char sha256>
-# Store this token now — it will not be shown again.
-```
-
-Pass the token as the `Authorization` header on every `/mcp` call.
-Revoke by hash with `weft tokens revoke <hash>` when rotating or
-retiring a credential. See `docs/user-identity.md` for the resolution
-chain, caller-mode semantics, and the agent-floor / non-escalation
-guarantee.
-
-**Legacy `WEFT_API_KEY`** still works: at lifespan startup the server
-auto-bootstraps a token row labeled `legacy-env-key` matching the env
-value, so existing clients keep authenticating through the same
-credential machinery. A deprecation warning fires on every successful
-resolution — migrate to issued tokens before the env-var path is
-removed.
-
-## Configuration
-
-Weft uses four-layer configuration with increasing precedence:
-
-1. **Defaults** (built into code)
-2. **TOML file** (`~/.weft/config.toml`)
-3. **Project YAML** (`.weft/config.yaml` in project directory)
-4. **Environment variables** (highest precedence)
-
-### Environment variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `WEFT_DATABASE_URL` | PostgreSQL connection string | `postgresql://weft:weft_local@localhost:5433/weft` |
-| `WEFT_REDIS_URL` | Redis connection string | `redis://localhost:6380` |
-| `WEFT_EMBEDDING_PROVIDER` | Embedding provider | `fastembed` |
-| `WEFT_EMBEDDING_MODEL` | Embedding model | `BAAI/bge-small-en-v1.5` |
-| `WEFT_LOG_LEVEL` | Log level | `INFO` |
-| `WEFT_API_KEY` | Hosted server bearer (legacy — auto-bootstraps a token row at startup; see Authentication) | unset |
-| `WEFT_DEFAULT_USER_ID` | UUID the legacy bootstrap row binds to. Required for the `weft_api_key` path and for background scheduler tasks (Slack sync) that have no HTTP request scope | unset |
-| `WEFT_OAUTH_ENABLED` | Enable Supabase JWT fallback when the bearer doesn't match a token row | `0` |
-
-### Configurable keys
-
-Set via `weft config set <key> <value>`:
-
-```
-project_name                    Project identifier
-log_level                       Logging level
-database.url                    PostgreSQL URL
-database.pool_min_size          Connection pool minimum
-database.pool_max_size          Connection pool maximum
-redis.url                       Redis URL
-embedding.provider              fastembed | openai | google
-embedding.model                 Model name
-embedding.dimensions            Vector dimensions
-embedding.batch_size            Batch size for bulk embedding
-retrieval.default_top_k         Default result count
-retrieval.similarity_threshold  Minimum similarity for results
-retrieval.context_budget_tokens Default token budget
-decay.enabled                   Enable automatic decay
-decay.half_life_days            Days until confidence halves
-decay.floor_score               Minimum score after decay
-```
-
-## Infrastructure
-
-### Docker Compose
-
-`docker-compose.weft.yml` provides:
-
-- **PostgreSQL 16** with pgvector extension (port 5433)
-- **Redis 7** with append-only persistence (port 6380)
-
-Both services include health checks. Data is persisted in named Docker volumes (`weft-postgres-data`, `weft-redis-data`).
-
-### Embedding Providers
-
-| Provider | Install | Notes |
-|----------|---------|-------|
-| `fastembed` | Included | Local inference, no API key needed. Default: `BAAI/bge-small-en-v1.5` (384d). Best for getting started. |
-| `openai` | Included | Requires `OPENAI_API_KEY`. Default: `text-embedding-3-small` (768d). Recommended for production. |
-| `google` | `pip install google-generativeai` | Requires `GOOGLE_API_KEY` |
+Full reference: [docs/tools.md](docs/tools.md).
+
+## Benchmarks
+
+Weft is benchmarked against [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — multi-session memory evaluation across S (~40 sessions/question) and M (~500 sessions/question) haystacks.
+
+Current numbers and reproduction harness: [docs/benchmarks.md](docs/benchmarks.md).
+
+## What you can do
+
+- **Query memories** — `weft recall "database configuration patterns"`
+- **Import existing memories** — `weft import ~/.claude/memory/MEMORY.md`
+- **Sync an Obsidian vault** — `weft obsidian sync ~/Documents/MyVault` ([guide](docs/obsidian.md))
+- **Ingest a codebase** — `weft ingest .` for grounded recall against your own source
+- **Inspect state** — `weft status` for counts, `weft config show` for resolved config
+- **Mint API tokens** — `weft tokens issue` for hosted-server auth ([guide](docs/user-identity.md))
+- **Back up + restore** — `weft backup` / `weft restore` ([playbook](docs/disaster-recovery.md))
+
+Full CLI: [docs/cli.md](docs/cli.md).
+
+## Documentation
+
+| | |
+| --- | --- |
+| **[Wire your agent](docs/wiring-your-agent.md)** | Full CLAUDE.md template + slash command setup + verification |
+| **[MCP tool reference](docs/tools.md)** | Every tool, every parameter |
+| **[CLI reference](docs/cli.md)** | Every command |
+| **[Configuration](docs/configuration.md)** | Environment variables, TOML keys, infrastructure |
+| **[Authentication + identity](docs/user-identity.md)** | Tokens, caller modes, agent floor |
+| **[Retrieval + scope](docs/retrieval-and-scope.md)** | How `weft_recall` decides what comes back |
+| **[Benchmarks](docs/benchmarks.md)** | LongMemEval methodology + current numbers |
+| **[Obsidian integration](docs/obsidian.md)** | Vault sync, frontmatter, Tasks plugin |
+| **[Disaster recovery](docs/disaster-recovery.md)** | Backup, restore, schema migration |
 
 ## Development
 
 ```bash
 uv sync                        # Install dependencies
-uv run pytest tests/ -v        # Run all tests (2380+ tests)
+uv run pytest tests/ -v        # Run all tests (~2670 tests, testcontainers-isolated)
 uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
 
-Tests use `testcontainers` for database isolation -- each test gets a fresh Postgres+pgvector instance. No external services required for testing.
+Tests use `testcontainers` for database isolation — each test gets a fresh Postgres+pgvector instance. No external services required.
 
 ## License
 
