@@ -438,6 +438,108 @@ async def _weft_recall_turns(
         return _db_error_response("weft_recall", e)
 
 
+async def _weft_recall_both(
+    ctx: Context,
+    *,
+    query: str,
+    project_id: str | None,
+    agent_id: str | None,
+    user_id: str | None,
+    limit: int,
+    retrieval_mode: str,
+    memory_status: MemoryStatus,
+    memory_type: MemoryType | None,
+    topic: str | None,
+) -> dict:
+    """Both-tier dispatch: RRF fuse belief-tier memories + turn-tier dialogue.
+
+    Mirrors the scoping discipline of the belief and turn paths so the
+    same project_id/agent_id/user_id rules apply consistently — the spec
+    is "no cross-project bleed" so all three flow into the belief half,
+    project_id flows into both halves.
+    """
+    try:
+        cid = set_correlation_id()
+        logger.debug("weft_recall.both start [%s] query=%r", cid, query[:50])
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.retrieval_modes import (
+            include_agent_provenance,
+            sources_for_mode,
+            wrap_untrusted_for_face,
+        )
+        from weft.turn_recall import recall_both
+
+        sources = sources_for_mode(retrieval_mode)
+        agent_provenance_ok = include_agent_provenance(retrieval_mode)
+        resolved_project = await _resolve_project_id(ctx, project_id)
+
+        async with acquire(app.pool):
+            fused = await recall_both(
+                app.pool, query,
+                project_id=resolved_project,
+                top_k=limit,
+                embedder=app.embedding,
+                agent_id=agent_id,
+                user_id=user_id,
+                status=memory_status,
+                memory_type=memory_type,
+                topic=topic,
+                sources=sources,
+                include_agent_provenance=agent_provenance_ok,
+            )
+
+            # Face-mode wrapping for belief-tier payloads — same rule as
+            # the belief path uses below. Turns are dialogue traces, not
+            # writeable rows, so they don't carry write_provenance.
+            if retrieval_mode == "face":
+                for entry in fused:
+                    if entry["kind"] == "memory":
+                        payload = entry["payload"]
+                        # MemoryRecall.to_dict() embeds the memory row
+                        # plus similarity/relevance_score. write_provenance
+                        # comes from the underlying memory dict.
+                        wp = payload.get("write_provenance")
+                        payload["content"] = wrap_untrusted_for_face(
+                            payload["content"], wp,
+                        )
+
+        # Fire-and-forget: log access to BOTH memory + turn IDs so the
+        # session-tracking layer keeps both surfaces in its working set.
+        import asyncio
+        memory_ids = [
+            e["payload"]["id"] for e in fused if e["kind"] == "memory"
+        ]
+        turn_ids = [
+            e["payload"]["id"] for e in fused if e["kind"] == "turn"
+        ]
+        if memory_ids:
+            asyncio.create_task(
+                log_memory_access(
+                    app.pool, memory_ids, "recall",
+                    retrieval_mode=retrieval_mode,
+                ),
+                name="weft-session-log-recall-both-memory",
+            )
+        if turn_ids:
+            asyncio.create_task(
+                log_turn_access(
+                    app.pool, turn_ids, tool_name="recall",
+                ),
+                name="weft-session-log-recall-both-turn",
+            )
+
+        return {
+            "query": query,
+            "tier": "both",
+            "count": len(fused),
+            "results": fused,
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_recall", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_recall", e)
+
+
 @mcp.tool()
 async def weft_recall(
     ctx: Context,
@@ -471,22 +573,26 @@ async def weft_recall(
 
     tier: 'belief' (default belief-tier semantic recall over `memories`), 'turns' (turn-tier
     raw dialogue trace over `episode_turns`, with multi-anchor splitting on temporal queries),
-    or 'auto' (regex-based query planner routes temporal markers to turns, everything else to
-    belief). When the chosen tier is 'turns', the response carries `tier: "turns"` and a `turns`
-    array instead of `results`; multi-anchor temporal queries also include an `anchors` mapping
-    from anchor phrase → returned turns so a Reader can do anchored arithmetic.
+    'both' (RRF-fused belief + turn results for episodic-recall queries), or 'auto'
+    (regex-based query planner routes episodic markers to 'both', temporal markers to 'turns',
+    everything else to 'belief'). When the chosen tier is 'turns', the response carries
+    `tier: "turns"` and a `turns` array instead of `results`; multi-anchor temporal queries
+    also include an `anchors` mapping from anchor phrase → returned turns so a Reader can do
+    anchored arithmetic. When the chosen tier is 'both', the response carries `tier: "both"`
+    and a `results` array of unified entries `{kind, payload, rank, rrf_score}` where `kind`
+    is 'memory' or 'turn'.
     """
     if user_id is None:
         user_id = get_user_id()
 
-    # Tier dispatch happens FIRST. The turns path doesn't reuse the
-    # belief-tier helpers below — it has its own scoring, response shape,
-    # and (for multi-anchor queries) splits the query into sub-recalls.
-    if tier not in ("auto", "belief", "turns"):
+    # Tier dispatch happens FIRST. The turns and both paths don't reuse
+    # the belief-tier helpers below — they have their own scoring,
+    # response shapes, and (for multi-anchor queries) sub-recall splits.
+    if tier not in ("auto", "belief", "turns", "both"):
         return _input_error_response(
             "weft_recall",
             ValueError(
-                f"tier must be 'auto', 'belief', or 'turns'; got {tier!r}"
+                f"tier must be 'auto', 'belief', 'turns', or 'both'; got {tier!r}"
             ),
         )
     if tier == "auto":
@@ -498,6 +604,19 @@ async def weft_recall(
             query=query,
             project_id=project_id,
             limit=limit,
+        )
+    if tier == "both":
+        return await _weft_recall_both(
+            ctx,
+            query=query,
+            project_id=project_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            limit=limit,
+            retrieval_mode=retrieval_mode,
+            memory_status=MemoryStatus(status) if status else MemoryStatus.active,
+            memory_type=MemoryType(type) if type else None,
+            topic=topic,
         )
 
     try:

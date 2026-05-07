@@ -25,16 +25,17 @@ Spec: weft-d3a2ef78. Loom task: loom-d9ac7e18.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 import asyncpg
 
 from weft.embeddings.base import EmbeddingProvider
-from weft.episode_turns import list_recent_turns, recall_turns
-from weft.models import EpisodeTurn
+from weft.episode_turns import _RRF_K, list_recent_turns, recall_turns
+from weft.models import EpisodeTurn, MemoryRecall, MemoryStatus, MemoryType
 
 logger = logging.getLogger(__name__)
 
@@ -232,3 +233,154 @@ async def temporal_anchor(
             top_k=top_k_per_anchor, embedding=embedding,
         )
     return out
+
+
+# --- Both-tier RRF fusion ---
+
+
+async def recall_both(
+    pool: asyncpg.Pool,
+    query: str,
+    *,
+    project_id: str | None = None,
+    top_k: int = 10,
+    embedder: EmbeddingProvider | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    status: MemoryStatus | None = MemoryStatus.active,
+    memory_type: MemoryType | None = None,
+    topic: str | None = None,
+    sources: list[str] | None = None,
+    include_agent_provenance: bool = True,
+) -> list[dict[str, Any]]:
+    """Run belief + turn recall in parallel, fuse via RRF, return unified list.
+
+    The driver: ``route_query_to_tier`` returns 'both' for explicit episodic
+    asks ("do you remember", "what did I last say") where the user wants
+    the canonical fact (belief tier) AND the dialogue evidence (turn tier)
+    fused together. This function runs both halves in parallel and fuses
+    them via Reciprocal Rank Fusion using the same K=60 constant as
+    ``weft.store.search_hybrid`` and ``weft.episode_turns.recall_turns``
+    (imported as ``_RRF_K``).
+
+    Heterogeneous fusion: belief items and turn items are disjoint — no
+    single item appears in both lists — so RRF degenerates to
+    ``rrf_score = 1 / (K + rank_in_originating_list)``. Sort descending
+    and take ``top_k``.
+
+    Scoping is applied to BOTH halves identically so cross-project context
+    cannot bleed in:
+
+    * ``project_id`` → both halves
+    * ``since`` / ``until`` → turn half only (memories don't carry an
+      occurred_at; their lifecycle is created_at/updated_at, not the
+      semantic "when did this happen" the temporal filter implies)
+    * ``agent_id`` / ``user_id`` → belief half only (turn-tier rows don't
+      carry agent_id; user_id on episode_turns is RLS-enforced via the
+      session GUC at acquire-time, not a query param)
+
+    Each half's ``top_k`` is set to ``2 * top_k`` so the fuser has
+    material — RRF on two N-item lists with no overlap is just sort by
+    rank, but oversampling lets us pick a richer mix when one side dwarfs
+    the other.
+
+    Returns a list of unified entries:
+        ``{"kind": "memory" | "turn", "payload": {...}, "rank": int,
+           "rrf_score": float}``
+
+    where ``payload`` is the same dict the existing belief / turn paths
+    return (``MemoryRecall.to_dict()`` for belief, ``EpisodeTurn.to_dict()``
+    for turns), ``rank`` is the 1-indexed position within the originating
+    list, and ``rrf_score`` is the per-item RRF contribution.
+    """
+    from weft.store import search_hybrid
+
+    half_k = max(1, top_k * 2)
+
+    # Both halves need an embedding. Compute once; share across the gather.
+    embedding: list[float] | None = None
+    if embedder is not None:
+        embedding = await embedder.embed(query)
+
+    async def _belief_half() -> list[MemoryRecall]:
+        if embedding is None:
+            # Belief search_hybrid requires an embedding. Without one we
+            # can't fuse a vector signal — fall back to keyword-only by
+            # returning an empty list so RRF degrades gracefully.
+            from weft.store import search_by_keyword
+            return await search_by_keyword(
+                pool, query,
+                limit=half_k,
+                status=status,
+                memory_type=memory_type,
+                topic=topic,
+                project_id=project_id,
+                agent_id=agent_id,
+                user_id=user_id,
+                sources=sources,
+                include_agent_provenance=include_agent_provenance,
+            )
+        return await search_hybrid(
+            pool, query, embedding,
+            limit=half_k,
+            status=status,
+            memory_type=memory_type,
+            topic=topic,
+            project_id=project_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            sources=sources,
+            include_agent_provenance=include_agent_provenance,
+        )
+
+    async def _turn_half() -> list[EpisodeTurn]:
+        return await recall_turns(
+            pool, query,
+            project_id=project_id,
+            since=since,
+            until=until,
+            top_k=half_k,
+            embedding=embedding,
+        )
+
+    # Parallel by default. When the caller has activated an RLS-scoped
+    # connection via ``acquire()`` (contextvar), both halves race on the
+    # same single connection — asyncpg refuses concurrent queries, so we
+    # serialize. The check is cheap and keeps both call paths correct:
+    #
+    #   * MCP tool path: outer ``async with acquire(pool)`` sets contextvar
+    #     → run sequentially on the bound conn (preserves user_id RLS).
+    #   * Direct call path (tests, internal callers): no contextvar →
+    #     each half pulls its own pool connection, gather races them.
+    from weft.db.connection import _current_conn
+    if _current_conn.get(None) is not None:
+        belief_results = await _belief_half()
+        turn_results = await _turn_half()
+    else:
+        belief_results, turn_results = await asyncio.gather(
+            _belief_half(), _turn_half(),
+        )
+
+    # Disjoint RRF: each item gets one term, 1 / (K + rank_in_its_list).
+    fused: list[dict[str, Any]] = []
+    for i, recall in enumerate(belief_results):
+        rank = i + 1
+        fused.append({
+            "kind": "memory",
+            "payload": recall.to_dict(),
+            "rank": rank,
+            "rrf_score": 1.0 / (_RRF_K + rank),
+        })
+    for i, turn in enumerate(turn_results):
+        rank = i + 1
+        fused.append({
+            "kind": "turn",
+            "payload": turn.to_dict(),
+            "rank": rank,
+            "rrf_score": 1.0 / (_RRF_K + rank),
+        })
+
+    fused.sort(key=lambda e: e["rrf_score"], reverse=True)
+    return fused[:top_k]
