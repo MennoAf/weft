@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import asyncpg
 
 from datetime import timedelta
 
 from weft.db.connection import get_db
+from weft.relevance import recency_factor
 from weft.schema import SYSTEM_GLOBAL_USER_ID
 from weft.models import (
     Episode,
@@ -26,8 +28,11 @@ from weft.models import (
     MemoryType,
     _weft_id,
 )
-from weft.store import _row_to_memory, store_memory
+from weft.store import _RRF_K, _row_to_memory, store_memory
 from weft.tokens import estimate_tokens
+
+if TYPE_CHECKING:
+    from weft.embeddings.base import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +428,238 @@ async def graduate_episode(
 
     updated_ep = _row_to_episode(row)
     return updated_ep, memory
+
+
+# --- Recall ---
+
+
+# Recency half-life for the episode-tier recall score. 30 days mirrors the
+# default `RelevanceWeights.recency_half_life_days` for the belief tier so
+# behavior is consistent across tiers; episodes that never anchor in time
+# don't lose more recency value than the memories that surround them.
+_EPISODE_RECENCY_HALF_LIFE_DAYS = 30.0
+
+
+async def recall_episodes(
+    pool: asyncpg.Pool,
+    query: str,
+    *,
+    project_id: str | None = None,
+    top_k_episodes: int = 10,
+    embedding: list[float] | None = None,
+    embedder: "EmbeddingProvider | None" = None,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    status: EpisodeStatus | None = None,
+    vector_weight: float = 0.5,
+    keyword_weight: float = 0.5,
+    now: datetime | None = None,
+) -> list[Episode]:
+    """Hybrid (vector + ts_rank) recall over episodes, ranked by RRF + recency.
+
+    Mirrors :func:`weft.episode_turns.recall_turns` at the episode tier.
+    Vector half scans :sql:`embedding <=> $1` (cosine distance) using the
+    HNSW index added in v47; keyword half computes :sql:`ts_rank` over
+    :sql:`title || ' ' || COALESCE(summary, '')`. The two ranked lists are
+    fused via Reciprocal Rank Fusion (K=60, the same constant
+    :mod:`weft.store.search_hybrid` and
+    :mod:`weft.episode_turns.recall_turns` use), and the composite score
+    is multiplied by an exponential recency factor over ``started_at`` so
+    older episodes decay against newer ones at similar topical match.
+
+    Args:
+        embedding: precomputed query embedding. If None and ``embedder`` is
+            provided, the embedder is invoked once to derive a vector from
+            ``query``. If both are None, the vector half is skipped (BM25
+            keyword half still runs).
+        embedder: optional :class:`EmbeddingProvider` used to compute the
+            query embedding when ``embedding`` is None. Mirrors how the
+            MCP layer threads ``app.episode_embedding`` into call sites.
+        project_id, agent_id, user_id: OR-NULL scoping — globally-scoped
+            episodes (NULL on that column) always pass through, matching
+            :func:`list_episodes` exactly.
+        since/until: filter on ``started_at`` (matching ``list_episodes``'s
+            ORDER BY axis); episodes that started outside the window are
+            excluded before scoring.
+        status: optional :class:`EpisodeStatus` filter.
+    """
+    if top_k_episodes <= 0:
+        return []
+
+    # Resolve query vector: prefer the explicit kwarg; otherwise call the
+    # embedder if one is supplied; else skip vector half.
+    if embedding is None and embedder is not None:
+        try:
+            embedding = await embedder.embed(query)
+        except Exception as exc:
+            logger.warning(
+                "recall_episodes embed failed, vector half skipped: %s", exc,
+            )
+            embedding = None
+
+    candidate_limit = top_k_episodes * 2
+    sql_filter, filter_params = _build_episode_recall_filters(
+        project_id=project_id,
+        agent_id=agent_id,
+        user_id=user_id,
+        since=since,
+        until=until,
+        status=status,
+        leading_args=1,  # $1 is reserved for embedding OR query
+    )
+
+    db = get_db(pool)
+
+    # --- Vector half (skipped when embedding is None) ---
+    vector_rows: list[asyncpg.Record] = []
+    if embedding is not None:
+        vector_sql = f"""
+            SELECT *
+              FROM episodes
+              WHERE embedding IS NOT NULL
+                {sql_filter}
+              ORDER BY embedding <=> $1::vector
+              LIMIT ${len(filter_params) + 2}
+        """
+        vector_rows = await db.fetch(
+            vector_sql, embedding, *filter_params, candidate_limit,
+        )
+
+    # --- Keyword half (ts_rank over title + summary) ---
+    keyword_sql = f"""
+        SELECT *,
+               ts_rank(
+                   to_tsvector('english', title || ' ' || COALESCE(summary, '')),
+                   plainto_tsquery('english', $1)
+               ) AS rank
+          FROM episodes
+          WHERE to_tsvector('english', title || ' ' || COALESCE(summary, ''))
+                @@ plainto_tsquery('english', $1)
+            {sql_filter}
+          ORDER BY rank DESC
+          LIMIT ${len(filter_params) + 2}
+    """
+    keyword_rows = await db.fetch(
+        keyword_sql, query, *filter_params, candidate_limit,
+    )
+
+    return _rrf_fuse_episode_rows(
+        vector_rows,
+        keyword_rows,
+        candidate_limit=candidate_limit,
+        top_k=top_k_episodes,
+        vector_weight=vector_weight,
+        keyword_weight=keyword_weight,
+        now=now,
+    )
+
+
+def _build_episode_recall_filters(
+    *,
+    project_id: str | None,
+    agent_id: str | None,
+    user_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+    status: EpisodeStatus | None,
+    leading_args: int,
+) -> tuple[str, list]:
+    """AND-joined WHERE fragments for ``recall_episodes``.
+
+    Mirrors :func:`list_episodes` scoping shape exactly: OR-NULL on
+    project_id and agent_id, two-arg OR on user_id (caller value OR
+    ``SYSTEM_GLOBAL_USER_ID`` sentinel). Param numbering is offset by
+    ``leading_args`` so the caller's positional embedding/query argument
+    keeps $1.
+    """
+    fragments: list[str] = []
+    params: list = []
+    base = leading_args + 1  # first param emitted is ${base}
+
+    if status is not None:
+        fragments.append(f"AND status = ${base + len(params)}")
+        params.append(status.value)
+    if project_id is not None:
+        fragments.append(
+            f"AND (project_id = ${base + len(params)} OR project_id IS NULL)"
+        )
+        params.append(project_id)
+    if agent_id is not None:
+        fragments.append(
+            f"AND (agent_id = ${base + len(params)} OR agent_id IS NULL)"
+        )
+        params.append(agent_id)
+    if user_id is not None:
+        # Two params: caller value + global sentinel (matches list_episodes).
+        fragments.append(
+            f"AND (user_id = ${base + len(params)} "
+            f"OR user_id = ${base + len(params) + 1})"
+        )
+        params.append(user_id)
+        params.append(SYSTEM_GLOBAL_USER_ID)
+    if since is not None:
+        fragments.append(f"AND started_at >= ${base + len(params)}")
+        params.append(since)
+    if until is not None:
+        fragments.append(f"AND started_at <= ${base + len(params)}")
+        params.append(until)
+
+    return (" ".join(fragments), params)
+
+
+def _rrf_fuse_episode_rows(
+    vector_rows: list[asyncpg.Record],
+    keyword_rows: list[asyncpg.Record],
+    *,
+    candidate_limit: int,
+    top_k: int,
+    vector_weight: float,
+    keyword_weight: float,
+    now: datetime | None = None,
+) -> list[Episode]:
+    """RRF-fuse the two halves, multiply each composite by a recency factor.
+
+    RRF mirrors :func:`weft.episode_turns._rrf_fuse_turn_rows` — missing
+    rows take an absent-rank penalty of ``candidate_limit + 1`` so an
+    episode appearing in only one half can still surface if its rank is
+    high. The recency multiplier comes from
+    :func:`weft.relevance.recency_factor` evaluated against
+    ``started_at`` (still meaningful for closed/graduated episodes — the
+    episode's recall worth decays from when it began, not from its
+    eventual end).
+    """
+    vector_ranks: dict[str, int] = {
+        r["id"]: i + 1 for i, r in enumerate(vector_rows)
+    }
+    keyword_ranks: dict[str, int] = {
+        r["id"]: i + 1 for i, r in enumerate(keyword_rows)
+    }
+    all_rows: dict[str, asyncpg.Record] = {}
+    for r in vector_rows:
+        all_rows[r["id"]] = r
+    for r in keyword_rows:
+        all_rows.setdefault(r["id"], r)
+
+    absent = candidate_limit + 1
+    scores: dict[str, float] = {}
+    for eid, row in all_rows.items():
+        v = vector_ranks.get(eid, absent)
+        k = keyword_ranks.get(eid, absent)
+        rrf = (
+            vector_weight / (_RRF_K + v)
+            + keyword_weight / (_RRF_K + k)
+        )
+        rec = recency_factor(
+            row["started_at"],
+            now=now,
+            half_life_days=_EPISODE_RECENCY_HALF_LIFE_DAYS,
+        )
+        scores[eid] = rrf * rec
+
+    sorted_ids = sorted(scores, key=lambda i: scores[i], reverse=True)[:top_k]
+    return [_row_to_episode(all_rows[eid]) for eid in sorted_ids]
 
 
 # --- Helpers ---
