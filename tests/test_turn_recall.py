@@ -149,6 +149,46 @@ class TestRouteQueryToTier:
         assert route_query_to_tier("HOW MANY DAYS BETWEEN X AND Y") == "turns"
         assert route_query_to_tier("Describe Architecture") == "belief"
 
+    def test_episodic_recall_routes_to_both(self):
+        # Explicit episodic asks fuse the canonical fact (belief) with
+        # the dialogue evidence (turns) via RRF — return 'both'.
+        for q in [
+            "do you remember the demo",
+            "did we discuss the rollout plan",
+            "have we discussed the new API",
+            "have I mentioned the migration",
+            "what did I say about the retro",
+            "what did I last say about the launch",
+            "what did I decide about scope",
+            "my decision on the new architecture",
+            "our position on the deprecation",
+            "my opinion about the design",
+            "remind me about the customer call",
+            "remind me when the demo is scheduled",
+        ]:
+            assert route_query_to_tier(q) == "both", f"failed for: {q}"
+
+    def test_both_takes_priority_over_turns(self):
+        # Ordering invariant: queries that hit both _BOTH_TIER_MARKERS
+        # and _TURN_TIER_MARKERS resolve to 'both', not 'turns'.
+        # "do you recall when did" matches both `do you ... recall`
+        # (BOTH) and `when did` (TURN); the BOTH list wins.
+        assert (
+            route_query_to_tier("do you recall when did the launch ship")
+            == "both"
+        )
+        assert (
+            route_query_to_tier("have we discussed before the demo")
+            == "both"
+        )
+
+    def test_both_markers_case_insensitive(self):
+        assert route_query_to_tier("Do You Remember The Demo") == "both"
+        assert (
+            route_query_to_tier("WHAT DID I LAST SAY ABOUT THE LAUNCH")
+            == "both"
+        )
+
 
 class TestExtractAnchors:
     def test_between_x_and_y(self):
