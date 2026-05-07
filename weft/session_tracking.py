@@ -145,6 +145,97 @@ async def boost_session_memories(
         return {"boosted": 0, "session_id": sid, "error": str(e)}
 
 
+async def log_turn_access(
+    pool: asyncpg.Pool,
+    turn_ids: list[str],
+    *,
+    tool_name: str,
+    session_id: str | None = None,
+) -> None:
+    """Log that episode turns were accessed in the current session.
+
+    Turn-tier analog of ``log_memory_access`` (P1.A2). Fire-and-forget safe
+    — never raises, logs warnings on failure. Uses INSERT ... ON CONFLICT
+    DO NOTHING on the (session_id, turn_id) PK so accessing the same turn
+    multiple times in one session collapses to one row, matching the
+    belief-tier dedup semantics that drive the boost loop.
+
+    Out of scope for now (deliberately): the v41 read-side audit columns
+    (``reader_user_id``, ``reader_caller_mode``, ``retrieval_mode``). The
+    turn-tier table mirrors only the boost-loop substrate; richer audit
+    comes later when the turn-tier surface itself is credential-bound.
+    """
+    if not turn_ids:
+        return
+
+    sid = session_id or get_session_id()
+
+    try:
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO turn_access_log (session_id, turn_id, tool_name)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (session_id, turn_id) DO NOTHING
+                """,
+                [(sid, tid, tool_name) for tid in turn_ids],
+            )
+    except Exception as e:
+        logger.warning("turn_access_log write failed: %s", e)
+
+
+async def boost_session_turns(
+    pool: asyncpg.Pool,
+    session_id: str | None = None,
+    boost: float = IMPLICIT_ACCESS_BOOST,
+) -> dict:
+    """Boost usefulness_score for all turns accessed in a session.
+
+    Turn-tier analog of ``boost_session_memories`` (P1.A2). Called at
+    session end (handoff/learn). Session-deduplicated — each turn gets at
+    most one boost per session regardless of how many times it was
+    accessed. Returns summary dict for logging.
+
+    Note on ``usefulness_count``: the belief-tier ``boost_session_memories``
+    does NOT bump ``usefulness_count`` in the boost loop (count is reserved
+    for explicit-feedback events via ``record_feedback``). We mirror that
+    asymmetry here for symmetry with the belief tier — implicit access
+    boosts ``usefulness_score`` and ``last_boosted_at`` but leaves
+    ``usefulness_count`` untouched.
+    """
+    sid = session_id or get_session_id()
+
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE episode_turns t
+                SET usefulness_score = LEAST(t.usefulness_score + $1, $2),
+                    last_boosted_at = now()
+                FROM (
+                    SELECT DISTINCT turn_id
+                    FROM turn_access_log
+                    WHERE session_id = $3
+                ) AS accessed
+                WHERE t.id = accessed.turn_id
+                """,
+                boost,
+                USEFULNESS_CAP,
+                sid,
+            )
+
+            count = int(result.split()[-1])  # "UPDATE N"
+            if count > 0:
+                logger.info(
+                    "Boosted %d turns by +%.3f for session %s",
+                    count, boost, sid,
+                )
+            return {"boosted": count, "session_id": sid, "boost": boost}
+    except Exception as e:
+        logger.warning("boost_session_turns failed: %s", e)
+        return {"boosted": 0, "session_id": sid, "error": str(e)}
+
+
 async def prune_old_access_logs(
     pool: asyncpg.Pool,
     cutoff_days: int = 90,

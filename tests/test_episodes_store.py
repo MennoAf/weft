@@ -367,3 +367,141 @@ async def test_timeline_query_status_filter(pool):
     )
     assert len(results) == 1
     assert results[0].title == "open"
+
+
+# --- P2.2: inline embedding on write hooks ---
+#
+# create_episode/close_episode now accept a precomputed `embedding`
+# argument and write it as part of the same statement that touches the
+# row, mirroring `store_memory(... embedding=...)`. graduate_episode does
+# NOT mutate the episode's embedding because it never changes title or
+# summary; it only flips status and links the new graduated memory.
+
+
+async def test_create_episode_writes_embedding(pool):
+    """create_episode persists the precomputed vector to the column."""
+    vec = [0.1] * 768
+    ep = await create_episode(
+        pool,
+        EpisodeCreate(title="vec test", summary="has a body"),
+        embedding=vec,
+    )
+    stored = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+    assert stored is not None
+    assert len(stored) == 768
+    assert stored[0] == pytest.approx(0.1)
+
+
+async def test_create_episode_without_embedding_writes_null(pool):
+    """Omitting `embedding` (e.g. embedder failure path) leaves column NULL."""
+    ep = await create_episode(pool, EpisodeCreate(title="no vec"))
+    stored = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+    assert stored is None
+
+
+async def test_close_episode_with_summary_updates_embedding(pool):
+    """When summary changes and a new embedding is supplied, the vector swaps."""
+    initial_vec = [0.1] * 768
+    ep = await create_episode(
+        pool,
+        EpisodeCreate(title="t", summary="initial summary"),
+        embedding=initial_vec,
+    )
+
+    # Sanity check: write landed.
+    pre = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+    assert pre[0] == pytest.approx(0.1)
+
+    new_vec = [0.5] * 768
+    closed = await close_episode(
+        pool, ep.id,
+        summary="updated summary",
+        embedding=new_vec,
+    )
+    assert closed is not None
+    assert closed.summary == "updated summary"
+
+    post = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+    assert post[0] == pytest.approx(0.5)
+    assert post != pre
+
+
+async def test_close_episode_without_embedding_leaves_existing_vector(pool):
+    """Closing without passing a new vector preserves whatever was there."""
+    initial_vec = [0.1] * 768
+    ep = await create_episode(
+        pool,
+        EpisodeCreate(title="keep vec", summary="orig"),
+        embedding=initial_vec,
+    )
+
+    # Close without summary or embedding — the embedding column must not be
+    # rewritten (status/ended_at update only).
+    await close_episode(pool, ep.id)
+
+    stored = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+    assert stored is not None
+    assert stored[0] == pytest.approx(0.1)
+
+
+async def test_close_episode_with_summary_but_no_embedding_keeps_old_vector(pool):
+    """Summary-only update path: caller chose not to re-embed; vector stays."""
+    initial_vec = [0.7] * 768
+    ep = await create_episode(
+        pool,
+        EpisodeCreate(title="t", summary="orig"),
+        embedding=initial_vec,
+    )
+    await close_episode(pool, ep.id, summary="changed but no new vec")
+
+    stored = await pool.fetchval(
+        "SELECT embedding, summary FROM episodes WHERE id = $1", ep.id,
+    )
+    # summary changed
+    summary = await pool.fetchval(
+        "SELECT summary FROM episodes WHERE id = $1", ep.id,
+    )
+    assert summary == "changed but no new vec"
+    # Embedding untouched. The MCP path always supplies a recomputed vector
+    # alongside a new summary — but the store layer must not zero out the
+    # column when the caller (e.g. a CLI tool, a test, an embed-failure
+    # branch) elects not to. v47 backfill will catch genuinely-missing rows.
+    embedding = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+    assert embedding is not None
+    assert embedding[0] == pytest.approx(0.7)
+
+
+async def test_graduate_episode_does_not_mutate_episode_embedding(pool):
+    """Graduation never changes title/summary, so the episode vector stays put."""
+    from weft.episodes import graduate_episode
+
+    initial_vec = [0.3] * 768
+    ep = await create_episode(
+        pool,
+        EpisodeCreate(title="grad-test", summary="will graduate"),
+        embedding=initial_vec,
+    )
+
+    pre = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+
+    await graduate_episode(pool, ep.id)
+
+    post = await pool.fetchval(
+        "SELECT embedding FROM episodes WHERE id = $1", ep.id,
+    )
+    assert post is not None
+    assert post == pre  # exact equality — graduation didn't touch this column

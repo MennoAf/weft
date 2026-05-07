@@ -70,7 +70,12 @@ from weft.quarantine import (
     reject_pending as reject_pending_quarantine,
 )
 from weft.tokens import estimate_tokens
-from weft.session_tracking import boost_session_memories, log_memory_access
+from weft.session_tracking import (
+    boost_session_memories,
+    boost_session_turns,
+    log_memory_access,
+    log_turn_access,
+)
 from weft.store import (
     add_relationship,
     count_by_vector,
@@ -407,6 +412,25 @@ async def _weft_recall_turns(
                 anchor: [t.to_dict() for t in turns]
                 for anchor, turns in anchored.items()
             }
+
+        # Fire-and-forget: log session access (outside acquire — system-level op).
+        # Mirrors the belief-tier wiring at weft_recall above. Dedup across the
+        # anchor map so a turn surfaced under multiple anchors is logged once.
+        import asyncio
+        accessed_ids: list[str] = []
+        seen_log: set[str] = set()
+        for turns in anchored.values():
+            for t in turns:
+                if t.id not in seen_log:
+                    seen_log.add(t.id)
+                    accessed_ids.append(t.id)
+        if accessed_ids:
+            asyncio.create_task(
+                log_turn_access(
+                    app.pool, accessed_ids, tool_name="recall",
+                ),
+                name="weft-session-log-recall-turns",
+            )
         return response
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_recall", e)
@@ -1211,6 +1235,13 @@ async def weft_learn(
         except Exception as exc:
             logger.warning("Session boost failed during learn: %s", exc)
 
+        # Turn-tier boost mirrors the belief-tier boost at session end (P1.A2).
+        turn_boost: dict = {}
+        try:
+            turn_boost = await boost_session_turns(app.pool)
+        except Exception as exc:
+            logger.warning("Turn-tier session boost failed during learn: %s", exc)
+
         return {
             "candidates_found": len(candidates),
             "stored": len(stored),
@@ -1220,6 +1251,7 @@ async def weft_learn(
             "task_id": task_id,
             "milestone": milestone_dict,
             "session_boost": session_boost,
+            "turn_boost": turn_boost,
         }
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_learn", e)
@@ -1343,17 +1375,36 @@ async def weft_handoff(
                     app.pool, project_id=resolved_project,
                     status=EpisodeStatus.open, limit=10,
                 )
+                # Each close_episode below rewrites `summary` to the
+                # handoff summary, so we recompute the embedding to match.
+                # Per-episode text uses the episode's own title with the
+                # new summary so the vector reflects the post-close state.
                 for ep in open_eps:
-                    closed = await close_episode(app.pool, ep.id, summary=summary)
+                    close_embedding = await _embed_episode_text(
+                        app, _episode_embed_text(ep.title, summary),
+                    )
+                    closed = await close_episode(
+                        app.pool, ep.id,
+                        summary=summary,
+                        embedding=close_embedding,
+                    )
                     if closed:
                         await add_memory_to_episode(app.pool, ep.id, memory.id)
                         closed_ids.append(ep.id)
 
-                new_ep = await create_episode(app.pool, EpisodeCreate(
-                    title=f"Session after: {summary[:80]}",
-                    project_id=resolved_project,
-                    agent_id=agent_id,
-                ))
+                new_title = f"Session after: {summary[:80]}"
+                new_embedding = await _embed_episode_text(
+                    app, _episode_embed_text(new_title, None),
+                )
+                new_ep = await create_episode(
+                    app.pool,
+                    EpisodeCreate(
+                        title=new_title,
+                        project_id=resolved_project,
+                        agent_id=agent_id,
+                    ),
+                    embedding=new_embedding,
+                )
                 await add_memory_to_episode(app.pool, new_ep.id, memory.id)
                 new_episode_id = new_ep.id
             except Exception as exc:
@@ -1366,6 +1417,13 @@ async def weft_handoff(
         except Exception as exc:
             logger.warning("Session boost failed during handoff: %s", exc)
 
+        # Turn-tier boost mirrors the belief-tier boost at session end (P1.A2).
+        turn_boost: dict = {}
+        try:
+            turn_boost = await boost_session_turns(app.pool)
+        except Exception as exc:
+            logger.warning("Turn-tier session boost failed during handoff: %s", exc)
+
         return {
             "id": memory.id,
             "project_id": resolved_project,
@@ -1374,6 +1432,7 @@ async def weft_handoff(
             "episodes_closed": closed_ids,
             "episode_opened": new_episode_id,
             "session_boost": session_boost,
+            "turn_boost": turn_boost,
         }
     except _DB_ERRORS as e:
         return _db_error_response("weft_handoff", e)
@@ -1844,6 +1903,35 @@ async def weft_behavior_delete(
 # --- Episode tools ---
 
 
+def _episode_embed_text(title: str, summary: str | None) -> str:
+    """Compose the text fed to the episode embedder.
+
+    Mirrors ``TABLE_TEXT_EXPRESSIONS["episodes"]`` in
+    :mod:`weft.db.reembed` (``title || ' ' || COALESCE(summary, '')``)
+    so write-time and backfill embeddings are derived from the same text.
+    """
+    return f"{title} {summary or ''}"
+
+
+async def _embed_episode_text(app: AppContext, text: str) -> list[float] | None:
+    """Embed an episode's text, mirroring store_memory's failure handling.
+
+    Returns ``None`` on any embed failure and logs a warning. The episode
+    write proceeds with a NULL embedding; the v47 startup backfill
+    (``reembed_table('episodes', ...)``) catches it on the next boot.
+    Uses ``app.episode_embedding`` (the per-tier provider) and falls back
+    to ``app.embedding`` for safety in case startup wiring failed.
+    """
+    provider = app.episode_embedding or app.embedding
+    try:
+        return await provider.embed(text)
+    except Exception as exc:
+        logger.warning(
+            "Episode embedding failed, storing without vector: %s", exc,
+        )
+        return None
+
+
 @mcp.tool()
 async def weft_episode_create(
     ctx: Context,
@@ -1859,13 +1947,21 @@ async def weft_episode_create(
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
+        # Embed BEFORE acquire — the network call shouldn't hold a tx open.
+        embedding = await _embed_episode_text(
+            app, _episode_embed_text(title, summary),
+        )
         async with acquire(app.pool):
-            ep = await create_episode(app.pool, EpisodeCreate(
-                title=title,
-                summary=summary,
-                project_id=resolved_project,
-                agent_id=agent_id,
-            ))
+            ep = await create_episode(
+                app.pool,
+                EpisodeCreate(
+                    title=title,
+                    summary=summary,
+                    project_id=resolved_project,
+                    agent_id=agent_id,
+                ),
+                embedding=embedding,
+            )
             return ep.to_dict()
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_episode_create", e)

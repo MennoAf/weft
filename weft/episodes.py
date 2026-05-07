@@ -35,8 +35,18 @@ logger = logging.getLogger(__name__)
 async def create_episode(
     pool: asyncpg.Pool,
     create: EpisodeCreate,
+    embedding: list[float] | None = None,
 ) -> Episode:
-    """Create a new open episode. If ttl_hours is set, computes expires_at."""
+    """Create a new open episode. If ttl_hours is set, computes expires_at.
+
+    ``embedding`` is the precomputed vector for ``title || ' ' || COALESCE(summary, '')``.
+    Mirrors :func:`weft.store.store_memory` — the embedder lives in the caller
+    (typically MCP app context), the network call happens *outside* the SQL
+    transaction, and a ``None`` value is written as NULL so the v47 startup
+    backfill in :mod:`weft.db.reembed` can fill it in later. Pass ``None`` from
+    callers that can't afford an embed call (background scripts, tests that
+    don't care, transient open-then-close flows).
+    """
     episode_id = _weft_id()
     now = datetime.now(timezone.utc)
 
@@ -49,10 +59,10 @@ async def create_episode(
         INSERT INTO episodes (
             id, title, summary, project_id, agent_id,
             user_id, started_at, expires_at, status, token_count,
-            created_at, updated_at
+            embedding, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5,
                   nullif(current_setting('app.user_id', true), ''),
-                  $6, $7, 'open', 0, $6, $6)
+                  $6, $7, 'open', 0, $8::vector, $6, $6)
         """,
         episode_id,
         create.title,
@@ -61,6 +71,7 @@ async def create_episode(
         create.agent_id,
         now,
         expires_at,
+        embedding,
     )
 
     return Episode(
@@ -148,8 +159,18 @@ async def close_episode(
     episode_id: str,
     *,
     summary: str | None = None,
+    embedding: list[float] | None = None,
 ) -> Episode | None:
-    """Close an episode — sets ended_at and status='closed'."""
+    """Close an episode — sets ended_at and status='closed'.
+
+    ``embedding`` is the precomputed vector for the new
+    ``title || ' ' || COALESCE(summary, '')``. Pass it ONLY when ``summary``
+    changes — otherwise leave it as ``None`` and the existing embedding is
+    untouched (no SET clause emitted). Callers that fail to embed should
+    still be able to close; following :func:`weft.store.store_memory`'s
+    semantics, an embed failure on the MCP side simply omits ``embedding``
+    here and the v47 backfill catches it on the next startup pass.
+    """
     now = datetime.now(timezone.utc)
 
     sets = ["ended_at = $1", "status = 'closed'", "updated_at = $1"]
@@ -159,6 +180,11 @@ async def close_episode(
     if summary is not None:
         sets.append(f"summary = ${idx}")
         params.append(summary)
+        idx += 1
+
+    if embedding is not None:
+        sets.append(f"embedding = ${idx}::vector")
+        params.append(embedding)
         idx += 1
 
     set_clause = ", ".join(sets)
@@ -373,7 +399,12 @@ async def graduate_episode(
     # Link the memory to the episode
     await add_memory_to_episode(pool, episode_id, memory.id)
 
-    # Update episode: set graduated status and graduated_memory_id
+    # Update episode: set graduated status and graduated_memory_id.
+    # NOTE: graduation never mutates `title` or `summary` (the only fields
+    # the episode embedding is built from), so there's no embedding
+    # recompute here. The graduated *memory* gets its own embedding via
+    # the `embedding=` arg threaded into store_memory above; the episode's
+    # vector stays valid because its source text is unchanged.
     now = datetime.now(timezone.utc)
     row = await get_db(pool).fetchrow(
         """
