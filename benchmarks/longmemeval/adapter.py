@@ -78,6 +78,15 @@ class RunStats:
     cached_tokens: int = 0
     output_tokens: int = 0
     started_at: float = 0.0
+    # Recall@k instrumentation (turn-mode + turn-tier only). None when
+    # recall capture didn't run; populated at the end of run_benchmark
+    # so the CLI can print the headline number without re-reading files.
+    recall_at_k: float | None = None
+    recall_k: int = 10
+    recall_n_hits: int = 0
+    recall_n_questions: int = 0
+    recall_jsonl_path: str | None = None
+    recall_summary_path: str | None = None
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started_at if self.started_at else 0.0
@@ -145,17 +154,41 @@ async def _run_one(
     mode: IngestMode,
     top_k: int,
     tier: Tier = "belief",
+    capture_recall: bool = False,
+    recall_k: int = 10,
 ) -> tuple[str, dict]:
     """Run the full pipeline for one question.
 
+    Args:
+        capture_recall: When True (turn-mode + turn-tier only), build an
+            in-memory ``{turn_id: session_id}`` side-map at ingest time
+            and record per-question recall@``recall_k`` against the gold
+            ``answer_session_ids``. The metric is returned in the
+            telemetry dict under the ``recall`` key. Other modes don't
+            have a stable id-to-session mapping, so this flag is a no-op
+            outside of ``mode='turns'`` + ``tier='turns'``.
+        recall_k: Cutoff for the recall metric (default 10). Independent
+            of the Reader's ``top_k`` so we can report recall@10 even
+            when the policy widens to 30 for multi-session questions.
+
     Returns:
         (hypothesis, telemetry_dict). The hypothesis goes into the JSONL
-        results file; telemetry is aggregated into RunStats.
+        results file; telemetry is aggregated into RunStats. When
+        capture_recall is enabled, telemetry["recall"] holds a dict with
+        per-question recall fields ready to serialize to JSONL.
     """
     project_id = project_id_for(instance.question_id)
 
     # 1+2. Ingest haystack into a per-question project sandbox.
-    n_sessions = await load_haystack(pool, embedder, instance, mode)
+    # Allocate a per-question side-map only when recall@k capture is on
+    # — keeps memory pressure flat for non-instrumented runs.
+    turn_session_map: dict[str, str] | None = (
+        {} if capture_recall and mode == "turns" and tier == "turns" else None
+    )
+    n_sessions = await load_haystack(
+        pool, embedder, instance, mode,
+        turn_session_map=turn_session_map,
+    )
 
     # 3. Recall — question-type-aware policy lives in router.policy_for().
     # The CLI top_k acts as a floor: if a caller bumps top_k above the
@@ -191,6 +224,37 @@ async def _run_one(
         "output_tokens": response.output_tokens,
         "model": response.model,
     }
+
+    # Recall@k instrumentation — only meaningful when we have a side-map.
+    # Compare the source sessions for the top-k retrieved turns against
+    # the gold ``has_answer`` sessions (loaded from
+    # ``answer_session_ids`` in dataset.py). A "hit" means at least one
+    # gold session appears among the retrieved sessions; the metric is
+    # therefore recall@k as a per-question 0/1 (rolled up to a fraction
+    # at the run level).
+    if turn_session_map is not None:
+        topk = memories[:recall_k]
+        retrieved_turn_ids = [m.memory.id for m in topk]
+        retrieved_session_ids = [
+            turn_session_map[tid] for tid in retrieved_turn_ids
+            if tid in turn_session_map
+        ]
+        retrieved_session_set = set(retrieved_session_ids)
+        gold_session_ids = {
+            s.session_id for s in instance.sessions if s.has_answer
+        }
+        hit = bool(gold_session_ids & retrieved_session_set)
+        telemetry["recall"] = {
+            "question_id": instance.question_id,
+            "question_type": instance.question_type,
+            "k": recall_k,
+            "retrieved_turn_ids": retrieved_turn_ids,
+            "retrieved_session_ids": sorted(retrieved_session_set),
+            "gold_session_ids": sorted(gold_session_ids),
+            "recall_at_k_hit": hit,
+            "n_turns_indexed": len(turn_session_map),
+        }
+
     return response.hypothesis, telemetry
 
 
@@ -319,6 +383,16 @@ async def run_benchmark(
 
     stats = RunStats(questions_total=len(instances), started_at=time.monotonic())
 
+    # Recall@10 instrumentation is only meaningful when we have a stable
+    # turn-id → session-id mapping, which only exists in turn-mode + turn
+    # tier. Other configurations skip the side-map allocation entirely.
+    capture_recall = mode == "turns" and tier == "turns"
+    recall_k = 10
+    recall_records: list[dict] = []
+    recall_jsonl_path = output_path.parent / f"{output_path.stem}_recall_at_{recall_k}.jsonl"
+    recall_summary_path = output_path.parent / f"{output_path.stem}_recall_at_{recall_k}_summary.json"
+    recall_out = recall_jsonl_path.open("a", encoding="utf-8") if capture_recall else None
+
     try:
         with output_path.open("a", encoding="utf-8") as out:
             for instance in instances:
@@ -326,6 +400,8 @@ async def run_benchmark(
                     hypothesis, telemetry = await _run_one(
                         pool, embedder, reader, instance,
                         mode=mode, top_k=top_k, tier=tier,
+                        capture_recall=capture_recall,
+                        recall_k=recall_k,
                     )
                 except Exception as exc:
                     logger.exception(
@@ -351,11 +427,59 @@ async def run_benchmark(
                     )
                     out.flush()
 
+                    recall_record = telemetry.get("recall")
+                    if recall_record is not None and recall_out is not None:
+                        recall_records.append(recall_record)
+                        recall_out.write(json.dumps(recall_record) + "\n")
+                        recall_out.flush()
+
                 if cleanup:
                     await cleanup_haystack(pool, instance)
     finally:
+        if recall_out is not None:
+            recall_out.close()
         if owns_pool:
             await pool.close()
+
+    # Roll up recall@k for turn-tier runs and emit a summary JSON next to
+    # the per-question JSONL. Print the headline number to stdout so smoke
+    # tests don't require opening a file to read it.
+    if capture_recall and recall_records:
+        n_total = len(recall_records)
+        n_hits = sum(1 for r in recall_records if r["recall_at_k_hit"])
+        per_type: dict[str, dict[str, int | float]] = {}
+        for r in recall_records:
+            qt = r["question_type"]
+            slot = per_type.setdefault(qt, {"n": 0, "hits": 0})
+            slot["n"] = int(slot["n"]) + 1
+            slot["hits"] = int(slot["hits"]) + (1 if r["recall_at_k_hit"] else 0)
+        for qt, slot in per_type.items():
+            n = int(slot["n"])
+            hits = int(slot["hits"])
+            slot["recall_at_k"] = (hits / n) if n else 0.0
+        summary = {
+            "k": recall_k,
+            "n_questions": n_total,
+            "n_hits": n_hits,
+            "recall_at_k": (n_hits / n_total) if n_total else 0.0,
+            "per_question_type": per_type,
+            "mode": mode,
+            "tier": tier,
+            "dataset": str(dataset_path),
+        }
+        recall_summary_path.write_text(
+            json.dumps(summary, indent=2), encoding="utf-8",
+        )
+        logger.info(
+            "recall@%d = %.3f (%d/%d) — written to %s",
+            recall_k, summary["recall_at_k"], n_hits, n_total, recall_summary_path,
+        )
+        stats.recall_at_k = float(summary["recall_at_k"])
+        stats.recall_k = recall_k
+        stats.recall_n_hits = n_hits
+        stats.recall_n_questions = n_total
+        stats.recall_jsonl_path = str(recall_jsonl_path)
+        stats.recall_summary_path = str(recall_summary_path)
 
     stats_path = output_path.with_suffix(output_path.suffix + ".stats.json")
     stats_path.write_text(
@@ -551,6 +675,13 @@ def cli(
         f"cached={stats.cached_tokens} "
         f"out={stats.output_tokens}"
     )
+    if stats.recall_at_k is not None:
+        click.echo(
+            f"  recall@{stats.recall_k}: {stats.recall_at_k:.3f} "
+            f"({stats.recall_n_hits}/{stats.recall_n_questions})"
+        )
+        click.echo(f"  recall jsonl: {stats.recall_jsonl_path}")
+        click.echo(f"  recall summary: {stats.recall_summary_path}")
     click.echo(
         f"\nNext: feed this file to LongMemEval's evaluator:\n"
         f"  python LongMemEval/src/evaluation/evaluate_qa.py "
