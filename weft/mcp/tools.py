@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -364,6 +365,16 @@ async def _weft_recall_turns(
     everything else is a single hybrid recall keyed under the query.
     Resolves the project_id the same way the belief path does so the
     same default-detection rules apply.
+
+    When ``WEFT_HIERARCHICAL=1`` is set in the env, the flat recall path
+    is replaced with the hierarchical descent
+    (:func:`weft.episode_turns.recall_turns_hierarchical`): rank episodes
+    first, then descend to turns scoped to that episode set. Multi-anchor
+    splits are skipped under the flag — the descent is a single coarse-
+    to-fine pipeline keyed under the original query, which trades the
+    per-anchor split for a tighter candidate set. The flag check happens
+    here, not inside ``recall_turns_hierarchical`` itself, so the new
+    function stays directly testable without env-var dance.
     """
     try:
         cid = set_correlation_id()
@@ -371,14 +382,30 @@ async def _weft_recall_turns(
         app: AppContext = ctx.request_context.lifespan_context
         from weft.turn_recall import temporal_anchor
 
+        hierarchical = os.environ.get("WEFT_HIERARCHICAL") == "1"
         resolved_project = await _resolve_project_id(ctx, project_id)
         async with acquire(app.pool):
-            anchored = await temporal_anchor(
-                app.pool, query,
-                project_id=resolved_project,
-                top_k_per_anchor=max(1, limit // 2),
-                embedder=app.embedding,
-            )
+            if hierarchical:
+                from weft.episode_turns import recall_turns_hierarchical
+                turns = await recall_turns_hierarchical(
+                    app.pool, query,
+                    project_id=resolved_project,
+                    top_k_episodes=10,
+                    top_k_turns=limit,
+                    embedder=app.embedding,
+                )
+                # Keep the same {anchor: [turns]} shape downstream code
+                # downstream expects so the dedup / logging blocks work
+                # without additional branching. The original-query key
+                # mirrors temporal_anchor's no-anchor fallback path.
+                anchored = {query: turns}
+            else:
+                anchored = await temporal_anchor(
+                    app.pool, query,
+                    project_id=resolved_project,
+                    top_k_per_anchor=max(1, limit // 2),
+                    embedder=app.embedding,
+                )
 
         # Flatten dedup'd turns for a single ``turns`` array (the most
         # common consumer shape), and surface the per-anchor mapping for
