@@ -214,6 +214,12 @@ class AppContext:
     cache: Cache | NullCache
     embedding: EmbeddingProvider
     config: WeftConfig
+    # Episode-tier embedder. Resolved once at startup via
+    # ``resolve_episode_embedder`` (honours ``WEFT_EPISODE_EMBEDDER`` env
+    # override, falls back to ``embedding``). Stored on AppContext so the
+    # write hooks reuse a single provider instance instead of paying the
+    # construction cost on every episode write.
+    episode_embedding: EmbeddingProvider | None = None
     _keepalive_task: asyncio.Task | None = field(default=None, repr=False)
     _fallback_task: asyncio.Task | None = field(default=None, repr=False)
     _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
@@ -427,7 +433,10 @@ async def lifespan(server: FastMCP):
     # ``reembed_table`` is idempotent — once every row has an embedding,
     # this becomes a cheap empty SELECT on subsequent boots. Uses the
     # episode-tier embedder helper so a future ``WEFT_EPISODE_EMBEDDER``
-    # override picks up automatically.
+    # override picks up automatically. The same provider instance is then
+    # threaded onto ``AppContext.episode_embedding`` so the P2.2 write
+    # hooks (create/close/graduate) embed inline without rebuilding it.
+    episode_embedder: EmbeddingProvider | None = None
     try:
         from weft.db.reembed import (
             reembed_table,
@@ -448,7 +457,13 @@ async def lifespan(server: FastMCP):
     except Exception as exc:
         logger.warning("Seed bootstrapping failed (non-fatal): %s", exc)
 
-    ctx = AppContext(pool=pool, cache=cache, embedding=embedding, config=config)
+    ctx = AppContext(
+        pool=pool,
+        cache=cache,
+        embedding=embedding,
+        config=config,
+        episode_embedding=episode_embedder,
+    )
     _app_ctx_ref.ctx = ctx
 
     # Start background tasks

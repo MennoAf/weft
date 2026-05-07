@@ -11,9 +11,11 @@ from weft.session_tracking import (
     USEFULNESS_CAP,
     _session_id,
     boost_session_memories,
+    boost_session_turns,
     get_session_id,
     get_session_memory_ids,
     log_memory_access,
+    log_turn_access,
     set_session_id,
 )
 from weft.store import get_memory, store_memory
@@ -506,3 +508,368 @@ async def _create_memory(pool, content: str):
         source=MemorySource.conversation,
     )
     return await store_memory(pool, create)
+
+
+# --- Turn-tier session tracking (P1.A2) ---
+#
+# Mirrors the belief-tier suite above one-for-one against the turn-tier
+# substrate landed in P1.A1 (mig 46): turn_access_log table +
+# episode_turns.{usefulness_score, usefulness_count, last_boosted_at}.
+# Boost loop is intentionally symmetric with boost_session_memories — the
+# only deliberate asymmetry is that we leave usefulness_count alone here
+# too, because the belief tier reserves count bumps for explicit feedback.
+
+
+async def _create_turn(pool, content: str):
+    """Create a test episode + turn and return the EpisodeTurn.
+
+    Each turn lives in its own episode so cross-test cleanup is trivial
+    and the turn-level tests don't accidentally couple through shared
+    episode state.
+    """
+    from weft.episode_turns import append_turn
+    from weft.episodes import create_episode
+    from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
+
+    ep = await create_episode(pool, EpisodeCreate(title=f"turn-test: {content[:40]}"))
+    return await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content=content,
+        ),
+    )
+
+
+# --- log_turn_access ---
+
+
+@pytest.mark.asyncio
+async def test_log_turn_access_empty_list_is_noop(pool):
+    """Empty turn_ids list should not write any rows."""
+    await log_turn_access(
+        pool, [], tool_name="recall", session_id="ses-turn-empty",
+    )
+    count = await pool.fetchval(
+        "SELECT count(*) FROM turn_access_log WHERE session_id = $1",
+        "ses-turn-empty",
+    )
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_log_turn_access_inserts_rows(pool):
+    """Log access inserts one row per turn ID."""
+    t1 = await _create_turn(pool, "First turn")
+    t2 = await _create_turn(pool, "Second turn")
+
+    await log_turn_access(
+        pool, [t1.id, t2.id],
+        tool_name="recall", session_id="ses-turn-insert",
+    )
+
+    rows = await pool.fetch(
+        "SELECT turn_id, tool_name FROM turn_access_log WHERE session_id = $1",
+        "ses-turn-insert",
+    )
+    assert len(rows) == 2
+    ids = {r["turn_id"] for r in rows}
+    assert ids == {t1.id, t2.id}
+    assert all(r["tool_name"] == "recall" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_log_turn_access_deduplicates_within_session(pool):
+    """Same turn accessed twice in one session → one row."""
+    t = await _create_turn(pool, "Dedup turn test")
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-dedup",
+    )
+    await log_turn_access(
+        pool, [t.id], tool_name="context", session_id="ses-turn-dedup",
+    )
+
+    count = await pool.fetchval(
+        "SELECT count(*) FROM turn_access_log WHERE session_id = $1",
+        "ses-turn-dedup",
+    )
+    assert count == 1  # ON CONFLICT DO NOTHING
+
+
+@pytest.mark.asyncio
+async def test_log_turn_access_different_sessions_both_recorded(pool):
+    """Same turn in different sessions → separate rows."""
+    t = await _create_turn(pool, "Multi-session turn")
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-a",
+    )
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-b",
+    )
+
+    count = await pool.fetchval(
+        "SELECT count(*) FROM turn_access_log WHERE turn_id = $1",
+        t.id,
+    )
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_log_turn_access_db_failure_does_not_raise(pool):
+    """DB errors are caught and logged, not propagated."""
+    await pool.close()
+    # Should not raise even with a closed pool.
+    await log_turn_access(
+        pool, ["fake-turn"],
+        tool_name="recall", session_id="ses-turn-fail",
+    )
+
+
+@pytest.mark.asyncio
+async def test_log_turn_access_tool_name_threaded_through(pool):
+    """The tool_name kwarg lands verbatim on the row — supervisor needs to
+    distinguish recall reads from temporal_anchor reads from prime reads."""
+    t = await _create_turn(pool, "Tool-name passthrough")
+    await log_turn_access(
+        pool, [t.id], tool_name="temporal_anchor",
+        session_id="ses-turn-tool",
+    )
+    tool_name = await pool.fetchval(
+        """
+        SELECT tool_name FROM turn_access_log
+        WHERE session_id = $1 AND turn_id = $2
+        """,
+        "ses-turn-tool", t.id,
+    )
+    assert tool_name == "temporal_anchor"
+
+
+# --- boost_session_turns ---
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_updates_usefulness_score(pool):
+    """Boost increases usefulness_score by the configured amount."""
+    t = await _create_turn(pool, "Boost me")
+    original_score = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+    )
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-boost",
+    )
+    result = await boost_session_turns(pool, session_id="ses-turn-boost")
+
+    assert result["boosted"] == 1
+    assert result["boost"] == IMPLICIT_ACCESS_BOOST
+
+    updated_score = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert updated_score == pytest.approx(
+        original_score + IMPLICIT_ACCESS_BOOST
+    )
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_sets_last_boosted_at(pool):
+    """Boost stamps last_boosted_at — feeds the time-decay term."""
+    t = await _create_turn(pool, "last_boosted_at trace")
+    pre = await pool.fetchval(
+        "SELECT last_boosted_at FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert pre is None  # default per migration
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-stamp",
+    )
+    await boost_session_turns(pool, session_id="ses-turn-stamp")
+
+    post = await pool.fetchval(
+        "SELECT last_boosted_at FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert post is not None
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_does_not_increment_usefulness_count(pool):
+    """Boost loop leaves usefulness_count alone — count is reserved for
+    explicit-feedback events, mirroring boost_session_memories which also
+    leaves the count untouched in the implicit-access path."""
+    t = await _create_turn(pool, "Count untouched")
+    pre_count = await pool.fetchval(
+        "SELECT usefulness_count FROM episode_turns WHERE id = $1", t.id,
+    )
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-count",
+    )
+    await boost_session_turns(pool, session_id="ses-turn-count")
+
+    post_count = await pool.fetchval(
+        "SELECT usefulness_count FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert post_count == pre_count
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_deduplicates_across_multiple_accesses(pool):
+    """Turn accessed 3 times in session gets ONE boost, not three."""
+    t = await _create_turn(pool, "Dedup boost turn")
+    original_score = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+    )
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-3x",
+    )
+    await log_turn_access(
+        pool, [t.id], tool_name="context", session_id="ses-turn-3x",
+    )
+    await log_turn_access(
+        pool, [t.id], tool_name="prime", session_id="ses-turn-3x",
+    )
+
+    await boost_session_turns(pool, session_id="ses-turn-3x")
+
+    updated_score = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert updated_score == pytest.approx(
+        original_score + IMPLICIT_ACCESS_BOOST
+    )
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_caps_at_maximum(pool):
+    """Usefulness score never exceeds USEFULNESS_CAP."""
+    t = await _create_turn(pool, "Turn cap test")
+
+    await pool.execute(
+        "UPDATE episode_turns SET usefulness_score = $1 WHERE id = $2",
+        USEFULNESS_CAP - 0.005,
+        t.id,
+    )
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-cap",
+    )
+    await boost_session_turns(pool, session_id="ses-turn-cap")
+
+    updated_score = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert updated_score == pytest.approx(USEFULNESS_CAP)
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_empty_session_is_noop(pool):
+    """Session with no access log entries → boost 0, no error."""
+    result = await boost_session_turns(pool, session_id="ses-turn-ghost")
+    assert result["boosted"] == 0
+    assert result["session_id"] == "ses-turn-ghost"
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_skips_deleted_turns(pool):
+    """If a turn was deleted between access and boost, FK cascade removes
+    the access log row — boost reports zero, no error."""
+    t = await _create_turn(pool, "Will be deleted turn")
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-del",
+    )
+
+    # Hard-delete the turn (CASCADE deletes access log row too)
+    await pool.execute("DELETE FROM episode_turns WHERE id = $1", t.id)
+
+    result = await boost_session_turns(pool, session_id="ses-turn-del")
+    assert result["boosted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_multiple_turns(pool):
+    """Multiple turns in session all get boosted."""
+    turns = [await _create_turn(pool, f"Turn multi {i}") for i in range(3)]
+    original = {
+        t.id: await pool.fetchval(
+            "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+        )
+        for t in turns
+    }
+
+    await log_turn_access(
+        pool, [t.id for t in turns],
+        tool_name="prime", session_id="ses-turn-multi",
+    )
+    result = await boost_session_turns(pool, session_id="ses-turn-multi")
+
+    assert result["boosted"] == 3
+    for t in turns:
+        updated = await pool.fetchval(
+            "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+        )
+        assert updated == pytest.approx(
+            original[t.id] + IMPLICIT_ACCESS_BOOST
+        )
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_second_session_stacks(pool):
+    """Two sessions boosting the same turn → score increases twice."""
+    t = await _create_turn(pool, "Double session turn")
+    original_score = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+    )
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-s1",
+    )
+    await boost_session_turns(pool, session_id="ses-turn-s1")
+
+    await log_turn_access(
+        pool, [t.id], tool_name="recall", session_id="ses-turn-s2",
+    )
+    await boost_session_turns(pool, session_id="ses-turn-s2")
+
+    updated_score = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert updated_score == pytest.approx(
+        original_score + 2 * IMPLICIT_ACCESS_BOOST
+    )
+
+
+@pytest.mark.asyncio
+async def test_boost_turns_does_not_cross_contaminate_sessions(pool):
+    """A turn accessed in session A does NOT get boosted by session B's
+    end-of-session call. Mirrors the per-session dedup contract."""
+    t_a = await _create_turn(pool, "Session A turn")
+    t_b = await _create_turn(pool, "Session B turn")
+
+    await log_turn_access(
+        pool, [t_a.id], tool_name="recall", session_id="ses-turn-A",
+    )
+    await log_turn_access(
+        pool, [t_b.id], tool_name="recall", session_id="ses-turn-B",
+    )
+
+    # End session A only.
+    result = await boost_session_turns(pool, session_id="ses-turn-A")
+    assert result["boosted"] == 1
+
+    score_a = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t_a.id,
+    )
+    score_b = await pool.fetchval(
+        "SELECT usefulness_score FROM episode_turns WHERE id = $1", t_b.id,
+    )
+    # A boosted, B untouched.
+    assert score_a == pytest.approx(0.7 + IMPLICIT_ACCESS_BOOST)
+    assert score_b == pytest.approx(0.7)
+    last_boosted_b = await pool.fetchval(
+        "SELECT last_boosted_at FROM episode_turns WHERE id = $1", t_b.id,
+    )
+    assert last_boosted_b is None
