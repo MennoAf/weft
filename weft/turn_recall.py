@@ -59,17 +59,64 @@ _TURN_TIER_MARKERS: tuple[re.Pattern, ...] = (
 )
 
 
+# Queries that benefit from RRF across belief and turns: explicit
+# episodic asks ("do you remember", "have we discussed"), self-referential
+# fact queries that reach for prior dialogue ("what did I last say",
+# "my decision on"), and remind-me prompts. The _TURN_TIER_MARKERS list
+# above catches pure temporal-arithmetic queries that need raw turns;
+# this list catches queries where the user wants the canonical fact
+# (belief tier) AND the dialogue evidence (turn tier) fused together.
+#
+# These patterns are checked BEFORE _TURN_TIER_MARKERS in
+# route_query_to_tier so a query like "what did I last say about X"
+# routes to 'both' instead of falling through to 'turns'.
+#
+# Starter set is deliberately narrow (PRECISION over recall on first
+# ship) — broaden based on Oracle data once Tier 1.5 RRF lands the
+# 'both' dispatch path. Today the auto-path caller (weft_recall) only
+# handles 'belief' and 'turns'; 'both' returns fall through to belief
+# until P1.B2 wires the RRF fusion.
+_BOTH_TIER_MARKERS: tuple[re.Pattern, ...] = (
+    # Explicit episodic recall asks.
+    re.compile(r"\b(?:do you|did we|have we) (?:recall|remember|discuss)"),
+    # "have we / I (talked|discussed|mentioned)" + topic.
+    re.compile(r"\bhave (?:we|i) (?:discussed|talked|mentioned)"),
+    # Self-referential fact retrieval that reaches for prior dialogue.
+    re.compile(
+        r"\bwhat did i (?:last )?(?:say|tell|mention|decide|think|conclude)"
+    ),
+    # Possessive opinion / decision queries — fact + history together.
+    re.compile(
+        r"\b(?:my|our) (?:decision|opinion|view|stance|take|position) (?:on|about)\b"
+    ),
+    # Remind-me prompts — factual answer grounded in prior dialogue.
+    re.compile(r"\bremind me (?:about|of|what|when)\b"),
+)
+
+
 def route_query_to_tier(query: str) -> Tier:
     """Decide which retrieval tier a query should hit.
 
     Returns:
-        ``'turns'`` for queries with explicit temporal markers
-        (LongMemEval temporal-reasoning patterns); ``'belief'`` otherwise.
-        Future: a ``'both'`` return is reserved for queries that benefit
-        from RRF across tiers (not enabled in the auto path yet — measure
-        the lift first).
+        ``'both'`` for queries that benefit from RRF across belief and
+        turns (explicit episodic asks, self-referential fact queries
+        that need dialogue evidence). ``'turns'`` for queries with
+        explicit temporal markers (LongMemEval temporal-reasoning
+        patterns). ``'belief'`` otherwise.
+
+    Priority order is ``both`` → ``turns`` → ``belief``. A query like
+    "what did I last say about the launch" matches the ``_BOTH_TIER_MARKERS``
+    self-referential pattern AND would also match no turn marker today,
+    but the ordering matters for queries that hit both lists (e.g.
+    "do you recall when did I ship" hits ``do you recall`` first and
+    routes to 'both' rather than falling through to 'turns').
     """
     q = query.lower()
+    for pattern in _BOTH_TIER_MARKERS:
+        if pattern.search(q):
+            logger.debug("route_query_to_tier: %r matched %s → both",
+                         query[:60], pattern.pattern)
+            return "both"
     for pattern in _TURN_TIER_MARKERS:
         if pattern.search(q):
             logger.debug("route_query_to_tier: %r matched %s → turns",
