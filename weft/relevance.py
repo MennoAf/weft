@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from weft.models import Memory, MemoryRecall, MemoryType
+from weft.models import EpisodeTurn, Memory, MemoryRecall, MemoryType
 
 
 # Default per-type score multipliers.  Types not listed get 1.0.
@@ -200,5 +200,106 @@ def rank_memories(
     Returns results sorted by score descending.
     """
     scored = [score_memory(r, weights=weights, now=now) for r in recalls]
+    scored.sort(key=lambda s: s.score, reverse=True)
+    return scored
+
+
+# --- Turn-tier scoring (P1.A3) ---
+
+
+@dataclass(frozen=True)
+class ScoredTurn:
+    """An episode turn with its composite relevance score and breakdown.
+
+    Mirrors :class:`ScoredMemory` shape but drops the belief-tier-only
+    factors (``confidence`` and ``type_boost``):
+
+    * Turns are observed dialogue, not asserted beliefs — there is no
+      confidence value to multiply through.
+    * Turns have no ``type`` column, so per-type boosts don't apply.
+
+    The base score is the RRF composite from
+    :func:`weft.episode_turns._rrf_fuse_turn_rows` (vector + ts_rank
+    fused), not a raw cosine — that's the rank-space the upstream layer
+    produces.
+    """
+
+    turn: EpisodeTurn
+    base_score: float
+    recency_factor: float
+    usefulness_factor: float
+    score: float
+
+
+def score_turn(
+    turn: EpisodeTurn,
+    base_score: float,
+    *,
+    weights: RelevanceWeights | None = None,
+    now: datetime | None = None,
+) -> ScoredTurn:
+    """Compute the composite relevance score for a single turn.
+
+    Formula:
+
+        score = base_score * recency_factor * usefulness_factor
+
+    where ``base_score`` is the upstream RRF composite (vector + ts_rank),
+    ``recency_factor`` decays by ``occurred_at`` (the dialogue's own
+    timestamp — turns don't have an ``accessed_at`` column; ``occurred_at``
+    is the load-bearing temporal signal), and ``usefulness_factor`` reads
+    the boost-loop columns (``usefulness_score`` + ``last_boosted_at``)
+    using the same time-decayed mapping as :func:`score_memory`.
+
+    Deliberately omits:
+
+    * ``confidence_factor`` — turns are dialogue, not asserted beliefs.
+    * ``frequency_factor`` — turns don't carry an ``access_count``;
+      access tracking lives in ``turn_access_log``, and the boost loop
+      already collapses that into ``usefulness_score``.
+    * ``type_boost_factor`` — turns have no type column.
+    """
+    w = weights or RelevanceWeights()
+
+    rf = recency_factor(
+        turn.occurred_at,
+        now=now,
+        half_life_days=w.recency_half_life_days,
+    )
+    uf = usefulness_factor(
+        turn.usefulness_score,
+        floor=w.usefulness_floor,
+        last_boosted_at=turn.last_boosted_at,
+        now=now,
+    )
+
+    final = base_score * rf * uf
+
+    return ScoredTurn(
+        turn=turn,
+        base_score=base_score,
+        recency_factor=rf,
+        usefulness_factor=uf,
+        score=final,
+    )
+
+
+def rank_turns(
+    turns_with_base: list[tuple[EpisodeTurn, float]],
+    *,
+    weights: RelevanceWeights | None = None,
+    now: datetime | None = None,
+) -> list[ScoredTurn]:
+    """Score and rank a list of (turn, base_score) pairs by composite
+    relevance. Returns results sorted by score descending.
+
+    The pair shape keeps the RRF score out of the EpisodeTurn model itself
+    — the model is the persistence shape, the score is a per-recall
+    artifact that doesn't belong on the row.
+    """
+    scored = [
+        score_turn(t, base, weights=weights, now=now)
+        for t, base in turns_with_base
+    ]
     scored.sort(key=lambda s: s.score, reverse=True)
     return scored

@@ -314,3 +314,114 @@ def test_type_boost_disabled_via_weights():
     scored = score_memory(anti, weights=weights, now=NOW)
 
     assert scored.type_boost_factor == pytest.approx(1.0)
+
+
+# --- score_turn (P1.A3) ---
+
+
+from weft.models import EpisodeTurn, TurnRole  # noqa: E402
+from weft.relevance import ScoredTurn, rank_turns, score_turn  # noqa: E402
+
+
+def _make_turn(
+    *,
+    occurred_at: datetime | None = None,
+    usefulness_score: float = 0.7,
+    last_boosted_at: datetime | None = None,
+    content: str = "test turn",
+) -> EpisodeTurn:
+    return EpisodeTurn(
+        id="et-test00001",
+        episode_id="ep-test",
+        turn_index=0,
+        role=TurnRole.user,
+        content=content,
+        occurred_at=occurred_at or NOW,
+        usefulness_score=usefulness_score,
+        last_boosted_at=last_boosted_at,
+    )
+
+
+def test_score_turn_higher_usefulness_wins():
+    """All else equal, higher usefulness_score should produce a higher
+    composite score."""
+    low = _make_turn(usefulness_score=0.3, occurred_at=NOW)
+    high = _make_turn(usefulness_score=1.0, occurred_at=NOW)
+
+    low_scored = score_turn(low, base_score=0.5, now=NOW)
+    high_scored = score_turn(high, base_score=0.5, now=NOW)
+
+    assert high_scored.score > low_scored.score
+    assert high_scored.usefulness_factor > low_scored.usefulness_factor
+
+
+def test_score_turn_decays_older_turns():
+    """All else equal, an older turn should have a lower recency factor
+    and therefore a lower composite score."""
+    recent = _make_turn(occurred_at=NOW, usefulness_score=0.7)
+    old = _make_turn(occurred_at=NOW - timedelta(days=60), usefulness_score=0.7)
+
+    recent_scored = score_turn(recent, base_score=0.5, now=NOW)
+    old_scored = score_turn(old, base_score=0.5, now=NOW)
+
+    assert recent_scored.recency_factor > old_scored.recency_factor
+    assert recent_scored.score > old_scored.score
+
+
+def test_score_turn_does_not_use_confidence():
+    """``score_turn`` must not depend on a confidence value — turns are
+    observed dialogue, not asserted beliefs. Verify by checking that
+    ``ScoredTurn`` exposes no ``confidence_factor`` attribute and that
+    EpisodeTurn itself has no ``confidence`` field on the model."""
+    turn = _make_turn()
+    scored = score_turn(turn, base_score=0.5, now=NOW)
+
+    assert isinstance(scored, ScoredTurn)
+    assert not hasattr(scored, "confidence_factor")
+    assert not hasattr(scored, "type_boost_factor")
+    # EpisodeTurn itself doesn't have a confidence column.
+    assert not hasattr(turn, "confidence")
+
+
+def test_score_turn_formula_is_base_times_recency_times_usefulness():
+    """Score breakdown should match the literal multiplicative formula."""
+    turn = _make_turn(occurred_at=NOW, usefulness_score=0.8)
+    scored = score_turn(turn, base_score=0.4, now=NOW)
+
+    expected = 0.4 * scored.recency_factor * scored.usefulness_factor
+    assert scored.score == pytest.approx(expected)
+
+
+def test_score_turn_last_boosted_at_decays_usefulness():
+    """When ``last_boosted_at`` is recent, usefulness should be near full
+    strength; when stale, it should decay toward the floor."""
+    recent_boost = _make_turn(
+        usefulness_score=1.0,
+        last_boosted_at=NOW,
+        occurred_at=NOW,
+    )
+    stale_boost = _make_turn(
+        usefulness_score=1.0,
+        last_boosted_at=NOW - timedelta(days=120),
+        occurred_at=NOW,
+    )
+
+    fresh_scored = score_turn(recent_boost, base_score=0.5, now=NOW)
+    stale_scored = score_turn(stale_boost, base_score=0.5, now=NOW)
+
+    assert fresh_scored.usefulness_factor > stale_scored.usefulness_factor
+
+
+def test_rank_turns_sorts_descending():
+    pairs = [
+        (_make_turn(usefulness_score=0.3, content="low"), 0.5),
+        (_make_turn(usefulness_score=1.0, content="high"), 0.5),
+        (_make_turn(usefulness_score=0.6, content="mid"), 0.5),
+    ]
+    ranked = rank_turns(pairs, now=NOW)
+    contents = [s.turn.content for s in ranked]
+    assert contents == ["high", "mid", "low"]
+
+
+def test_rank_turns_empty_list():
+    assert rank_turns([], now=NOW) == []

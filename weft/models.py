@@ -475,6 +475,13 @@ class EpisodeTurn(BaseModel):
     token_count: int = 0
     user_id: str | None = None
     created_at: datetime = Field(default_factory=_now)
+    # Boost-loop signals (v46). Mirror the belief-tier scoring fields so
+    # turn-tier recall can rerank by usefulness × recency the same way
+    # ``score_memory`` does. ``last_boosted_at`` is None until the first
+    # session-end boost lands.
+    usefulness_score: float = Field(default=0.7, ge=0.0, le=1.0)
+    usefulness_count: int = 0
+    last_boosted_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = self.model_dump(mode="json")
