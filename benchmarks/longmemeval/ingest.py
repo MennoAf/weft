@@ -165,6 +165,8 @@ async def _ingest_haystack_turns(
     embedder: EmbeddingProvider,
     instance: Instance,
     project_id: str,
+    *,
+    turn_session_map: dict[str, str] | None = None,
 ) -> None:
     """Write the haystack as one episode of dialogue turns (turn-tier).
 
@@ -184,6 +186,13 @@ async def _ingest_haystack_turns(
     turn tier preserves enough fidelity to claw back the multi-session
     and single-session-assistant losses observed under belief-tier
     extraction (see ``project_longmemeval_baseline.md``).
+
+    Args:
+        turn_session_map: Optional dict that, if provided, will be
+            populated in-place with ``{turn_id: session_id}`` for every
+            turn written. Used by the adapter's recall@10 instrumentation
+            to map retrieved turn IDs back to the source session ID
+            without persisting the lineage to the episode_turns table.
     """
     episode = await create_episode(
         pool,
@@ -195,8 +204,11 @@ async def _ingest_haystack_turns(
     )
 
     # Flatten the haystack into a single list of (role, content, occurred_at)
-    # so embedding calls can batch across session boundaries.
+    # so embedding calls can batch across session boundaries. Track
+    # session_id alongside each turn so we can populate the side-map
+    # after rows are assigned IDs in _bulk_append_turns.
     pending: list[tuple[TurnRole, str, datetime]] = []
+    pending_session_ids: list[str] = []
     for session in instance.sessions:
         occurred_at = _parse_session_date(session.date)
         for turn in session.turns:
@@ -208,6 +220,7 @@ async def _ingest_haystack_turns(
                 )
                 continue
             pending.append((role, turn.content, occurred_at))
+            pending_session_ids.append(session.session_id)
 
     embeddings: list[list[float] | None] = [None] * len(pending)
     for start in range(0, len(pending), _EMBED_BATCH_SIZE):
@@ -231,7 +244,10 @@ async def _ingest_haystack_turns(
                         start + i, instance.question_id, inner_exc,
                     )
 
-    await _bulk_append_turns(pool, episode.id, pending, embeddings)
+    turn_ids = await _bulk_append_turns(pool, episode.id, pending, embeddings)
+    if turn_session_map is not None:
+        for turn_id, session_id in zip(turn_ids, pending_session_ids):
+            turn_session_map[turn_id] = session_id
 
 
 async def _bulk_append_turns(
@@ -239,7 +255,7 @@ async def _bulk_append_turns(
     episode_id: str,
     pending: list[tuple[TurnRole, str, datetime]],
     embeddings: list[list[float] | None],
-) -> None:
+) -> list[str]:
     """Bulk-insert all turns of one episode in a single executemany call.
 
     The production ``append_turn`` path takes a per-row advisory lock and
@@ -254,16 +270,24 @@ async def _bulk_append_turns(
     so list[float] parameters are encoded into the vector type natively.
     Pass the list straight through; explicit ``::vector`` casts collide
     with the codec's binary encoding under ``executemany``.
+
+    Returns:
+        List of generated turn IDs in the same order as ``pending``. Used
+        by the adapter to build the in-memory ``{turn_id: session_id}``
+        side-map for recall@10 instrumentation.
     """
     if not pending:
-        return
+        return []
 
     rows: list[tuple] = []
+    turn_ids: list[str] = []
     for idx, ((role, content, occurred_at), embedding) in enumerate(zip(pending, embeddings)):
+        turn_id = f"et-{_short_id()}"
+        turn_ids.append(turn_id)
         token_count = estimate_tokens(content)
         rows.append(
             (
-                f"et-{_short_id()}",
+                turn_id,
                 episode_id,
                 idx,
                 role.value,
@@ -285,6 +309,7 @@ async def _bulk_append_turns(
             """,
             rows,
         )
+    return turn_ids
 
 
 async def load_haystack(
@@ -292,6 +317,8 @@ async def load_haystack(
     embedder: EmbeddingProvider,
     instance: Instance,
     mode: IngestMode,
+    *,
+    turn_session_map: dict[str, str] | None = None,
 ) -> int:
     """Load all sessions for one benchmark question into Weft.
 
@@ -303,6 +330,12 @@ async def load_haystack(
             (run Weft's LLM extraction pipeline), or "turns"
             (write each conversational turn as an ``episode_turns`` row
             for turn-tier hybrid recall — Branch A of the roadmap).
+        turn_session_map: Optional dict that, in turn-mode only, will be
+            populated in-place with ``{turn_id: session_id}`` for every
+            turn written. Ignored in raw/extracted modes (those paths
+            don't have stable per-row IDs that map back to the Reader's
+            view). The adapter passes a fresh dict per question to drive
+            recall@10 instrumentation without persisting lineage.
 
     Returns:
         Count of sessions ingested. Memory count may be higher (extracted
@@ -314,7 +347,10 @@ async def load_haystack(
     """
     project_id = project_id_for(instance.question_id)
     if mode == "turns":
-        await _ingest_haystack_turns(pool, embedder, instance, project_id)
+        await _ingest_haystack_turns(
+            pool, embedder, instance, project_id,
+            turn_session_map=turn_session_map,
+        )
         return len(instance.sessions)
 
     handler = {
