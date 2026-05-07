@@ -25,12 +25,16 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import asyncpg
 
 from weft.db.connection import get_db
 from weft.models import EpisodeTurn, EpisodeTurnCreate, TurnRole
 from weft.tokens import estimate_tokens
+
+if TYPE_CHECKING:
+    from weft.embeddings.base import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
 
@@ -275,17 +279,22 @@ async def recall_turns(
     embedding: list[float] | None = None,
     vector_weight: float = 0.5,
     keyword_weight: float = 0.5,
+    episode_ids: list[str] | None = None,
 ) -> list[EpisodeTurn]:
     """Hybrid (vector + BM25) recall over episode_turns.
 
     Filters apply BEFORE scoring: ``project_id`` joins through ``episodes``,
-    ``since`` / ``until`` constrain ``occurred_at``. Vector similarity uses
-    cosine distance against the inline embedding column; keyword scoring
-    uses Postgres FTS (``to_tsvector('english', content)``) — there is no
-    persisted tsvector column on episode_turns yet, so this path is
-    unindexed for now. Acceptable at Wick scale (one user's dialogue
-    trace); add a stored search_tsv column + GIN index when a single
-    installation crosses ~100k turns.
+    ``since`` / ``until`` constrain ``occurred_at``, ``episode_ids`` (when
+    supplied) restricts the candidate pool to turns whose ``episode_id``
+    is in the list — used by the hierarchical-descent path in
+    :func:`recall_turns_hierarchical` to fan out from a top-K episode set.
+    Vector similarity uses cosine distance against the inline embedding
+    column; keyword scoring uses Postgres FTS
+    (``to_tsvector('english', content)``) — there is no persisted tsvector
+    column on episode_turns yet, so this path is unindexed for now.
+    Acceptable at Wick scale (one user's dialogue trace); add a stored
+    search_tsv column + GIN index when a single installation crosses
+    ~100k turns.
 
     RRF fusion mirrors ``weft.store.search_hybrid`` so callers can reason
     about belief-tier and turn-tier results in the same rank space.
@@ -295,10 +304,20 @@ async def recall_turns(
             responsible for skipping vector search (we don't reach into
             the embedding provider from this layer to keep the store
             module dependency-free).
+        episode_ids: optional list of episode ids; when non-empty, both
+            halves filter ``t.episode_id = ANY($N)``. ``None`` (default)
+            preserves the legacy unscoped behavior. An empty list short-
+            circuits to ``[]`` since no candidate episode could match.
     """
+    if episode_ids is not None and len(episode_ids) == 0:
+        # Empty filter would produce ``ANY('{}'::text[])`` which matches
+        # nothing — shortcut so callers (the hierarchical path on an
+        # empty episode result) don't pay the round-trip.
+        return []
     candidate_limit = top_k * 3
     sql_filter, params = _build_turn_filters(
         project_id=project_id, since=since, until=until,
+        episode_ids=episode_ids,
     )
 
     db = get_db(pool)
@@ -348,6 +367,113 @@ async def recall_turns(
     return [s.turn for s in ranked]
 
 
+# --- Hierarchical descent: episodes → turns ---
+
+
+async def recall_turns_hierarchical(
+    pool: asyncpg.Pool,
+    query: str,
+    *,
+    top_k_episodes: int = 10,
+    top_k_turns: int = 20,
+    embedder: "EmbeddingProvider | None" = None,
+    embedding: list[float] | None = None,
+    project_id: str | None = None,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[EpisodeTurn]:
+    """Hierarchical retrieval: rank episodes first, then descend to turns.
+
+    Two-step:
+
+    1. :func:`weft.episodes.recall_episodes` ranks the top-K episodes that
+       match the query (cosine + ts_rank + RRF + 30d recency). This is the
+       coarse filter — the episode title/summary embedding tends to
+       summarize the conversation arc, which gives a lower-noise signal
+       than searching every turn flat.
+    2. :func:`recall_turns` runs scoped to ``episode_id IN (top_k_ids)``,
+       which means the vector + BM25 scoring in step 2 only considers the
+       relevant slice. The hybrid score for the surviving turns is what
+       the caller sees back; we don't blend the episode-level score in.
+
+    Fallback: when step 1 returns no episodes (empty embedding column,
+    too-aggressive temporal filter, etc.), fall through to a flat
+    ``recall_turns(query, ...)`` so the caller always gets a populated
+    list. This keeps the hierarchical path strictly additive — turning
+    the flag on can only ever match or beat the flat baseline on recall,
+    not regress it on empty pools.
+
+    Embedder degradation: when no ``embedding`` is provided and no
+    ``embedder`` is given, both halves run keyword-only via the
+    :func:`recall_episodes` and :func:`recall_turns` keyword fallbacks.
+
+    Scoping (matches the dispatch site convention from the belief tier):
+
+    * ``project_id`` flows into BOTH halves so cross-project context
+      cannot bleed in.
+    * ``since`` / ``until`` flows into BOTH halves; for episodes it
+      filters ``started_at``, for turns it filters ``occurred_at`` —
+      both are "when did this happen" axes so the temporal intent is
+      preserved through the descent.
+    * ``agent_id`` / ``user_id`` flows into the episode half only
+      (matching :func:`weft.episodes.recall_episodes`'s scoping shape;
+      the turn-tier RLS path uses the session GUC, not a query param).
+    """
+    # Late imports keep the module's import graph minimal at startup
+    # (recall_episodes pulls in weft.relevance and weft.store, which
+    # import models and embeddings indirectly).
+    from weft.episodes import recall_episodes
+
+    # Resolve query embedding once and share with both halves so we don't
+    # pay the embed cost twice. Mirrors recall_both's approach.
+    if embedding is None and embedder is not None:
+        try:
+            embedding = await embedder.embed(query)
+        except Exception as exc:
+            logger.warning(
+                "recall_turns_hierarchical embed failed, "
+                "halves will run keyword-only: %s", exc,
+            )
+            embedding = None
+
+    episodes = await recall_episodes(
+        pool, query,
+        project_id=project_id,
+        agent_id=agent_id,
+        user_id=user_id,
+        since=since,
+        until=until,
+        top_k_episodes=top_k_episodes,
+        embedding=embedding,
+    )
+
+    if not episodes:
+        # Fallback path: flat recall_turns so the caller gets something.
+        # Only project_id / since / until propagate — agent_id / user_id
+        # don't apply at the turn tier (see docstring).
+        return await recall_turns(
+            pool, query,
+            project_id=project_id,
+            since=since,
+            until=until,
+            top_k=top_k_turns,
+            embedding=embedding,
+        )
+
+    episode_id_set = [e.id for e in episodes]
+    return await recall_turns(
+        pool, query,
+        project_id=project_id,
+        since=since,
+        until=until,
+        top_k=top_k_turns,
+        embedding=embedding,
+        episode_ids=episode_id_set,
+    )
+
+
 async def list_recent_turns(
     pool: asyncpg.Pool,
     *,
@@ -389,6 +515,7 @@ def _build_turn_filters(
     project_id: str | None,
     since: datetime | None,
     until: datetime | None,
+    episode_ids: list[str] | None = None,
 ) -> tuple[str, list]:
     """Compose AND-joined WHERE fragments; param numbering is offset by the
     caller's leading positional args (embedding or query string)."""
@@ -408,6 +535,14 @@ def _build_turn_filters(
     if project_id is not None:
         fragments.append(f"AND e.project_id = ${base + len(params)}")
         params.append(project_id)
+    if episode_ids is not None and len(episode_ids) > 0:
+        # ANY($N::text[]) matches any element of the list. The cast is
+        # explicit so asyncpg picks the right encoder when the list is
+        # otherwise unbound (asyncpg has been known to misinfer when the
+        # list mixes None / non-strings; episode IDs are always non-null
+        # text so the cast is purely defensive).
+        fragments.append(f"AND t.episode_id = ANY(${base + len(params)}::text[])")
+        params.append(list(episode_ids))
     return (" ".join(fragments), params)
 
 

@@ -335,7 +335,25 @@ async def recall_both(
             include_agent_provenance=include_agent_provenance,
         )
 
+    # WEFT_HIERARCHICAL=1 swaps the flat recall_turns for the
+    # hierarchical episode→turn descent. Same env-var convention as
+    # the MCP `_weft_recall_turns` dispatch site so a single env-var
+    # toggle covers both turn-only and both-tier paths.
+    import os as _os
+    _hierarchical = _os.environ.get("WEFT_HIERARCHICAL") == "1"
+
     async def _turn_half() -> list[EpisodeTurn]:
+        if _hierarchical:
+            from weft.episode_turns import recall_turns_hierarchical
+            return await recall_turns_hierarchical(
+                pool, query,
+                project_id=project_id,
+                since=since,
+                until=until,
+                top_k_episodes=10,
+                top_k_turns=half_k,
+                embedding=embedding,
+            )
         return await recall_turns(
             pool, query,
             project_id=project_id,
