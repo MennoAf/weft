@@ -962,13 +962,20 @@ async def weft_revise(
     new_topic: list[str] | None = None,
     new_type: MemoryTypeLiteral | None = None,
     new_project_id: str | None = None,
+    new_pinned: bool | None = None,
     review_after: str | None = None,
 ) -> dict:
     """Update a memory's content, creating a new version that supersedes the old one.
 
+    Preserves the predecessor's pinned state and project_id by default — pass
+    new_pinned/new_project_id only when explicitly changing them.
+
     new_project_id: optional project_id for the new version. Use this to fix
     memories saved under the wrong project (e.g. a UUID instead of the
     directory name). Must be a human-readable name, not a UUID.
+
+    new_pinned: optional explicit pin override for the new version. Omit to
+    inherit the predecessor's pin state.
 
     review_after: optional lifecycle date for the new version. Accepts ISO
     timestamp or relative durations like '30d', '2w', '3m'."""
@@ -985,6 +992,18 @@ async def weft_revise(
                     "Use the directory/folder name instead."
                 ),
             )
+        # Build kwargs conditionally so omitted MCP args preserve predecessor
+        # state via revise_memory's _UNSET sentinels. Passing None explicitly
+        # would overwrite the inherited value with NULL.
+        revise_kwargs: dict = {}
+        if new_project_id is not None:
+            revise_kwargs["new_project_id"] = new_project_id
+        if new_pinned is not None:
+            revise_kwargs["new_pinned"] = new_pinned
+        if review_after is not None:
+            parsed = _parse_review_after(review_after)
+            if parsed is not None:
+                revise_kwargs["review_after"] = parsed
         app: AppContext = ctx.request_context.lifespan_context
         embedding = await app.embedding.embed(new_content)
         async with acquire(app.pool):
@@ -992,8 +1011,7 @@ async def weft_revise(
                 app.pool, memory_id, new_content,
                 embedding=embedding, new_confidence=new_confidence,
                 new_topic=_coerce_list(new_topic), new_type=resolved_type,
-                new_project_id=new_project_id,
-                review_after=_parse_review_after(review_after),
+                **revise_kwargs,
             )
             await app.cache.set_memory(new)
             await app.cache.invalidate_memory(old.id)

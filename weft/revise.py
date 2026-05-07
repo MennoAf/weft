@@ -37,6 +37,7 @@ async def revise_memory(
     new_topic: list[str] | None = None,
     new_type: MemoryType | None = None,
     new_project_id: str | None = _UNSET,
+    new_pinned: bool | None = _UNSET,
     review_after: datetime | None = _UNSET,
 ) -> tuple[Memory, Memory]:
     """Create a new version of a memory, superseding the old one.
@@ -54,6 +55,7 @@ async def revise_memory(
     resolved_topic = new_topic if new_topic is not None else old.topic
     resolved_confidence = new_confidence if new_confidence is not None else old.confidence
     resolved_project_id = old.project_id if new_project_id is _UNSET else new_project_id
+    resolved_pinned = old.pinned if new_pinned is _UNSET else bool(new_pinned)
     new_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(new_content)
@@ -70,7 +72,7 @@ async def revise_memory(
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $8, $8,
-                    0, $9, $10, $11::vector, 'active', false,
+                    0, $9, $10, $11::vector, 'active', $13,
                     $12, nullif(current_setting('app.user_id', true), '')
                 )
                 """,
@@ -86,6 +88,7 @@ async def revise_memory(
                 old.agent_id,
                 embedding,
                 resolved_review,
+                resolved_pinned,
             )
 
             # 2. Link: new supersedes old
@@ -122,7 +125,7 @@ async def revise_memory(
         project_id=resolved_project_id,
         agent_id=old.agent_id,
         status=MemoryStatus.active,
-        pinned=False,
+        pinned=resolved_pinned,
         review_after=resolved_review,
     )
 

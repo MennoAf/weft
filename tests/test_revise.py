@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from weft.cache import NullCache
+from weft.config import WeftConfig
 from weft.embeddings import get_provider
+from weft.mcp.server import AppContext
 from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType, RelationType
 from weft.revise import revise_memory
 from weft.store import get_memory, get_relationships, store_memory
+
+
+_FAKE_EMBEDDING = [0.1] * 768
+
+
+class _FakeEmbeddingProvider:
+    provider_name = "fake"
+    dimensions = 768
+
+    async def embed(self, text: str) -> list[float]:
+        return list(_FAKE_EMBEDDING)
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [list(_FAKE_EMBEDDING) for _ in texts]
+
+
+def _make_ctx(pool) -> MagicMock:
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context = AppContext(
+        pool=pool,
+        cache=NullCache(),
+        embedding=_FakeEmbeddingProvider(),
+        config=WeftConfig(),
+    )
+    ctx.list_roots = AsyncMock(return_value=[])
+    return ctx
 
 
 @pytest.fixture
@@ -177,3 +208,110 @@ async def test_revise_nonexistent(pool):
     """Revising a nonexistent memory should raise ValueError."""
     with pytest.raises(ValueError, match="not found"):
         await revise_memory(pool, "weft-nonexist", "new content")
+
+
+# ---------------------------------------------------------------------------
+# Pinned-state preservation (regression: weft-102dbe19, Shuttle 2026-05-07)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def pinned_original(pool):
+    """An original memory with pinned=True and a non-null project_id."""
+    provider = get_provider("fastembed")
+    create = MemoryCreate(
+        type=MemoryType.decision,
+        content="canonical decision worth pinning",
+        topic=["pinning", "regression"],
+        source=MemorySource.conversation,
+        confidence=0.95,
+        pinned=True,
+        project_id="warp",
+    )
+    emb = await provider.embed(create.content)
+    memory = await store_memory(pool, create, embedding=emb)
+    assert memory.pinned is True
+    assert memory.project_id == "warp"
+    return pool, memory, provider
+
+
+async def test_revise_preserves_pinned_when_omitted(pinned_original):
+    """Revising a pinned memory without new_pinned must inherit pinned=True."""
+    pool, old, provider = pinned_original
+    emb = await provider.embed("revised content")
+
+    new, _ = await revise_memory(pool, old.id, "revised content", embedding=emb)
+
+    assert new.pinned is True
+    db_new = await get_memory(pool, new.id)
+    assert db_new.pinned is True
+
+
+async def test_revise_can_explicitly_unpin(pinned_original):
+    """Revising with new_pinned=False unpins the new version."""
+    pool, old, provider = pinned_original
+    emb = await provider.embed("explicit unpin")
+
+    new, _ = await revise_memory(
+        pool, old.id, "explicit unpin",
+        embedding=emb, new_pinned=False,
+    )
+
+    assert new.pinned is False
+    db_new = await get_memory(pool, new.id)
+    assert db_new.pinned is False
+
+
+async def test_revise_can_explicitly_pin(original_memory):
+    """Revising an unpinned memory with new_pinned=True pins the new version."""
+    pool, old, provider = original_memory
+    assert old.pinned is False
+
+    emb = await provider.embed("explicit pin")
+    new, _ = await revise_memory(
+        pool, old.id, "explicit pin",
+        embedding=emb, new_pinned=True,
+    )
+
+    assert new.pinned is True
+    db_new = await get_memory(pool, new.id)
+    assert db_new.pinned is True
+
+
+# ---------------------------------------------------------------------------
+# MCP-layer regression: omitted args must not be coerced to None and overwrite
+# the predecessor's pinned/project_id state. The original bug (Shuttle's repro
+# in weft-102dbe19) was that tools.py passed new_project_id=None unconditionally,
+# defeating revise_memory's _UNSET sentinel.
+# ---------------------------------------------------------------------------
+
+
+async def test_mcp_revise_preserves_pinned_and_project_id(pinned_original, monkeypatch):
+    """End-to-end: weft_revise without new_pinned/new_project_id inherits both."""
+    from weft.mcp.tools import weft_revise
+
+    pool, old, _ = pinned_original
+    ctx = _make_ctx(pool)
+
+    result = await weft_revise(ctx, memory_id=old.id, new_content="revised")
+
+    assert "error" not in result, f"unexpected error: {result}"
+    new = result["new"]
+    assert new["pinned"] is True
+    assert new["project_id"] == "warp"
+
+
+async def test_mcp_revise_explicit_unpin_overrides(pinned_original):
+    """weft_revise with new_pinned=False unpins."""
+    from weft.mcp.tools import weft_revise
+
+    pool, old, _ = pinned_original
+    ctx = _make_ctx(pool)
+
+    result = await weft_revise(
+        ctx, memory_id=old.id, new_content="unpin me", new_pinned=False,
+    )
+
+    assert "error" not in result
+    assert result["new"]["pinned"] is False
+    assert result["new"]["project_id"] == "warp"  # still inherited
