@@ -3,29 +3,84 @@
 Provides reembed_table() for per-table batch re-embedding and
 auto_reembed() as the top-level orchestrator called from
 ensure_vector_dimensions after a dimension migration.
+
+Also hosts the per-tier embedder lookup helper
+(``resolve_episode_embedder``) so future tiers can run on a different
+provider than memory embeddings without touching the migration files.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import asyncpg
 
 if TYPE_CHECKING:
+    from weft.config import WeftConfig
     from weft.embeddings.base import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
 
-# Table → text column used to generate embeddings.
+# Table → text column used to generate embeddings. Single-column case;
+# the SQL projection is just the bare column name.
 TABLE_TEXT_COLUMNS: dict[str, str] = {
     "memories": "content",
     "behaviors": "action",
     "entities": "description",
+    # Episodes use a composite expression — see TABLE_TEXT_EXPRESSIONS.
+    # The mapping value here is the column we filter on for "has text"
+    # (title is NOT NULL on episodes, so this filter is effectively a no-op,
+    # but keeping the entry preserves the symmetry with auto_reembed's
+    # default-to-all-tables behaviour).
+    "episodes": "title",
+}
+
+# Optional per-table override of the SQL expression that produces the
+# text input fed to the embedder. When absent, the column from
+# TABLE_TEXT_COLUMNS is used directly. When present, this expression
+# replaces the bare column name in the SELECT clause and is exposed
+# under the alias ``embed_text`` so the row dict has a stable key.
+TABLE_TEXT_EXPRESSIONS: dict[str, str] = {
+    # P2.1: episodes embed title + summary. summary is nullable; coalesce
+    # to empty string so a missing summary doesn't null out the whole
+    # expression.
+    "episodes": "title || ' ' || COALESCE(summary, '')",
 }
 
 # Known safe table names — reject anything else.
 _ALLOWED_TABLES = frozenset(TABLE_TEXT_COLUMNS.keys())
+
+
+# ---------------------------------------------------------------------------
+# Per-tier embedder selection
+# ---------------------------------------------------------------------------
+
+
+def resolve_episode_embedder(config: "WeftConfig") -> "EmbeddingProvider":
+    """Resolve the embedding provider used for the episode tier.
+
+    Reads the ``WEFT_EPISODE_EMBEDDER`` env var. When set, instantiates
+    the named provider with the same model/dimensions as the memory
+    embedder (callers can extend this with WEFT_EPISODE_EMBEDDER_MODEL
+    if a future tier needs full provider+model independence). When unset,
+    returns a provider built from ``config.embedding`` — the same one
+    memory embeddings use, so a single-key local install just works.
+
+    Factored out here (not inlined in the migration) so additional tiers
+    (turns, entities, …) can grow analogous helpers without each one
+    re-implementing the env-var-with-fallback pattern.
+    """
+    from weft.embeddings import get_provider
+
+    override = os.environ.get("WEFT_EPISODE_EMBEDDER")
+    provider_name = override or config.embedding.provider
+    return get_provider(
+        provider_name,
+        model_name=config.embedding.model,
+        dimensions=config.embedding.dimensions,
+    )
 
 
 async def reembed_table(
@@ -49,13 +104,18 @@ async def reembed_table(
         )
 
     text_col = TABLE_TEXT_COLUMNS[table]
+    # Composite expressions (e.g. episodes "title || ' ' || COALESCE(summary, '')")
+    # are aliased to ``embed_text`` so the row dict key is stable across
+    # the simple-column and expression cases.
+    text_expr = TABLE_TEXT_EXPRESSIONS.get(table, text_col)
+    text_key = "embed_text" if table in TABLE_TEXT_EXPRESSIONS else text_col
 
     # Fetch rows needing embeddings
     where = f"WHERE {text_col} IS NOT NULL"
     if not force:
         where = f"WHERE embedding IS NULL AND {text_col} IS NOT NULL"
     rows = await pool.fetch(
-        f"SELECT id, {text_col} FROM {table} {where}"  # noqa: S608
+        f"SELECT id, {text_expr} AS {text_key} FROM {table} {where}"  # noqa: S608
     )
 
     if not rows:
@@ -68,7 +128,7 @@ async def reembed_table(
     embedded = 0
     for i in range(0, total, batch_size):
         batch = rows[i : i + batch_size]
-        texts = [r[text_col] for r in batch]
+        texts = [r[text_key] for r in batch]
         ids = [r["id"] for r in batch]
 
         try:
