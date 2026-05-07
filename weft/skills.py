@@ -315,6 +315,94 @@ async def project_status(
     }
 
 
+_HANDOFF_SUMMARY_RE = re.compile(
+    # `[ \t]*` (not `\s*`) so an empty Summary block doesn't slurp newlines
+    # and bleed into the next **Section:** below it. `(\S.*?)` requires the
+    # capture to start with non-whitespace, so an all-whitespace body fails
+    # to match instead of returning the next section's body.
+    r"\*\*Summary:\*\*[ \t]*(\S.*?)(?=\n\s*\*\*[A-Z][\w ]*:\*\*|\Z)",
+    re.DOTALL,
+)
+
+
+def _extract_handoff_summary(content: str | None, max_chars: int = 200) -> str | None:
+    # weft_handoff writes "## Session Handoff\n\n**Summary:** <text>\n\n**Next:** ..."
+    # — pull the Summary block, stop at the next bold-section header or EOS.
+    if not content:
+        return None
+    m = _HANDOFF_SUMMARY_RE.search(content)
+    if not m:
+        return None
+    summary = m.group(1).strip()
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 1].rstrip() + "…"
+    return summary or None
+
+
+async def list_projects_with_handoffs(pool: asyncpg.Pool) -> list[dict]:
+    """List known projects with last-handoff metadata for cross-project lookup.
+
+    Returns one entry per project_id with at least one active memory:
+
+        {
+          "project_id": str,
+          "last_handoff_at": ISO8601 str | None,
+          "last_handoff_summary": str | None,   # truncated to 200 chars
+          "last_activity_at": ISO8601 str | None,
+          "memory_count": int,
+        }
+
+    Sorted by last_handoff_at DESC NULLS LAST, then project_id ASC. Designed
+    so an agent in one project can discover the canonical project_id strings
+    for other projects and form a `weft_prime(project_id=...)` call to read
+    that project's most recent handoff.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+            project_id,
+            MAX(created_at) FILTER (WHERE type = 'handoff' AND status = 'active')
+                AS last_handoff_at,
+            MAX(created_at) FILTER (WHERE status = 'active')
+                AS last_activity_at,
+            COUNT(*) FILTER (WHERE status = 'active') AS memory_count
+        FROM memories
+        WHERE project_id IS NOT NULL
+        GROUP BY project_id
+        HAVING COUNT(*) FILTER (WHERE status = 'active') > 0
+        ORDER BY last_handoff_at DESC NULLS LAST, project_id ASC
+        """,
+    )
+
+    summary_rows = await pool.fetch(
+        """
+        SELECT DISTINCT ON (project_id) project_id, content
+        FROM memories
+        WHERE type = 'handoff' AND status = 'active' AND project_id IS NOT NULL
+        ORDER BY project_id, created_at DESC
+        """,
+    )
+    summary_by_project = {
+        r["project_id"]: _extract_handoff_summary(r["content"])
+        for r in summary_rows
+    }
+
+    return [
+        {
+            "project_id": r["project_id"],
+            "last_handoff_at": (
+                r["last_handoff_at"].isoformat() if r["last_handoff_at"] else None
+            ),
+            "last_handoff_summary": summary_by_project.get(r["project_id"]),
+            "last_activity_at": (
+                r["last_activity_at"].isoformat() if r["last_activity_at"] else None
+            ),
+            "memory_count": int(r["memory_count"]),
+        }
+        for r in rows
+    ]
+
+
 async def meal_plan(
     pool: asyncpg.Pool,
     *,

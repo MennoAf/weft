@@ -1477,6 +1477,31 @@ async def weft_project_status(
 
 
 @mcp.tool()
+async def weft_projects(ctx: Context) -> dict:
+    """Cross-project handoff index — discover what projects exist.
+
+    Returns one entry per project_id that has at least one active memory,
+    sorted so projects with the freshest handoff come first (projects with
+    no handoff sort to the end). Each entry has last_handoff_at,
+    last_handoff_summary (the **Summary:** line, truncated), last_activity_at,
+    and memory_count.
+
+    Use this when a session in project A needs to find work in project B —
+    call weft_projects() to discover the canonical project_id, then
+    weft_prime(project_id="<id>") to load that project's handoff and rules.
+    """
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.skills import list_projects_with_handoffs
+
+        async with acquire(app.pool):
+            projects = await list_projects_with_handoffs(app.pool)
+        return {"count": len(projects), "projects": projects}
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_projects", e)
+
+
+@mcp.tool()
 async def weft_meal_plan(
     ctx: Context,
     lissy_approved: bool | None = None,
