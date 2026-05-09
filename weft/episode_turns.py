@@ -360,6 +360,12 @@ async def recall_turns(
         vector_weight=vector_weight,
         keyword_weight=keyword_weight,
     )
+    # WEFT_TURN_RERANK_DISABLE=1 short-circuits back to RRF order.
+    # Used by the P1.A5 warm-boost harness to A/B rerank-on vs rerank-off
+    # on the same warmed dataset without needing a code revert.
+    import os as _os
+    if _os.environ.get("WEFT_TURN_RERANK_DISABLE") == "1":
+        return [t for t, _ in fused]
     # Late import: relevance imports models, which we already loaded.
     # Done at call time to keep the store layer's import graph minimal.
     from weft.relevance import rank_turns

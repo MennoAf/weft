@@ -236,6 +236,63 @@ async def test_question_type_filter_with_no_matches_runs_zero(
 
 
 @pytest.mark.asyncio
+async def test_warm_boost_diverges_turn_usefulness_scores(
+    pool, tmp_path: Path, tiny_dataset_path: Path
+) -> None:
+    """P1.A5: --warm-boost-rounds N must move at least one turn's
+    ``usefulness_score`` off the v46 ingest default of 0.7.
+
+    Without warmup, every turn would sit at 0.7 forever and the P1.A3
+    rerank would have no signal to work with (the whole reason the
+    cold-DB harness can't measure Track A's compounding contribution).
+    """
+    output = tmp_path / "warm.jsonl"
+    embedder = get_provider("fastembed", dimensions=768)
+    reader = _stub_reader("stub")
+
+    await run_benchmark(
+        dataset_path=tiny_dataset_path,
+        output_path=output,
+        mode="turns",
+        tier="turns",
+        top_k=5,
+        cleanup=False,
+        warm_boost_rounds=2,
+        warm_boost_queries_per_round=4,
+        pool=pool,
+        embedder=embedder,
+        reader=reader,
+    )
+
+    boosted_count = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM episode_turns t
+         JOIN episodes e ON e.id = t.episode_id
+         WHERE e.project_id LIKE 'lme_%'
+           AND t.last_boosted_at IS NOT NULL
+        """
+    )
+    assert boosted_count > 0, (
+        "warm-boost should have written last_boosted_at on at least "
+        "one turn"
+    )
+
+    # Spot-check that some turn moved off the 0.7 default.
+    diverged = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM episode_turns t
+         JOIN episodes e ON e.id = t.episode_id
+         WHERE e.project_id LIKE 'lme_%'
+           AND t.usefulness_score > 0.7
+        """
+    )
+    assert diverged > 0, (
+        "at least one turn's usefulness_score should be above the "
+        "0.7 ingest default after warmup"
+    )
+
+
+@pytest.mark.asyncio
 async def test_recall_finds_evidence_session_in_raw_mode(
     pool, tmp_path: Path, tiny_dataset_path: Path
 ) -> None:
