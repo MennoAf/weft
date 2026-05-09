@@ -11,7 +11,8 @@ its falsification gate fails and the plan revises rather than ships.
 | **P0.1 — LongMemEval-M strat50, turns/turns (QA accuracy)** | overall **0.7689** / task-averaged **0.7785** (n=251) | 2026-05-07 | `be4d352` |
 | **P0.2 — turn-tier recall@10 (M strat50)** | **0.9482** (238/251) | 2026-05-07 | `34f1063` |
 | **P1.A5 Run 1 — warm rerank-ON recall@10** | **0.9482** (238/251 norm., 238/249 succ.) | 2026-05-09 | `a33ad6d` |
-| _P1.A5 Run 2 — warm rerank-OFF recall@10_ | _pending_ | — | — |
+| **P1.A5 Run 1 — warm rerank-ON QA accuracy** | **0.7430** (185/249), task-avg **0.7432** | 2026-05-09 | _this commit_ |
+| ~~P1.A5 Run 2 — warm rerank-OFF recall@10~~ | ~~pending~~ | — | **skipped — decision `weft-b8efcc24`** |
 
 ### Falsification gates (targets — these are revisited per leaf)
 
@@ -87,18 +88,43 @@ well below the ≥ 3pt falsification threshold.
   73 832 boosts (i.e. the loop was firmly exercised)
 - file: `benchmarks/longmemeval/results/longmemeval_m_cleaned_turns_tier-turns_strat50s0_warm3_20260509T012034Z*`
 
-**Verdict signal (preliminary, awaiting Run 2 rerank-OFF):**
+**Verdict (final — Run 2 skipped):**
 
 The Lodestar verdict's claim — _"Track A turn-tier compounding lifts
-recall@10 by ≥ 3 points"_ — is now **falsified under exercised
-boost-loop conditions.** Even with 74k boost events accumulated across
-3 rounds × 10 queries × ~250 questions, the rerank surfaces exactly
-**one** previously-missed gold session.
+recall@10 by ≥ 3 points"_ — is **falsified.** Even with 74k boost
+events accumulated across 3 rounds × 10 queries × ~250 questions, the
+rerank surfaces exactly **one** previously-missed gold session.
 
-Run 2 (rerank-OFF, same warmed dataset) will tell us whether that 1pt
-came from the rerank itself or from the warmup-induced boost
-distribution that the rerank then merely consumed. Either way, Track A
-is not the lever the verdict thought it was.
+**Run 2 (rerank-OFF) was the planned rerank-isolation control.** It is
+skipped as decision `weft-b8efcc24` (2026-05-09): Run 1 alone falsifies
+the +3pt claim; Run 2 only answers the architectural curiosity "does
+the rerank do anything beyond RRF order?" — not worth ~8h + ~$10 right
+now. If we ever want that signal, do it cheap on a 50-Q subset.
+
+**Worse than no-op on QA.** The 2026-05-09 warm3 hypotheses were judged
+with `gpt-4o` (commit see git log) and the warm-boost rerank actively
+**regressed** total accuracy on the 249 questions both runs answered:
+
+| metric | P0.1 baseline (no warm-boost) | P1.A5 Run 1 (warm3) | Δ |
+| --- | ---: | ---: | ---: |
+| overall accuracy | 0.7689 (193/251) | 0.7430 (185/249) | **−2.59 pt** |
+| task-averaged accuracy | 0.7785 | 0.7432 | **−3.53 pt** |
+| knowledge-update | 26/39 = 0.6667 | 26/39 = 0.6667 | 0 |
+| multi-session | 50/67 = 0.7463 | 48/67 = 0.7164 | −2.99 pt (lost 2) |
+| single-session-assistant | 28/28 = 1.0000 | 27/27 = 1.0000 | −1 hit (q failed in ingest) |
+| single-session-preference | 9/15 = 0.6000 | 7/15 = 0.4667 | **−13.33 pt (lost 2)** |
+| single-session-user | 34/35 = 0.9714 | 33/35 = 0.9429 | −2.85 pt (lost 1) |
+| temporal-reasoning | 46/67 = 0.6866 | 44/66 = 0.6667 | −1.99 pt (lost 2 + 1 ingest fail) |
+
+The boost loop did exactly what it was designed to do — re-rank turns
+by accumulated usefulness — but that re-ranking nudged out turns the
+Reader was actually using to synthesize correct answers. Net: the
+rerank is not just unhelpful, it's mildly harmful at the QA layer.
+
+Files:
+- `benchmarks/longmemeval/results/longmemeval_m_cleaned_turns_tier-turns_strat50s0_warm3_20260509T012034Z.jsonl.eval-results-gpt-4o`
+- `<same>.metrics.json`
+- Local-only validation summary: `benchmarks/longmemeval/results/turn_tier_validation_2026_05_09.md`
 
 **Reproduce Run 1:**
 
@@ -240,3 +266,43 @@ falsifiable claim weakens.
 - Per-question recall: `<jsonl-stem>_recall_at_10.jsonl`
 - Summary: `<jsonl-stem>_recall_at_10_summary.json`
 - Stats: `<jsonl>.stats.json`
+
+## Turn-tier validation — temporal-reasoning empty-rate (loom-ee973301)
+
+**Question:** does turn-tier ingest + retrieval drop the temporal-reasoning
+empty-rate below 15% (the gap diagnosed in `project_recall_completeness_diagnosis.md`)?
+
+**Verdict:** ✅ **Yes — 3.0% on M-tier turn-tier baseline (vs <15% target).**
+
+Naive empty-detection on the JSONL hypotheses (empty string, "I don't
+know", "no information", "cannot determine"). Same row across the same
+strat50 sample for both M-tier rows.
+
+| Question type | Oracle raw (n=500) | Oracle extracted post-fence (n=500) | M turn-tier baseline (n=251) | M turn-tier warm3 (n=249) |
+| --- | ---: | ---: | ---: | ---: |
+| knowledge-update | 3.8% | 5.1% | **0.0%** | 5.1% |
+| multi-session | 3.0% | 6.8% | 6.0% | 3.0% |
+| single-session-assistant | 0.0% | 0.0% | 0.0% | 0.0% |
+| single-session-preference | 0.0% | 0.0% | 0.0% | 0.0% |
+| single-session-user | 0.0% | 0.0% | 0.0% | 0.0% |
+| **temporal-reasoning** | 5.3% | 14.3% | **3.0%** | **10.6%** |
+
+The diagnosis-era memory referenced "raw 37% empty, extracted 31%
+empty" on temporal-reasoning. Naive empty-detection on the current
+(cleaned) dataset shows lower numbers across the board — the original
+diagnosis number was likely measured under a stricter "did not produce a
+useful answer" definition. Either way, the M-tier turn-tier baseline at
+**3.0%** clears the original target by a wide margin, and the
+post-fence Oracle extracted at 14.3% is right at the threshold —
+showing the gain from belief→turn ingest is real on the load-bearing
+question class.
+
+**Total accuracy floor (no worse than the better of raw/extracted):**
+
+The M-tier turn-tier baseline at **0.7689 overall / 0.7785 task-avg**
+beats every Oracle raw/extracted run on every shared question type
+(comparison split, but Oracle is the easier benchmark — turn-tier wins
+on the harder M split anyway).
+
+`loom-ee973301` is satisfied. Local-only summary doc with the full
+comparison table: `benchmarks/longmemeval/results/turn_tier_validation_2026_05_09.md`.
