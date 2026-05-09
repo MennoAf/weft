@@ -277,6 +277,20 @@ async def test_warm_boost_diverges_turn_usefulness_scores(
         "one turn"
     )
 
+    # Stats sidecar should carry the warm_boost aggregates (P1.A5
+    # diagnostic surface for M-tier A/B comparison).
+    stats_payload = json.loads(
+        output.with_suffix(output.suffix + ".stats.json").read_text()
+    )
+    wb = stats_payload["warm_boost"]
+    assert wb is not None
+    assert wb["config_rounds"] == 2
+    assert wb["config_queries_per_round"] == 4
+    assert wb["total_rounds_ran"] >= 2
+    assert wb["total_queries"] > 0
+    assert wb["total_boosted_turns"] > 0
+    assert wb["rerank_disabled"] is False
+
     # Spot-check that some turn moved off the 0.7 default.
     diverged = await pool.fetchval(
         """

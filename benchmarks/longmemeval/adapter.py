@@ -87,6 +87,11 @@ class RunStats:
     recall_n_questions: int = 0
     recall_jsonl_path: str | None = None
     recall_summary_path: str | None = None
+    # Warm-boost aggregates (P1.A5). Zero when --warm-boost-rounds=0.
+    warm_boost_rounds: int = 0
+    warm_boost_queries: int = 0
+    warm_boost_accessed_turns: int = 0
+    warm_boost_boosted_turns: int = 0
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started_at if self.started_at else 0.0
@@ -437,6 +442,12 @@ async def run_benchmark(
                     stats.input_tokens += telemetry["input_tokens"]
                     stats.cached_tokens += telemetry["cached_tokens"]
                     stats.output_tokens += telemetry["output_tokens"]
+                    wb = telemetry.get("warm_boost")
+                    if wb is not None:
+                        stats.warm_boost_rounds += int(wb.get("rounds", 0))
+                        stats.warm_boost_queries += int(wb.get("queries", 0))
+                        stats.warm_boost_accessed_turns += int(wb.get("accessed_turns", 0))
+                        stats.warm_boost_boosted_turns += int(wb.get("boosted_turns", 0))
 
                     out.write(
                         json.dumps(
@@ -520,6 +531,17 @@ async def run_benchmark(
                 "top_k": top_k,
                 "dataset": str(dataset_path),
                 "question_types": sorted(question_types) if question_types else None,
+                "warm_boost": {
+                    "config_rounds": warm_boost_rounds,
+                    "config_queries_per_round": warm_boost_queries_per_round,
+                    "rerank_disabled": os.environ.get(
+                        "WEFT_TURN_RERANK_DISABLE"
+                    ) == "1",
+                    "total_rounds_ran": stats.warm_boost_rounds,
+                    "total_queries": stats.warm_boost_queries,
+                    "total_accessed_turns": stats.warm_boost_accessed_turns,
+                    "total_boosted_turns": stats.warm_boost_boosted_turns,
+                } if warm_boost_rounds > 0 else None,
             },
             indent=2,
         ),
