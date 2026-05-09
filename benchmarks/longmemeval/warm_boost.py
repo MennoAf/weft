@@ -113,20 +113,33 @@ async def warm_boost_turns(
                 logger.warning("warm_boost embed failed: %s", e)
                 continue
 
-            recalled = await recall_turns(
-                pool, query,
-                project_id=project_id,
-                top_k=top_k,
-                embedding=embedding,
-            )
+            try:
+                recalled = await recall_turns(
+                    pool, query,
+                    project_id=project_id,
+                    top_k=top_k,
+                    embedding=embedding,
+                )
+            except Exception as e:
+                # PG FTS can throw on pathological inputs (e.g. "tsquery
+                # stack too small" when a content-prefix sample parses
+                # into a deeply-nested tsquery). One bad warmup query
+                # must not take down the whole benchmark question — the
+                # rest of the round can still produce signal.
+                logger.warning("warm_boost recall_turns failed: %s", e)
+                continue
             total_queries += 1
             if recalled:
-                await log_turn_access(
-                    pool,
-                    [t.id for t in recalled],
-                    tool_name="warm_boost",
-                    session_id=session_id,
-                )
+                try:
+                    await log_turn_access(
+                        pool,
+                        [t.id for t in recalled],
+                        tool_name="warm_boost",
+                        session_id=session_id,
+                    )
+                except Exception as e:
+                    logger.warning("warm_boost log_turn_access failed: %s", e)
+                    continue
                 total_accessed += len(recalled)
 
         boost_result = await boost_session_turns(pool, session_id=session_id)
