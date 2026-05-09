@@ -325,6 +325,77 @@ async def test_recall_turns_reranks_by_usefulness(pool):
     assert results[1].id == low_turn.id
 
 
+async def test_recall_turns_disable_rerank_flag(pool, monkeypatch):
+    """``WEFT_TURN_RERANK_DISABLE=1`` short-circuits the P1.A3 rerank.
+
+    Setup gives turn A higher BM25 (denser keyword match) but lower
+    usefulness, and turn B lower BM25 but higher usefulness. Under the
+    default rerank, usefulness flips the order and B wins. With the flag
+    on, the RRF order is preserved and A wins. Used by the P1.A5
+    warm-boost harness to A/B without a code revert.
+    """
+    ep = await create_episode(
+        pool, EpisodeCreate(title="rerank-flag", project_id="proj-rerank-flag"),
+    )
+    same_when = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+
+    # turn_a: dense keyword content (higher ts_rank), low usefulness.
+    turn_a = await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content="flagprobe flagprobe flagprobe sentinel",
+            occurred_at=same_when,
+        ),
+    )
+    # turn_b: sparser match (lower ts_rank), high usefulness.
+    turn_b = await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content="flagprobe sentinel content",
+            occurred_at=same_when,
+        ),
+    )
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE episode_turns SET usefulness_score = $1 WHERE id = $2",
+            0.2, turn_a.id,
+        )
+        await conn.execute(
+            "UPDATE episode_turns SET usefulness_score = $1, last_boosted_at = now() "
+            "WHERE id = $2",
+            1.0, turn_b.id,
+        )
+
+    # Default (rerank ON): usefulness wins, turn_b first.
+    monkeypatch.delenv("WEFT_TURN_RERANK_DISABLE", raising=False)
+    results_on = await recall_turns(
+        pool, "flagprobe",
+        project_id="proj-rerank-flag",
+        top_k=5,
+    )
+    assert len(results_on) == 2
+    assert results_on[0].id == turn_b.id, (
+        "with rerank ON, high-useful turn should win"
+    )
+
+    # Flag ON: rerank skipped, RRF order preserved, turn_a first.
+    monkeypatch.setenv("WEFT_TURN_RERANK_DISABLE", "1")
+    results_off = await recall_turns(
+        pool, "flagprobe",
+        project_id="proj-rerank-flag",
+        top_k=5,
+    )
+    assert len(results_off) == 2
+    assert results_off[0].id == turn_a.id, (
+        "with rerank DISABLED, RRF/BM25 order should win"
+    )
+
+
 async def test_recall_turns_populates_usefulness_columns(pool, episode_with_turns):
     """``_row_to_turn`` should hydrate the v46 boost-loop columns onto the
     EpisodeTurn model so callers can introspect them (e.g., for

@@ -156,6 +156,8 @@ async def _run_one(
     tier: Tier = "belief",
     capture_recall: bool = False,
     recall_k: int = 10,
+    warm_boost_rounds: int = 0,
+    warm_boost_queries_per_round: int = 10,
 ) -> tuple[str, dict]:
     """Run the full pipeline for one question.
 
@@ -189,6 +191,20 @@ async def _run_one(
         pool, embedder, instance, mode,
         turn_session_map=turn_session_map,
     )
+
+    # 2.5. Warm-boost (P1.A5) — pre-warm the boost loop so usefulness
+    # scores diverge before the actual recall query runs. No-op when
+    # warm_boost_rounds=0, which is the cold-DB baseline path.
+    warm_boost_telemetry: dict | None = None
+    if warm_boost_rounds > 0 and tier == "turns" and mode == "turns":
+        from benchmarks.longmemeval.warm_boost import warm_boost_turns
+        warm_boost_telemetry = await warm_boost_turns(
+            pool, embedder,
+            project_id=project_id,
+            rounds=warm_boost_rounds,
+            queries_per_round=warm_boost_queries_per_round,
+            rng_seed=hash(instance.question_id) & 0xFFFFFFFF,
+        )
 
     # 3. Recall — question-type-aware policy lives in router.policy_for().
     # The CLI top_k acts as a floor: if a caller bumps top_k above the
@@ -224,6 +240,8 @@ async def _run_one(
         "output_tokens": response.output_tokens,
         "model": response.model,
     }
+    if warm_boost_telemetry is not None:
+        telemetry["warm_boost"] = warm_boost_telemetry
 
     # Recall@k instrumentation — only meaningful when we have a side-map.
     # Compare the source sessions for the top-k retrieved turns against
@@ -314,6 +332,8 @@ async def run_benchmark(
     stratified_frac: float | None = None,
     sample_seed: int = 0,
     tier: Tier = "belief",
+    warm_boost_rounds: int = 0,
+    warm_boost_queries_per_round: int = 10,
     pool: asyncpg.Pool | None = None,
     embedder: EmbeddingProvider | None = None,
     reader: Reader | None = None,
@@ -402,6 +422,8 @@ async def run_benchmark(
                         mode=mode, top_k=top_k, tier=tier,
                         capture_recall=capture_recall,
                         recall_k=recall_k,
+                        warm_boost_rounds=warm_boost_rounds,
+                        warm_boost_queries_per_round=warm_boost_queries_per_round,
                     )
                 except Exception as exc:
                     logger.exception(
@@ -598,6 +620,28 @@ async def run_benchmark(
     help="Do not delete a question's memories after answering. Default cleans up.",
 )
 @click.option(
+    "--warm-boost-rounds",
+    type=int,
+    default=0,
+    show_default=True,
+    help=(
+        "P1.A5: pre-warm the turn-tier boost loop with N rounds of recall + "
+        "access-log + boost before each question's actual recall query. 0 "
+        "(default) is the cold-DB baseline path. Only active in "
+        "--mode turns --tier turns."
+    ),
+)
+@click.option(
+    "--warm-boost-queries-per-round",
+    type=int,
+    default=10,
+    show_default=True,
+    help=(
+        "Queries per warmup round. Each query is a randomly-sampled turn's "
+        "content prefix — recall-driven, not gold-keyed."
+    ),
+)
+@click.option(
     "--log-level",
     default="INFO",
     show_default=True,
@@ -614,6 +658,8 @@ def cli(
     stratified_frac: float | None,
     sample_seed: int,
     no_cleanup: bool,
+    warm_boost_rounds: int,
+    warm_boost_queries_per_round: int,
     log_level: str,
 ) -> None:
     """Run Weft against the LongMemEval benchmark, write hypotheses JSONL."""
@@ -647,7 +693,13 @@ def cli(
     # Suffix the tier into the filename when it's not the default belief
     # path so A/B comparison runs don't fight over filenames.
     tier_slug = "" if tier == "belief" else f"_tier-{tier}"
-    output_path = output_dir / f"{split_name}_{mode}{tier_slug}{slug}_{timestamp}.jsonl"
+    # Suffix warm-boost config so A/B runs (rerank-on/off, varying rounds)
+    # don't collide. Also captures whether WEFT_TURN_RERANK_DISABLE was set
+    # for run-time disambiguation.
+    warm_slug = f"_warm{warm_boost_rounds}" if warm_boost_rounds > 0 else ""
+    if os.environ.get("WEFT_TURN_RERANK_DISABLE") == "1":
+        warm_slug = f"{warm_slug}_rerankoff"
+    output_path = output_dir / f"{split_name}_{mode}{tier_slug}{slug}{warm_slug}_{timestamp}.jsonl"
 
     stats = asyncio.run(
         run_benchmark(
@@ -661,6 +713,8 @@ def cli(
             stratified_frac=stratified_frac,
             sample_seed=sample_seed,
             tier=tier,
+            warm_boost_rounds=warm_boost_rounds,
+            warm_boost_queries_per_round=warm_boost_queries_per_round,
         )
     )
 
