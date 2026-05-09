@@ -8,16 +8,22 @@ its falsification gate fails and the plan revises rather than ships.
 
 | Number | Value | Captured | Commit |
 | --- | --- | --- | --- |
-| **P0.1 — LongMemEval-M strat50, turns/turns** | overall **0.7689** / task-averaged **0.7785** (n=251) | 2026-05-07 | `be4d352` |
-| P0.2 — turn-tier recall@10 | _pending — `loom-22bf6b24`_ | — | — |
+| **P0.1 — LongMemEval-M strat50, turns/turns (QA accuracy)** | overall **0.7689** / task-averaged **0.7785** (n=251) | 2026-05-07 | `be4d352` |
+| **P0.2 — turn-tier recall@10 (M strat50)** | **0.9482** (238/251) | 2026-05-07 | `34f1063` |
 
 ### Falsification gates (targets — these are revisited per leaf)
 
-| Gate | Target | Source |
-| --- | --- | --- |
-| **P1.A4** turn-tier recall@10 lift vs P0.2 | ≥ 3 points | EPIC `loom-6e86575c` |
-| **P1.B3** Tier 1.5 RRF Oracle lift | ≥ 1 point, stable | EPIC `loom-6e86575c` |
-| **Phase 2** M-tier under `WEFT_HIERARCHICAL=on` | overall > 0.75 | EPIC `loom-531d1c44` |
+| Gate | Target | Absolute | Source |
+| --- | --- | --- | --- |
+| **P1.A4** turn-tier recall@10 lift vs P0.2 | ≥ 3 points | **≥ 0.978** | EPIC `loom-6e86575c` |
+| **P1.B3** Tier 1.5 RRF Oracle lift | ≥ 1 point, stable | (S baseline + 1pt) | EPIC `loom-6e86575c` |
+| **Phase 2** M-tier under `WEFT_HIERARCHICAL=on` | overall > 0.75 | **> 0.75 QA** | EPIC `loom-531d1c44` |
+
+> Phase 2 gate sits below the P0.1 baseline (0.7689). The original verdict
+> assumed a lower starting point. Treat overall > 0.75 as a floor — the
+> informative signal is per-question-type lift on `knowledge-update` and
+> `temporal-reasoning` (the haystack-noise classes). Revisit the gate
+> wording before claiming Phase 2 success on overall accuracy alone.
 
 ## P0.1 — LongMemEval-M (50% stratified) baseline
 
@@ -78,8 +84,72 @@ uv run python -m benchmarks.longmemeval.judge \
 - Metrics summary: `<jsonl>.metrics.json`
 - Run log: `benchmarks/longmemeval/results/m_strat50s0_turns_run_20260507T001029Z.log`
 
-## P0.2 — Turn-tier recall@10
+## P0.2 — Turn-tier recall@10 (M strat50)
 
-_Not yet captured. Tracked as `loom-22bf6b24`. Adds a small extension to the
-adapter (or a sibling script) to compute recall@10 against the gold evidence
-sessions in M. Lock the number here when it lands._
+**Numbers (n=251, k=10, gold = `gold_session_ids`):**
+
+| metric | value |
+| --- | --- |
+| recall@10 overall | **0.9482** (238/251) |
+| single-session-assistant | 28/28 = 1.0000 |
+| single-session-user | 35/35 = 1.0000 |
+| knowledge-update | 38/39 = 0.9744 |
+| multi-session | 64/67 = 0.9552 |
+| single-session-preference | 14/15 = 0.9333 |
+| temporal-reasoning | 59/67 = 0.8806 |
+
+**Reproduce:** Same command as P0.1. Recall@k is auto-computed alongside
+the QA hypothesis when `--mode turns --tier turns` is set (instrumentation
+landed in commit `8ed3d49`). The summary file lands next to the hypothesis
+JSONL as `<stem>_recall_at_10_summary.json`; per-question hits are in
+`<stem>_recall_at_10.jsonl`.
+
+```bash
+WEFT_DATABASE_URL="postgresql://weft:weft_local@localhost:5433/weft" \
+DATABASE_URL="postgresql://weft:weft_local@localhost:5433/weft" \
+uv run python -m benchmarks.longmemeval.adapter \
+    --dataset ../langchain/LongMemEval/data/longmemeval_m_cleaned.json \
+    --mode turns --tier turns \
+    --stratified-frac 0.5 --sample-seed 0
+```
+
+**Run cost:** 5h34m wall, 1.04M input / 10.7k output tokens, 119 210 sessions
+ingested, 0 failed questions. ~17 turns lost their vector to the
+`text-embedding-3-small` 8192-token input cap (issue `weft-b1bd07c2`); only
+1/13 misses correlated with that ceiling, so the structural recall ceiling
+on this run is ~1 question, not 17.
+
+**QA-vs-retrieval gap.** The headline number that matters for Phase 1 / 2 is
+recall@10. The gap between recall@10 and QA accuracy is the answering/
+extraction layer, not retrieval:
+
+| Type | QA acc (P0.1) | recall@10 (P0.2) | gap |
+| --- | --- | --- | --- |
+| single-session-assistant | 1.0000 | 1.0000 | 0.000 |
+| single-session-user | 0.9714 | 1.0000 | 0.029 |
+| multi-session | 0.7463 | 0.9552 | 0.209 |
+| knowledge-update | 0.6667 | 0.9744 | 0.308 |
+| temporal-reasoning | 0.6866 | 0.8806 | 0.194 |
+| single-session-preference | 0.6000 | 0.9333 | 0.333 |
+
+`single-session-preference` and `knowledge-update` show the largest gaps:
+retrieval finds the gold session, the answer comes back wrong. Phase 1 / 2
+gates measure recall lift; QA lift is downstream of that.
+
+**Miss cluster (13 misses out of 251):**
+
+- temporal-reasoning: 8 (62%)
+- multi-session: 3
+- knowledge-update: 1
+- single-session-preference: 1
+
+Temporal-reasoning is the load-bearing class for Phase 2 hierarchical
+descent. If hierarchical doesn't lift it specifically, the verdict's
+falsifiable claim weakens.
+
+**Run artifacts:**
+
+- Hypothesis JSONL: `benchmarks/longmemeval/results/longmemeval_m_cleaned_turns_tier-turns_strat50s0_20260507T150321Z.jsonl`
+- Per-question recall: `<jsonl-stem>_recall_at_10.jsonl`
+- Summary: `<jsonl-stem>_recall_at_10_summary.json`
+- Stats: `<jsonl>.stats.json`
