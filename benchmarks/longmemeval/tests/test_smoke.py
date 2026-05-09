@@ -307,6 +307,67 @@ async def test_warm_boost_diverges_turn_usefulness_scores(
 
 
 @pytest.mark.asyncio
+async def test_warm_boost_survives_recall_turns_failure(
+    pool, monkeypatch
+) -> None:
+    """A single bad warmup query (e.g., PG ``tsquery stack too small``
+    on a pathological content prefix) must not abort the whole round.
+
+    Hit during P1.A5 M-tier Run 1: question 41275add died because one
+    sampled turn's prefix produced a tsquery PG couldn't parse, and the
+    error propagated up through warm_boost_turns into _run_one. The fix
+    wraps recall_turns in try/except so the rest of the round still
+    contributes signal.
+    """
+    from weft.episodes import create_episode
+    from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
+    from weft.episode_turns import append_turn
+
+    from benchmarks.longmemeval import warm_boost as warm_boost_mod
+
+    project_id = "warm-boost-failure-probe"
+    ep = await create_episode(
+        pool, EpisodeCreate(title="warmboost-fail", project_id=project_id),
+    )
+
+    # Five turns with non-trivial content so warmup has population to sample.
+    for i in range(5):
+        await append_turn(
+            pool,
+            EpisodeTurnCreate(
+                episode_id=ep.id,
+                role=TurnRole.user,
+                content=f"warmboost survival probe content sentinel {i}",
+            ),
+        )
+
+    # Patch recall_turns to raise on every call. With the fix in place,
+    # the function should still return a telemetry dict — boosted_turns
+    # may be 0 since no recalls succeeded, but the call itself must not
+    # propagate the exception.
+    async def _always_raises(*args, **kwargs):
+        raise RuntimeError("simulated tsquery stack too small")
+
+    monkeypatch.setattr(warm_boost_mod, "recall_turns", _always_raises)
+
+    embedder = get_provider("fastembed", dimensions=768)
+    result = await warm_boost_mod.warm_boost_turns(
+        pool, embedder,
+        project_id=project_id,
+        rounds=2,
+        queries_per_round=3,
+    )
+
+    # Function returned without raising, telemetry shape intact.
+    assert result["rounds"] == 2
+    assert result["n_population"] == 5
+    # All recall calls failed → no queries counted, no accesses, no boosts.
+    assert result["queries"] == 0
+    assert result["accessed_turns"] == 0
+    assert result["boosted_turns"] == 0
+
+
+@pytest.mark.asyncio
 async def test_recall_finds_evidence_session_in_raw_mode(
     pool, tmp_path: Path, tiny_dataset_path: Path
 ) -> None:
