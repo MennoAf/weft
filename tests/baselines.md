@@ -15,7 +15,7 @@ its falsification gate fails and the plan revises rather than ships.
 
 | Gate | Target | Absolute | Source |
 | --- | --- | --- | --- |
-| **P1.A4** turn-tier recall@10 lift vs P0.2 | ≥ 3 points | **≥ 0.978** | EPIC `loom-6e86575c` |
+| ~~**P1.A4** turn-tier recall@10 lift vs P0.2~~ | ~~≥ 3 points~~ | **REFRAMED** | see "Track A measurement caveat" below |
 | **P1.B3** Tier 1.5 RRF Oracle lift | ≥ 1 point, stable | (S baseline + 1pt) | EPIC `loom-6e86575c` |
 | **Phase 2** M-tier under `WEFT_HIERARCHICAL=on` | overall > 0.75 | **> 0.75 QA** | EPIC `loom-531d1c44` |
 
@@ -24,6 +24,34 @@ its falsification gate fails and the plan revises rather than ships.
 > informative signal is per-question-type lift on `knowledge-update` and
 > `temporal-reasoning` (the haystack-noise classes). Revisit the gate
 > wording before claiming Phase 2 success on overall accuracy alone.
+
+### Track A measurement caveat (P1.A4 reframe)
+
+The Phase 1 Track A falsification gate ("turn-tier compounding lifts
+recall@10 by ≥ 3 points") is **structurally untestable on the cold-DB
+LongMemEval harness.** Two compounding reasons:
+
+1. **Baseline contamination.** P0.2 (`recall@10 = 0.9482` at commit
+   `34f1063`) was captured AFTER all three Track A items merged
+   (`b12857d` A1, `6c95374` A2, `35669b1` A3). The locked baseline IS
+   the post-Track-A number. There's no on-file pre-Track-A counterfactual.
+2. **Cold-DB harness.** Each benchmark question runs against a fresh
+   database. New turns ingest at the default `usefulness_score = 0.7`,
+   `last_boosted_at = None`. That makes `usefulness_factor ≈ 0.85` for
+   every turn (constant — cancels in ranking) and disables the decay
+   path. In benchmark conditions, the Track A rerank reduces to
+   `RRF × recency_by_occurred_at`. The compounding boost signal the
+   verdict's falsifiable claim was about is not exercised.
+
+**Decision (2026-05-08).** Track A stays on main as a structural piece
+— the loop is wired, awaiting accumulation in real personal-recall use.
+The cold-DB falsification gate is retired. P1.A4 (`loom-d32a8353`)
+cancelled-as-reframed. A warm-boost harness variant is filed as
+`loom-3363e387` (P1.A5): pre-warm phase that simulates N rounds of
+recall + boost, plus a `WEFT_TURN_RERANK_DISABLE` flag for clean A/B
+on the same warmed dataset.
+
+Diagnosis logged at `weft-dea4cce7`.
 
 ## P0.1 — LongMemEval-M (50% stratified) baseline
 
