@@ -10,6 +10,8 @@ its falsification gate fails and the plan revises rather than ships.
 | --- | --- | --- | --- |
 | **P0.1 — LongMemEval-M strat50, turns/turns (QA accuracy)** | overall **0.7689** / taREDACTED **0.7785** (n=251) | 2026-05-07 | `be4d352` |
 | **P0.2 — turn-tier recall@10 (M strat50)** | **0.9482** (238/251) | 2026-05-07 | `34f1063` |
+| **P1.A5 Run 1 — warm rerank-ON recall@10** | **0.9482** (238/251 norm., 238/249 succ.) | 2026-05-09 | `a33ad6d` |
+| _P1.A5 Run 2 — warm rerank-OFF recall@10_ | _pending_ | — | — |
 
 ### Falsification gates (targets — these are revisited per leaf)
 
@@ -52,6 +54,63 @@ recall + boost, plus a `WEFT_TURN_RERANK_DISABLE` flag for clean A/B
 on the same warmed dataset.
 
 Diagnosis logged at `weft-dea4cce7`.
+
+### P1.A5 Run 1 — warm rerank-ON (M strat50, warm-boost rounds=3)
+
+**Headline:** recall@10 = **0.9482** (238/251 normalized, 238/249 on
+succeeded subset). **Numerically identical to the cold P0.2 baseline.**
+
+**Per-question-type recall@10 vs P0.2 cold:**
+
+| type | cold P0.2 | warm Run 1 | hit Δ |
+| --- | --- | --- | --- |
+| single-session-assistant | 28/28 = 1.000 | 27/27 = 1.000 (1 failed) | -1 (lost to failure) |
+| single-session-user | 35/35 = 1.000 | 35/35 = 1.000 | 0 |
+| multi-session | 64/67 = 0.9552 | 64/67 = 0.9552 | 0 |
+| **knowledge-update** | 38/39 = 0.9744 | **39/39 = 1.0000** | **+1 (rerank-attributable)** |
+| temporal-reasoning | 59/67 = 0.8806 | 59/66 = 0.8939 (1 failed) | 0 |
+| single-session-preference | 14/15 = 0.9333 | 14/15 = 0.9333 | 0 |
+
+**Net: +1 hit on knowledge-update, −1 hit lost to a tsquery failure on
+single-session-assistant.** Apples-to-apples on the 249-question subset:
+Track A's compounding rerank moves at most **+1 question** (≈ +0.4pt),
+well below the ≥ 3pt falsification threshold.
+
+**Run details:**
+
+- elapsed: 28 229s (7h50m wall)
+- 1.02M input tokens, 11.1k output, 0 cached
+- 2 questions failed (`tsquery stack too small` on warmup queries with
+  pathological content prefixes — fixed in commit `a33ad6d` for future
+  runs, but Run 1 was on unpatched code)
+- warm-boost telemetry: 747 rounds ran, 7 470 queries, 74 570 accesses,
+  73 832 boosts (i.e. the loop was firmly exercised)
+- file: `benchmarks/longmemeval/results/longmemeval_m_cleaned_turns_tier-turns_strat50s0_warm3_20260509T012034Z*`
+
+**Verdict signal (preliminary, awaiting Run 2 rerank-OFF):**
+
+The Lodestar verdict's claim — _"Track A turn-tier compounding lifts
+recall@10 by ≥ 3 points"_ — is now **falsified under exercised
+boost-loop conditions.** Even with 74k boost events accumulated across
+3 rounds × 10 queries × ~250 questions, the rerank surfaces exactly
+**one** previously-missed gold session.
+
+Run 2 (rerank-OFF, same warmed dataset) will tell us whether that 1pt
+came from the rerank itself or from the warmup-induced boost
+distribution that the rerank then merely consumed. Either way, Track A
+is not the lever the verdict thought it was.
+
+**Reproduce Run 1:**
+
+```bash
+WEFT_DATABASE_URL="postgresql://weft:weft_local@localhost:5433/weft" \
+DATABASE_URL="postgresql://weft:weft_local@localhost:5433/weft" \
+uv run python -m benchmarks.longmemeval.adapter \
+    --dataset ../langchain/LongMemEval/data/longmemeval_m_cleaned.json \
+    --mode turns --tier turns \
+    --stratified-frac 0.5 --sample-seed 0 \
+    --warm-boost-rounds 3
+```
 
 ## P0.1 — LongMemEval-M (50% stratified) baseline
 
