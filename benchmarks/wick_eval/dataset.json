@@ -1,0 +1,129 @@
+[
+  {
+    "id": "wick-recall-001",
+    "question": "What's the status of project X?",
+    "shape": "belief-current",
+    "expected_answer_pattern": "Returns the most-recent handoff content for project X (a single current snapshot). The answer is the latest known state, not a history.",
+    "current_weft_tier": "weft_handoff",
+    "belief_view_addresses_this": true,
+    "notes": "Existing weft_handoff infra serves this directly; belief-view query API should layer on top."
+  },
+  {
+    "id": "wick-recall-002",
+    "question": "How is my sleep doing compared to last time we talked?",
+    "shape": "belief-with-history",
+    "expected_answer_pattern": "Returns the supersession chain from oldest to newest with each prior value and its evidence timestamp, so the user can compare current to past. Requires temporal anchoring to prior conversation.",
+    "current_weft_tier": "wellness_snapshot",
+    "belief_view_addresses_this": true,
+    "notes": "Wellness snapshot already partial; needs supersession chain retained. Temporal-anchor: reference to prior session."
+  },
+  {
+    "id": "wick-recall-003",
+    "question": "When was the last time I heard from Sarah?",
+    "shape": "event-anchored",
+    "expected_answer_pattern": "Returns the most recent episode or turn mentioning Sarah, with timestamp and context snippet showing when communication occurred.",
+    "current_weft_tier": "episode-view (not yet built)",
+    "belief_view_addresses_this": false,
+    "notes_secondary": "entity-anchoring on Sarah; requires episode + entity cross-reference."
+  },
+  {
+    "id": "wick-recall-004",
+    "question": "I just got new cholesterol numbers (X), how am I doing?",
+    "shape": "belief-with-history",
+    "expected_answer_pattern": "Returns the trajectory chain of cholesterol readings with dates, allowing user to assess whether new reading is improving, stable, or declining relative to prior measurements.",
+    "current_weft_tier": "belief-view (not yet built)",
+    "belief_view_addresses_this": true,
+    "notes": "Trajectory query; requires supersession chain with dates."
+  },
+  {
+    "id": "wick-recall-005",
+    "question": "How many books have I read this year?",
+    "shape": "collection",
+    "expected_answer_pattern": "Returns a count or enumerated list of distinct books read in the current calendar year, deduplicated by title.",
+    "current_weft_tier": "collection-view (not yet built)",
+    "belief_view_addresses_this": false,
+    "notes": "USER PAIN POINT: self-flagged 'I suck at this'; collection counting is a core unmet need."
+  },
+  {
+    "id": "wick-recall-006",
+    "question": "How many times have I worked on my novel?",
+    "shape": "collection",
+    "expected_answer_pattern": "Returns a count of distinct episodes or sessions where work on the novel occurred, or enumerated list of those episodes with dates and session summaries.",
+    "current_weft_tier": "collection-view (not yet built)",
+    "belief_view_addresses_this": false,
+    "notes": "Collection of episodes; counter over events; helps user track productivity."
+  },
+  {
+    "id": "wick-recall-007",
+    "question": "How do I make a Daddy Issues Drink again?",
+    "shape": "named-artifact",
+    "expected_answer_pattern": "Returns the full recipe including ingredients, measurements, preparation steps, and any notes about variation or origin stored with the artifact.",
+    "current_weft_tier": "belief-view (not yet built)",
+    "belief_view_addresses_this": true,
+    "notes": "Rich-content belief anchored by name; named-artifact pattern for recipes, routines, and procedures."
+  },
+  {
+    "id": "wick-recall-008",
+    "question": "What is my recipe for Bourbon Peanut Butter Oatmeal Cookies?",
+    "shape": "named-artifact",
+    "expected_answer_pattern": "Returns the complete recipe with ingredients, measurements, baking time/temperature, and any personal notes or modifications.",
+    "current_weft_tier": "belief-view (not yet built)",
+    "belief_view_addresses_this": true,
+    "notes": "Same pattern as drink recipe; named-artifact retrieval."
+  },
+  {
+    "id": "wick-recall-009",
+    "question": "When is Zero Click NYC this year? Do I have a ticket?",
+    "shape": "belief-current",
+    "secondary_shapes": ["belief-current"],
+    "expected_answer_pattern": "Returns two simultaneous beliefs: (1) event date (singular), (2) ticket status flag (yes/no/maybe). Both are current-state beliefs that may update independently.",
+    "current_weft_tier": "belief-view (not yet built)",
+    "belief_view_addresses_this": true,
+    "notes": "Two simultaneous beliefs: event date and ticket status flag; could optionally leverage weft_tracker for ticket."
+  },
+  {
+    "id": "wick-recall-010",
+    "question": "We were talking about a black swan, what was it + recon updates?",
+    "shape": "dialogue",
+    "expected_answer_pattern": "Returns the original dialogue turn(s) discussing the black swan event, plus any subsequent recon updates stored as separate memories; reconstructs the investigation arc.",
+    "current_weft_tier": "turn-tier (shipped)",
+    "belief_view_addresses_this": false,
+    "notes": "Turn-tier already shipped; secondary outbound action (recon update) stored separately; dialogue-recall stitches them."
+  },
+  {
+    "id": "wick-recall-011",
+    "question": "What did we decide on Muttr SaaS + core blockers?",
+    "shape": "decision",
+    "expected_answer_pattern": "Returns the decision record including the chosen path, alternatives considered, reasoning for the choice, and identified blockers or open questions.",
+    "current_weft_tier": "decision memory type",
+    "belief_view_addresses_this": false,
+    "notes": "Existing decision memory type; includes reasoning and blockers."
+  },
+  {
+    "id": "wick-recall-012",
+    "question": "What was that workout routine you made for me?",
+    "shape": "named-artifact",
+    "expected_answer_pattern": "Returns the full workout plan including exercises, reps/sets, frequency, rest periods, and any modifications or progression notes.",
+    "current_weft_tier": "belief-view (not yet built)",
+    "belief_view_addresses_this": true,
+    "notes": "Same pattern as recipes; named-artifact for procedures and routines."
+  },
+  {
+    "id": "wick-recall-013",
+    "question": "How often should I be posting on LinkedIn?",
+    "shape": "belief-current",
+    "expected_answer_pattern": "Returns a frequency recommendation with source provenance: distinguishes whether it was user-stated, agent-suggested, or jointly agreed upon; may include reasoning.",
+    "current_weft_tier": "belief-view (not yet built)",
+    "belief_view_addresses_this": true,
+    "notes": "Load-bearing requirement: source-provenance distinguishing user-stated vs agent-suggested vs joint decision."
+  },
+  {
+    "id": "wick-recall-014",
+    "question": "What was my net worth at the last annual review?",
+    "shape": "belief-with-history",
+    "expected_answer_pattern": "Returns the specific net worth value anchored to the last annual review episode, with comparison to prior review(s) to show trend.",
+    "current_weft_tier": "belief-view (not yet built)",
+    "belief_view_addresses_this": true,
+    "notes": "Episode-anchored historical lookup; temporal anchor to annual-review event."
+  }
+]

@@ -463,3 +463,14 @@ remaining retrieval-side fails.
 
 **Run artifact (corrected):** `benchmarks/longmemeval/results/recall_vs_reader_bucketing_2026_05_09_extended.json`
 (6-bucket cross-tab + per-question gold-coverage detail).
+
+## Wick recall fixture (loom-efffb521)
+
+Hand-crafted fixture of 14 anticipated Wick recall use cases (n=14),
+sourced from Jason's personal-agent expectations and Finch council
+2026-05-09. Lives at `benchmarks/wick_eval/dataset.json`. Each entry
+specifies question text, shape-tag, expected-answer pattern,
+current-Weft-tier that should serve it, and belief-view scope flag.
+Used as design checklist for loom-540df5f7 (belief-view spec) and
+proxy eval for loom-1fe75d00 (M-tier eval gate). Real-world Wick
+eval (n≥50) is a separate task (loom-b2c02183) blocked on Wick shipping.
