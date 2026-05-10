@@ -2,7 +2,7 @@
 
 > Shared persistent brain for you and your agents.
 
-Weft replaces flat-file agent memory (`MEMORY.md`, scattered notes) with a queryable knowledge base that any MCP-compatible agent can read from and write to. Semantic search via pgvector, structured types with distinct lifecycles, confidence + decay, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity.
+Weft is the persistent brain you share with your agents. Conversations, decisions, recipes, plans — anything you'd write down so you and your agents can find it later. Queryable via semantic search (pgvector), structured types with distinct lifecycles, confidence + decay, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity.
 
 Part of the trilogy: **Loom** (orchestration) → **Warp** (builder agent) → **Weft** (memory).
 
