@@ -36,6 +36,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# --- Graduation retention constants ---
+
+# Importance score above which a turn persists indefinitely after its episode
+# graduates. Below this, retention falls back to age-based TTL.
+GRADUATION_HIGH_IMPORTANCE_THRESHOLD = 0.7
+
+# Default TTL for low-importance turns AFTER episode graduation. Used when
+# importance_score is populated and below the high threshold.
+GRADUATION_TURN_TTL_DAYS = 90
+
+# Fallback TTL for turns with NULL importance_score (Face offline). Conservative
+# (shorter than the scored fallback) because we cannot tell what to keep.
+GRADUATION_TURN_TTL_DAYS_NO_SCORE = 30
+
+# Maximum number of turns to include verbatim in the graduated memory's
+# conversation section. Turns beyond this cap produce a truncation notice.
+_GRADUATION_TURN_CAP = 60
+
 
 async def create_episode(
     pool: asyncpg.Pool,
@@ -381,9 +399,29 @@ async def graduate_episode(
 
     # Build memory content from episode if not provided
     if content is None:
+        from weft.episode_turns import list_turns as _list_turns
+
         parts = [ep.title]
         if ep.summary:
             parts.append(ep.summary)
+
+        # Pull turns and pre-existing linked memories to enrich the snapshot.
+        turns = await _list_turns(pool, episode_id)
+        prior_memories = await get_episode_memories(pool, episode_id)
+
+        if turns:
+            # Cap at _GRADUATION_TURN_CAP turns (windowed compression — no LLM).
+            included = turns[:_GRADUATION_TURN_CAP]
+            omitted = len(turns) - len(included)
+            convo_lines = [f"{t.role.value}: {t.content}" for t in included]
+            if omitted > 0:
+                convo_lines.append(f"... [truncated, {omitted} turns omitted]")
+            parts.append("Conversation:\n" + "\n".join(convo_lines))
+
+        if prior_memories:
+            mem_lines = [m.content for m in prior_memories]
+            parts.append("Linked memories:\n" + "\n".join(mem_lines))
+
         content = "\n\n".join(parts)
 
     # Create the persistent memory

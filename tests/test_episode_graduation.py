@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from weft.episode_turns import append_turn
 from weft.episodes import (
     add_memory_to_episode,
     close_episode,
@@ -14,9 +15,11 @@ from weft.episodes import (
 )
 from weft.models import (
     EpisodeCreate,
+    EpisodeTurnCreate,
     EpisodeStatus,
     MemoryCreate,
     MemoryType,
+    TurnRole,
 )
 from weft.store import store_memory
 
@@ -153,3 +156,78 @@ async def test_graduate_episode_persists_in_db(pool):
     refetched = await get_episode(pool, ep.id)
     assert refetched.status == EpisodeStatus.graduated
     assert refetched.graduated_memory_id == memory.id
+
+
+# --- Turn-reading and linked-memory enrichment ---
+
+
+async def _append(pool, episode_id, role, content):
+    """Helper: append a single turn and return it."""
+    return await append_turn(
+        pool,
+        EpisodeTurnCreate(episode_id=episode_id, role=role, content=content),
+    )
+
+
+async def test_graduate_episode_reads_turns_and_memories(pool):
+    """Graduate with content=None; result memory includes turns + prior linked memories."""
+    ep = await _make_episode(pool, title="Enriched episode", summary="A rich session")
+
+    # Attach 3 turns in order.
+    await _append(pool, ep.id, TurnRole.user, "Hello from user")
+    await _append(pool, ep.id, TurnRole.assistant, "Hello back")
+    await _append(pool, ep.id, TurnRole.user, "Thanks!")
+
+    # Attach 1 pre-existing memory.
+    prior_mem = await _make_memory(pool, content="Prior insight about the topic")
+    await add_memory_to_episode(pool, ep.id, prior_mem.id)
+
+    updated_ep, grad_memory = await graduate_episode(pool, ep.id)
+
+    content = grad_memory.content
+
+    # Title and summary must still be present.
+    assert "Enriched episode" in content
+    assert "A rich session" in content
+
+    # Turn lines must appear in role:content format.
+    assert "user: Hello from user" in content
+    assert "assistant: Hello back" in content
+    assert "user: Thanks!" in content
+
+    # Prior memory content must appear in the linked-memories section.
+    assert "Prior insight about the topic" in content
+
+    # With only 3 turns, truncation marker must NOT appear.
+    assert "[truncated" not in content
+
+
+async def test_graduate_episode_no_turns_unchanged(pool):
+    """Episode with no turns and no linked memories produces the same content as before."""
+    ep = await _make_episode(pool, title="Plain title", summary="Plain summary")
+
+    updated_ep, grad_memory = await graduate_episode(pool, ep.id)
+
+    # Exact match against the pre-existing behavior: title + double-newline + summary.
+    assert grad_memory.content == "Plain title\n\nPlain summary"
+
+
+async def test_graduate_episode_truncation_marker(pool):
+    """Episode with > 60 turns produces a truncation notice in the content."""
+    ep = await _make_episode(pool, title="Big episode")
+
+    # Append 70 turns.
+    for i in range(70):
+        role = TurnRole.user if i % 2 == 0 else TurnRole.assistant
+        await _append(pool, ep.id, role, f"message {i}")
+
+    updated_ep, grad_memory = await graduate_episode(pool, ep.id)
+
+    content = grad_memory.content
+    assert "[truncated" in content
+    assert "10 turns omitted" in content
+
+    # Count turn lines: "user: message N" or "assistant: message N". There
+    # should be exactly 60 (indices 0..59 included, 60..69 omitted).
+    turn_lines = [ln for ln in content.splitlines() if ln.startswith(("user:", "assistant:"))]
+    assert len(turn_lines) == 60

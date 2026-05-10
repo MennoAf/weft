@@ -33,6 +33,24 @@ from weft.db.connection import get_db
 from weft.models import EpisodeTurn, EpisodeTurnCreate, TurnRole
 from weft.tokens import estimate_tokens
 
+# Retention thresholds imported from episodes to keep a single source of truth.
+# Import deferred to module body (not top-level) to avoid a circular import:
+# episodes imports episode_turns (list_turns), episode_turns must not import
+# episodes at module load time. The constants are read at call time inside the
+# function bodies, which is safe.
+def _graduation_constants() -> tuple[float, int, int]:
+    """Lazy import guard — returns (HIGH_THRESHOLD, TTL_DAYS, TTL_DAYS_NO_SCORE)."""
+    from weft.episodes import (  # noqa: PLC0415
+        GRADUATION_HIGH_IMPORTANCE_THRESHOLD,
+        GRADUATION_TURN_TTL_DAYS,
+        GRADUATION_TURN_TTL_DAYS_NO_SCORE,
+    )
+    return (
+        GRADUATION_HIGH_IMPORTANCE_THRESHOLD,
+        GRADUATION_TURN_TTL_DAYS,
+        GRADUATION_TURN_TTL_DAYS_NO_SCORE,
+    )
+
 if TYPE_CHECKING:
     from weft.embeddings.base import EmbeddingProvider
 
@@ -257,6 +275,78 @@ async def delete_turns_for_graduated_episode(
         str(older_than_days),
     )
     return int(result.split()[-1])
+
+
+async def delete_turns_after_graduation(
+    pool: asyncpg.Pool,
+    *,
+    high_threshold: float | None = None,
+    ttl_days_scored: int | None = None,
+    ttl_days_no_score: int | None = None,
+) -> dict[str, int]:
+    """Sweep turns whose episode has been graduated long enough.
+
+    Two policies in one sweep:
+    - Score-aware: turns whose episode graduated > ttl_days_scored ago AND
+      importance_score < high_threshold are deleted.
+    - Score-blind fallback (Face offline): turns whose episode graduated >
+      ttl_days_no_score ago AND importance_score IS NULL are deleted.
+
+    Turns whose importance_score >= high_threshold are RETAINED indefinitely
+    regardless of age. Turns belonging to non-graduated episodes are ignored.
+
+    Default values for threshold and TTLs come from the module-level constants
+    in weft.episodes. Pass explicit values at the call site to override.
+
+    Returns counts: {"scored_deleted": int, "no_score_deleted": int}.
+    """
+    _default_threshold, _default_ttl_scored, _default_ttl_no_score = _graduation_constants()
+    if high_threshold is None:
+        high_threshold = _default_threshold
+    if ttl_days_scored is None:
+        ttl_days_scored = _default_ttl_scored
+    if ttl_days_no_score is None:
+        ttl_days_no_score = _default_ttl_no_score
+
+    db = get_db(pool)
+
+    # Score-aware path: delete turns with a score below threshold whose
+    # episode graduated long enough ago.
+    scored_result = await db.execute(
+        """
+        DELETE FROM episode_turns
+        WHERE importance_score IS NOT NULL
+          AND importance_score < $1
+          AND episode_id IN (
+              SELECT id FROM episodes
+              WHERE status = 'graduated'
+                AND ended_at IS NOT NULL
+                AND ended_at < now() - ($2 || ' days')::interval
+          )
+        """,
+        high_threshold,
+        str(ttl_days_scored),
+    )
+    scored_deleted = int(scored_result.split()[-1])
+
+    # Score-blind fallback: delete turns with NULL importance_score whose
+    # episode graduated past the shorter no-score TTL.
+    no_score_result = await db.execute(
+        """
+        DELETE FROM episode_turns
+        WHERE importance_score IS NULL
+          AND episode_id IN (
+              SELECT id FROM episodes
+              WHERE status = 'graduated'
+                AND ended_at IS NOT NULL
+                AND ended_at < now() - ($1 || ' days')::interval
+          )
+        """,
+        str(ttl_days_no_score),
+    )
+    no_score_deleted = int(no_score_result.split()[-1])
+
+    return {"scored_deleted": scored_deleted, "no_score_deleted": no_score_deleted}
 
 
 # --- Recall ---
