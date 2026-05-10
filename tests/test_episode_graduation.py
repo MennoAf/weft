@@ -203,7 +203,12 @@ async def test_graduate_episode_reads_turns_and_memories(pool):
 
 
 async def test_graduate_episode_no_turns_unchanged(pool):
-    """Episode with no turns and no linked memories produces the same content as before."""
+    """Episode with no turns and no linked memories produces the same content as before.
+
+    This test covers the both-empty case specifically. See
+    ``test_graduate_episode_no_turns_with_prior_memory_includes_memory_section``
+    for the turns=[] + prior_memories=[mem] variant.
+    """
     ep = await _make_episode(pool, title="Plain title", summary="Plain summary")
 
     updated_ep, grad_memory = await graduate_episode(pool, ep.id)
@@ -212,12 +217,38 @@ async def test_graduate_episode_no_turns_unchanged(pool):
     assert grad_memory.content == "Plain title\n\nPlain summary"
 
 
+async def test_graduate_episode_no_turns_with_prior_memory_includes_memory_section(pool):
+    """Episode with no turns but a linked prior memory includes the memory section.
+
+    The ``turns=[] + prior_memories=[mem]`` case should produce content that
+    includes the prior memory's text under the 'Linked memories:' section.
+    This is intentional: pre-linked memories are always folded into the
+    graduated snapshot regardless of whether any turns exist.
+    """
+    ep = await _make_episode(pool, title="Memory-only episode")
+
+    # Link a prior memory without appending any turns.
+    mem = await _make_memory(pool, content="Crucial prior observation")
+    await add_memory_to_episode(pool, ep.id, mem.id)
+
+    updated_ep, grad_memory = await graduate_episode(pool, ep.id)
+
+    content = grad_memory.content
+    assert "Memory-only episode" in content
+    assert "Linked memories:" in content
+    assert "Crucial prior observation" in content
+    # No turns were added, so no conversation section should appear.
+    assert "Conversation:" not in content
+    # No truncation marker.
+    assert "[truncated" not in content
+
+
 async def test_graduate_episode_truncation_marker(pool):
     """Episode with > 60 turns produces a truncation notice in the content."""
     ep = await _make_episode(pool, title="Big episode")
 
-    # Append 70 turns.
-    for i in range(70):
+    # Append 65 turns (above the _GRADUATION_TURN_CAP of 60).
+    for i in range(65):
         role = TurnRole.user if i % 2 == 0 else TurnRole.assistant
         await _append(pool, ep.id, role, f"message {i}")
 
@@ -225,9 +256,32 @@ async def test_graduate_episode_truncation_marker(pool):
 
     content = grad_memory.content
     assert "[truncated" in content
-    assert "10 turns omitted" in content
+
+    # The new generic marker must not carry a specific omit count.
+    assert "turns omitted" not in content
 
     # Count turn lines: "user: message N" or "assistant: message N". There
-    # should be exactly 60 (indices 0..59 included, 60..69 omitted).
+    # should be exactly 60 (indices 0..59 included, 60..64 omitted).
     turn_lines = [ln for ln in content.splitlines() if ln.startswith(("user:", "assistant:"))]
     assert len(turn_lines) == 60
+
+
+async def test_graduate_episode_byte_cap_triggers_truncation(pool):
+    """Episode with 5 large turns (~10 KB each) triggers the byte cap before the turn cap.
+
+    Even though the turn count (5) is well under _GRADUATION_TURN_CAP (60),
+    the combined content (~50 KB) exceeds _GRADUATION_CONTENT_BYTE_CAP (32 KB),
+    so the truncation marker must appear.
+    """
+    ep = await _make_episode(pool, title="Big content episode")
+
+    # Each turn is ~10 KB. Five turns = ~50 KB > 32 KB byte cap.
+    large_content = "x" * (10 * 1024)
+    for i in range(5):
+        role = TurnRole.user if i % 2 == 0 else TurnRole.assistant
+        await _append(pool, ep.id, role, large_content)
+
+    updated_ep, grad_memory = await graduate_episode(pool, ep.id)
+
+    content = grad_memory.content
+    assert "[truncated" in content

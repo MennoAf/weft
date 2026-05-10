@@ -37,7 +37,11 @@ def main() -> None:
     rows = load_dataset()
     report = coverage_report(rows)
     print(json.dumps(report, indent=2))
-    assert report["n"] >= 11, f"fixture below n=11 floor: {report['n']}"
+    if report["n"] != 14:
+        raise RuntimeError(
+            f"fixture count drifted: expected 14, got {report['n']} — "
+            f"if you intentionally added/removed an entry, update this floor."
+        )
 
 
 if __name__ == "__main__":

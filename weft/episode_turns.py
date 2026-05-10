@@ -232,6 +232,10 @@ async def delete_turns_below_importance(
 
     Returns the number of turns deleted.
     """
+    if older_than_days <= 0:
+        raise ValueError(
+            f"ttl_days must be positive: older_than_days={older_than_days}"
+        )
     result = await get_db(pool).execute(
         """
         DELETE FROM episode_turns
@@ -262,6 +266,10 @@ async def delete_turns_for_graduated_episode(
     only signal is age. Graduation policy invokes this with a longer TTL
     than the importance-aware path.
     """
+    if older_than_days <= 0:
+        raise ValueError(
+            f"ttl_days must be positive: older_than_days={older_than_days}"
+        )
     result = await get_db(pool).execute(
         """
         DELETE FROM episode_turns
@@ -307,6 +315,12 @@ async def delete_turns_after_graduation(
         ttl_days_scored = _default_ttl_scored
     if ttl_days_no_score is None:
         ttl_days_no_score = _default_ttl_no_score
+
+    if ttl_days_scored <= 0 or ttl_days_no_score <= 0:
+        raise ValueError(
+            f"ttl_days must be positive: scored={ttl_days_scored}, "
+            f"no_score={ttl_days_no_score}"
+        )
 
     db = get_db(pool)
 

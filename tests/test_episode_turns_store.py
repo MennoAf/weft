@@ -428,3 +428,74 @@ async def test_delete_turns_after_graduation_mixed_scores(pool):
     assert scored_high.id in surviving
     assert scored_low.id not in surviving
     assert no_score.id not in surviving
+
+
+# --- TTL guard tests (Fix 1) ---
+
+
+async def test_delete_turns_after_graduation_rejects_zero_ttl_scored(pool):
+    """delete_turns_after_graduation raises ValueError when ttl_days_scored=0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_after_graduation(
+            pool,
+            high_threshold=0.7,
+            ttl_days_scored=0,
+            ttl_days_no_score=30,
+        )
+
+
+async def test_delete_turns_after_graduation_rejects_negative_ttl_scored(pool):
+    """delete_turns_after_graduation raises ValueError when ttl_days_scored<0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_after_graduation(
+            pool,
+            high_threshold=0.7,
+            ttl_days_scored=-5,
+            ttl_days_no_score=30,
+        )
+
+
+async def test_delete_turns_after_graduation_rejects_zero_ttl_no_score(pool):
+    """delete_turns_after_graduation raises ValueError when ttl_days_no_score=0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_after_graduation(
+            pool,
+            high_threshold=0.7,
+            ttl_days_scored=90,
+            ttl_days_no_score=0,
+        )
+
+
+async def test_delete_turns_after_graduation_rejects_negative_ttl_no_score(pool):
+    """delete_turns_after_graduation raises ValueError when ttl_days_no_score<0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_after_graduation(
+            pool,
+            high_threshold=0.7,
+            ttl_days_scored=90,
+            ttl_days_no_score=-1,
+        )
+
+
+async def test_delete_turns_below_importance_rejects_zero_ttl(pool):
+    """delete_turns_below_importance raises ValueError when older_than_days=0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_below_importance(pool, threshold=0.7, older_than_days=0)
+
+
+async def test_delete_turns_below_importance_rejects_negative_ttl(pool):
+    """delete_turns_below_importance raises ValueError when older_than_days<0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_below_importance(pool, threshold=0.7, older_than_days=-10)
+
+
+async def test_delete_turns_for_graduated_episode_rejects_zero_ttl(pool):
+    """delete_turns_for_graduated_episode raises ValueError when older_than_days=0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_for_graduated_episode(pool, older_than_days=0)
+
+
+async def test_delete_turns_for_graduated_episode_rejects_negative_ttl(pool):
+    """delete_turns_for_graduated_episode raises ValueError when older_than_days<0."""
+    with pytest.raises(ValueError, match="ttl_days must be positive"):
+        await delete_turns_for_graduated_episode(pool, older_than_days=-3)

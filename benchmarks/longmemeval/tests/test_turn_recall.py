@@ -98,3 +98,23 @@ def test_boundary_four_chars_uses_substring() -> None:
 def test_positive_match_mid_sentence() -> None:
     """Gold answer embedded mid-sentence is found via substring match."""
     assert _answer_text_match("rock climbing", "Rock climbing is going great.") is True
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: non-word-boundary short gold answers (punctuation-wrapped tokens)
+# ---------------------------------------------------------------------------
+
+
+def test_positive_short_parenthesized_answer_matches() -> None:
+    """Short gold '(b)' (non-word chars at both ends) falls back to substring match."""
+    assert _answer_text_match("(b)", "the answer is (b) actually") is True
+
+
+def test_positive_short_punctuation_suffixed_answer_matches() -> None:
+    """Short gold 'no.' (word char at start, punct at end) falls back to substring match."""
+    assert _answer_text_match("no.", "well, no. that's wrong") is True
+
+
+def test_negative_short_parenthesized_answer_no_false_positive() -> None:
+    """Short gold '(c)' does not match content containing '(b)'."""
+    assert _answer_text_match("(c)", "the answer is (b) actually") is False

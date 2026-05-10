@@ -88,6 +88,13 @@ def _answer_text_match(gold: str, content: str) -> bool:
     - Hyphenated or punctuation-adjacent gold tokens may miss a boundary
       match for the short-token path (``re`` \\b is ASCII-boundary-aware).
 
+    Updated behavior for ≤3-char gold answers:
+    - Word-boundary matching (``\\b``) requires a word character (``[A-Za-z0-9_]``)
+      immediately adjacent to the boundary. If the gold answer starts or ends
+      with a non-word character (e.g. ``"(b)"``, ``"no."``), ``\\b`` can never
+      anchor and the regex always fails. For such tokens, substring containment
+      is used instead. Pure alphanumeric short tokens still use ``\\b`` as before.
+
     Args:
         gold: The gold answer string (lowercased + stripped before use).
         content: The turn content to search within.
@@ -100,7 +107,11 @@ def _answer_text_match(gold: str, content: str) -> bool:
     if not gold:
         return False
     if len(gold) <= 3:
-        return bool(re.search(rf"\b{re.escape(gold)}\b", content))
+        # Word-boundary regex requires word chars at both ends; otherwise \b
+        # can't anchor and the match always fails. Fall back to substring.
+        if gold[0].isalnum() and gold[-1].isalnum():
+            return bool(re.search(rf"\b{re.escape(gold)}\b", content))
+        return gold in content
     return gold in content
 
 
