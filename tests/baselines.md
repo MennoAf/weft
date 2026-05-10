@@ -464,6 +464,29 @@ remaining retrieval-side fails.
 **Run artifact (corrected):** `benchmarks/longmemeval/results/recall_vs_reader_bucketing_2026_05_09_extended.json`
 (6-bucket cross-tab + per-question gold-coverage detail).
 
+## Turn-level recall@k instrumentation (loom-f658cd55)
+
+New telemetry fields added to the per-question recall JSONL (turn-mode + turn-tier only):
+
+- `turn_level_recall_at_k_hit` — `true` if the gold answer text appears (via substring or
+  word-boundary match) in any of the top-k retrieved turns' content.
+- `n_retrieved_turns_with_content` — count of retrieved turn IDs that resolved to content
+  in the in-memory `turn_content_map`. Values below `k` indicate coverage gaps in
+  instrumentation (e.g. turn IDs that were not found in the map).
+
+Heuristic: gold answer is lowercased and stripped, then matched against each turn's
+content (also lowercased + stripped). Answers longer than 3 characters use substring
+containment; answers of 1-3 characters use a `\b<gold>\b` word-boundary regex to avoid
+false positives like "no" matching "north". See `_answer_text_match` in `adapter.py` for
+documented false-positive and false-negative cases.
+
+**The 2026-05-07 M-tier jsonl cannot be retrofitted.** Turn IDs are minted as
+`et-{_short_id()}` at ingest time (random per run); the existing JSONL's
+`retrieved_turn_ids` are dead references with no content recoverable from disk. A fresh
+M-tier run with `capture_recall=True` (automatic when `--mode turns --tier turns`) will
+produce the first turn-level baseline — that is a separate task. This closes the
+session-level-only gap flagged in Ghost Audit finding `weft-496166ed`.
+
 ## Wick recall fixture (loom-efffb521)
 
 Hand-crafted fixture of 14 anticipated Wick recall use cases (n=14),

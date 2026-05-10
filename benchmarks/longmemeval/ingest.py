@@ -167,6 +167,7 @@ async def _ingest_haystack_turns(
     project_id: str,
     *,
     turn_session_map: dict[str, str] | None = None,
+    turn_content_map: dict[str, str] | None = None,
 ) -> None:
     """Write the haystack as one episode of dialogue turns (turn-tier).
 
@@ -193,6 +194,11 @@ async def _ingest_haystack_turns(
             turn written. Used by the adapter's recall@10 instrumentation
             to map retrieved turn IDs back to the source session ID
             without persisting the lineage to the episode_turns table.
+        turn_content_map: Optional dict that, if provided, will be
+            populated in-place with ``{turn_id: content}`` for every turn
+            written. Used by the adapter's turn-level recall@k
+            instrumentation to check whether the gold answer text appears
+            in any of the retrieved turns' content.
     """
     episode = await create_episode(
         pool,
@@ -244,7 +250,10 @@ async def _ingest_haystack_turns(
                         start + i, instance.question_id, inner_exc,
                     )
 
-    turn_ids = await _bulk_append_turns(pool, episode.id, pending, embeddings)
+    turn_ids = await _bulk_append_turns(
+        pool, episode.id, pending, embeddings,
+        turn_content_map=turn_content_map,
+    )
     if turn_session_map is not None:
         for turn_id, session_id in zip(turn_ids, pending_session_ids):
             turn_session_map[turn_id] = session_id
@@ -255,6 +264,8 @@ async def _bulk_append_turns(
     episode_id: str,
     pending: list[tuple[TurnRole, str, datetime]],
     embeddings: list[list[float] | None],
+    *,
+    turn_content_map: dict[str, str] | None = None,
 ) -> list[str]:
     """Bulk-insert all turns of one episode in a single executemany call.
 
@@ -271,10 +282,17 @@ async def _bulk_append_turns(
     Pass the list straight through; explicit ``::vector`` casts collide
     with the codec's binary encoding under ``executemany``.
 
+    Args:
+        turn_content_map: Optional dict that, if provided, will be
+            populated in-place with ``{turn_id: content}`` for every turn
+            inserted. Used by the adapter's turn-level recall@k
+            instrumentation. Populated alongside ``turn_ids`` so
+            the content is available without a DB round-trip.
+
     Returns:
         List of generated turn IDs in the same order as ``pending``. Used
         by the adapter to build the in-memory ``{turn_id: session_id}``
-        side-map for recall@10 instrumentation.
+        and ``{turn_id: content}`` side-maps for recall@10 instrumentation.
     """
     if not pending:
         return []
@@ -284,6 +302,8 @@ async def _bulk_append_turns(
     for idx, ((role, content, occurred_at), embedding) in enumerate(zip(pending, embeddings)):
         turn_id = f"et-{_short_id()}"
         turn_ids.append(turn_id)
+        if turn_content_map is not None:
+            turn_content_map[turn_id] = content
         token_count = estimate_tokens(content)
         rows.append(
             (
@@ -319,6 +339,7 @@ async def load_haystack(
     mode: IngestMode,
     *,
     turn_session_map: dict[str, str] | None = None,
+    turn_content_map: dict[str, str] | None = None,
 ) -> int:
     """Load all sessions for one benchmark question into Weft.
 
@@ -336,6 +357,12 @@ async def load_haystack(
             don't have stable per-row IDs that map back to the Reader's
             view). The adapter passes a fresh dict per question to drive
             recall@10 instrumentation without persisting lineage.
+        turn_content_map: Optional dict that, in turn-mode only, will be
+            populated in-place with ``{turn_id: content}`` for every turn
+            written. Ignored in raw/extracted modes. Used alongside
+            ``turn_session_map`` to power turn-level recall@k
+            instrumentation (gold-answer text-match against retrieved
+            turn contents).
 
     Returns:
         Count of sessions ingested. Memory count may be higher (extracted
@@ -350,6 +377,7 @@ async def load_haystack(
         await _ingest_haystack_turns(
             pool, embedder, instance, project_id,
             turn_session_map=turn_session_map,
+            turn_content_map=turn_content_map,
         )
         return len(instance.sessions)
 
