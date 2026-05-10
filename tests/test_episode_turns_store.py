@@ -9,6 +9,7 @@ import pytest
 
 from weft.episode_turns import (
     append_turn,
+    delete_turns_after_graduation,
     delete_turns_below_importance,
     delete_turns_for_graduated_episode,
     get_turn,
@@ -308,3 +309,122 @@ async def test_delete_turns_for_graduated_episode_preserves_open_episodes(pool):
     deleted = await delete_turns_for_graduated_episode(pool, older_than_days=30)
     assert deleted == 0
     assert len(await list_turns(pool, ep.id)) == 1
+
+
+# --- delete_turns_after_graduation ---
+
+
+async def _graduate_episode_aged(pool, ep_id: str, *, days_ago: int) -> None:
+    """Mark an episode graduated with ended_at set N days in the past."""
+    await pool.execute(
+        "UPDATE episodes SET status = 'graduated', "
+        "ended_at = now() - ($1 || ' days')::interval "
+        "WHERE id = $2",
+        str(days_ago),
+        ep_id,
+    )
+
+
+async def test_delete_turns_after_graduation_score_path(pool):
+    """Scored path: low-score turns deleted, high-score turns retained after TTL."""
+    ep = await _make_episode(pool)
+
+    low = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="low score"),
+    )
+    high = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.assistant, content="high score"),
+    )
+
+    # Set importance scores.
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.3 WHERE id = $1", low.id,
+    )
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.9 WHERE id = $1", high.id,
+    )
+
+    # Graduate the episode far enough in the past to exceed ttl_days_scored=90.
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+
+    result = await delete_turns_after_graduation(
+        pool,
+        high_threshold=0.7,
+        ttl_days_scored=90,
+        ttl_days_no_score=30,
+    )
+
+    assert result["scored_deleted"] == 1
+    assert result["no_score_deleted"] == 0
+
+    surviving = [t.id for t in await list_turns(pool, ep.id)]
+    assert high.id in surviving
+    assert low.id not in surviving
+
+
+async def test_delete_turns_after_graduation_no_score_fallback(pool):
+    """No-score fallback: NULL-score turns deleted after ttl_days_no_score."""
+    ep = await _make_episode(pool)
+
+    t1 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="null score 1"),
+    )
+    t2 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.assistant, content="null score 2"),
+    )
+    # importance_score remains NULL (Face offline, default state).
+
+    # Graduate the episode far enough in the past to exceed ttl_days_no_score=30.
+    await _graduate_episode_aged(pool, ep.id, days_ago=40)
+
+    result = await delete_turns_after_graduation(
+        pool,
+        high_threshold=0.7,
+        ttl_days_scored=90,
+        ttl_days_no_score=30,
+    )
+
+    assert result["no_score_deleted"] == 2
+    assert result["scored_deleted"] == 0
+    assert await list_turns(pool, ep.id) == []
+
+
+async def test_delete_turns_after_graduation_mixed_scores(pool):
+    """Mixed episode: scored-low + NULL each swept by their own policy; high-score retained."""
+    ep = await _make_episode(pool)
+
+    scored_low = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="low"),
+    )
+    scored_high = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.assistant, content="high"),
+    )
+    no_score = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="null"),
+    )
+
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id = $1", scored_low.id,
+    )
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.95 WHERE id = $1", scored_high.id,
+    )
+    # no_score.importance_score remains NULL.
+
+    # Graduated 100 days ago — past both TTLs (scored=90, no-score=30).
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+
+    result = await delete_turns_after_graduation(
+        pool,
+        high_threshold=0.7,
+        ttl_days_scored=90,
+        ttl_days_no_score=30,
+    )
+
+    assert result["scored_deleted"] == 1
+    assert result["no_score_deleted"] == 1
+
+    surviving = [t.id for t in await list_turns(pool, ep.id)]
+    assert scored_high.id in surviving
+    assert scored_low.id not in surviving
+    assert no_score.id not in surviving
