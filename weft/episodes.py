@@ -54,6 +54,11 @@ GRADUATION_TURN_TTL_DAYS_NO_SCORE = 30
 # conversation section. Turns beyond this cap produce a truncation notice.
 _GRADUATION_TURN_CAP = 60
 
+# Maximum bytes from concatenated turn content. Beyond this, the conversation
+# section truncates regardless of turn count, to keep embedding inputs from
+# silently truncating downstream.
+_GRADUATION_CONTENT_BYTE_CAP = 32 * 1024  # 32 KB
+
 
 async def create_episode(
     pool: asyncpg.Pool,
@@ -406,16 +411,33 @@ async def graduate_episode(
             parts.append(ep.summary)
 
         # Pull turns and pre-existing linked memories to enrich the snapshot.
-        turns = await _list_turns(pool, episode_id)
+        # Fetch cap+1 to detect truncation without loading the full episode.
+        turns = await _list_turns(pool, episode_id, limit=_GRADUATION_TURN_CAP + 1)
         prior_memories = await get_episode_memories(pool, episode_id)
 
         if turns:
             # Cap at _GRADUATION_TURN_CAP turns (windowed compression — no LLM).
-            included = turns[:_GRADUATION_TURN_CAP]
-            omitted = len(turns) - len(included)
-            convo_lines = [f"{t.role.value}: {t.content}" for t in included]
-            if omitted > 0:
-                convo_lines.append(f"... [truncated, {omitted} turns omitted]")
+            # Also cap by byte total so a single huge turn doesn't balloon the
+            # assembled string and silently truncate the downstream embedding.
+            convo_lines: list[str] = []
+            byte_total = 0
+            hit_byte_cap = False
+            hit_turn_cap = len(turns) > _GRADUATION_TURN_CAP
+            cap_turns = turns[:_GRADUATION_TURN_CAP]
+            for t in cap_turns:
+                line = f"{t.role.value}: {t.content}"
+                line_bytes = len(line.encode())
+                if byte_total + line_bytes > _GRADUATION_CONTENT_BYTE_CAP:
+                    hit_byte_cap = True
+                    break
+                convo_lines.append(line)
+                byte_total += line_bytes
+            if hit_byte_cap or hit_turn_cap:
+                convo_lines.append(
+                    f"... [truncated; conversation exceeded "
+                    f"{_GRADUATION_TURN_CAP}-turn or "
+                    f"{_GRADUATION_CONTENT_BYTE_CAP}-byte cap]"
+                )
             parts.append("Conversation:\n" + "\n".join(convo_lines))
 
         if prior_memories:

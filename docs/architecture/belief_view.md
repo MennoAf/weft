@@ -275,6 +275,14 @@ The `role` field on the input turn is a hard gate: `role=assistant` turns can
 only emit `"agent_suggested"` claims, never `"user_stated"`. This prevents
 adversarial injection (see §6.1).
 
+- `role=tool` and `role=system`: detector returns abstention unconditionally.
+  Tool outputs and system instructions are not factual assertions about the
+  user; their content can be adversarially controlled and they bypass the
+  user/assistant role-gating. The conservative default is no claim emission
+  for these roles in v1; if a future spec needs to extract from tool outputs
+  (e.g., calendar API responses), the design must add per-tool trust
+  attestation.
+
 **Version stamping:** every `ClaimUpdate` carries the detector's
 `detector_version` string (e.g., `"belief-detector-v1.2"`). The version is
 written to `belief_claims.detector_version` at materialization. When the
@@ -370,6 +378,10 @@ not resolve to any valid dot-namespaced attribute and should fail attribute
 extraction before confidence is even computed. Test fixtures must include these
 adversarial cases; any detector version that emits a non-abstention output for
 them fails certification.
+
+- `role=tool` and `role=system` turns produce no claims regardless of content
+  (gate at the detector level). This closes the role-spoofing path where
+  instruction-style content sneaks in via a non-user, non-assistant role.
 
 ### 6.2 Over-Extraction
 
