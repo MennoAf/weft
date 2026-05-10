@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +61,47 @@ from benchmarks.longmemeval.reader import Reader
 from benchmarks.longmemeval.router import Tier, policy_for, retrieve
 
 logger = logging.getLogger(__name__)
+
+
+def _answer_text_match(gold: str, content: str) -> bool:
+    """Check whether a gold answer string is present in a turn's content.
+
+    Heuristic (documented for transparency):
+    - Both sides are lowercased and whitespace-stripped before comparison.
+    - For gold answers longer than 3 characters: substring containment
+      (``gold in content``). This means "Paris" matches "Parisian" as a
+      side effect; short, common tokens are more likely to false-positive.
+    - For gold answers 3 characters or shorter (e.g. "no", "yes", "UK"):
+      word-boundary match via ``re.search(r"\\b<gold>\\b", content)`` to
+      prevent "no" matching "north" or "not".
+
+    Known false positives:
+    - "Paris" will match a turn that mentions "Parisian" (substring, no
+      boundary guard for long tokens by design — boundary guards on long
+      tokens would miss plurals, possessives, etc.).
+    - Single-word gold answers that appear inside compound words sharing
+      that root (e.g. "art" inside "artifact") — accepted trade-off.
+
+    Known false negatives:
+    - Gold answers that appear only in paraphrased form (e.g. "NYC" when
+      the turn says "New York City"). Text-match cannot resolve synonyms.
+    - Hyphenated or punctuation-adjacent gold tokens may miss a boundary
+      match for the short-token path (``re`` \\b is ASCII-boundary-aware).
+
+    Args:
+        gold: The gold answer string (lowercased + stripped before use).
+        content: The turn content to search within.
+
+    Returns:
+        True if the gold answer is found in the content, False otherwise.
+    """
+    gold = gold.strip().lower()
+    content = content.strip().lower()
+    if not gold:
+        return False
+    if len(gold) <= 3:
+        return bool(re.search(rf"\b{re.escape(gold)}\b", content))
+    return gold in content
 
 
 DEFAULT_TOP_K = 10
@@ -187,14 +229,18 @@ async def _run_one(
     project_id = project_id_for(instance.question_id)
 
     # 1+2. Ingest haystack into a per-question project sandbox.
-    # Allocate a per-question side-map only when recall@k capture is on
+    # Allocate per-question side-maps only when recall@k capture is on
     # — keeps memory pressure flat for non-instrumented runs.
     turn_session_map: dict[str, str] | None = (
+        {} if capture_recall and mode == "turns" and tier == "turns" else None
+    )
+    turn_content_map: dict[str, str] | None = (
         {} if capture_recall and mode == "turns" and tier == "turns" else None
     )
     n_sessions = await load_haystack(
         pool, embedder, instance, mode,
         turn_session_map=turn_session_map,
+        turn_content_map=turn_content_map,
     )
 
     # 2.5. Warm-boost (P1.A5) — pre-warm the boost loop so usefulness
@@ -248,13 +294,17 @@ async def _run_one(
     if warm_boost_telemetry is not None:
         telemetry["warm_boost"] = warm_boost_telemetry
 
-    # Recall@k instrumentation — only meaningful when we have a side-map.
-    # Compare the source sessions for the top-k retrieved turns against
-    # the gold ``has_answer`` sessions (loaded from
-    # ``answer_session_ids`` in dataset.py). A "hit" means at least one
-    # gold session appears among the retrieved sessions; the metric is
-    # therefore recall@k as a per-question 0/1 (rolled up to a fraction
-    # at the run level).
+    # Recall@k instrumentation — only meaningful when we have side-maps.
+    # Session-level: compare source sessions of top-k retrieved turns
+    # against the gold ``has_answer`` sessions (loaded from
+    # ``answer_session_ids`` in dataset.py). A session-level "hit" means
+    # at least one gold session appears among the retrieved sessions.
+    #
+    # Turn-level: additionally check whether the gold answer text appears
+    # verbatim in any of the retrieved turns' content (substring match
+    # for long gold answers, word-boundary match for short ones). See
+    # ``_answer_text_match`` for the documented heuristic and its
+    # known false-positive / false-negative cases.
     if turn_session_map is not None:
         topk = memories[:recall_k]
         retrieved_turn_ids = [m.memory.id for m in topk]
@@ -267,6 +317,25 @@ async def _run_one(
             s.session_id for s in instance.sessions if s.has_answer
         }
         hit = bool(gold_session_ids & retrieved_session_set)
+
+        # Turn-level recall: check whether the gold answer text appears in
+        # any of the top-k retrieved turns. Requires the turn_content_map
+        # side-map, which is always populated alongside turn_session_map
+        # when capture_recall is True in turns mode.
+        gold_answer_text = instance.answer.strip().lower()
+        retrieved_turn_contents: list[str] = []
+        if turn_content_map is not None:
+            retrieved_turn_contents = [
+                turn_content_map[tid]
+                for tid in retrieved_turn_ids
+                if tid in turn_content_map
+            ]
+        n_retrieved_turns_with_content = len(retrieved_turn_contents)
+        turn_level_hit = any(
+            _answer_text_match(gold_answer_text, content)
+            for content in retrieved_turn_contents
+        )
+
         telemetry["recall"] = {
             "question_id": instance.question_id,
             "question_type": instance.question_type,
@@ -276,6 +345,8 @@ async def _run_one(
             "gold_session_ids": sorted(gold_session_ids),
             "recall_at_k_hit": hit,
             "n_turns_indexed": len(turn_session_map),
+            "turn_level_recall_at_k_hit": turn_level_hit,
+            "n_retrieved_turns_with_content": n_retrieved_turns_with_content,
         }
 
     return response.hypothesis, telemetry
