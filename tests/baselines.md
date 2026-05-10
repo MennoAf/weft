@@ -306,3 +306,160 @@ on the harder M split anyway).
 
 `loom-ee973301` is satisfied. Local-only summary doc with the full
 comparison table: `benchmarks/longmemeval/results/turn_tier_validation_2026_05_09.md`.
+
+## Recall-vs-Reader bucketing spike (2026-05-09 evening)
+
+**Question:** of the 58 M-tier turn-tier baseline failures, are they
+retrieval failures (gold context not in top-10) or Reader failures
+(gold context retrieved, answer still wrong)? The answer decides
+whether Phase 2 hierarchical retrieval (loom-531d1c44) ships or pivots.
+
+**Inputs (no fresh run — both files already on disk):**
+
+- QA eval: `longmemeval_m_cleaned_turns_tier-turns_strat50s0_20260507T001033Z.jsonl.eval-results-gpt-4o`
+- Recall@10: `longmemeval_m_cleaned_turns_tier-turns_strat50s0_20260507T150321Z_recall_at_10.jsonl`
+
+Joined by `question_id` — perfect overlap (251/251).
+
+**Verdict:** ✅ **Reader is the bottleneck. 81% of failures had gold context retrieved.**
+
+Cross-tab (n=251):
+
+| | QA OK | QA FAIL | Total |
+|---|---:|---:|---:|
+| Recall@10 HIT | 191 | **47** (Reader fails) | 238 |
+| Recall@10 MISS | 2 | **11** (Retrieval fails) | 13 |
+| **Total** | 193 | 58 | 251 |
+
+- P(QA correct \| HIT) = 191/238 = **80.3%** — the Reader's ceiling on
+  the retrieved context.
+- P(QA correct \| MISS) = 2/13 = **15.4%** — lucky-guess floor when
+  no gold context is in the prompt.
+
+**Headroom (assuming current P(correct\|HIT) on the new context):**
+
+| Layer fix | New accuracy | Δ |
+| --- | ---: | ---: |
+| Current overall | 76.89% | — |
+| Reader fixes every HIT_FAIL | **95.62%** | +18.73pt |
+| Retrieval fixes every MISS_FAIL | 81.27% | +4.38pt |
+
+Reader-to-retrieval headroom ratio: **4.3x**.
+
+**By question type — Reader-share of failures:**
+
+| type | n | pass% | H_OK | H_FL | M_OK | M_FL | Reader-share of fails |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| knowledge-update | 39 | 66.7% | 25 | 13 | 1 | 0 | **13/13 (100%)** |
+| multi-session | 67 | 74.6% | 49 | 15 | 1 | 2 | **15/17 (88%)** |
+| single-session-assistant | 28 | 100.0% | 28 | 0 | 0 | 0 | n/a |
+| single-session-preference | 15 | 60.0% | 9 | 5 | 0 | 1 | **5/6 (83%)** |
+| single-session-user | 35 | 97.1% | 34 | 1 | 0 | 0 | 1/1 (100%) |
+| temporal-reasoning | 67 | 68.7% | 46 | 13 | 0 | 8 | **13/21 (62%)** |
+
+knowledge-update is the cleanest signal: **every** failing question
+had gold context retrieved. There is nothing for hierarchical
+retrieval to fix on knowledge-update — the entire gap is the Reader
+not reasoning correctly over an updated fact.
+
+Temporal-reasoning is the only type where retrieval-side losses
+matter (8 of 21 failures). Even there, Reader-fix headroom (+19pt
+on the type) is larger than retrieval-fix headroom (+12pt on the
+type).
+
+**Implication for Phase 2 (loom-531d1c44):** hierarchical retrieval
+caps at +4.38pt overall, almost all of it concentrated in
+temporal-reasoning. The overall accuracy ceiling for any
+retrieval-only intervention on this baseline is **81.27%**.
+The 95.62% ceiling lives downstream — in whatever is reading the
+context.
+
+**Run artifacts:**
+
+- JSON cross-tab: `benchmarks/longmemeval/results/recall_vs_reader_bucketing_2026_05_09.json`
+- Inputs: the two files listed above
+
+### Correction: the 81% headline overstated Reader-share
+
+The 4-bucket cross-tab above uses `recall_at_k_hit` as-recorded in the
+recall@10 file, which is **session-level**: a question is HIT if at
+least one gold session is represented in the 10 retrieved turns. For
+multi-session questions where there are 3, 5, or 6 gold sessions and
+only 1-2 are retrieved, the metric still reports HIT — even though
+the answer-bearing turn(s) are likely in the missed gold sessions.
+
+A 12-question stratified eyeball on HIT_FAIL examples surfaced this
+quickly (e.g. qid `0977f2af` "kitchen gadget before Air Fryer" — gold
+session for *Instant Pot* was not retrieved, only the *Air Fryer* gold
+session; recall@10 reports HIT but the Reader cannot answer).
+
+**Re-bucketing the 47 HIT_FAIL questions by gold-session coverage:**
+
+| Bucket | n_OK | n_FAIL | Notes |
+| --- | ---: | ---: | --- |
+| HIT_FULL (all gold sessions retrieved) | 156 | 20 | cleanest "Reader-only failure" |
+| HIT_PARTIAL (some gold sessions missed) | 35 | 27 | retrieval covered partially |
+| MISS (no gold sessions retrieved) | 2 | 11 | clean retrieval miss |
+
+**Failure share corrected:** Reader-only **34.5%**, retrieval-side
+total **65.5%** (HIT_PARTIAL + MISS). This **inverts** the
+session-level headline.
+
+**Corrected ceilings:**
+
+| Layer fix | New accuracy | Δ |
+| --- | ---: | ---: |
+| Reader fixes every HIT_FULL fail | 84.86% | +7.97pt |
+| Retrieval fixes every PARTIAL+MISS fail | **92.03%** | **+15.14pt** |
+
+Retrieval has ~1.9× the headroom of the Reader.
+
+**By type — the failure regimes are now distinct:**
+
+| type | fails | HIT_FULL | HIT_PART | MISS | Reader-only % |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| knowledge-update | 13 | 9 | 4 | 0 | **69.2%** |
+| single-session-preference | 6 | 5 | 0 | 1 | **83.3%** |
+| single-session-user | 1 | 1 | 0 | 0 | 100% |
+| multi-session | 17 | 3 | 12 | 2 | **17.6%** |
+| temporal-reasoning | 21 | 2 | 11 | 8 | **9.5%** |
+
+knowledge-update + preference + user (n=20 fails) is overwhelmingly
+**Reader-driven** — gold context is fully retrieved and the Reader
+fails to reason over it (recency-priority, preference application,
+abstention). multi-session + temporal-reasoning (n=38 fails) is
+overwhelmingly **retrieval-driven** — partial gold-session coverage
+is the dominant failure shape.
+
+**Sample-12 failure-mode taxonomy (HIT_FAIL inspection):**
+
+1. **Recall-hit-but-turn-miss** — gold session in retrieved set, but
+   answer-bearing turn isn't (multi-session, temporal-reasoning).
+2. **Reader recency/update failure** — multiple values in context,
+   Reader picks the older or more-discussed one (e.g. Hawaii vs Paris
+   for "most recent family trip").
+3. **Reader hallucination on `_abs` (should-abstain) questions** — gold
+   context is silent on the asked detail, Reader fabricates from world
+   knowledge (e.g. bus-cost estimate, vintage *films* answered with
+   vintage-*camera* duration).
+4. **Reader preference-blindness** — preference signal in context,
+   Reader gives a generic answer (e.g. cultural-events question whose
+   gold session is full of language-learning context).
+5. Likely judge noise — 1 of 12 borderline.
+
+**Implication for Phase 2 (loom-531d1c44):** hierarchical retrieval is
+the right intervention for the multi-session + temporal-reasoning
+cluster (38 fails, mostly retrieval-side; ceiling +15.14pt). A small
+Reader-prompt pass — abstention rule for `_abs`-style questions,
+recency-priority rule for updates, explicit preference-application
+instruction — also has standalone value for the knowledge-update +
+preference + user cluster (20 fails, mostly Reader-side; ceiling
++7.97pt). The two interventions don't compete: they target disjoint
+question-type clusters.
+
+Cheapest sequence: Reader prompt pass first (a few hours, no infra
+work), measure delta, then commit to Phase 2 retrieval for the
+remaining retrieval-side fails.
+
+**Run artifact (corrected):** `benchmarks/longmemeval/results/recall_vs_reader_bucketing_2026_05_09_extended.json`
+(6-bucket cross-tab + per-question gold-coverage detail).
