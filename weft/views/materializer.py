@@ -45,8 +45,10 @@ Lock namespace analogue: weft/episode_turns.py (_TURN_APPEND_LOCK_NAMESPACE).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -84,6 +86,15 @@ _REVIEW_THRESHOLD = 0.85
 _EPOCH_ISO = "1970-01-01T00:00:00+00:00"
 _EPOCH_TURN_ID = ""
 
+# RLS sentinel — the system-wide bypass user_id used for cross-user reads.
+# Must never be used as a write-side user_id (would insert claims owned by
+# the sentinel, bypassing per-user RLS boundaries).
+_RLS_SYSTEM_SENTINEL = "__system_global_zathras__"
+
+# Allow-list for write-side user_id values.  Matches alphanumeric + underscore
+# + hyphen, 1-64 characters — no shell-special or SQL-special characters.
+_USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
 
 # ---------------------------------------------------------------------------
 # Public dataclass
@@ -116,19 +127,42 @@ def _new_claim_id() -> str:
     return f"belief-{uuid.uuid4().hex[:10]}"
 
 
+def _validate_user_id_for_write(user_id: str) -> None:
+    """Raise ValueError if user_id is unsafe to use in a write-side SET LOCAL.
+
+    Two checks (both must pass):
+    1. Must not be the RLS bypass sentinel — writing claims under the sentinel
+       would place them outside any real user's RLS boundary.
+    2. Must match _USER_ID_PATTERN — no SQL-special or shell-special characters,
+       max 64 chars.  The regex restricts to characters that need no SQL escaping,
+       so the SET LOCAL literal can use user_id directly.
+    """
+    if user_id == _RLS_SYSTEM_SENTINEL:
+        raise ValueError(
+            f"refusing to materialize claim under RLS sentinel user_id={_RLS_SYSTEM_SENTINEL!r}"
+        )
+    if not _USER_ID_PATTERN.match(user_id):
+        raise ValueError(
+            f"refusing to write claim with user_id={user_id!r} — "
+            f"must match {_USER_ID_PATTERN.pattern}"
+        )
+
+
 def _claim_lock_key(user_id: str, attribute: str, scope: str) -> int:
     """Hash (user_id, attribute, scope) to a 32-bit signed int for advisory locking.
+
+    Uses sha256 (not Python's hash()) because Python's hash() is randomized
+    per process by default (PYTHONHASHSEED), which means two materializer
+    processes computing the lock key for the same triple would get
+    different values and the advisory lock would not serialize them.
 
     Collisions across distinct keys produce harmless extra serialization.
     Collisions do NOT produce incorrect behaviour because the critical section
     also checks the full key in SQL (SELECT FOR UPDATE).
     """
-    combined = f"{user_id}|{attribute}|{scope}"
-    raw = hash(combined) & 0xFFFF_FFFF
-    # Convert unsigned 32-bit to signed 32-bit (asyncpg expects int32).
-    if raw >= 0x8000_0000:
-        raw -= 0x1_0000_0000
-    return raw
+    combined = f"{user_id}|{attribute}|{scope}".encode("utf-8")
+    digest = hashlib.sha256(combined).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
 
 async def _fetch_pending_turns(
@@ -503,11 +537,10 @@ async def materialize_turn(
                     # policies pass.  The materializer processes multiple
                     # users' turns; setting per-write is the safe path.
                     # NOTE: SET LOCAL does not support parameterized values in
-                    # PostgreSQL — must use a literal string.  Sanitize by
-                    # escaping single quotes (user_id is an internal key, not
-                    # user-controlled text, but be defensive anyway).
-                    safe_uid = user_id.replace("'", "''")
-                    await conn.execute(f"SET LOCAL app.user_id = '{safe_uid}'")
+                    # PostgreSQL — must use a literal string.  _validate_user_id_for_write
+                    # restricts user_id to alphanumeric + _ + -, so no escaping is needed.
+                    _validate_user_id_for_write(user_id)
+                    await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
 
                     result = await _write_single_claim(
                         conn,
@@ -661,6 +694,17 @@ async def materialize_pending_turns(
             write_result = await materialize_turn(pool, turn, actionable)
             result.claims_written += write_result["written"]
             result.claims_superseded += write_result["superseded"]
+        except ValueError as exc:
+            # Permanent validation failure (e.g. sentinel user_id, invalid format).
+            # Advance the cursor — retrying will never help.
+            logger.warning(
+                "materializer.write_validation_error: turn_id=%s error=%s", turn.id, exc,
+            )
+            result.errors += 1
+            new_cursor_occurred_at = turn.occurred_at.isoformat()
+            new_cursor_turn_id = turn.id
+            result.turns_processed += 1
+            continue
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "materializer.write_error: turn_id=%s error=%s", turn.id, exc,

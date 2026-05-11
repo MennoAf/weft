@@ -30,6 +30,7 @@ from weft.views.belief_detector import DETECTOR_VERSION, ClaimUpdate
 from weft.views.materializer import (
     MaterializeResult,
     _CURSOR_KEY,
+    _claim_lock_key,
     materialize_pending_turns,
     materialize_turn,
 )
@@ -640,3 +641,161 @@ async def test_supersession_chain_walk_returns_history_in_occurred_at_order(
     assert claims[0]["superseded_by"] == claims[1]["claim_id"]
     assert claims[1]["superseded_by"] == claims[2]["claim_id"]
     assert claims[2]["superseded_by"] is None
+
+
+# ---------------------------------------------------------------------------
+# Test 13 (Finding 1): Sentinel user_id rejected — no claim written, errors >= 1
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sentinel_user_id_rejected(pool: asyncpg.Pool) -> None:
+    """A turn with user_id = '__system_global_zathras__' must not produce a claim.
+
+    We INSERT a turn directly using raw SQL with the sentinel GUC so the row
+    is visible to the system reader, then run materialize_pending_turns with a
+    stub detector.  The materializer must increment result.errors and leave
+    belief_claims empty for that user_id.
+    """
+    sentinel = "__system_global_zathras__"
+    ep = await create_episode(pool, EpisodeCreate(title="sentinel-test"))
+    sentinel_turn_id = f"et-{uuid.uuid4().hex[:10]}"
+
+    # Insert a turn with user_id = sentinel, bypassing the GUC-guarded helper.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL app.user_id = '{sentinel}'")
+            await conn.execute(
+                """
+                INSERT INTO episode_turns (
+                    id, episode_id, turn_index, role, content, occurred_at,
+                    token_count, user_id
+                ) VALUES ($1, $2, 0, 'user', 'sentinel content', now() - interval '2 seconds', 0, $3)
+                """,
+                sentinel_turn_id, ep.id, sentinel,
+            )
+
+    detector = _stub_detector(
+        [_make_claim_update(attribute="sleep.recent_hours", value={"hours": 7})]
+    )
+
+    result = await materialize_pending_turns(pool, detector=detector)
+
+    # No claim should exist for the sentinel user_id.
+    count = await pool.fetchval(
+        "SELECT count(*) FROM belief_claims WHERE user_id = $1", sentinel,
+    )
+    assert count == 0, f"Expected 0 claims for sentinel user_id, got {count}"
+    assert result.errors >= 1, f"Expected errors >= 1, got {result.errors}"
+
+
+# ---------------------------------------------------------------------------
+# Test 14 (Finding 2): user_id validation rejects special chars, accepts valid
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_uid", [
+    "alice'; DROP TABLE--",
+    "x\nbad",
+    "x\x00null",
+    "x with space",
+    "alice@example.com",
+    "name<tag>",
+])
+async def test_user_id_validation_rejects_special_chars(
+    pool: asyncpg.Pool,
+    bad_uid: str,
+) -> None:
+    """user_ids with SQL-special or format-special chars must be rejected.
+
+    Each bad user_id should cause materialize to increment result.errors and
+    write zero claims.
+    """
+    ep = await create_episode(pool, EpisodeCreate(title=f"bad-uid-{uuid.uuid4().hex[:6]}"))
+
+    # Build an EpisodeTurn in memory with the bad user_id — we don't insert it
+    # into the DB, we test materialize_turn directly.
+    bad_turn = EpisodeTurn(
+        id=f"et-{uuid.uuid4().hex[:10]}",
+        episode_id=ep.id,
+        turn_index=0,
+        role=TurnRole.user,
+        content="test content",
+        user_id=bad_uid,
+    )
+    updates = [_make_claim_update(turn_id=bad_turn.id)]
+
+    # materialize_turn should raise ValueError and the caller increments errors.
+    with pytest.raises(Exception):
+        await materialize_turn(pool, bad_turn, updates)
+
+    count = await pool.fetchval("SELECT count(*) FROM belief_claims")
+    assert count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("good_uid", [
+    "alice",
+    "user-123",
+    "5e9d8b4f1a2c",
+])
+async def test_user_id_validation_accepts_valid(
+    pool: asyncpg.Pool,
+    good_uid: str,
+) -> None:
+    """Valid user_ids must not be rejected."""
+    ep = await create_episode(pool, EpisodeCreate(title=f"good-uid-{uuid.uuid4().hex[:6]}"))
+    turn = EpisodeTurn(
+        id=f"et-{uuid.uuid4().hex[:10]}",
+        episode_id=ep.id,
+        turn_index=0,
+        role=TurnRole.user,
+        content="I slept 7 hours.",
+        user_id=good_uid,
+    )
+
+    # Manually insert the turn so the materializer can see it via the batch path.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            safe = good_uid.replace("'", "''")
+            await conn.execute(f"SET LOCAL app.user_id = '{safe}'")
+            await conn.execute(
+                """
+                INSERT INTO episode_turns (
+                    id, episode_id, turn_index, role, content, occurred_at,
+                    token_count, user_id
+                ) VALUES ($1, $2, 0, 'user', 'I slept 7 hours.', now() - interval '1 second', 0, $3)
+                """,
+                turn.id, ep.id, good_uid,
+            )
+
+    updates = [_make_claim_update(attribute="sleep.recent_hours", value={"hours": 7}, turn_id=turn.id)]
+    result = await materialize_turn(pool, turn, updates)
+    assert result["written"] == 1, f"Expected 1 written for uid={good_uid!r}, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# Test 15 (Finding 3): _claim_lock_key is deterministic across calls
+# ---------------------------------------------------------------------------
+
+
+def test_claim_lock_key_deterministic_across_calls() -> None:
+    """_claim_lock_key must return the same value for the same inputs every call.
+
+    Pins the expected value so a change in the hash formula (e.g. switching
+    back to Python's hash()) will flip this test red.
+    """
+    # Expected value: sha256("user-1|sleep.recent_hours|global")[:4] big-endian & 0x7FFFFFFF
+    # Computed once: 1622640639
+    _EXPECTED = 1622640639
+
+    results = [
+        _claim_lock_key("user-1", "sleep.recent_hours", "global")
+        for _ in range(1000)
+    ]
+    assert len(set(results)) == 1, "Lock key is not deterministic across calls"
+    assert results[0] == _EXPECTED, (
+        f"Lock key changed: expected {_EXPECTED}, got {results[0]}. "
+        "If the hash algorithm was intentionally changed, update _EXPECTED."
+    )
