@@ -1,0 +1,26 @@
+[
+  {
+    "turn_index": 0,
+    "role": "user",
+    "occurred_at": "2026-03-15T18:00:00+00:00",
+    "content": "We went to Hawaii for our family trip last month. The beaches were great.",
+    "claim_update": {
+      "attribute": "trip.recent-family",
+      "value": {"destination": "Hawaii", "month": "2026-02"},
+      "confidence": 0.92,
+      "source_provenance": "user_stated"
+    }
+  },
+  {
+    "turn_index": 1,
+    "role": "user",
+    "occurred_at": "2026-05-09T12:30:00+00:00",
+    "content": "Just got back from Paris! That was our latest family trip — completely different vibe from Hawaii.",
+    "claim_update": {
+      "attribute": "trip.recent-family",
+      "value": {"destination": "Paris", "month": "2026-05"},
+      "confidence": 0.95,
+      "source_provenance": "user_stated"
+    }
+  }
+]
