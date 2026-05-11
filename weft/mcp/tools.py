@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -443,7 +444,6 @@ async def _weft_recall_turns(
         # Fire-and-forget: log session access (outside acquire — system-level op).
         # Mirrors the belief-tier wiring at weft_recall above. Dedup across the
         # anchor map so a turn surfaced under multiple anchors is logged once.
-        import asyncio
         accessed_ids: list[str] = []
         seen_log: set[str] = set()
         for turns in anchored.values():
@@ -532,7 +532,6 @@ async def _weft_recall_both(
 
         # Fire-and-forget: log access to BOTH memory + turn IDs so the
         # session-tracking layer keeps both surfaces in its working set.
-        import asyncio
         memory_ids = [
             e["payload"]["id"] for e in fused if e["kind"] == "memory"
         ]
@@ -672,9 +671,18 @@ async def weft_recall(
                     "count": len(claim_results),
                     "results": [r.to_recall_dict() for r in claim_results],
                 }
-        except Exception as exc:
+        except (
+            asyncpg.PostgresConnectionError,
+            asyncpg.InterfaceError,
+            ConnectionError,
+            asyncio.TimeoutError,
+            ImportError,
+        ) as exc:
             # Hard rule: belief-view failures must NOT break the legacy
             # belief tier.  Log and fall through to the existing memories search.
+            # Only transient / infrastructure errors are caught here — programming
+            # errors (ValueError, KeyError) and integrity violations propagate so
+            # the caller learns about bugs.
             logger.warning(
                 "belief_view_query failed; falling back to memories search: %s",
                 exc,
@@ -831,7 +839,6 @@ async def weft_recall(
                         logger.warning("Cross-project search failed: %s", exc)
 
         # Fire-and-forget: log session access (outside acquire — system-level op)
-        import asyncio
         if results:
             asyncio.create_task(
                 log_memory_access(

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,7 +51,7 @@ MAX_COST_PER_CALL_USD = 0.0021
 # each segment.  The invariant that matters is: all-lowercase, no spaces,
 # no uppercase, dot-separated namespace + name.
 _ATTRIBUTE_RE = re.compile(
-    r"^[a-z][a-z0-9_-]*\.[a-z0-9][a-z0-9._\-]*$"
+    r"^[a-z]([a-z0-9][a-z0-9_-]*)?\.[a-z0-9][a-z0-9._\-]*$"
 )
 
 # Pre-filter patterns for adversarial injection (§6.1).
@@ -64,6 +65,34 @@ _INJECTION_PATTERNS = [
     re.compile(r"(?i)\bact as\b"),
     re.compile(r"(?i)\bsystem\s+prompt\b"),
 ]
+
+# Translation table mapping common confusable Unicode characters to their ASCII
+# equivalents.  Built once at import time.  Applied in _check_injection after
+# NFKC normalization to catch lookalike bypass attempts (e.g. Cyrillic 'і' for
+# Latin 'i') that NFKC alone does not collapse.
+_CONFUSABLE_MAP = str.maketrans(
+    {
+        # Cyrillic lookalikes for Latin letters
+        "а": "a",  # Cyrillic а
+        "е": "e",  # Cyrillic е
+        "і": "i",  # Cyrillic і (Byelorussian-Ukrainian I)
+        "и": "i",  # Cyrillic и
+        "о": "o",  # Cyrillic о
+        "р": "r",  # Cyrillic р
+        "с": "c",  # Cyrillic с
+        "х": "x",  # Cyrillic х
+        "у": "y",  # Cyrillic у
+        # Greek lookalikes
+        "α": "a",  # Greek α
+        "ε": "e",  # Greek ε
+        "ι": "i",  # Greek ι
+        "ο": "o",  # Greek ο
+        # Full-width ASCII (NFKC collapses most of these, belt-and-suspenders)
+        "Ｉ": "I",  # Fullwidth Latin Capital Letter I
+        "ｉ": "i",  # Fullwidth Latin Small Letter i
+        "Ｐ": "P",  # Fullwidth P
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Output dataclass
@@ -204,9 +233,24 @@ def _get_client() -> AsyncAnthropic:
 
 
 def _check_injection(content: str) -> bool:
-    """Return True if the content matches any adversarial injection pattern."""
+    """Return True if the content matches any adversarial injection pattern.
+
+    Normalizes Unicode (NFKC) before matching so confusable characters like
+    Cyrillic 'і' (U+0456) and zero-width joiners can't bypass ASCII regex.
+    """
+    normalized = unicodedata.normalize("NFKC", content)
+    # Strip zero-width and bidirectional formatting characters that
+    # NFKC alone does not collapse but which can split a regex match.
+    normalized = "".join(
+        ch for ch in normalized
+        if unicodedata.category(ch) != "Cf"  # 'Cf' = format characters
+    )
+    # Map common confusable (lookalike) characters to their ASCII equivalents.
+    # Covers the most frequent Latin-lookalike Cyrillic/Greek/other codepoints
+    # used to bypass keyword injection filters.
+    normalized = normalized.translate(_CONFUSABLE_MAP)
     for pattern in _INJECTION_PATTERNS:
-        if pattern.search(content):
+        if pattern.search(normalized):
             return True
     return False
 

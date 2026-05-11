@@ -24,6 +24,7 @@ Reader-only fail #3 (qid 9ea5eabc):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -380,7 +381,7 @@ async def test_belief_view_error_falls_back_gracefully(pool: asyncpg.Pool) -> No
 
     with patch(
         "weft.views.belief_query.search_belief_claims",
-        side_effect=RuntimeError("injected failure for test"),
+        side_effect=asyncio.TimeoutError("injected transient timeout for test"),
     ):
         response = await weft_recall(
             ctx,
@@ -569,3 +570,34 @@ async def test_token_overlap_ranks_correctly(pool: asyncpg.Pool) -> None:
     assert results[0].overlap_score >= results[1].overlap_score, (
         "First result should have overlap_score >= second"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 (Finding 6): Non-transient errors propagate out of weft_recall
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_belief_view_propagates_non_transient_errors(
+    pool: asyncpg.Pool,
+) -> None:
+    """Non-transient asyncpg errors must propagate, not be swallowed.
+
+    The narrowed except clause only catches transient infrastructure errors
+    (connection failure, timeout, interface error, import error).  A
+    UniqueViolationError indicates a bug and must not be silently caught.
+    """
+    app = _make_app(pool)
+    ctx = _make_ctx(app)
+
+    with patch(
+        "weft.views.belief_query.search_belief_claims",
+        side_effect=asyncpg.UniqueViolationError(),
+    ):
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await weft_recall(
+                ctx,
+                query="x",
+                tier="belief",
+                limit=5,
+            )
