@@ -646,6 +646,41 @@ async def weft_recall(
             topic=topic,
         )
 
+    # === Belief-view primary lookup (loom-719e74b0) ===
+    # When tier='belief', first check the new belief_claims table for active
+    # claims that match the query.  Returns them in the standard response shape
+    # if any are found, skipping the legacy memories search entirely.
+    # If the primary lookup returns nothing (or errors), falls through to the
+    # existing memories search below — the legacy path is NEVER broken.
+    if tier == "belief":
+        try:
+            app: AppContext = ctx.request_context.lifespan_context
+            from weft.views.belief_query import search_belief_claims
+            async with acquire(app.pool):
+                claim_results = await search_belief_claims(
+                    app.pool,
+                    query=query,
+                    user_id=user_id,
+                    scope="global",
+                    limit=limit,
+                )
+            if claim_results:
+                return {
+                    "query": query,
+                    "mode": mode,
+                    "tier": "belief-view",
+                    "count": len(claim_results),
+                    "results": [r.to_recall_dict() for r in claim_results],
+                }
+        except Exception as exc:
+            # Hard rule: belief-view failures must NOT break the legacy
+            # belief tier.  Log and fall through to the existing memories search.
+            logger.warning(
+                "belief_view_query failed; falling back to memories search: %s",
+                exc,
+                exc_info=True,
+            )
+
     try:
         cid = set_correlation_id()
         logger.debug("weft_recall start [%s] query=%r mode=%s", cid, query[:50], mode)
