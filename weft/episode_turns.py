@@ -247,6 +247,11 @@ async def delete_turns_below_importance(
                 AND ended_at IS NOT NULL
                 AND ended_at < now() - ($2 || ' days')::interval
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM belief_claims bc
+              WHERE bc.status IN ('active', 'superseded')
+                AND episode_turns.id = ANY(bc.evidence_turn_ids)
+          )
         """,
         threshold,
         str(older_than_days),
@@ -279,6 +284,11 @@ async def delete_turns_for_graduated_episode(
               AND ended_at IS NOT NULL
               AND ended_at < now() - ($1 || ' days')::interval
         )
+          AND NOT EXISTS (
+              SELECT 1 FROM belief_claims bc
+              WHERE bc.status IN ('active', 'superseded')
+                AND episode_turns.id = ANY(bc.evidence_turn_ids)
+          )
         """,
         str(older_than_days),
     )
@@ -325,7 +335,9 @@ async def delete_turns_after_graduation(
     db = get_db(pool)
 
     # Score-aware path: delete turns with a score below threshold whose
-    # episode graduated long enough ago.
+    # episode graduated long enough ago.  Turns anchored by an active or
+    # superseded belief_claim are skipped — provenance-loss prevention
+    # per docs/architecture/belief_view.md §6.4.
     scored_result = await db.execute(
         """
         DELETE FROM episode_turns
@@ -337,6 +349,11 @@ async def delete_turns_after_graduation(
                 AND ended_at IS NOT NULL
                 AND ended_at < now() - ($2 || ' days')::interval
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM belief_claims bc
+              WHERE bc.status IN ('active', 'superseded')
+                AND episode_turns.id = ANY(bc.evidence_turn_ids)
+          )
         """,
         high_threshold,
         str(ttl_days_scored),
@@ -344,7 +361,9 @@ async def delete_turns_after_graduation(
     scored_deleted = int(scored_result.split()[-1])
 
     # Score-blind fallback: delete turns with NULL importance_score whose
-    # episode graduated past the shorter no-score TTL.
+    # episode graduated past the shorter no-score TTL.  Same prune-guard
+    # applies — a NULL-score turn is still anchored if a belief_claim
+    # references it.
     no_score_result = await db.execute(
         """
         DELETE FROM episode_turns
@@ -354,6 +373,11 @@ async def delete_turns_after_graduation(
               WHERE status = 'graduated'
                 AND ended_at IS NOT NULL
                 AND ended_at < now() - ($1 || ' days')::interval
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM belief_claims bc
+              WHERE bc.status IN ('active', 'superseded')
+                AND episode_turns.id = ANY(bc.evidence_turn_ids)
           )
         """,
         str(ttl_days_no_score),
