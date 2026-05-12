@@ -253,6 +253,52 @@ class TestWeftRecall:
         assert after["last_retrieved_at"] is not None
         assert after["retrieval_count"] == 1
 
+    async def test_query_log_writes_one_row_per_recall(self, ctx, app):
+        """v50: every weft_recall invocation persists a row in weft_recall_queries.
+
+        Fire-and-forget log task; poll briefly for the row to land. Confirms
+        (a) the wiring fires regardless of result count, (b) the resolved
+        tier (not 'auto') is what gets stored.
+        """
+        import asyncio as _asyncio
+        from weft.mcp.tools import weft_recall
+
+        # No matching memories — exercises the empty-result path so we know
+        # the log fires even when recall returns nothing.
+        await weft_recall(ctx, query="quokka", mode="keyword", tier="belief")
+
+        # Drain pending tasks. asyncio.gather on named tasks is the
+        # deterministic way to wait for a fire-and-forget log task.
+        log_tasks = [t for t in _asyncio.all_tasks() if t.get_name() == "weft-recall-query-log"]
+        if log_tasks:
+            await _asyncio.gather(*log_tasks, return_exceptions=True)
+
+        rows = await app.pool.fetch(
+            "SELECT * FROM weft_recall_queries WHERE query_text = 'quokka'"
+        )
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "recall"
+        assert rows[0]["tier"] == "belief"  # not 'auto'
+        assert rows[0]["mode"] == "keyword"
+
+    async def test_query_log_writes_for_search_all(self, ctx, app):
+        """v50: weft_search_all also writes one row per call."""
+        import asyncio as _asyncio
+        from weft.mcp.tools import weft_search_all
+
+        await weft_search_all(ctx, query="bobcat", retrieval_mode="face")
+
+        log_tasks = [t for t in _asyncio.all_tasks() if t.get_name() == "weft-search-all-query-log"]
+        if log_tasks:
+            await _asyncio.gather(*log_tasks, return_exceptions=True)
+
+        rows = await app.pool.fetch(
+            "SELECT * FROM weft_recall_queries WHERE query_text = 'bobcat'"
+        )
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "search_all"
+        assert rows[0]["retrieval_mode"] == "face"
+
     async def test_retrieval_telemetry_not_bumped_when_empty(self, ctx, app):
         """Empty result sets don't issue spurious bumps — guards against accidental wildcard updates."""
         from tests.conftest import DEFAULT_TEST_USER_ID

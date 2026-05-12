@@ -96,6 +96,7 @@ from weft.store import (
     touch_memory,
     update_memory,
     bump_retrieval_telemetry,
+    log_recall_query,
 )
 
 logger = logging.getLogger(__name__)
@@ -630,6 +631,25 @@ async def weft_recall(
     if tier == "auto":
         from weft.turn_recall import route_query_to_tier
         tier = route_query_to_tier(query)
+
+    # Step 1.5 (v50) — fire-and-forget query log. Captures EVERY weft_recall
+    # invocation regardless of which downstream tier path runs (belief / turns /
+    # both / belief-view fallback). Logged after tier resolution so the row
+    # carries the concrete tier the call actually executed against, not 'auto'.
+    app_for_log: AppContext = ctx.request_context.lifespan_context
+    asyncio.create_task(
+        log_recall_query(
+            app_for_log.pool,
+            tool_name="recall",
+            query_text=query,
+            project_id=project_id,
+            tier=tier,
+            mode=mode,
+            retrieval_mode=retrieval_mode,
+        ),
+        name="weft-recall-query-log",
+    )
+
     if tier == "turns":
         return await _weft_recall_turns(
             ctx,
@@ -1708,6 +1728,22 @@ async def weft_search_all(
         app: AppContext = ctx.request_context.lifespan_context
         from weft.skills import search_all
 
+        # Step 1.5 (v50) — fire-and-forget query log. Same observation
+        # window as weft_recall: every cross-project search counts toward
+        # the calls/week + repeat-query metrics. Logged before the actual
+        # search runs so a search failure still leaves a row.
+        if query:
+            asyncio.create_task(
+                log_recall_query(
+                    app.pool,
+                    tool_name="search_all",
+                    query_text=query,
+                    project_id=None,
+                    retrieval_mode=retrieval_mode,
+                ),
+                name="weft-search-all-query-log",
+            )
+
         async with acquire(app.pool):
             result = await search_all(
                 app.pool, app.embedding,
@@ -1719,7 +1755,7 @@ async def weft_search_all(
         # Brain-wide search returning a poisoned memory must be traceable
         # the same way recall is — incident response shouldn't have to
         # care whether the read came from weft_recall or weft_search_all.
-        import asyncio
+        # asyncio is imported at module level — no shadowing local import.
         result_ids = [r["id"] for r in result.get("results", []) if isinstance(r, dict) and "id" in r]
         # Cross-project results returned alongside the main hit set also
         # count as retrievals for telemetry purposes (handoff: "any memory

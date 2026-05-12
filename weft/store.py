@@ -1058,6 +1058,52 @@ async def bump_retrieval_telemetry(
     )
 
 
+async def log_recall_query(
+    pool: asyncpg.Pool,
+    *,
+    tool_name: str,
+    query_text: str,
+    project_id: str | None = None,
+    tier: str | None = None,
+    mode: str | None = None,
+    retrieval_mode: str | None = None,
+    result_count: int | None = None,
+) -> None:
+    """Record one weft_recall / weft_search_all invocation in weft_recall_queries.
+
+    Step 1.5 of the compounding loop (v50). The 2-week observation window
+    measures three baseline metrics — calls/week, repeat-query %, and
+    consecutive-query semantic similarity — all of which need a per-call
+    query log. Embeddings are NOT stored here; metric (c) re-embeds the
+    text at analysis time so model choice is deferred.
+
+    Errors are caught and logged but never raised: this is observation
+    telemetry on the hot recall path, and a logging failure must never
+    break a user-facing query. Callers should treat this as fire-and-forget.
+    """
+    import uuid
+    query_id = f"rq-{uuid.uuid4().hex[:8]}"
+    try:
+        await get_db(pool).execute(
+            """
+            INSERT INTO weft_recall_queries
+                (query_id, project_id, tool_name, query_text,
+                 tier, mode, retrieval_mode, result_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            query_id,
+            project_id,
+            tool_name,
+            query_text,
+            tier,
+            mode,
+            retrieval_mode,
+            result_count,
+        )
+    except (asyncpg.PostgresError, OSError, ConnectionError) as exc:
+        logger.warning("log_recall_query failed (tool=%s): %s", tool_name, exc)
+
+
 async def record_feedback(
     pool: asyncpg.Pool,
     memory_id: str,
