@@ -22,6 +22,7 @@ from weft.store import (
     store_memory,
     touch_memory,
     update_memory,
+    bump_retrieval_telemetry,
 )
 
 
@@ -177,6 +178,76 @@ async def test_touch_memory(pool):
     fetched = await get_memory(pool, mem.id)
     assert fetched.access_count == 1
     assert fetched.accessed_at >= mem.accessed_at
+
+
+async def _retrieval_telemetry(pool, memory_id):
+    row = await pool.fetchrow(
+        "SELECT last_retrieved_at, retrieval_count FROM memories WHERE id = $1",
+        memory_id,
+    )
+    return row["last_retrieved_at"], row["retrieval_count"]
+
+
+async def test_bump_retrieval_telemetry_default(pool):
+    """Freshly stored memories start with retrieval_count=0 and NULL last_retrieved_at."""
+    mem = await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="never retrieved"))
+    last_at, count = await _retrieval_telemetry(pool, mem.id)
+    assert last_at is None
+    assert count == 0
+
+
+async def test_bump_retrieval_telemetry_single(pool):
+    """Single bump increments count by 1 and stamps last_retrieved_at."""
+    mem = await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="bump once"))
+
+    await bump_retrieval_telemetry(pool, [mem.id])
+    last_at, count = await _retrieval_telemetry(pool, mem.id)
+    assert count == 1
+    assert last_at is not None
+
+
+async def test_bump_retrieval_telemetry_batched(pool):
+    """Batched bump increments every supplied id in a single statement."""
+    ids = [
+        (await store_memory(pool, MemoryCreate(type=MemoryType.fact, content=f"batch {i}"))).id
+        for i in range(3)
+    ]
+
+    await bump_retrieval_telemetry(pool, ids)
+    for memory_id in ids:
+        _, count = await _retrieval_telemetry(pool, memory_id)
+        assert count == 1
+
+
+async def test_bump_retrieval_telemetry_idempotent_increments(pool):
+    """Repeated bumps accumulate — counter is monotonic, not set-once."""
+    mem = await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="bump thrice"))
+
+    for _ in range(3):
+        await bump_retrieval_telemetry(pool, [mem.id])
+    _, count = await _retrieval_telemetry(pool, mem.id)
+    assert count == 3
+
+
+async def test_bump_retrieval_telemetry_empty_is_noop(pool):
+    """Empty id list issues no UPDATE — callers can pass result lists unconditionally."""
+    # No exception, no side effect. The implementation short-circuits before
+    # the SQL so this also doubles as a guard against accidental wildcard updates.
+    await bump_retrieval_telemetry(pool, [])
+
+
+async def test_bump_retrieval_telemetry_does_not_touch_access_count(pool):
+    """The new telemetry is intentionally decoupled from accessed_at/access_count.
+
+    Confounding the two would re-couple raw retrieval signal to the usefulness
+    EMA bump that touch_memory applies — defeats the point of v49.
+    """
+    mem = await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="separated signals"))
+
+    await bump_retrieval_telemetry(pool, [mem.id])
+    fetched = await get_memory(pool, mem.id)
+    assert fetched.access_count == 0
+    assert fetched.accessed_at == mem.accessed_at
 
 
 async def test_vector_search(pool):

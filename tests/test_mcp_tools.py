@@ -208,6 +208,77 @@ class TestWeftRecall:
         elif "total_matches" in result:
             assert result["total_matches"] > result["count"]
 
+    async def test_retrieval_telemetry_bumped_for_returned_results(self, ctx, app):
+        """v49 compounding-loop Step 1: returned memories get retrieval_count++ and last_retrieved_at stamped.
+
+        Uses mode='keyword' so the bump assertion doesn't depend on
+        FakeEmbeddingProvider similarity scores — BM25 over the literal
+        content gives deterministic matches.
+
+        ``user_id`` is passed explicitly because weft_remember (in this test
+        harness) writes under the pool's app.user_id GUC ("test-user-default")
+        while weft_recall's default resolves get_user_id() to the real
+        installation UUID. The two must match for the row to be visible.
+        """
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        store_result = await weft_remember(
+            ctx, content="Bumper memory about narwhals and arctic ecosystems"
+        )
+        memory_id = store_result["id"]
+
+        before = await app.pool.fetchrow(
+            "SELECT last_retrieved_at, retrieval_count FROM memories WHERE id = $1",
+            memory_id,
+        )
+        assert before["last_retrieved_at"] is None
+        assert before["retrieval_count"] == 0
+
+        result = await weft_recall(
+            ctx,
+            query="narwhals arctic",
+            limit=10,
+            mode="keyword",
+            tier="belief",
+            user_id=DEFAULT_TEST_USER_ID,
+        )
+        assert result["count"] >= 1
+        assert any(r["id"] == memory_id for r in result["results"])
+
+        after = await app.pool.fetchrow(
+            "SELECT last_retrieved_at, retrieval_count FROM memories WHERE id = $1",
+            memory_id,
+        )
+        assert after["last_retrieved_at"] is not None
+        assert after["retrieval_count"] == 1
+
+    async def test_retrieval_telemetry_not_bumped_when_empty(self, ctx, app):
+        """Empty result sets don't issue spurious bumps — guards against accidental wildcard updates."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        store_result = await weft_remember(
+            ctx, content="Tangential memory about volcanic geology"
+        )
+        memory_id = store_result["id"]
+
+        result = await weft_recall(
+            ctx,
+            query="entirely unrelated quantum chromodynamics topic",
+            mode="keyword",
+            tier="belief",
+            user_id=DEFAULT_TEST_USER_ID,
+        )
+        assert result["count"] == 0
+
+        row = await app.pool.fetchrow(
+            "SELECT last_retrieved_at, retrieval_count FROM memories WHERE id = $1",
+            memory_id,
+        )
+        assert row["last_retrieved_at"] is None
+        assert row["retrieval_count"] == 0
+
 
 # ---------------------------------------------------------------------------
 # weft_status
