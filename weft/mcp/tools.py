@@ -95,6 +95,7 @@ from weft.store import (
     store_memory,
     touch_memory,
     update_memory,
+    bump_retrieval_telemetry,
 )
 
 logger = logging.getLogger(__name__)
@@ -538,6 +539,11 @@ async def _weft_recall_both(
         turn_ids = [
             e["payload"]["id"] for e in fused if e["kind"] == "turn"
         ]
+        # Compounding-loop Step 1 (v49): bump per-memory retrieval telemetry
+        # for memory-kind entries only. Turns are tracked separately via
+        # turn_access_log (v46) and have no analogous column pair.
+        if memory_ids:
+            await bump_retrieval_telemetry(app.pool, memory_ids)
         if memory_ids:
             asyncio.create_task(
                 log_memory_access(
@@ -837,6 +843,16 @@ async def weft_recall(
                                 ]
                     except Exception as exc:
                         logger.warning("Cross-project search failed: %s", exc)
+
+        # Compounding-loop Step 1 (v49): bump per-memory retrieval telemetry
+        # for every id surfaced in this response — primary AND cross-project.
+        # Awaited inline so the writes commit before the session-access log
+        # task scheduled below races on the same rows.
+        bump_ids = [r.memory.id for r in results]
+        if "cross_project" in response:
+            bump_ids.extend(r["id"] for r in response["cross_project"])
+        if bump_ids:
+            await bump_retrieval_telemetry(app.pool, bump_ids)
 
         # Fire-and-forget: log session access (outside acquire — system-level op)
         if results:
@@ -1705,6 +1721,17 @@ async def weft_search_all(
         # care whether the read came from weft_recall or weft_search_all.
         import asyncio
         result_ids = [r["id"] for r in result.get("results", []) if isinstance(r, dict) and "id" in r]
+        # Cross-project results returned alongside the main hit set also
+        # count as retrievals for telemetry purposes (handoff: "any memory
+        # returned in results"). search_all flattens them, but the dict
+        # form is conservative against future shape changes.
+        cross_ids = [
+            r["id"] for r in result.get("cross_project", [])
+            if isinstance(r, dict) and "id" in r
+        ]
+        bump_ids = result_ids + cross_ids
+        if bump_ids:
+            await bump_retrieval_telemetry(app.pool, bump_ids)
         if result_ids:
             asyncio.create_task(
                 log_memory_access(

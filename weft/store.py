@@ -1031,6 +1031,33 @@ async def touch_memory(
     )
 
 
+async def bump_retrieval_telemetry(
+    pool: asyncpg.Pool,
+    memory_ids: list[str],
+) -> None:
+    """Record that ``memory_ids`` were returned by a retrieval surface.
+
+    Bumps ``last_retrieved_at`` to now() and increments ``retrieval_count`` for
+    every id in a single statement. Side-effect-free at the ranking layer —
+    deliberately distinct from ``touch_memory``'s usefulness-EMA bump, so the
+    raw retrieval signal stays unconfounded for the 2-week observation window
+    (Anvil-reframed Step 1; see migration v49 for provenance).
+
+    Empty input is a no-op so callers can pass result lists unconditionally.
+    """
+    if not memory_ids:
+        return
+    await get_db(pool).execute(
+        """
+        UPDATE memories
+        SET last_retrieved_at = now(),
+            retrieval_count = retrieval_count + 1
+        WHERE id = ANY($1::text[])
+        """,
+        memory_ids,
+    )
+
+
 async def record_feedback(
     pool: asyncpg.Pool,
     memory_id: str,
