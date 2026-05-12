@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import asyncpg
 import pytest
 
 from weft.embeddings import get_provider
@@ -23,6 +24,7 @@ from weft.store import (
     touch_memory,
     update_memory,
     bump_retrieval_telemetry,
+    log_recall_query,
 )
 
 
@@ -248,6 +250,85 @@ async def test_bump_retrieval_telemetry_does_not_touch_access_count(pool):
     fetched = await get_memory(pool, mem.id)
     assert fetched.access_count == 0
     assert fetched.accessed_at == mem.accessed_at
+
+
+async def test_log_recall_query_minimal(pool):
+    """A bare invocation persists a row with the required fields populated."""
+    await log_recall_query(pool, tool_name="recall", query_text="why is the sky blue")
+
+    rows = await pool.fetch("SELECT * FROM weft_recall_queries WHERE tool_name = 'recall'")
+    assert len(rows) == 1
+    assert rows[0]["query_text"] == "why is the sky blue"
+    assert rows[0]["query_id"].startswith("rq-")
+    assert rows[0]["created_at"] is not None
+
+
+async def test_log_recall_query_full_metadata(pool):
+    """All optional fields round-trip when supplied."""
+    await log_recall_query(
+        pool,
+        tool_name="search_all",
+        query_text="hierarchical retrieval",
+        project_id="proj-abc",
+        tier="belief",
+        mode="hybrid",
+        retrieval_mode="face",
+        result_count=7,
+    )
+
+    row = await pool.fetchrow("SELECT * FROM weft_recall_queries WHERE tool_name = 'search_all'")
+    assert row["project_id"] == "proj-abc"
+    assert row["tier"] == "belief"
+    assert row["mode"] == "hybrid"
+    assert row["retrieval_mode"] == "face"
+    assert row["result_count"] == 7
+
+
+async def test_log_recall_query_rejects_unknown_tool_name(pool):
+    """tool_name CHECK constraint guards the metric-aggregation contract.
+
+    Future analysis splits calls/week by tool_name. An unknown literal would
+    silently land in the table and skew the metric (or worse, look like a
+    new tool we shipped without updating analysis). Fail fast at write time.
+    """
+    # log_recall_query swallows DB errors — verify directly that the CHECK fires.
+    with pytest.raises(asyncpg.CheckViolationError):
+        await pool.execute(
+            "INSERT INTO weft_recall_queries (query_id, tool_name, query_text) "
+            "VALUES ($1, $2, $3)",
+            "rq-bogus01",
+            "totally_made_up",
+            "x",
+        )
+
+
+async def test_log_recall_query_swallows_db_errors(pool, caplog):
+    """A DB failure in the log path must not propagate to the caller.
+
+    The query log is on the hot retrieval surface — a transient failure
+    here must never break weft_recall for the user.
+    """
+    import logging
+    caplog.set_level(logging.WARNING, logger="weft.store")
+
+    # Force a constraint failure (NULL query_text) and confirm log_recall_query
+    # absorbs it cleanly. We bypass log_recall_query's signature by patching
+    # the underlying SQL — simpler: trigger CHECK failure via a bad tool_name
+    # by monkey-fixing the call. Cleanest path: log to a known-broken pool.
+    # Use the existing pool but pre-truncate to a degenerate state via SQL
+    # that violates the CHECK.
+    #
+    # Practically: invoke with valid args but pre-poison the DB so the INSERT
+    # would fail. Easier: just invoke with an absurdly long query_text? There's
+    # no length cap. Instead, drop the table briefly to force PostgresError.
+    await pool.execute("ALTER TABLE weft_recall_queries RENAME TO _tmp_drop_target")
+    try:
+        # Should NOT raise.
+        await log_recall_query(pool, tool_name="recall", query_text="orphaned")
+    finally:
+        await pool.execute("ALTER TABLE _tmp_drop_target RENAME TO weft_recall_queries")
+
+    assert any("log_recall_query failed" in rec.message for rec in caplog.records)
 
 
 async def test_vector_search(pool):
