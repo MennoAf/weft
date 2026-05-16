@@ -71,8 +71,10 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
         "with one ingredient apply to baking with another. Identify the "
         "preference signal even when the question's topic is not literal-match "
         "in memory, and answer in terms of how that preference applies to the "
-        "current question. Abstain only if no preference is present anywhere "
-        "in memory."
+        "current question. When a preference IS present in memory, EXTRACT it "
+        "and answer with that preference applied — do NOT give a generic answer "
+        "when a preference signal exists. The preference itself is the answer. "
+        "Abstain only if no preference is present anywhere in memory."
     ),
     "multi-session": (
         "This question requires synthesizing information across multiple past "
@@ -80,7 +82,11 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     ),
     "knowledge-update": (
         "The relevant fact may have been UPDATED across sessions. If memories "
-        "contradict, trust the most recent one based on session date."
+        "contradict, trust the most recent one based on session date. "
+        "CRITICAL: frequency or volume of mentions does NOT determine the "
+        "current value. Sort memories by session date; the LATEST date wins, "
+        "even if older mentions are more numerous, more detailed, or more "
+        "elaborately discussed."
     ),
     "temporal-reasoning": (
         "This question requires reasoning about WHEN events happened. Use the "
@@ -91,8 +97,13 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 
 _ABSTENTION_SUFFIX = (
     "\n\nABSTENTION CASE: This question may not have an answer in the memories. "
-    "If the memories do not actually contain the requested information, respond "
-    "with exactly: I don't know."
+    "If the SPECIFIC detail asked is not explicitly stated in the memories, "
+    "respond with exactly: I don't know. Do NOT use general world knowledge "
+    "to fill gaps. Do NOT infer plausible values from related-but-different "
+    "memories — if the question asks about a film and the memories only "
+    "mention a camera, you do not know about the film; if asked about a "
+    "specific cost and the memories only describe a related event, you do "
+    "not know the cost. Plausibility is not evidence."
 )
 
 

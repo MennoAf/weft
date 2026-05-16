@@ -521,3 +521,36 @@ uv run python -m benchmarks.wick_eval.run_belief_canary \
 | overall_over_extraction_rate | TBD — fixture curation tracked by loom-72bd0d59 |
 | total_turns | 5 |
 | baseline_run_cost | ~$0.01 (5 detector calls at ≤$0.0021 each, minor extractions) |
+
+## Reader-prompt v2 — anti-frequency / anti-fabrication / extract-preference (2026-05-16)
+
+Targeted patches to `benchmarks/longmemeval/reader.py` system prompts addressing
+the Reader-driven failure clusters identified by the Recall-vs-Reader bucketing
+spike (see corrected analysis above). All three patches gate to specific question
+types — no risk of collateral on already-passing classes.
+
+| Patch | Question type | Failure mode addressed | Source taxonomy item |
+| --- | --- | --- | --- |
+| Anti-frequency recency rule | `knowledge-update` | Reader picks older fact when discussed more (Hawaii vs Paris) | Failure mode #2 |
+| Anti-fabrication abstention rule | all `_abs` types | Reader fills gaps from world knowledge (bus cost, vintage films vs cameras) | Failure mode #3 |
+| Extract-and-apply preference rule | `single-session-preference` | Reader gives generic answer when preference signal exists | Failure mode #4 |
+
+**Falsifiable claim:** the recall-vs-Reader analysis identified +7.97pt overall
+accuracy headroom across the Reader-driven clusters (HIT_FULL failures on
+knowledge-update + preference + single-session-user). Reader-prompt v2 should
+move that ceiling — not fully close it, but materially lift overall accuracy
+above the P0.1 baseline of 0.7689 on a re-run.
+
+**Measurement plan:** the in-flight Phase 2 benchmark (`loom-87e4d8bf`, started
+2026-05-16 10:47 UTC) loaded the OLD Reader at startup and will measure
+hierarchical retrieval against the v1 Reader. A subsequent M-tier re-run
+post-Phase-2-completion measures v2-Reader + (whichever WEFT_HIERARCHICAL state
+was decided). Tracked by a follow-up Loom task — see the Loom queue for
+the M-tier Reader-v2 re-run.
+
+**Why ship before measurement:** the failure taxonomy is published; the patches
+are tight; the cost of a wrong patch is small (each is type-gated). The cheaper
+sequence per the Recall-vs-Reader analysis (line 460-462) is Reader prompt pass
+first, then commit to Phase 2 retrieval for the remaining retrieval-side fails.
+This commit ships the Reader pass; Phase 2 measurement decides the rest.
+
