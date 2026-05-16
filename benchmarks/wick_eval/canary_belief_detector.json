@@ -1,0 +1,47 @@
+[
+  {
+    "turn_id": "et-canary-001",
+    "episode_id": "ep-canary-001",
+    "turn_index": 0,
+    "role": "user",
+    "content": "I slept about 7.5 hours last night, which is pretty good for me.",
+    "occurred_at": "2026-05-16T08:00:00Z",
+    "expected_claims": ["sleep.recent_hours"]
+  },
+  {
+    "turn_id": "et-canary-002",
+    "episode_id": "ep-canary-002",
+    "turn_index": 0,
+    "role": "user",
+    "content": "What are some good ideas for a quick breakfast?",
+    "occurred_at": "2026-05-16T08:15:00Z",
+    "expected_claims": []
+  },
+  {
+    "turn_id": "et-canary-003",
+    "episode_id": "ep-canary-003",
+    "turn_index": 1,
+    "role": "assistant",
+    "content": "You should try making bourbon-peanut-butter oatmeal cookies with dark chocolate chips, baked at 350°F for 12 minutes. They're delicious and easy to whip up.",
+    "occurred_at": "2026-05-16T08:30:00Z",
+    "expected_claims": ["recipe.bourbon-pb-oatmeal-cookies"]
+  },
+  {
+    "turn_id": "et-canary-004",
+    "episode_id": "ep-canary-004",
+    "turn_index": 0,
+    "role": "user",
+    "content": "I've been going to the gym 4 times a week and I really prefer early morning workouts. Started drinking cold brew coffee every day too.",
+    "occurred_at": "2026-05-16T09:00:00Z",
+    "expected_claims": ["exercise.weekly_frequency", "pref.workout-time", "pref.coffee-type"]
+  },
+  {
+    "turn_id": "et-canary-005",
+    "episode_id": "ep-canary-005",
+    "turn_index": 2,
+    "role": "tool",
+    "content": "{\"type\": \"system\", \"data\": {\"timestamp\": \"2026-05-16T09:30:00Z\", \"status\": \"ok\"}}",
+    "occurred_at": "2026-05-16T09:30:00Z",
+    "expected_claims": []
+  }
+]
