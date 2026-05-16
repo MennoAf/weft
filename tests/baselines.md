@@ -497,3 +497,27 @@ current-Weft-tier that should serve it, and belief-view scope flag.
 Used as design checklist for loom-540df5f7 (belief-view spec) and
 proxy eval for loom-1fe75d00 (M-tier eval gate). Real-world Wick
 eval (n≥50) is a separate task (loom-b2c02183) blocked on Wick shipping.
+
+## Belief-view detector canary — harness
+
+The belief-detector canary measures over-extraction rate on a hand-crafted fixture of
+episode turns. "Over-extraction" is the fraction of claims emitted by the Haiku detector
+that do NOT appear in the fixture's expected_claims set. The fixture covers five turn types
+(user single-claim, user no-claim question, assistant agent-suggested claim, user multi-claim,
+tool-role abstention) to validate baseline detector behavior across role-gating and confidence
+thresholding.
+
+**Reproduce:**
+
+```bash
+uv run python -m benchmarks.wick_eval.run_belief_canary \
+    --fixture benchmarks/wick_eval/canary_belief_detector.json
+```
+
+**Locked number:**
+
+| Metric | Value |
+| --- | --- |
+| overall_over_extraction_rate | TBD — fixture curation tracked by loom-72bd0d59 |
+| total_turns | 5 |
+| baseline_run_cost | ~$0.01 (5 detector calls at ≤$0.0021 each, minor extractions) |
