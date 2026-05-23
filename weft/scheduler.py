@@ -31,7 +31,7 @@ _SLACK_TIMEOUT = 10  # seconds for Slack API calls
 DEFAULT_POLL_INTERVAL = 60  # seconds
 DEFAULT_BATCH_SIZE = 50
 
-# --- Dispatch registry ---
+# --- Alert dispatch registry ---
 
 DispatchHandler = Callable[[Alert], Awaitable[None]]
 
@@ -41,6 +41,53 @@ _DISPATCH_REGISTRY: dict[str, DispatchHandler] = {}
 def register_dispatch(channel: str, handler: DispatchHandler) -> None:
     """Register a dispatch handler for a channel."""
     _DISPATCH_REGISTRY[channel] = handler
+
+
+# --- Outbound event registry ---
+# Structurally separate from _DISPATCH_REGISTRY (which keys by alert.channel).
+# This registry keys by *event name* and routes through a single active
+# connector selected by the WEFT_OUTBOUND_CONNECTOR env var.
+# Acceptable values: "slack", "none" (or unset → no-op).
+# "discord" is reserved for future use (L2's job — do NOT register here).
+
+OutboundEventHandler = Callable[..., Awaitable[None]]
+
+_OUTBOUND_EVENT_REGISTRY: dict[str, dict[str, OutboundEventHandler]] = {}
+
+
+def register_outbound_handler(event: str, connector: str, handler: OutboundEventHandler) -> None:
+    """Register an outbound connector handler for an event.
+
+    *event* — event name (e.g. "daily_brief")
+    *connector* — connector name matching WEFT_OUTBOUND_CONNECTOR values (e.g. "slack")
+    *handler* — async callable; receives keyword arguments specific to the event
+    """
+    _OUTBOUND_EVENT_REGISTRY.setdefault(event, {})[connector] = handler
+
+
+async def emit_outbound_event(event: str, **kwargs) -> None:
+    """Emit an outbound event through the active connector.
+
+    Reads WEFT_OUTBOUND_CONNECTOR fresh at dispatch time so tests can
+    monkeypatch the env var. When the connector is unset/none, logs at info level
+    and returns silently without raising.
+    """
+    connector = os.environ.get("WEFT_OUTBOUND_CONNECTOR", "").strip().lower()
+    if not connector or connector == "none":
+        logger.info(
+            "outbound_event.no_active_connector",
+            extra={"event": event},
+        )
+        return
+    handlers = _OUTBOUND_EVENT_REGISTRY.get(event, {})
+    handler = handlers.get(connector)
+    if handler is None:
+        logger.warning(
+            "outbound_event.no_handler",
+            extra={"event": event, "connector": connector},
+        )
+        return
+    await handler(**kwargs)
 
 
 async def dispatch_log(alert: Alert) -> None:
@@ -118,9 +165,18 @@ async def dispatch_slack(alert: Alert) -> None:
         )
 
 
-# Register built-in handlers
+# Register built-in alert dispatch handlers
 register_dispatch("log", dispatch_log)
 register_dispatch("slack", dispatch_slack)
+
+
+async def _outbound_slack_brief(channel: str, brief_result) -> None:
+    """Outbound connector wrapper: post a daily_brief event to Slack."""
+    await _post_brief_to_slack(channel, brief_result)
+
+
+# Register built-in outbound connector handlers
+register_outbound_handler("daily_brief", "slack", _outbound_slack_brief)
 
 
 async def dispatch_alert(alert: Alert) -> None:
@@ -311,8 +367,10 @@ async def daily_brief_loop(
                         )
                         result = await assemble_daily_brief(pool, brief_config, target_date=now)
 
-                        # Post to Slack
-                        await _post_brief_to_slack(brief_channel, result)
+                        # Emit outbound event — routed by WEFT_OUTBOUND_CONNECTOR
+                        await emit_outbound_event(
+                            "daily_brief", channel=brief_channel, brief_result=result
+                        )
                         set_last_brief_date(local_date)
                         logger.info("daily_brief.delivered", extra={"date": str(local_date)})
             except Exception:

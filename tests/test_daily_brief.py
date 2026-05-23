@@ -353,6 +353,7 @@ class TestDailyBriefLoop:
                 raise asyncio.CancelledError()
 
         with (
+            patch.dict("os.environ", {"WEFT_OUTBOUND_CONNECTOR": "slack"}),
             patch("weft.scheduler.is_daily_brief_due", return_value=True),
             patch("weft.brief_state.get_last_brief_date", return_value=None),
             patch("weft.brief_state.set_last_brief_date") as mock_set,
@@ -384,6 +385,7 @@ class TestDailyBriefLoop:
         today = date.today()
 
         with (
+            patch.dict("os.environ", {"WEFT_OUTBOUND_CONNECTOR": "slack"}),
             patch("weft.scheduler.is_daily_brief_due", return_value=True),
             patch("weft.brief_state.get_last_brief_date", return_value=today),
             patch("weft.daily_brief.assemble_daily_brief", new_callable=AsyncMock) as mock_assemble,
