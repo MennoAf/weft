@@ -554,3 +554,16 @@ sequence per the Recall-vs-Reader analysis (line 460-462) is Reader prompt pass
 first, then commit to Phase 2 retrieval for the remaining retrieval-side fails.
 This commit ships the Reader pass; Phase 2 measurement decides the rest.
 
+## Phase 2 hierarchical — falsified + diagnosed (2026-05-16 / 2026-05-22)
+
+The Phase 2 hierarchical retrieval M-tier run on 2026-05-16 failed its gate
+(overall 0.7161 vs required ≥ 0.75, and regressed against the flat 0.7689
+baseline). `WEFT_HIERARCHICAL` is off-by-default and Phase 2 was NOT merged.
+Post-mortem: `benchmarks/longmemeval/results/phase2_hierarchical_postmortem_2026_05_16.md`.
+Diagnosis epic (`loom-f1fdf679`) ran four leaves; synthesis with recommendation:
+`benchmarks/longmemeval/results/phase2_hierarchical_diagnosis_2026_05_22.md`.
+Headline: H5 (descent ignores question_date temporal anchors) is the
+highest-leverage actionable finding; recommendation is a smaller H5-only
+experiment on temporal-reasoning subset before any broader revise-or-shelve
+decision.
+
