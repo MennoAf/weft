@@ -259,3 +259,130 @@ class TestOutboundEventDispatch:
             await slack_handler(channel="#mychannel", brief_result=fake_result)
 
         mock_post.assert_awaited_once_with("#mychannel", fake_result)
+
+
+# ---------------------------------------------------------------------------
+# Discord connector + bot loop
+# ---------------------------------------------------------------------------
+
+
+class TestDiscordOutboundHandler:
+    """Tests for the daily_brief discord handler and its bot-reference contract."""
+
+    @pytest.mark.asyncio
+    async def test_discord_connector_registered(self):
+        """Importing weft.discord registers the discord handler for daily_brief."""
+        import weft.discord  # noqa: F401  — import triggers registration
+        from weft.scheduler import _OUTBOUND_EVENT_REGISTRY
+
+        assert "daily_brief" in _OUTBOUND_EVENT_REGISTRY
+        assert "discord" in _OUTBOUND_EVENT_REGISTRY["daily_brief"]
+
+    @pytest.mark.asyncio
+    async def test_handler_noops_when_bot_unset(self):
+        """Handler logs and returns when no bot has been registered."""
+        from weft.discord import connector
+        from weft.scheduler import _OUTBOUND_EVENT_REGISTRY
+
+        connector.clear_bot()
+        handler = _OUTBOUND_EVENT_REGISTRY["daily_brief"]["discord"]
+        # Must not raise
+        await handler(channel="ignored", brief_result=SimpleNamespace(markdown="hi"))
+
+    @pytest.mark.asyncio
+    async def test_handler_noops_when_bot_not_ready(self):
+        """Handler skips post when bot reports not-ready."""
+        from weft.discord import connector
+        from weft.scheduler import _OUTBOUND_EVENT_REGISTRY
+
+        fake_bot = MagicMock()
+        fake_bot.is_ready = False
+        fake_bot.channel_id = 12345
+        fake_bot.post = AsyncMock()
+        connector.set_bot(fake_bot)
+        try:
+            handler = _OUTBOUND_EVENT_REGISTRY["daily_brief"]["discord"]
+            await handler(channel="ignored", brief_result=SimpleNamespace(markdown="hi"))
+            fake_bot.post.assert_not_called()
+        finally:
+            connector.clear_bot()
+
+    @pytest.mark.asyncio
+    async def test_handler_posts_markdown_when_ready(self):
+        """Handler forwards brief_result.markdown to bot.post when ready."""
+        from weft.discord import connector
+        from weft.scheduler import _OUTBOUND_EVENT_REGISTRY
+
+        fake_bot = MagicMock()
+        fake_bot.is_ready = True
+        fake_bot.channel_id = 12345
+        fake_bot.post = AsyncMock(return_value=[111])
+        connector.set_bot(fake_bot)
+        try:
+            handler = _OUTBOUND_EVENT_REGISTRY["daily_brief"]["discord"]
+            await handler(
+                channel="ignored-slack-channel",
+                brief_result=SimpleNamespace(markdown="# Morning Brief\n\n..."),
+            )
+            fake_bot.post.assert_awaited_once_with("# Morning Brief\n\n...")
+        finally:
+            connector.clear_bot()
+
+
+class TestDiscordBotLoop:
+    """Tests for the discord_bot_loop env handling and lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_returns_early_without_token(self, monkeypatch):
+        from weft.scheduler import discord_bot_loop
+
+        monkeypatch.delenv("WEFT_DISCORD_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("WEFT_DISCORD_BRIEF_CHANNEL_ID", "12345")
+
+        # Returns without raising and without starting a bot
+        await discord_bot_loop(AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_returns_early_without_channel_id(self, monkeypatch):
+        from weft.scheduler import discord_bot_loop
+
+        monkeypatch.setenv("WEFT_DISCORD_BOT_TOKEN", "fake.token")
+        monkeypatch.delenv("WEFT_DISCORD_BRIEF_CHANNEL_ID", raising=False)
+
+        await discord_bot_loop(AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_returns_early_on_non_integer_channel_id(self, monkeypatch):
+        from weft.scheduler import discord_bot_loop
+
+        monkeypatch.setenv("WEFT_DISCORD_BOT_TOKEN", "fake.token")
+        monkeypatch.setenv("WEFT_DISCORD_BRIEF_CHANNEL_ID", "not-a-number")
+
+        await discord_bot_loop(AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_registers_and_clears_bot(self, monkeypatch):
+        """Loop calls set_bot after start and clear_bot on cancel."""
+        from weft.discord import connector
+        from weft.scheduler import discord_bot_loop
+
+        monkeypatch.setenv("WEFT_DISCORD_BOT_TOKEN", "fake.token")
+        monkeypatch.setenv("WEFT_DISCORD_BRIEF_CHANNEL_ID", "12345")
+
+        fake_bot = MagicMock()
+        fake_bot.start = AsyncMock()
+        fake_bot.close = AsyncMock()
+
+        connector.clear_bot()
+        with patch("weft.discord.bot.Bot", return_value=fake_bot):
+            task = asyncio.create_task(discord_bot_loop(AsyncMock(), interval=0))
+            # Give the loop time to start + set_bot
+            await asyncio.sleep(0.05)
+            assert connector.get_bot() is fake_bot
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        # finally block must clear the reference and close the bot
+        assert connector.get_bot() is None
+        fake_bot.close.assert_awaited_once()
