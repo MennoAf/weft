@@ -218,3 +218,36 @@ def test_primer_config_from_toml(tmp_path: Path, monkeypatch):
 
     config = load_config()
     assert config.primer.disabled_sections == ["triggers", "cost"]
+
+
+# --- Daily Brief Config ---
+
+
+def test_daily_brief_config_channel_type_default():
+    """DailyBriefConfig.channel_type has a default value of 'slack'."""
+    from weft.config import DailyBriefConfig
+
+    dbc = DailyBriefConfig()
+    assert dbc.channel_type == "slack"
+
+
+def test_daily_brief_config_channel_type_from_env(monkeypatch):
+    """DailyBriefConfig.channel_type loads from WEFT_DAILY_BRIEF_CHANNEL_TYPE env var."""
+    toml_path = None
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path or Path.home() / ".weft" / "config.toml")
+    monkeypatch.setenv("WEFT_DAILY_BRIEF_CHANNEL_TYPE", "discord")
+
+    config = load_config()
+    assert config.daily_brief.channel_type == "discord"
+
+
+def test_daily_brief_config_channel_type_env_precedence(tmp_path: Path, monkeypatch):
+    """Environment variable overrides default for channel_type."""
+    toml_path = tmp_path / ".weft" / "config.toml"
+    toml_path.parent.mkdir(parents=True)
+
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    monkeypatch.setenv("WEFT_DAILY_BRIEF_CHANNEL_TYPE", "none")
+
+    config = load_config()
+    assert config.daily_brief.channel_type == "none"

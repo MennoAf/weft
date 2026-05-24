@@ -10,10 +10,9 @@ Tests verify that each loop:
 from __future__ import annotations
 
 import asyncio
+import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +28,38 @@ async def _run_one_iteration(coro_fn, pool, **kwargs):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# ---------------------------------------------------------------------------
+# Outbound Connector Startup Validation
+# ---------------------------------------------------------------------------
+
+
+class TestOutboundConnectorValidation:
+    """Tests for WEFT_OUTBOUND_CONNECTOR env var validation at startup."""
+
+    @pytest.mark.parametrize("value", ["slack", "discord", "none", "", "SLACK", " slack "])
+    def test_valid_connector_values_pass(self, monkeypatch, value):
+        """Valid WEFT_OUTBOUND_CONNECTOR values do not raise at startup."""
+        from weft.mcp.server import _validate_outbound_connector_env
+
+        if value == "":
+            monkeypatch.delenv("WEFT_OUTBOUND_CONNECTOR", raising=False)
+        else:
+            monkeypatch.setenv("WEFT_OUTBOUND_CONNECTOR", value)
+
+        # Must not raise
+        _validate_outbound_connector_env()
+
+    @pytest.mark.parametrize("invalid_value", ["badconnector", "slack2", "ftp", "http", "Discord!"])
+    def test_invalid_connector_values_raise(self, monkeypatch, invalid_value):
+        """Invalid WEFT_OUTBOUND_CONNECTOR values raise ValueError at startup."""
+        from weft.mcp.server import _validate_outbound_connector_env
+
+        monkeypatch.setenv("WEFT_OUTBOUND_CONNECTOR", invalid_value)
+
+        with pytest.raises(ValueError, match="WEFT_OUTBOUND_CONNECTOR must be one of"):
+            _validate_outbound_connector_env()
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +220,21 @@ class TestOutboundEventDispatch:
         await emit_outbound_event("none_event", channel="#foo", brief_result=None)
 
         handler.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_connector_value_warning(self, monkeypatch, caplog):
+        """emit_outbound_event logs a warning when WEFT_OUTBOUND_CONNECTOR has an invalid value (invalid at dispatch time)."""
+        from weft.scheduler import emit_outbound_event, register_outbound_handler
+
+        handler = AsyncMock()
+        register_outbound_handler("test_event", "slack", handler)
+        monkeypatch.setenv("WEFT_OUTBOUND_CONNECTOR", "invalid_connector")
+
+        # Must not raise — invalid values at dispatch time are warnings
+        await emit_outbound_event("test_event", channel="#foo", brief_result=None)
+
+        # Should log a warning about missing handler
+        assert "no_handler" in caplog.text
 
     @pytest.mark.asyncio
     async def test_daily_brief_loop_emits_event(self, monkeypatch):

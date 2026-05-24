@@ -59,6 +59,9 @@ _FALLBACK_REFRESH_INTERVAL = 1800  # 30 minutes
 _STARTUP_MAX_RETRIES = 5
 _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
 
+# Valid outbound connector values
+_VALID_OUTBOUND_CONNECTORS = {"slack", "discord", "none", ""}
+
 
 class UserIdentityMiddleware(BaseHTTPMiddleware):
     """Extract user identity + caller mode from Authorization header.
@@ -327,12 +330,30 @@ async def _write_fallback_snapshot(pool: asyncpg.Pool) -> None:
         logger.warning("Failed to write fallback snapshot: %s", e)
 
 
+def _validate_outbound_connector_env() -> None:
+    """Validate WEFT_OUTBOUND_CONNECTOR env var. Raises ValueError on invalid values.
+
+    Valid values (case-insensitive, whitespace-trimmed): slack, discord, none, or unset.
+    """
+    raw = os.environ.get("WEFT_OUTBOUND_CONNECTOR")
+    connector = (raw or "").strip().lower()
+    if connector not in _VALID_OUTBOUND_CONNECTORS:
+        raise ValueError(
+            f"WEFT_OUTBOUND_CONNECTOR must be one of {sorted(_VALID_OUTBOUND_CONNECTORS - {''})} or unset "
+            f"(got: {raw!r})"
+        )
+
+
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     """Initialize database, Redis, and embedding provider."""
     from weft.correlation import CorrelationFilter
 
     config = load_config()
+
+    # Validate WEFT_OUTBOUND_CONNECTOR at startup
+    _validate_outbound_connector_env()
+
     logging.basicConfig(
         level=getattr(logging, config.log_level),
         format="%(asctime)s %(levelname)s [%(correlation_id)s] %(name)s: %(message)s",
