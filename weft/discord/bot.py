@@ -104,16 +104,47 @@ class Bot:
 
     Pass ``pool`` to enable slash-command registration. Without a pool the bot
     operates in outbound-only mode (same as before this change).
+
+    Pass ``idea_dump_channel_id`` to enable the inbound idea-dump watcher. When
+    set, the bot requests the ``message_content`` PRIVILEGED intent and registers
+    an ``on_message`` handler that pipes matching messages through the ingest
+    pipeline. Without this parameter, the bot stays on default intents — the
+    same outbound-only behaviour as before.
+
+    IMPORTANT: ``message_content`` is a Discord privileged intent. It requires
+    manual enablement in the Discord Developer Portal under Bot → Privileged
+    Gateway Intents → Message Content Intent. Discord will reject the gateway
+    connection at runtime if the intent is enabled in code but not in the
+    Developer Portal.
     """
 
-    def __init__(self, token: str, channel_id: int, *, pool: asyncpg.Pool | None = None) -> None:
-        # Default intents only — no privileged `message_content` since we
-        # don't read inbound messages here.
+    def __init__(
+        self,
+        token: str,
+        channel_id: int,
+        *,
+        pool: asyncpg.Pool | None = None,
+        idea_dump_channel_id: int | None = None,
+    ) -> None:
         intents = discord.Intents.default()
+
+        if idea_dump_channel_id is not None:
+            # The message_content intent is PRIVILEGED — Discord requires manual
+            # enablement in the Developer Portal (Bot → Privileged Gateway
+            # Intents → Message Content Intent). Code can request it, but Discord
+            # will reject the gateway connection at runtime if it's not toggled on
+            # in the portal configuration.
+            intents.message_content = True
+            logger.warning(
+                "discord_bot.idea_dump_enabled: WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID is set — "
+                "requires message_content intent enabled in Discord Developer Portal"
+            )
+
         self._client = _WeftClient(intents=intents, pool=pool)
         self._pool = pool
         self._token = token
         self._channel_id = channel_id
+        self._idea_dump_channel_id = idea_dump_channel_id
         self._channel: discord.TextChannel | None = None
         self._ready = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -124,6 +155,11 @@ class Bot:
             self._register_commands()
 
         self._client.event(self.on_ready)
+
+        # Register the inbound idea-dump handler only when the feature is enabled.
+        # This keeps the outbound-only deployment path completely unaffected.
+        if idea_dump_channel_id is not None:
+            self._client.event(self.on_message)
 
     @property
     def channel_id(self) -> int:
@@ -170,6 +206,62 @@ class Bot:
 
         self._ready.set()
         logger.info("discord_bot.ready as %s, channel=#%s", self._client.user, ch.name)
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Inbound idea-dump handler. Only active when idea_dump_channel_id is set.
+
+        Discord delivers gateway events serially per shard, so a slow ingest
+        call would back up the entire event queue. We use asyncio.create_task to
+        detach the ingest work from the gateway loop — the task runs concurrently
+        and any failure is contained without blocking subsequent message events.
+        """
+        # Skip messages from any bot (including the bot itself) — defense layer 1.
+        if message.author.bot:
+            return
+
+        # Skip messages from the bot itself — defense layer 2 (covers edge cases
+        # where .bot might be False for the client user in unusual configurations).
+        if self._client.user and message.author.id == self._client.user.id:
+            return
+
+        # Skip messages not in the configured idea-dump channel.
+        if self._idea_dump_channel_id is None or message.channel.id != self._idea_dump_channel_id:
+            return
+
+        # Build the raw dict for DiscordAdapter.ingest()
+        raw: dict = {
+            "id": message.id,
+            "content": message.content,
+            "author_id": str(message.author.id),
+            "author_name": message.author.name,
+            "channel_id": str(message.channel.id),
+            "created_at": message.created_at.isoformat() if message.created_at else None,
+        }
+
+        pool = self._pool
+
+        async def _ingest() -> None:
+            from weft.ingest_adapters import DiscordAdapter
+
+            try:
+                result = await DiscordAdapter().ingest(
+                    raw,
+                    pool,
+                    embedding_provider=None,
+                    channel=str(message.channel.id),
+                )
+                logger.info(
+                    "discord_bot.idea_ingested: msg_id=%s memories=%s",
+                    message.id,
+                    result.memories_created if result else 0,
+                )
+            except Exception:
+                # Must not raise — the gateway connection must stay alive.
+                logger.exception("discord_bot.ingest_error: msg_id=%s", message.id)
+
+        # Detach from the gateway event loop to avoid backing up the serial
+        # event queue on slow ingest calls.
+        asyncio.create_task(_ingest())
 
     async def start(self) -> None:
         """Schedule the gateway handshake in the background. Returns immediately."""

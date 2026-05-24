@@ -432,3 +432,191 @@ class TestDiscordBotLoop:
         # finally block must clear the reference and close the bot
         assert connector.get_bot() is None
         fake_bot.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_on_message_not_registered_without_idea_dump_channel(self, monkeypatch):
+        """When WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID is unset, on_message is NOT registered."""
+        monkeypatch.setenv("WEFT_DISCORD_BOT_TOKEN", "fake.token")
+        monkeypatch.setenv("WEFT_DISCORD_BRIEF_CHANNEL_ID", "12345")
+        monkeypatch.delenv("WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID", raising=False)
+
+        from weft.discord.bot import Bot
+
+        # Capture the Bot constructor call to inspect the instance
+        created_bots = []
+
+        original_init = Bot.__init__
+
+        def capturing_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            created_bots.append(self)
+
+        with patch.object(Bot, "__init__", capturing_init):
+            fake_bot = MagicMock()
+            fake_bot.start = AsyncMock()
+            fake_bot.close = AsyncMock()
+
+            with patch("weft.discord.bot.Bot", return_value=fake_bot) as MockBot:
+                task = asyncio.create_task(
+                    __import__("weft.scheduler", fromlist=["discord_bot_loop"]).discord_bot_loop(
+                        AsyncMock(), interval=0
+                    )
+                )
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+                # Bot must have been called without idea_dump_channel_id
+                call_kwargs = MockBot.call_args.kwargs
+                assert call_kwargs.get("idea_dump_channel_id") is None
+
+    @pytest.mark.asyncio
+    async def test_on_message_registered_with_idea_dump_channel(self, monkeypatch):
+        """When WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID is set, idea_dump_channel_id is passed to Bot."""
+        monkeypatch.setenv("WEFT_DISCORD_BOT_TOKEN", "fake.token")
+        monkeypatch.setenv("WEFT_DISCORD_BRIEF_CHANNEL_ID", "12345")
+        monkeypatch.setenv("WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID", "99999")
+
+        fake_bot = MagicMock()
+        fake_bot.start = AsyncMock()
+        fake_bot.close = AsyncMock()
+
+        with patch("weft.discord.bot.Bot", return_value=fake_bot) as MockBot:
+            task = asyncio.create_task(
+                __import__("weft.scheduler", fromlist=["discord_bot_loop"]).discord_bot_loop(
+                    AsyncMock(), interval=0
+                )
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            call_kwargs = MockBot.call_args.kwargs
+            assert call_kwargs.get("idea_dump_channel_id") == 99999
+
+    @pytest.mark.asyncio
+    async def test_on_message_skips_wrong_channel(self):
+        """Bot.on_message returns without ingesting when channel doesn't match."""
+        import discord as discord_mod
+        from weft.discord.bot import Bot
+
+        # Build a real Bot instance with mocked discord internals
+        fake_client = MagicMock()
+        fake_client.user = MagicMock()
+        fake_client.user.id = 1111
+
+        bot = object.__new__(Bot)
+        bot._pool = AsyncMock()
+        bot._idea_dump_channel_id = 99999
+        bot._client = fake_client
+
+        # Message from a human in a DIFFERENT channel
+        msg = MagicMock()
+        msg.author = MagicMock()
+        msg.author.bot = False
+        msg.author.id = 5555
+        msg.channel = MagicMock()
+        msg.channel.id = 11111  # wrong channel
+
+        with patch("weft.ingest_adapters.DiscordAdapter.ingest", new_callable=AsyncMock) as mock_ingest:
+            await bot.on_message(msg)
+            await asyncio.sleep(0)  # let any tasks run
+
+        mock_ingest.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_message_skips_bot_author(self):
+        """Bot.on_message skips messages where message.author.bot is True."""
+        from weft.discord.bot import Bot
+
+        fake_client = MagicMock()
+        fake_client.user = MagicMock()
+        fake_client.user.id = 1111
+
+        bot = object.__new__(Bot)
+        bot._pool = AsyncMock()
+        bot._idea_dump_channel_id = 99999
+        bot._client = fake_client
+
+        msg = MagicMock()
+        msg.author = MagicMock()
+        msg.author.bot = True  # bot message
+        msg.author.id = 2222
+        msg.channel = MagicMock()
+        msg.channel.id = 99999  # correct channel
+
+        with patch("weft.ingest_adapters.DiscordAdapter.ingest", new_callable=AsyncMock) as mock_ingest:
+            await bot.on_message(msg)
+            await asyncio.sleep(0)
+
+        mock_ingest.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_message_skips_self_message(self):
+        """Bot.on_message skips messages from the bot itself (self-ingest defense)."""
+        from weft.discord.bot import Bot
+
+        bot_user_id = 1111
+
+        fake_client = MagicMock()
+        fake_client.user = MagicMock()
+        fake_client.user.id = bot_user_id
+
+        bot = object.__new__(Bot)
+        bot._pool = AsyncMock()
+        bot._idea_dump_channel_id = 99999
+        bot._client = fake_client
+
+        msg = MagicMock()
+        msg.author = MagicMock()
+        msg.author.bot = False  # technically not .bot=True, but same user ID
+        msg.author.id = bot_user_id  # same as bot's own ID
+        msg.channel = MagicMock()
+        msg.channel.id = 99999
+
+        with patch("weft.ingest_adapters.DiscordAdapter.ingest", new_callable=AsyncMock) as mock_ingest:
+            await bot.on_message(msg)
+            await asyncio.sleep(0)
+
+        mock_ingest.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_message_calls_discord_adapter_ingest_for_valid_message(self):
+        """Bot.on_message calls DiscordAdapter.ingest for a non-bot message in the target channel."""
+        from weft.discord.bot import Bot
+        from weft.ingest_pipeline import IngestResult
+
+        fake_client = MagicMock()
+        fake_client.user = MagicMock()
+        fake_client.user.id = 1111
+
+        bot = object.__new__(Bot)
+        bot._pool = AsyncMock()
+        bot._idea_dump_channel_id = 99999
+        bot._client = fake_client
+
+        msg = MagicMock()
+        msg.author = MagicMock()
+        msg.author.bot = False
+        msg.author.id = 5555  # different from bot's own ID
+        msg.author.name = "testuser"
+        msg.id = 777
+        msg.content = "This is a great idea for the dump channel"
+        msg.channel = MagicMock()
+        msg.channel.id = 99999  # correct channel
+        msg.created_at = None
+
+        fake_result = IngestResult(memories_created=1)
+
+        with patch(
+            "weft.discord.bot.DiscordAdapter.ingest" if False else "weft.ingest_adapters.DiscordAdapter.ingest",
+            new_callable=AsyncMock,
+            return_value=fake_result,
+        ) as mock_ingest:
+            await bot.on_message(msg)
+            # Allow the create_task to run
+            await asyncio.sleep(0.05)
+
+        mock_ingest.assert_awaited_once()

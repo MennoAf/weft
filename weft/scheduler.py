@@ -360,13 +360,28 @@ async def discord_bot_loop(
         )
         return
 
+    # Optional inbound watcher — reads the idea-dump channel ID if configured.
+    # When absent/blank the watcher feature is disabled and the bot stays on
+    # default intents (no privileged message_content intent requested).
+    idea_dump_channel_id: int | None = None
+    raw_idea_dump = os.environ.get("WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID", "").strip()
+    if raw_idea_dump:
+        try:
+            idea_dump_channel_id = int(raw_idea_dump)
+        except ValueError:
+            logger.error(
+                "discord_bot.bad_idea_dump_channel_id — "
+                "WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID=%r is not an int; watcher disabled",
+                raw_idea_dump,
+            )
+
     # Lazy import to keep discord.py off the import path for non-Discord
     # deployments and to avoid an import cycle (connector.py imports from
     # this module at load time).
     from weft.discord.bot import Bot
     from weft.discord.connector import clear_bot, set_bot
 
-    bot = Bot(token, channel_id, pool=pool)
+    bot = Bot(token, channel_id, pool=pool, idea_dump_channel_id=idea_dump_channel_id)
     logger.info("discord_bot.starting", extra={"channel_id": channel_id})
     try:
         await bot.start()
