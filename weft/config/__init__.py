@@ -137,6 +137,32 @@ class PrimerConfig(BaseModel):
     )
 
 
+class DiscordConfig(BaseModel):
+    """Owner-mapping config for Discord slash commands.
+
+    Single-user mode: set WEFT_DISCORD_OWNER_DISCORD_ID to the Discord
+    snowflake (user.id) of the owner and WEFT_DISCORD_OWNER_WEFT_USER_ID
+    to the corresponding Weft user UUID.
+
+    When a slash command fires, the handler resolves the interaction's
+    user.id against owner_discord_id. On match, owner_weft_user_id is
+    injected into the RLS context. On mismatch, an ephemeral error is
+    returned.
+
+    TODO(multi-user): replace the two scalar fields with a dict[str, str]
+    mapping (discord_snowflake → weft_uuid) loaded from env or config
+    file, so multiple Discord accounts can be bound to different Weft
+    users. The resolver below in commands.py has a single lookup point
+    that must change at that migration.
+    """
+
+    owner_discord_id: str | None = None
+    """Discord snowflake (user.id string) of the configured owner. None = unconfigured."""
+
+    owner_weft_user_id: str | None = None
+    """Weft user UUID to inject into RLS when the owner fires a command. None = unconfigured."""
+
+
 class QuarantineReviewConfig(BaseModel):
     """Layer 3.5 — periodic LLM review of agent-provenance writes."""
 
@@ -261,6 +287,7 @@ class WeftConfig(BaseModel):
         default_factory=AlertCooldownConfig
     )
     primer: PrimerConfig = Field(default_factory=PrimerConfig)
+    discord: DiscordConfig = Field(default_factory=DiscordConfig)
     api_key: str | None = None
     supabase_url: str | None = None
     # Supabase anon (publishable) key — required for the consent page to
@@ -648,6 +675,12 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
             logger.warning("Invalid OAUTH_REFRESH_TTL_S=%r; using default", oauth_refresh_ttl)
     if provider := os.environ.get("WEFT_SUPABASE_AUTH_PROVIDER"):
         config.supabase_auth_provider = provider.strip()
+
+    # Discord owner mapping (single-user mode).
+    if discord_owner_id := os.environ.get("WEFT_DISCORD_OWNER_DISCORD_ID"):
+        config.discord.owner_discord_id = discord_owner_id.strip()
+    if discord_owner_weft_id := os.environ.get("WEFT_DISCORD_OWNER_WEFT_USER_ID"):
+        config.discord.owner_weft_user_id = discord_owner_weft_id.strip()
 
     # The legacy ``oauth_jwt_*`` fields exist for backwards compatibility
     # with the prior Weft-as-OAuth-server deployment. In the new
