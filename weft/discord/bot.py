@@ -125,6 +125,7 @@ class Bot:
         *,
         pool: asyncpg.Pool | None = None,
         idea_dump_channel_id: int | None = None,
+        channel_map: "dict | None" = None,
     ) -> None:
         intents = discord.Intents.default()
 
@@ -148,6 +149,12 @@ class Bot:
         self._channel: discord.TextChannel | None = None
         self._ready = asyncio.Event()
         self._task: asyncio.Task | None = None
+
+        # Channel-mapping-aware ingest adapter.  The custom channel_map is
+        # injected here so the bot's message handler routes via the mapping
+        # instead of using the hardcoded idea-dump-only logic.  None uses
+        # DEFAULT_CHANNEL_MAP (env-var driven, populated at module import time).
+        self._channel_map = channel_map
 
         # Build the command tree if a pool was supplied.
         if pool is not None:
@@ -208,7 +215,11 @@ class Bot:
         logger.info("discord_bot.ready as %s, channel=#%s", self._client.user, ch.name)
 
     async def on_message(self, message: discord.Message) -> None:
-        """Inbound idea-dump handler. Only active when idea_dump_channel_id is set.
+        """Inbound message handler. Only active when idea_dump_channel_id is set.
+
+        Routes messages through DiscordChannelAdapter, which consults the
+        channel mapping to decide whether to ingest and which memory type to
+        use.  Unconfigured channels are silently ignored by the adapter.
 
         Discord delivers gateway events serially per shard, so a slow ingest
         call would back up the entire event queue. We use asyncio.create_task to
@@ -224,34 +235,41 @@ class Bot:
         if self._client.user and message.author.id == self._client.user.id:
             return
 
-        # Skip messages not in the configured idea-dump channel.
-        if self._idea_dump_channel_id is None or message.channel.id != self._idea_dump_channel_id:
-            return
+        # Guard: only process messages from channels the bot is watching.
+        # The idea_dump_channel_id param keeps backward compat — if it's set,
+        # we only process that specific channel.  When channel mapping is used
+        # directly (idea_dump_channel_id=None), the adapter's resolve step
+        # handles per-channel filtering.
+        channel_id_str = str(message.channel.id)
+        if self._idea_dump_channel_id is not None:
+            if message.channel.id != self._idea_dump_channel_id:
+                return
 
-        # Build the raw dict for DiscordAdapter.ingest()
+        # Build the raw dict for DiscordChannelAdapter.ingest()
         raw: dict = {
             "id": message.id,
             "content": message.content,
             "author_id": str(message.author.id),
             "author_name": message.author.name,
-            "channel_id": str(message.channel.id),
+            "channel_id": channel_id_str,
             "created_at": message.created_at.isoformat() if message.created_at else None,
         }
 
         pool = self._pool
+        channel_map = self._channel_map
 
         async def _ingest() -> None:
-            from weft.ingest_adapters import DiscordAdapter
+            from weft.discord.adapter import DiscordChannelAdapter
 
             try:
-                result = await DiscordAdapter().ingest(
+                result = await DiscordChannelAdapter(channel_map=channel_map).ingest(
                     raw,
                     pool,
                     embedding_provider=None,
-                    channel=str(message.channel.id),
+                    channel=channel_id_str,
                 )
                 logger.info(
-                    "discord_bot.idea_ingested: msg_id=%s memories=%s",
+                    "discord_bot.message_ingested: msg_id=%s memories=%s",
                     message.id,
                     result.memories_created if result else 0,
                 )

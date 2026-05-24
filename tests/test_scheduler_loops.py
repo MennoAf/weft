@@ -596,6 +596,10 @@ class TestDiscordBotLoop:
         bot._pool = AsyncMock()
         bot._idea_dump_channel_id = 99999
         bot._client = fake_client
+        # __init__ sets _channel_map; bypassed via object.__new__, so seed it
+        # here. None routes through DEFAULT_CHANNEL_MAP, but the adapter is
+        # mocked below so the value doesn't reach resolve_channel_mapping.
+        bot._channel_map = None
 
         msg = MagicMock()
         msg.author = MagicMock()
@@ -610,8 +614,10 @@ class TestDiscordBotLoop:
 
         fake_result = IngestResult(memories_created=1)
 
+        # The bot now routes via DiscordChannelAdapter, not the generic
+        # DiscordAdapter — patch the channel-aware adapter the WIP added.
         with patch(
-            "weft.discord.bot.DiscordAdapter.ingest" if False else "weft.ingest_adapters.DiscordAdapter.ingest",
+            "weft.discord.adapter.DiscordChannelAdapter.ingest",
             new_callable=AsyncMock,
             return_value=fake_result,
         ) as mock_ingest:

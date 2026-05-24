@@ -102,6 +102,11 @@ class Intent:
     entities: list[EntityRef] = field(default_factory=list)
     dates: list[datetime] = field(default_factory=list)
     raw_text: str = ""
+    # Source-supplied overrides — when present, take precedence over the
+    # LLM-inferred mapping in route(). Set by process() from IngestItem.metadata
+    # (e.g. Discord channel mapping). None means "no override; use defaults".
+    memory_type_hint: str | None = None
+    extra_topics: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if self.type not in INTENT_TYPES:
@@ -426,11 +431,27 @@ async def route(
     for intent in intents:
         try:
             # --- Build memory inputs (HTTP / pure logic — outside acquire) ---
+            # Source-supplied hint (e.g. Discord channel mapping) wins over the
+            # LLM-derived default. Validate against MemoryType; on invalid hint
+            # log + fall back to lookup so a bad config can't crash ingest.
             mem_type_str = _INTENT_MEMORY_TYPE.get(intent.type, "fact")
+            if intent.memory_type_hint:
+                try:
+                    MemoryType(intent.memory_type_hint)
+                    mem_type_str = intent.memory_type_hint
+                except ValueError:
+                    logger.warning(
+                        "route.invalid_memory_type_hint: hint=%r, falling back to %s",
+                        intent.memory_type_hint, mem_type_str,
+                    )
             topics = [f"intent:{intent.type}"]
             if intent.entities:
                 for e in intent.entities:
                     topics.append(f"entity:{e.name}")
+            # Source-supplied topics (e.g. ["discord", "brain-dump"]) — append
+            # after auto-topics so they're easy to spot in recall queries.
+            if intent.extra_topics:
+                topics.extend(intent.extra_topics)
 
             embedding = None
             if embedding_provider:
@@ -536,6 +557,19 @@ async def process(
 
     if not intents:
         return IngestResult()
+
+    # Stamp source-supplied overrides onto every intent. Channel-mapped sources
+    # (e.g. Discord adapter) put memory_type_hint + topics in metadata; route()
+    # honors them over the LLM-derived defaults.
+    hint = item.metadata.get("memory_type_hint")
+    extra_topics_raw = item.metadata.get("topics") or []
+    extra_topics = [t for t in extra_topics_raw if isinstance(t, str) and t]
+    if hint or extra_topics:
+        for intent in intents:
+            if hint and isinstance(hint, str):
+                intent.memory_type_hint = hint
+            if extra_topics:
+                intent.extra_topics = list(extra_topics)
 
     return await route(
         intents,

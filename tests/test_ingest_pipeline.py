@@ -141,6 +141,114 @@ class TestDataModels:
         assert r.memories_created == 0
         assert r.errors == []
 
+    def test_intent_hint_fields_default(self):
+        """memory_type_hint defaults to None; extra_topics defaults to [].
+        route() treats these defaults as 'no override'."""
+        i = Intent(type="general_note", content="x")
+        assert i.memory_type_hint is None
+        assert i.extra_topics == []
+
+    def test_intent_hint_fields_carry_values(self):
+        i = Intent(
+            type="general_note",
+            content="x",
+            memory_type_hint="preference",
+            extra_topics=["discord", "brain-dump"],
+        )
+        assert i.memory_type_hint == "preference"
+        assert i.extra_topics == ["discord", "brain-dump"]
+
+
+class TestProcessMetadataStamping:
+    """process() must lift source-supplied hints from IngestItem.metadata onto
+    every Intent before route() runs. Without this plumbing, channel mappings
+    silently no-op at write time — the substrate-stub gap that put L8 on HOLD."""
+
+    @pytest.mark.asyncio
+    async def test_metadata_hint_stamped_onto_intents(self):
+        from weft.ingest_pipeline import process
+
+        # Two intents come back from classify; both must carry the hint.
+        fake_intents = [
+            Intent(type="general_note", content="first note"),
+            Intent(type="general_note", content="second note"),
+        ]
+        fake_route_result = IngestResult(intents=fake_intents, memories_created=2)
+
+        with patch(
+            "weft.ingest_pipeline.classify",
+            new_callable=AsyncMock,
+            return_value=fake_intents,
+        ), patch(
+            "weft.ingest_pipeline.route",
+            new_callable=AsyncMock,
+            return_value=fake_route_result,
+        ) as mock_route:
+            item = IngestItem(
+                text="some content from a mapped channel",
+                source="discord",
+                metadata={
+                    "memory_type_hint": "preference",
+                    "topics": ["discord", "brain-dump"],
+                    "channel": "1507757010857496618",
+                },
+            )
+            await process(item, pool=AsyncMock(), embedding_provider=None)
+
+        passed_intents = mock_route.call_args.args[0]
+        for intent in passed_intents:
+            assert intent.memory_type_hint == "preference"
+            assert intent.extra_topics == ["discord", "brain-dump"]
+
+    @pytest.mark.asyncio
+    async def test_no_metadata_hint_leaves_intent_defaults(self):
+        from weft.ingest_pipeline import process
+
+        fake_intents = [Intent(type="general_note", content="bare note")]
+        fake_route_result = IngestResult(intents=fake_intents, memories_created=1)
+
+        with patch(
+            "weft.ingest_pipeline.classify",
+            new_callable=AsyncMock,
+            return_value=fake_intents,
+        ), patch(
+            "weft.ingest_pipeline.route",
+            new_callable=AsyncMock,
+            return_value=fake_route_result,
+        ) as mock_route:
+            item = IngestItem(text="plain text", source="cli")
+            await process(item, pool=AsyncMock(), embedding_provider=None)
+
+        passed = mock_route.call_args.args[0][0]
+        assert passed.memory_type_hint is None
+        assert passed.extra_topics == []
+
+    @pytest.mark.asyncio
+    async def test_non_string_hint_ignored(self):
+        """A non-string hint in metadata is treated as absent — never crashes."""
+        from weft.ingest_pipeline import process
+
+        fake_intents = [Intent(type="general_note", content="defensive note")]
+        fake_route_result = IngestResult(intents=fake_intents, memories_created=1)
+
+        with patch(
+            "weft.ingest_pipeline.classify",
+            new_callable=AsyncMock,
+            return_value=fake_intents,
+        ), patch(
+            "weft.ingest_pipeline.route",
+            new_callable=AsyncMock,
+            return_value=fake_route_result,
+        ) as mock_route:
+            item = IngestItem(
+                text="text with garbage metadata",
+                metadata={"memory_type_hint": 42},  # int, not str
+            )
+            await process(item, pool=AsyncMock(), embedding_provider=None)
+
+        passed = mock_route.call_args.args[0][0]
+        assert passed.memory_type_hint is None
+
 
 # --- Classifier ---
 

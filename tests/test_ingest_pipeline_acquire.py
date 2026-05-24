@@ -54,6 +54,75 @@ async def test_route_persists_memory_with_user_id_stamped(pool):
 
 
 @pytest.mark.asyncio
+async def test_route_honors_memory_type_hint(pool):
+    """The channel-mapping fix: when Intent carries memory_type_hint, it
+    overrides _INTENT_MEMORY_TYPE[intent.type]. Without this, the LLM-derived
+    intent type would win at write time and the channel mapping would be a
+    silent no-op (the substrate-stub gap that put L8 on HOLD)."""
+    intents = [
+        Intent(
+            type="general_note",          # default mapping → fact
+            content="brain dump note routed via channel mapping",
+            confidence=0.8,
+            memory_type_hint="preference",  # hint should win
+            extra_topics=["discord", "brain-dump"],
+        )
+    ]
+
+    tok = current_user_id.set("ingest-hint-user")
+    try:
+        result = await route(intents, pool, embedding_provider=None)
+    finally:
+        current_user_id.reset(tok)
+
+    assert result.errors == []
+    assert result.memories_created == 1
+
+    rows = await pool.fetch(
+        "SELECT type, topic FROM memories WHERE content = $1",
+        "brain dump note routed via channel mapping",
+    )
+    assert len(rows) == 1
+    # The hint must beat the default ("fact") from _INTENT_MEMORY_TYPE.
+    assert rows[0]["type"] == "preference"
+    # Source-supplied topics ride along with the auto-topics.
+    assert "discord" in rows[0]["topic"]
+    assert "brain-dump" in rows[0]["topic"]
+    assert "intent:general_note" in rows[0]["topic"]
+
+
+@pytest.mark.asyncio
+async def test_route_invalid_hint_falls_back_to_default(pool):
+    """An invalid memory_type_hint string must not crash ingest. Validation
+    fails silently (warning logged) and the LLM default applies — protects
+    against a bad config value taking down the whole pipeline."""
+    intents = [
+        Intent(
+            type="general_note",
+            content="ingest with bogus hint should still land",
+            confidence=0.8,
+            memory_type_hint="not_a_real_type",
+        )
+    ]
+
+    tok = current_user_id.set("ingest-bad-hint-user")
+    try:
+        result = await route(intents, pool, embedding_provider=None)
+    finally:
+        current_user_id.reset(tok)
+
+    assert result.errors == []
+    assert result.memories_created == 1
+
+    rows = await pool.fetch(
+        "SELECT type FROM memories WHERE content = $1",
+        "ingest with bogus hint should still land",
+    )
+    assert len(rows) == 1
+    assert rows[0]["type"] == "fact"  # fell back to _INTENT_MEMORY_TYPE['general_note']
+
+
+@pytest.mark.asyncio
 async def test_route_two_intents_each_get_own_acquire_scope(pool):
     """Per-intent acquire() means a failure in one intent doesn't
     poison the others — the existing per-intent try/except still
