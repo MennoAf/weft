@@ -341,11 +341,30 @@ async def discord_bot_loop(
     The pool parameter is unused for now — kept in the signature so the
     task can be started uniformly alongside the other scheduler loops.
     """
+    from weft.auth import current_user_id
+
     token = os.environ.get("WEFT_DISCORD_BOT_TOKEN", "").strip()
     raw_channel = os.environ.get("WEFT_DISCORD_BRIEF_CHANNEL_ID", "").strip()
     if not token:
         logger.info("discord_bot.no_token — Discord bot loop disabled")
         return
+
+    # Background scheduler tasks have no HTTP middleware setting the
+    # request-scoped user identity. Discord-ingested memories belong to
+    # the deployment owner — same pattern as slack_sync_loop. Without this,
+    # every store_memory inside route() trips the migration-34 NOT NULL on
+    # memories.user_id (asyncpg.exceptions.NotNullViolationError).
+    # ContextVar set here propagates into discord.py's spawned tasks
+    # (gateway loop, on_message dispatch, _ingest sub-task) via asyncio's
+    # automatic context inheritance on create_task.
+    default_uid = os.environ.get("WEFT_DEFAULT_USER_ID")
+    if not default_uid:
+        logger.warning(
+            "discord_bot.no_default_user — set WEFT_DEFAULT_USER_ID to "
+            "the deployment owner's UUID; inbound ingest would fail"
+        )
+    else:
+        current_user_id.set(default_uid)
     if not raw_channel:
         logger.warning(
             "discord_bot.no_channel_id — set WEFT_DISCORD_BRIEF_CHANNEL_ID; loop disabled"
