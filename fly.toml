@@ -11,6 +11,7 @@ primary_region = "iad"
   WEFT_TRANSPORT = "streamable-http"
   WEFT_REDIS_URL = ""
   WEFT_LOG_LEVEL = "INFO"
+  WEFT_OUTBOUND_CONNECTOR = "discord"
   PORT = "8000"
 
 [http_service]
