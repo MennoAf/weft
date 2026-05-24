@@ -366,7 +366,7 @@ async def discord_bot_loop(
     from weft.discord.bot import Bot
     from weft.discord.connector import clear_bot, set_bot
 
-    bot = Bot(token, channel_id)
+    bot = Bot(token, channel_id, pool=pool)
     logger.info("discord_bot.starting", extra={"channel_id": channel_id})
     try:
         await bot.start()
