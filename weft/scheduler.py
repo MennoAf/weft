@@ -360,9 +360,18 @@ async def discord_bot_loop(
         )
         return
 
-    # Optional inbound watcher — reads the idea-dump channel ID if configured.
-    # When absent/blank the watcher feature is disabled and the bot stays on
-    # default intents (no privileged message_content intent requested).
+    # Optional inbound watcher — enabled if ANY channel mapping is configured.
+    # DEFAULT_CHANNEL_MAP is module-load populated from per-channel env vars
+    # (WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID, WEFT_DISCORD_BRAIN_DUMP_CHANNEL_ID).
+    # When the map is empty the watcher stays off and the bot keeps default
+    # intents (no privileged message_content intent requested).
+    #
+    # idea_dump_channel_id is kept as the enable flag for backward compat;
+    # any non-None value means "register on_message + request message_content
+    # intent". The adapter's resolve_channel_mapping does the actual per-
+    # channel routing — no in-bot filter on this value.
+    from weft.discord.config import DEFAULT_CHANNEL_MAP
+
     idea_dump_channel_id: int | None = None
     raw_idea_dump = os.environ.get("WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID", "").strip()
     if raw_idea_dump:
@@ -371,9 +380,15 @@ async def discord_bot_loop(
         except ValueError:
             logger.error(
                 "discord_bot.bad_idea_dump_channel_id — "
-                "WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID=%r is not an int; watcher disabled",
+                "WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID=%r is not an int",
                 raw_idea_dump,
             )
+
+    # If the idea-dump var isn't set but other channels are mapped (e.g.
+    # WEFT_DISCORD_BRAIN_DUMP_CHANNEL_ID only), still enable inbound by
+    # passing a sentinel non-None value so on_message gets registered.
+    if idea_dump_channel_id is None and DEFAULT_CHANNEL_MAP:
+        idea_dump_channel_id = 0  # sentinel: enable inbound, no channel-specific filter
 
     # Lazy import to keep discord.py off the import path for non-Discord
     # deployments and to avoid an import cycle (connector.py imports from

@@ -497,36 +497,6 @@ class TestDiscordBotLoop:
             assert call_kwargs.get("idea_dump_channel_id") == 99999
 
     @pytest.mark.asyncio
-    async def test_on_message_skips_wrong_channel(self):
-        """Bot.on_message returns without ingesting when channel doesn't match."""
-        import discord as discord_mod
-        from weft.discord.bot import Bot
-
-        # Build a real Bot instance with mocked discord internals
-        fake_client = MagicMock()
-        fake_client.user = MagicMock()
-        fake_client.user.id = 1111
-
-        bot = object.__new__(Bot)
-        bot._pool = AsyncMock()
-        bot._idea_dump_channel_id = 99999
-        bot._client = fake_client
-
-        # Message from a human in a DIFFERENT channel
-        msg = MagicMock()
-        msg.author = MagicMock()
-        msg.author.bot = False
-        msg.author.id = 5555
-        msg.channel = MagicMock()
-        msg.channel.id = 11111  # wrong channel
-
-        with patch("weft.ingest_adapters.DiscordAdapter.ingest", new_callable=AsyncMock) as mock_ingest:
-            await bot.on_message(msg)
-            await asyncio.sleep(0)  # let any tasks run
-
-        mock_ingest.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_on_message_skips_bot_author(self):
         """Bot.on_message skips messages where message.author.bot is True."""
         from weft.discord.bot import Bot
