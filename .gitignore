@@ -17,6 +17,7 @@ PLAN.md
 loom_suggestions.md
 .env
 .env.*
+!.env.example
 weft-backup-*.json
 
 # OAuth staging/prod secret output files produced by

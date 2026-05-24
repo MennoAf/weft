@@ -117,6 +117,7 @@ class DailyBriefConfig(BaseModel):
     time: str = "08:00"  # HH:MM wall-clock time for delivery
     timezone: str = "America/New_York"  # IANA timezone for brief schedule
     channel: str = ""  # Slack channel ID or name; empty = skip Slack delivery
+    channel_type: str = "slack"  # Outbound connector: slack, discord, or none
     calendar_id: str = "primary"  # Google Calendar ID to query
     # Map project_id (the slug used in handoff memories) to an absolute repo
     # path. Used by the "active projects" section to count git commits per
@@ -617,6 +618,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.daily_brief.timezone = brief_tz.strip()
     if brief_channel := os.environ.get("WEFT_DAILY_BRIEF_CHANNEL"):
         config.daily_brief.channel = brief_channel.strip()
+    if brief_channel_type := os.environ.get("WEFT_DAILY_BRIEF_CHANNEL_TYPE"):
+        config.daily_brief.channel_type = brief_channel_type.strip()
 
     # OAuth 2.1 authz-server env vars (optional unless WEFT_OAUTH_ENABLED=1).
     # When disabled, every field below stays at its default and the OAuth
