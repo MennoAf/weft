@@ -215,11 +215,12 @@ class Bot:
         logger.info("discord_bot.ready as %s, channel=#%s", self._client.user, ch.name)
 
     async def on_message(self, message: discord.Message) -> None:
-        """Inbound message handler. Only active when idea_dump_channel_id is set.
+        """Inbound message handler. Registered when the inbound watcher is on.
 
-        Routes messages through DiscordChannelAdapter, which consults the
-        channel mapping to decide whether to ingest and which memory type to
-        use.  Unconfigured channels are silently ignored by the adapter.
+        All per-channel filtering is delegated to DiscordChannelAdapter via
+        DEFAULT_CHANNEL_MAP — unmapped channels return None from
+        resolve_channel_mapping and are silently ignored. Adding a new
+        watched channel requires only a config / env var, no code edit here.
 
         Discord delivers gateway events serially per shard, so a slow ingest
         call would back up the entire event queue. We use asyncio.create_task to
@@ -235,15 +236,7 @@ class Bot:
         if self._client.user and message.author.id == self._client.user.id:
             return
 
-        # Guard: only process messages from channels the bot is watching.
-        # The idea_dump_channel_id param keeps backward compat — if it's set,
-        # we only process that specific channel.  When channel mapping is used
-        # directly (idea_dump_channel_id=None), the adapter's resolve step
-        # handles per-channel filtering.
         channel_id_str = str(message.channel.id)
-        if self._idea_dump_channel_id is not None:
-            if message.channel.id != self._idea_dump_channel_id:
-                return
 
         # Build the raw dict for DiscordChannelAdapter.ingest()
         raw: dict = {
