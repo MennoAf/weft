@@ -19,21 +19,56 @@ validate_checkin_ranges() from the lifted weft.checkin_parser module.
 Testing note: ``checkin_handler`` is the bare async function, importable
 directly for unit tests. ``register_checkin_command`` wraps it in a
 ``@tree.command`` decorator when attaching to a live CommandTree.
+
+User-identity / RLS binding
+---------------------------
+Discord interactions carry a ``interaction.user.id`` snowflake (str).  We
+resolve this to a Weft user UUID via the owner-mapping config (single-user
+mode today — see weft.config.DiscordConfig).  The resolved UUID is pushed
+into the ``current_user_id`` contextvar so ``weft.db.connection`` issues
+``SET LOCAL app.user_id`` and RLS scopes the write to the correct owner.
+
+TODO(multi-user): when more than one Discord account needs to map to Weft
+users, replace the two-scalar config with a dict[discord_snowflake, weft_uuid]
+lookup table (loaded from env or config file). The resolver helper
+``_resolve_weft_user_id`` is the single migration point.
 """
 
 from __future__ import annotations
 
 import logging
+from contextvars import Token
 from typing import Optional
 
 import discord
 from discord import app_commands
 
+from weft.auth import current_user_id
 from weft.check_ins import create_check_in
 from weft.checkin_parser import validate_checkin_ranges
+from weft.config import load_config
 from weft.models import CheckInCreate
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_weft_user_id(discord_user_id: str) -> str | None:
+    """Resolve a Discord snowflake to a configured Weft user UUID.
+
+    Returns the Weft user UUID string if ``discord_user_id`` matches the
+    configured owner, or ``None`` if the mapping is unconfigured or the
+    snowflake doesn't match.
+
+    TODO(multi-user): replace scalar owner_discord_id/owner_weft_user_id with
+    a dict-based lookup so multiple Discord accounts can bind to different Weft
+    users.  Callers of this function need no changes — only its internals.
+    """
+    cfg = load_config().discord
+    if cfg.owner_discord_id is None or cfg.owner_weft_user_id is None:
+        return None  # Not configured
+    if discord_user_id == cfg.owner_discord_id:
+        return cfg.owner_weft_user_id
+    return None  # Snowflake does not match the configured owner
 
 
 async def checkin_handler(
@@ -50,6 +85,34 @@ async def checkin_handler(
     """
     # Defer immediately — DB call may take >3 s on cold start.
     await interaction.response.defer(ephemeral=True)
+
+    # --- User-identity resolution (RLS binding) ---
+    # Resolve the Discord user.id snowflake to the configured Weft user UUID.
+    # This must happen before any DB call so connection.py issues
+    # SET LOCAL app.user_id and RLS scopes the write to the correct owner.
+    discord_cfg = load_config().discord
+    if discord_cfg.owner_discord_id is None or discord_cfg.owner_weft_user_id is None:
+        # Bot is running but owner mapping was never configured.
+        logger.error(
+            "discord.checkin: WEFT_DISCORD_OWNER_DISCORD_ID or "
+            "WEFT_DISCORD_OWNER_WEFT_USER_ID is not set"
+        )
+        await interaction.followup.send(
+            "This bot is not configured. "
+            "Set WEFT_DISCORD_OWNER_DISCORD_ID and WEFT_DISCORD_OWNER_WEFT_USER_ID.",
+            ephemeral=True,
+        )
+        return
+
+    discord_user_id = str(interaction.user.id)
+    weft_user_id = _resolve_weft_user_id(discord_user_id)
+    if weft_user_id is None:
+        # Snowflake doesn't match the configured owner.
+        await interaction.followup.send(
+            "This bot is not configured for your account.",
+            ephemeral=True,
+        )
+        return
 
     # At least one field must be provided.
     if mood is None and sleep_hours is None and energy is None and notes is None:
@@ -84,6 +147,9 @@ async def checkin_handler(
         )
         return
 
+    # Bind the resolved Weft user UUID into the RLS contextvar so that
+    # connection.py issues SET LOCAL app.user_id for the DB transaction.
+    _token: Token[str | None] = current_user_id.set(weft_user_id)
     try:
         create = CheckInCreate(
             mood=mood,
@@ -103,6 +169,8 @@ async def checkin_handler(
             ephemeral=True,
         )
         return
+    finally:
+        current_user_id.reset(_token)
 
     # Build ephemeral confirmation with parsed values.
     parts: list[str] = []
