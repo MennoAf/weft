@@ -8,6 +8,13 @@ on_message hook back in.
 
 Surface: start/close lifecycle, chunked text post, embed post, and an
 is_ready probe that gates the connector handler.
+
+Slash commands: the Bot accepts an optional `pool` parameter. When present, it
+creates an `app_commands.CommandTree` on the underlying client, calls
+`register_commands()` to attach slash command handlers, and syncs the tree
+globally in `on_ready` after channel resolution but BEFORE setting _ready.
+Tree sync failures are logged and swallowed — the outbound brief keeps working
+regardless.
 """
 
 from __future__ import annotations
@@ -18,7 +25,9 @@ import logging
 from typing import Awaitable, Callable, TypeVar
 
 import aiohttp
+import asyncpg
 import discord
+from discord import app_commands
 
 logger = logging.getLogger(__name__)
 
@@ -75,19 +84,45 @@ class BotNotReady(RuntimeError):
     """Operation attempted before the gateway handshake completed."""
 
 
-class Bot:
-    """Wraps a discord.py Client for outbound posting to one configured channel."""
+class _WeftClient(discord.Client):
+    """Bare discord.Client subclass that carries Weft-specific state.
 
-    def __init__(self, token: str, channel_id: int) -> None:
+    Attributes stashed here are accessible inside slash-command handlers via
+    ``interaction.client._weft_pool`` and ``interaction.client._weft_tree``.
+    Using a subclass rather than monkeypatching the base client keeps the
+    attribute access explicit and avoids type-checker complaints.
+    """
+
+    def __init__(self, *args, pool: asyncpg.Pool | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._weft_pool: asyncpg.Pool | None = pool
+        self._weft_tree: app_commands.CommandTree | None = None
+
+
+class Bot:
+    """Wraps a discord.py Client for outbound posting to one configured channel.
+
+    Pass ``pool`` to enable slash-command registration. Without a pool the bot
+    operates in outbound-only mode (same as before this change).
+    """
+
+    def __init__(self, token: str, channel_id: int, *, pool: asyncpg.Pool | None = None) -> None:
         # Default intents only — no privileged `message_content` since we
         # don't read inbound messages here.
         intents = discord.Intents.default()
-        self._client = discord.Client(intents=intents)
+        self._client = _WeftClient(intents=intents, pool=pool)
+        self._pool = pool
         self._token = token
         self._channel_id = channel_id
         self._channel: discord.TextChannel | None = None
         self._ready = asyncio.Event()
         self._task: asyncio.Task | None = None
+
+        # Build the command tree if a pool was supplied.
+        if pool is not None:
+            self._client._weft_tree = app_commands.CommandTree(self._client)
+            self._register_commands()
+
         self._client.event(self.on_ready)
 
     @property
@@ -97,6 +132,18 @@ class Bot:
     @property
     def is_ready(self) -> bool:
         return self._ready.is_set() and not self._client.is_closed()
+
+    def _register_commands(self) -> None:
+        """Attach slash command handlers to the command tree.
+
+        Imported lazily from weft.discord.commands to avoid a circular import
+        at module load time (commands.py imports Bot).
+        """
+        from weft.discord.commands import register_checkin_command
+
+        tree = self._client._weft_tree
+        assert tree is not None  # only called when pool is set
+        register_checkin_command(tree)
 
     async def on_ready(self) -> None:
         ch = self._client.get_channel(self._channel_id) or await self._client.fetch_channel(
@@ -108,6 +155,19 @@ class Bot:
                 f"is not a TextChannel (got {type(ch).__name__})."
             )
         self._channel = ch
+
+        # Sync the slash-command tree BEFORE marking ready so callers that
+        # await wait_until_ready() can assume commands are registered.
+        tree = self._client._weft_tree
+        if tree is not None:
+            try:
+                await tree.sync()
+                logger.info("discord_bot.commands_synced")
+            except Exception:
+                # Sync failure must NOT crash the bot — the outbound brief
+                # should keep working even if command registration fails.
+                logger.exception("discord_bot.commands_sync_failed — continuing")
+
         self._ready.set()
         logger.info("discord_bot.ready as %s, channel=#%s", self._client.user, ch.name)
 
