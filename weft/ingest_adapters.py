@@ -117,9 +117,81 @@ class SlackAdapter:
         return await process(item, pool, embedding_provider, project_id=project_id)
 
 
+class DiscordAdapter:
+    """Transforms raw Discord message dicts into IngestItems.
+
+    Raw dict shape (produced by the bot's on_message handler)::
+
+        {
+            "id": <int message snowflake>,
+            "content": <str message text>,
+            "author_id": <str>,
+            "author_name": <str>,
+            "channel_id": <str>,
+            "created_at": <ISO-8601 str or None>,
+        }
+
+    Defense-in-depth bot filter: even if the bot's on_message handler already
+    filtered self-messages, this adapter re-checks the ``is_bot`` flag so an
+    inadvertent call path can't create an ingest loop.
+    """
+
+    async def ingest(
+        self,
+        raw_data: dict,
+        pool: Any,
+        embedding_provider: Any = None,
+        *,
+        channel: str | None = None,
+        project_id: str | None = None,
+    ) -> IngestResult | None:
+        msg_id = raw_data.get("id", "?")
+
+        # Defense-in-depth: skip if caller signals this is a bot message
+        if raw_data.get("is_bot"):
+            logger.debug("DiscordAdapter.skip: bot author, id=%s", msg_id)
+            return None
+
+        # Extract and clean text
+        text = (raw_data.get("content") or "").strip()
+
+        if not text or len(text) < _MIN_TEXT_LENGTH:
+            logger.debug("DiscordAdapter.skip: short/empty text, id=%s", msg_id)
+            return None
+
+        # Build IngestItem
+        author = raw_data.get("author_name") or raw_data.get("author_id") or "unknown"
+        timestamp = None
+        created_at = raw_data.get("created_at")
+        if created_at:
+            try:
+                timestamp = datetime.fromisoformat(created_at)
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+
+        effective_channel = channel or raw_data.get("channel_id")
+
+        item = IngestItem(
+            text=text,
+            source="discord",
+            author=author,
+            timestamp=timestamp,
+            metadata={
+                "channel": effective_channel,
+                "message_id": str(msg_id),
+                "author_id": raw_data.get("author_id"),
+            },
+        )
+
+        return await process(item, pool, embedding_provider, project_id=project_id)
+
+
 # Registry of adapters by source name
 ADAPTERS: dict[str, type[IngestAdapter]] = {
     "slack": SlackAdapter,
+    "discord": DiscordAdapter,
 }
 
-__all__ = ["IngestAdapter", "SlackAdapter", "ADAPTERS"]
+__all__ = ["IngestAdapter", "SlackAdapter", "DiscordAdapter", "ADAPTERS"]
