@@ -47,8 +47,9 @@ def register_dispatch(channel: str, handler: DispatchHandler) -> None:
 # Structurally separate from _DISPATCH_REGISTRY (which keys by alert.channel).
 # This registry keys by *event name* and routes through a single active
 # connector selected by the WEFT_OUTBOUND_CONNECTOR env var.
-# Acceptable values: "slack", "none" (or unset → no-op).
-# "discord" is reserved for future use (L2's job — do NOT register here).
+# Acceptable values: "slack", "discord", "none" (or unset → no-op).
+# The discord handler self-registers from weft.discord.connector at import
+# time; weft.scheduler.discord_bot_loop pulls that module in on startup.
 
 OutboundEventHandler = Callable[..., Awaitable[None]]
 
@@ -314,6 +315,73 @@ async def slack_sync_loop(
     except asyncio.CancelledError:
         logger.info("slack_sync.stopped")
         raise
+
+
+# --- Discord bot loop ---
+
+# Floor mirrors slack_sync_loop's _MIN_SYNC_INTERVAL: anything tighter is
+# just churn while a gateway reconnect is happening on its own clock.
+_DISCORD_BOT_KEEPALIVE_INTERVAL = 60
+
+
+async def discord_bot_loop(
+    pool: asyncpg.Pool,
+    *,
+    interval: int = _DISCORD_BOT_KEEPALIVE_INTERVAL,
+) -> None:
+    """Long-lived Discord gateway connection. Runs until cancelled.
+
+    Reads WEFT_DISCORD_BOT_TOKEN and WEFT_DISCORD_BRIEF_CHANNEL_ID from env.
+    On missing env, logs and returns (loop disabled). On startup, opens the
+    gateway, registers the bot instance with weft.discord.connector so the
+    outbound `daily_brief` handler can dispatch through it, then sleeps in
+    *interval*-second ticks until cancelled. The discord.py client manages
+    its own reconnect logic; this loop only owns the lifecycle.
+
+    The pool parameter is unused for now — kept in the signature so the
+    task can be started uniformly alongside the other scheduler loops.
+    """
+    token = os.environ.get("WEFT_DISCORD_BOT_TOKEN", "").strip()
+    raw_channel = os.environ.get("WEFT_DISCORD_BRIEF_CHANNEL_ID", "").strip()
+    if not token:
+        logger.info("discord_bot.no_token — Discord bot loop disabled")
+        return
+    if not raw_channel:
+        logger.warning(
+            "discord_bot.no_channel_id — set WEFT_DISCORD_BRIEF_CHANNEL_ID; loop disabled"
+        )
+        return
+    try:
+        channel_id = int(raw_channel)
+    except ValueError:
+        logger.error(
+            "discord_bot.bad_channel_id — WEFT_DISCORD_BRIEF_CHANNEL_ID=%r is not an int",
+            raw_channel,
+        )
+        return
+
+    # Lazy import to keep discord.py off the import path for non-Discord
+    # deployments and to avoid an import cycle (connector.py imports from
+    # this module at load time).
+    from weft.discord.bot import Bot
+    from weft.discord.connector import clear_bot, set_bot
+
+    bot = Bot(token, channel_id)
+    logger.info("discord_bot.starting", extra={"channel_id": channel_id})
+    try:
+        await bot.start()
+        set_bot(bot)
+        while True:
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("discord_bot.stopped")
+        raise
+    finally:
+        clear_bot()
+        try:
+            await bot.close()
+        except Exception:
+            logger.exception("discord_bot.close_error")
 
 
 # --- Daily brief delivery loop ---

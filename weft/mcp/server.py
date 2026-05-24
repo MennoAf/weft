@@ -37,6 +37,7 @@ from weft.mcp.slack_commands import handle_slash_checkin
 from weft.cost_enforcement import cost_enforcement_loop
 from weft.scheduler import (
     daily_brief_loop,
+    discord_bot_loop,
     loom_awareness_loop,
     memory_hygiene_loop,
     quarantine_review_loop,
@@ -493,6 +494,7 @@ async def lifespan(server: FastMCP):
             brief_channel=config.daily_brief.channel,
         )
     )
+    ctx._discord_bot_task = asyncio.create_task(discord_bot_loop(pool))
     ctx._loom_awareness_task = asyncio.create_task(
         loom_awareness_loop(pool)
     )
@@ -534,7 +536,7 @@ async def lifespan(server: FastMCP):
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._quarantine_review_task, ctx._cost_enforcement_task):
+        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._discord_bot_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._quarantine_review_task, ctx._cost_enforcement_task):
             if task is not None:
                 task.cancel()
                 try:
