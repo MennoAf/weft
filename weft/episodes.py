@@ -29,7 +29,6 @@ from weft.models import (
     _weft_id,
 )
 from weft.store import _RRF_K, _row_to_memory, store_memory
-from weft.tokens import estimate_tokens
 
 if TYPE_CHECKING:
     from weft.embeddings.base import EmbeddingProvider

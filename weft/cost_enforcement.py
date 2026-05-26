@@ -34,10 +34,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 import asyncpg
-from pydantic import BaseModel, Field
 
 from weft.autonomy import (
-    AutonomyOverride,
     AutonomyOverrideCreate,
     AutonomyTier,
     OverrideSource,

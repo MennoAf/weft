@@ -30,7 +30,6 @@ tokens happens in the middleware via the existing Supabase JWKS path.
 
 from __future__ import annotations
 
-import html
 import logging
 
 from starlette.requests import Request

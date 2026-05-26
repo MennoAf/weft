@@ -11,7 +11,7 @@ from datetime import timedelta
 
 import redis.asyncio as aioredis
 
-from weft.models import Memory, MemoryStatus, MemoryType
+from weft.models import Memory
 
 logger = logging.getLogger(__name__)
 

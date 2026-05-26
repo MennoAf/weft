@@ -38,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import asyncpg
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 

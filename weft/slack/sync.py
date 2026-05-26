@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import asyncpg
 
 from weft.db.connection import acquire, get_db
 from weft.embeddings.base import EmbeddingProvider
-from weft.models import MemoryCreate, MemorySource, MemoryType
+from weft.models import MemoryCreate, MemorySource
 from weft.store import store_memory
 
 from .config import (

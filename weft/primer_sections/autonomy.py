@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from weft.autonomy import AutonomyTier, list_policies
+from weft.autonomy import list_policies
 from weft.primer_sections.context import (
     SECTION_BUDGETS,
     SECTION_MAX_ITEMS,

@@ -10,8 +10,7 @@ logger = logging.getLogger(__name__)
 
 import asyncpg
 
-from weft.models import Memory, MemoryRecall
-from weft.store import list_memories, search_by_vector
+from weft.store import search_by_vector
 
 
 async def weekly_recap(
