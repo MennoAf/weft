@@ -554,7 +554,31 @@ sequence per the Recall-vs-Reader analysis (line 460-462) is Reader prompt pass
 first, then commit to Phase 2 retrieval for the remaining retrieval-side fails.
 This commit ships the Reader pass; Phase 2 measurement decides the rest.
 
-## Phase 2 hierarchical — falsified + diagnosed (2026-05-16 / 2026-05-22)
+## Phase 2 hierarchical — RETRACTED: the falsification was a confound (corrected 2026-05-26)
+
+> **⚠️ The 2026-05-16 "hierarchical falsification" recorded below is INVALID — hierarchical
+> descent was never actually measured.** `WEFT_HIERARCHICAL` is **inert** on the LongMemEval
+> `--tier turns` path: `retrieve(tier="turns")` → `_retrieve_turns` (router.py:152) only calls
+> `temporal_anchor` / flat `recall_turns`; the flag is read solely in `recall_both`
+> (turn_recall.py:343) and the MCP `weft_recall` tool (tools.py:388), neither on the benchmark
+> path, and `recall_turns_hierarchical` was never invoked. `_retrieve_turns` is byte-identical
+> since commit 5c11e14 (May 4), so the May 16 "hier" run and the May 7 "flat" baseline executed
+> **identical flat retrieval**. The −5pt overall delta is explained by 15 question crashes in the
+> May 16 run (cause unrecoverable — log lost to a failed nohup) plus reader/judge nondeterminism
+> across two runs 9 days apart. The "−6% ingest" was a **counting artifact**: per-question ingest
+> was identical (~474.9 sessions/q); the 7,137-session gap = the 15 failed questions' haystacks
+> never tallied (`adapter.py:515-523` `continue`s before `sessions_ingested += n_sessions`). The
+> H1–H5 diagnosis (incl. H5 "descent ignores question_date") therefore describes FLAT turn-tier
+> retrieval, misattributed to descent.
+>
+> **Outcome:** hierarchical's real LongMemEval performance is UNMEASURED. The track (EPIC
+> `loom-531d1c44` + children `loom-31a8db2c`/`loom-c6989702`/`loom-23999517`) was shelved
+> 2026-05-26 and Phase 2 retrieval reallocated to belief-view (`loom-44565df2`). Inert-flag
+> cleanup tracked as `loom-c2dc5637`. Full record + proofs: pinned Weft anti-pattern
+> `weft-be0e9374`. Local diagnosis docs under `benchmarks/longmemeval/results/` (gitignored)
+> carry the same correction banner.
+
+### Original (now-retracted) entry — kept for history
 
 The Phase 2 hierarchical retrieval M-tier run on 2026-05-16 failed its gate
 (overall 0.7161 vs required ≥ 0.75, and regressed against the flat 0.7689
