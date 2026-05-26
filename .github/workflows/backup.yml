@@ -2,7 +2,7 @@ name: Scheduled Weft Backup
 
 on:
   schedule:
-    # Every 4 hours at :15 past to avoid top-of-hour congestion
+    # Every 12 hours at :15 past to avoid top-of-hour congestion
     - cron: "15 */12 * * *"
   workflow_dispatch:
     inputs:
@@ -68,7 +68,10 @@ jobs:
               if not report['valid']:
                   for issue in report['issues']:
                       print(f'WARNING: {issue}')
-              Path('${{ env.BACKUP_FILE }}').write_text(json.dumps(data, indent=2))
+              # Compact (no indent): the embedding float arrays don't need
+              # pretty-printing, and it keeps the in-memory string ~35%
+              # smaller (153MB vs 232MB) for OOM headroom on the runner.
+              Path('${{ env.BACKUP_FILE }}').write_text(json.dumps(data))
               print(f'Backup complete: {data[\"memory_count\"]} memories, {data[\"relationship_count\"]} relationships')
 
           asyncio.run(run())
@@ -104,7 +107,12 @@ jobs:
         with:
           name: weft-backup-${{ github.run_id }}
           path: ${{ env.BACKUP_FILE }}
-          retention-days: 30
+          # upload-artifact zips the file itself — no manual gzip needed.
+          # Max compression since the payload is large float-text JSON.
+          compression-level: 9
+          # 14 days × 2 runs/day ≈ 28 rolling artifacts. Supabase holds the
+          # primary DB; these are a secondary safety net, not long-term archive.
+          retention-days: 14
 
       - name: Commit to backups branch
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.commit_to_branch == 'true'

@@ -148,8 +148,14 @@ def _row_to_jsonable(row: asyncpg.Record, col_kinds: dict[str, str]) -> dict[str
         elif kind == _KIND_INTERVAL:
             out[col] = v.total_seconds() if isinstance(v, timedelta) else v
         elif kind == _KIND_VECTOR:
-            # pgvector codec already decoded to list[float]
-            out[col] = list(v)
+            # pgvector hands back a list[float] when a vector codec is
+            # registered on the connection (the app pool), but the bare
+            # asyncpg pools the backup workflow / CLI open have none — there
+            # the value arrives as its text literal "[0.1,0.2,...]". Parse
+            # that form; do NOT fall through to list(v), which would explode
+            # the ~10KB string into ~9500 single-character entries, bloating
+            # the backup ~8x (1.5GB) and OOM-ing the runner mid-serialize.
+            out[col] = json.loads(v) if isinstance(v, str) else list(v)
         elif kind == _KIND_ARRAY:
             out[col] = list(v) if not isinstance(v, list) else v
         elif kind == _KIND_JSONB:
@@ -189,8 +195,15 @@ def _jsonable_to_args(
             # asyncpg expects a JSON string for jsonb columns
             args.append(json.dumps(v))
         elif kind == _KIND_VECTOR:
-            # codec encodes list[float]; positional cast handles it
-            args.append(v)
+            # Symmetric to the backup side: restore connections are also
+            # codec-less, so a Python list can't bind to the ${i}::vector
+            # cast. Re-serialize to the pgvector text literal "[...]" (the
+            # shape the codec's encoder produces); the ::vector cast parses
+            # it. A value already a str (legacy/other backups) passes through.
+            if isinstance(v, list):
+                args.append("[" + ",".join(str(x) for x in v) + "]")
+            else:
+                args.append(v)
         else:
             args.append(v)
         cols.append(col)
@@ -206,7 +219,13 @@ def _insert_sql(spec: _TableSpec, columns: list[str], col_kinds: dict[str, str])
     placeholders = []
     for i, col in enumerate(columns, start=1):
         if col_kinds.get(col) == _KIND_VECTOR:
-            placeholders.append(f"${i}::vector")
+            # Cast through ::text first so asyncpg types the param as text and
+            # binds the "[...]" literal directly, regardless of whether a
+            # pgvector codec is registered on the connection. A bare
+            # ${i}::vector routes the value through the codec's encoder when
+            # one exists — which would re-encode our already-serialized string
+            # character by character. ::text::vector lets Postgres parse it.
+            placeholders.append(f"${i}::text::vector")
         else:
             placeholders.append(f"${i}")
 
