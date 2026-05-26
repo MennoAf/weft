@@ -51,8 +51,8 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import datetime
+from typing import Callable
 
 import asyncpg
 
@@ -592,7 +592,6 @@ async def materialize_pending_turns(
     or async callable that takes EpisodeTurn and returns list[ClaimUpdate].
     Defaults to weft.views.belief_detector.detect_belief_updates.
     """
-    import asyncio
     import inspect
 
     if detector is None:

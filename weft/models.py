@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 

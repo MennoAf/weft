@@ -1280,7 +1280,6 @@ async def get_metadata(pool: asyncpg.Pool, key: str) -> dict | None:
         val = row["value"]
         # asyncpg returns JSONB as a string or dict depending on codec
         if isinstance(val, str):
-            import json
             return json.loads(val)
         return dict(val)
     except Exception:
@@ -1290,7 +1289,6 @@ async def get_metadata(pool: asyncpg.Pool, key: str) -> dict | None:
 
 async def set_metadata(pool: asyncpg.Pool, key: str, value: dict) -> None:
     """Upsert a metadata value (idempotent)."""
-    import json
     await get_db(pool).execute(
         """INSERT INTO weft_metadata (key, value, updated_at)
            VALUES ($1, $2::jsonb, NOW())

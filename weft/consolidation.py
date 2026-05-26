@@ -226,7 +226,6 @@ async def find_duplicates(
             continue
 
         # Search for similar memories
-        from weft.models import MemoryRecall
 
         similar = await search_by_vector(
             pool, embedding, limit=10, threshold=threshold, status=MemoryStatus.active,
@@ -490,7 +489,6 @@ def _content_conflicts(content_a: str, content_b: str) -> bool:
     # --- Version/number check ---
     # Only flag when numbers appear in similar surrounding context
     # (e.g., both say "version X" but with different X).
-    import re
 
     a_num_ctx = _number_context(a_lower)
     b_num_ctx = _number_context(b_lower)

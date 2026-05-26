@@ -21,7 +21,7 @@ import asyncpg
 from slack_sdk.web.async_client import AsyncWebClient
 
 from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts
-from weft.models import Alert, Trigger
+from weft.models import Alert
 
 logger = logging.getLogger(__name__)
 

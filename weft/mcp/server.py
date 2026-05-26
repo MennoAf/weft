@@ -26,7 +26,7 @@ from weft.auth import (
 )
 from weft.cache import Cache, NullCache
 from weft.config import WeftConfig, load_config
-from weft.db.connection import create_pool, register_pgvector_codec
+from weft.db.connection import create_pool
 from weft.db.migrations import run_migrations
 from weft.db.schema import ensure_vector_dimensions
 from weft.embeddings import get_provider
