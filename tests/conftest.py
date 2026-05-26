@@ -111,6 +111,18 @@ async def pool():
 
 
 @pytest.fixture
+def pg_dsn():
+    """Raw DSN for the shared test Postgres container.
+
+    Lets a test open a *codec-less* asyncpg pool — mirroring the bare
+    connection the backup workflow and `weft backup` CLI use (no pgvector
+    codec registered) — to exercise serialization paths the codec-equipped
+    `pool` fixture hides.
+    """
+    return _pg_container.get_connection_url().replace("+psycopg2", "")
+
+
+@pytest.fixture
 async def redis_conn():
     """Function-scoped Redis connection — flushed each test."""
     host = _redis_container.get_container_host_ip()

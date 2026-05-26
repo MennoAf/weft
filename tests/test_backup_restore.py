@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
+import asyncpg
 import pytest
 
 from weft.auth import current_user_id
@@ -399,6 +400,64 @@ async def test_restore_without_embeddings(pool):
         "SELECT COUNT(*) AS c FROM memories WHERE embedding IS NOT NULL"
     )
     assert row["c"] == 0
+
+
+@pytest.mark.asyncio
+async def test_backup_restore_roundtrip_without_vector_codec(pool, pg_dsn):
+    """Reproduce the production path: backup + restore over a codec-LESS pool.
+
+    The scheduled backup workflow and the ``weft backup`` CLI open bare
+    asyncpg pools with no pgvector codec, so embeddings arrive as the text
+    literal ``"[0.1,...]"`` rather than ``list[float]``. This is the path the
+    codec-equipped ``pool`` fixture never exercises — which is why the
+    char-explosion bug shipped.
+
+    Guards against the regression where ``_row_to_jsonable`` did ``list(v)``
+    on that string, exploding each 768-dim vector into ~9500 single-character
+    entries (~1.5GB backup, OOM-ing the runner) and leaving embeddings
+    un-restorable (a char-list can't bind to the ``::vector`` cast).
+    """
+    await _seed_test_data(pool)
+
+    # Bare pool — exactly like the workflow: no init callback, no codec.
+    raw = await asyncpg.create_pool(
+        pg_dsn, min_size=1, max_size=2, statement_cache_size=0
+    )
+    try:
+        data = await backup_all(raw)
+
+        # Embeddings must serialize as 768 floats — not a list of characters.
+        for m in data["memories"]:
+            assert m["embedding"] is not None
+            assert len(m["embedding"]) == 768, (
+                f"expected 768 floats, got {len(m['embedding'])} entries — "
+                "char-explosion regression if this is ~9500"
+            )
+            assert all(isinstance(x, float) for x in m["embedding"])
+
+        # The backup must survive the JSON file-write round-trip intact.
+        assert verify_backup(json.loads(json.dumps(data)))["valid"]
+
+        # Wipe, then restore through the same codec-less pool.
+        await pool.execute(
+            "TRUNCATE entity_mentions, episode_memories, memory_relationships, "
+            "entities, episodes, memories CASCADE"
+        )
+        report = await restore_all(raw, data)
+        assert report["errors"] == []
+        assert report["memories_restored"] == 3
+    finally:
+        await raw.close()
+
+    # Embedding round-tripped to a real vector with values intact (0.1 * 768).
+    row = await pool.fetchrow(
+        "SELECT embedding::text AS e FROM memories WHERE content = $1",
+        "Python uses indentation for blocks",
+    )
+    assert row is not None and row["e"].startswith("[")
+    restored = [float(x) for x in row["e"].strip("[]").split(",")]
+    assert len(restored) == 768
+    assert all(abs(x - 0.1) < 1e-6 for x in restored)
 
 
 # --- v1.2 full-coverage roundtrip ---
