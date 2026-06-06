@@ -44,13 +44,12 @@ from typing import Literal
 import asyncpg
 
 from weft.embeddings.base import EmbeddingProvider
-from weft.episode_turns import _short_id, append_turn
+from weft.episode_turns import _short_id
 from weft.episodes import create_episode
 from weft.ingest_pipeline import IngestItem, process as pipeline_process
 from weft.tokens import estimate_tokens
 from weft.models import (
     EpisodeCreate,
-    EpisodeTurnCreate,
     MemoryCreate,
     MemorySource,
     MemoryType,
@@ -394,13 +393,39 @@ async def load_haystack(
 
 
 async def cleanup_haystack(pool: asyncpg.Pool, instance: Instance) -> int:
-    """Delete every memory + episode written for one benchmark question.
+    """Delete every memory + episode + belief claim written for one question.
 
     Useful between dev iterations so the database does not grow unboundedly.
     Returns the count of memory rows deleted; episodes/turns also pruned
     (turns cascade from episodes via the v45 ``ON DELETE CASCADE`` FK).
+
+    Belief claims are deleted FIRST, while the turns they reference still
+    exist: ``belief_claims`` has no ``project_id`` column (the table is
+    user-partitioned, not project-partitioned), so the only way to scope a
+    delete to this question is by overlap between ``evidence_turn_ids`` and
+    the question's turn ids. After the episode cascade removes those turns the
+    linkage is gone, so order matters. Without this step claims accumulate
+    across questions under the shared benchmark ``user_id`` and leak into
+    later belief-view recalls.
     """
     project_id = project_id_for(instance.question_id)
+
+    # Delete claims anchored to this question's turns before the cascade drops
+    # the turns. COALESCE to an empty array so a question with no turns (raw /
+    # extracted mode) is a no-op rather than a NULL-overlap surprise.
+    await pool.execute(
+        """
+        DELETE FROM belief_claims
+        WHERE evidence_turn_ids && (
+            SELECT COALESCE(array_agg(et.id), ARRAY[]::text[])
+            FROM episode_turns et
+            JOIN episodes e ON et.episode_id = e.id
+            WHERE e.project_id = $1
+        )
+        """,
+        project_id,
+    )
+
     # Hard delete (not Weft's soft-delete) so re-runs start clean.
     count = await pool.fetchval(
         "SELECT COUNT(*) FROM memories WHERE project_id = $1", project_id,

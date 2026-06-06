@@ -57,6 +57,11 @@ from benchmarks.longmemeval.ingest import (
     load_haystack,
     project_id_for,
 )
+from benchmarks.longmemeval.materialize import (
+    Detector,
+    MaterializationAborted,
+    materialize_question,
+)
 from benchmarks.longmemeval.reader import Reader
 from benchmarks.longmemeval.router import Tier, policy_for, retrieve
 
@@ -145,6 +150,14 @@ class RunStats:
     warm_boost_queries: int = 0
     warm_boost_accessed_turns: int = 0
     warm_boost_boosted_turns: int = 0
+    # Belief-view materialization aggregates (tier=belief-view only). Errors
+    # here mean turns whose claims were silently skipped — a non-zero count
+    # on a gate run means the score under-reads the belief-view.
+    materialize_turns_total: int = 0
+    materialize_claims_written: int = 0
+    materialize_claims_superseded: int = 0
+    materialize_abstentions: int = 0
+    materialize_errors: int = 0
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started_at if self.started_at else 0.0
@@ -216,6 +229,7 @@ async def _run_one(
     recall_k: int = 10,
     warm_boost_rounds: int = 0,
     warm_boost_queries_per_round: int = 10,
+    detector: Detector | None = None,
 ) -> tuple[str, dict]:
     """Run the full pipeline for one question.
 
@@ -268,6 +282,39 @@ async def _run_one(
             rng_seed=hash(instance.question_id) & 0xFFFFFFFF,
         )
 
+    # 2.6. Belief-view materialization (loom-1fe75d00) — run the detector +
+    # supersession writer over this question's just-ingested turns so the
+    # belief-view query has claims to read. Sandbox-scoped, cursor-free (see
+    # materialize.py for why the production global cursor is wrong here). Only
+    # meaningful with --mode turns; a belief-view run over raw/extracted mode
+    # has no episode_turns to materialize, so the tier degrades to its
+    # turn-recall fallback (which is also empty) — guard with a clear warning.
+    materialize_telemetry: dict | None = None
+    if tier == "belief-view":
+        if mode != "turns":
+            logger.warning(
+                "tier='belief-view' requires --mode turns (no episode_turns to "
+                "materialize in mode=%r); claims will be empty for q=%s",
+                mode, instance.question_id,
+            )
+        mat_stats = await materialize_question(
+            pool, project_id,
+            detector=detector,
+        )
+        materialize_telemetry = mat_stats.to_dict()
+        if mode == "turns" and mat_stats.turns_total == 0:
+            # Turns mode ingested sessions but the sandbox SELECT saw nothing —
+            # the signature of an identity/RLS mismatch (e.g. a caller-supplied
+            # pool whose role neither owns the tables nor sets app.user_id),
+            # not of an empty haystack. Loud because the run would otherwise
+            # complete and bill the Reader against claim-less recalls.
+            logger.warning(
+                "belief-view materialization fetched ZERO turns for q=%s "
+                "(project_id=%s) despite mode=turns — check pool identity/RLS "
+                "(see materialize._fetch_question_turns)",
+                instance.question_id, project_id,
+            )
+
     # 3. Recall — question-type-aware policy lives in router.policy_for().
     # The CLI top_k acts as a floor: if a caller bumps top_k above the
     # policy default (e.g. running ablations), honor that. Sandbox isolation
@@ -283,6 +330,7 @@ async def _run_one(
         project_id=project_id,
         policy=policy,
         tier=tier,
+        user_id=BENCHMARK_USER_ID,
     )
 
     # 4. Read — Claude synthesizes the answer.
@@ -304,6 +352,8 @@ async def _run_one(
     }
     if warm_boost_telemetry is not None:
         telemetry["warm_boost"] = warm_boost_telemetry
+    if materialize_telemetry is not None:
+        telemetry["materialize"] = materialize_telemetry
 
     # Recall@k instrumentation — only meaningful when we have side-maps.
     # Session-level: compare source sessions of top-k retrieved turns
@@ -424,6 +474,7 @@ async def run_benchmark(
     pool: asyncpg.Pool | None = None,
     embedder: EmbeddingProvider | None = None,
     reader: Reader | None = None,
+    detector: Detector | None = None,
 ) -> RunStats:
     """Run the LongMemEval adapter over a dataset split.
 
@@ -511,13 +562,23 @@ async def run_benchmark(
                         recall_k=recall_k,
                         warm_boost_rounds=warm_boost_rounds,
                         warm_boost_queries_per_round=warm_boost_queries_per_round,
+                        detector=detector,
                     )
+                except MaterializationAborted:
+                    # Consecutive-failure burst — detector/DB is down. Every
+                    # subsequent question would fail the same way while still
+                    # billing the Reader, so fail the whole run loudly instead
+                    # of recording one more questions_failed and moving on.
+                    raise
                 except Exception as exc:
                     logger.exception(
                         "question %s failed: %s", instance.question_id, exc,
                     )
                     stats.questions_failed += 1
-                    continue
+                    # No continue: fall through to the per-question cleanup
+                    # below. Skipping cleanup on failure would leak this
+                    # question's belief_claims (which have no project_id
+                    # scoping) into every later question's belief-view recall.
                 else:
                     stats.questions_done += 1
                     stats.sessions_ingested += telemetry["n_sessions"]
@@ -530,6 +591,13 @@ async def run_benchmark(
                         stats.warm_boost_queries += int(wb.get("queries", 0))
                         stats.warm_boost_accessed_turns += int(wb.get("accessed_turns", 0))
                         stats.warm_boost_boosted_turns += int(wb.get("boosted_turns", 0))
+                    mat = telemetry.get("materialize")
+                    if mat is not None:
+                        stats.materialize_turns_total += int(mat.get("turns_total", 0))
+                        stats.materialize_claims_written += int(mat.get("claims_written", 0))
+                        stats.materialize_claims_superseded += int(mat.get("claims_superseded", 0))
+                        stats.materialize_abstentions += int(mat.get("abstentions", 0))
+                        stats.materialize_errors += int(mat.get("errors", 0))
 
                     out.write(
                         json.dumps(
@@ -624,6 +692,13 @@ async def run_benchmark(
                     "total_accessed_turns": stats.warm_boost_accessed_turns,
                     "total_boosted_turns": stats.warm_boost_boosted_turns,
                 } if warm_boost_rounds > 0 else None,
+                "materialize": {
+                    "turns_total": stats.materialize_turns_total,
+                    "claims_written": stats.materialize_claims_written,
+                    "claims_superseded": stats.materialize_claims_superseded,
+                    "abstentions": stats.materialize_abstentions,
+                    "errors": stats.materialize_errors,
+                } if tier == "belief-view" else None,
             },
             indent=2,
         ),
@@ -658,14 +733,17 @@ async def run_benchmark(
 )
 @click.option(
     "--tier",
-    type=click.Choice(["belief", "turns", "auto"]),
+    type=click.Choice(["belief", "turns", "auto", "belief-view"]),
     default="belief",
     show_default=True,
     help=(
         "Retrieval tier. 'belief' (default) hits hybrid recall over memories. "
         "'turns' queries episode_turns directly (use with --mode turns). "
         "'auto' routes multi-session and temporal-reasoning to turns; "
-        "everything else stays on belief."
+        "everything else stays on belief. 'belief-view' materializes claims "
+        "from the turns substrate then reads the supersession-collapsed "
+        "belief_claims view, falling back to turn recall on a miss (use with "
+        "--mode turns; targets knowledge-update questions)."
     ),
 )
 @click.option(
@@ -771,6 +849,23 @@ def cli(
         level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # belief-view guard rails — both misconfigurations burn real Reader spend
+    # producing garbage, so they hard-fail (before any env/key checks) instead
+    # of warning per question.
+    if tier == "belief-view" and mode != "turns":
+        raise click.UsageError(
+            "--tier belief-view requires --mode turns: the materializer reads "
+            f"episode_turns, which mode={mode!r} never writes — every recall "
+            "would be empty while the Reader still bills per question."
+        )
+    if tier == "belief-view" and no_cleanup:
+        raise click.UsageError(
+            "--tier belief-view is incompatible with --no-cleanup: "
+            "belief_claims has no project_id scoping, so claims from one "
+            "question leak into every later question's belief-view recall "
+            "and silently corrupt the run."
+        )
+
     # Match Weft's config loader: load ~/.weft/.env before checking env.
     # Without this, keys placed in the standard Weft .env would be rejected
     # because the check runs before load_config() triggers load_dotenv().
@@ -840,6 +935,20 @@ def cli(
         )
         click.echo(f"  recall jsonl: {stats.recall_jsonl_path}")
         click.echo(f"  recall summary: {stats.recall_summary_path}")
+    if tier == "belief-view":
+        click.echo(
+            f"  materialize: turns={stats.materialize_turns_total} "
+            f"claims={stats.materialize_claims_written} "
+            f"superseded={stats.materialize_claims_superseded} "
+            f"abstentions={stats.materialize_abstentions} "
+            f"errors={stats.materialize_errors}"
+        )
+        if stats.materialize_errors:
+            click.echo(
+                f"  WARNING: {stats.materialize_errors} materialization "
+                "errors — the belief-view under-read those turns; treat the "
+                "score as a lower bound, not a gate result.",
+            )
     click.echo(
         f"\nNext: feed this file to LongMemEval's evaluator:\n"
         f"  python LongMemEval/src/evaluation/evaluate_qa.py "
@@ -881,6 +990,20 @@ def cli(
 #        --mode extracted \
 #        --question-type multi-session \
 #        --question-type multi-session_abs
+#
+# 3b. BELIEF-VIEW GATE (loom-1fe75d00) — knowledge-update accuracy ≥ 0.85.
+#     Requires --mode turns (the substrate the materializer reads) and
+#     --tier belief-view (materialize per question, then read the claim
+#     view). Start with the knowledge-update subset to bound cost: the
+#     materializer makes ONE Haiku call per haystack turn, so a full M-tier
+#     run is materially more expensive than a Reader-only run — scope first,
+#     widen only if the subset clears the gate.
+#    uv run python -m benchmarks.longmemeval.adapter \
+#        --dataset ../LongMemEval/data/longmemeval_m.json \
+#        --mode turns --tier belief-view \
+#        --question-type knowledge-update \
+#        --question-type knowledge-update_abs
+#     Then score with the judge (step 4) and record in tests/baselines.md.
 #
 # 4. Score the resulting JSONL with the LongMemEval judge wrapper. This
 #    runs the upstream evaluator inside an ephemeral uv env (no Weft dep

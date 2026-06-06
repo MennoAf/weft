@@ -52,9 +52,16 @@ from weft.models import (
 )
 from weft.store import search_hybrid
 from weft.turn_recall import route_query_to_tier, temporal_anchor
+from weft.views.belief_query import BeliefClaimResult, search_belief_claims
 
 
-Tier = Literal["belief", "turns", "auto"]
+Tier = Literal["belief", "turns", "auto", "belief-view"]
+
+# Owner identity benchmark turns + claims are written under. Mirrors
+# adapter.BENCHMARK_USER_ID; duplicated here to avoid a router→adapter import
+# cycle (adapter imports router). The adapter passes its canonical constant
+# into retrieve(), so this default only matters for direct/standalone calls.
+_BENCHMARK_USER_ID = "longmemeval-bench"
 
 
 # ----------------------------------------------------------------------
@@ -149,6 +156,57 @@ def _turn_to_recall(
     return MemoryRecall(memory=memory, similarity=similarity)
 
 
+def _render_claim_value(value: object) -> str:
+    """Render a claim's JSONB value as compact prose for the Reader.
+
+    Dicts become ``k=v`` pairs; scalars pass through. Mirrors the default
+    rendering in ``weft.views.belief_query._render_value`` so the Reader sees
+    the same shape whether the claim arrives via the MCP tool or this harness.
+    """
+    if isinstance(value, dict):
+        return ", ".join(f"{k}={v}" for k, v in value.items())
+    return str(value)
+
+
+def _claim_to_recall(
+    claim: BeliefClaimResult,
+    *,
+    rank: int,
+    total: int,
+    project_id: str,
+) -> MemoryRecall:
+    """Wrap a ``BeliefClaimResult`` in a ``MemoryRecall`` for the Reader.
+
+    The belief-view returns supersession-collapsed *current* claims, so the
+    occurred_at date is rendered into the content as the as-of anchor — this
+    is exactly the signal that resolves knowledge-update questions (the Reader
+    sees only the active value, not the superseded one). Pseudo-similarity is
+    synthesized from rank order, matching ``_turn_to_recall`` so the relevance
+    display stays monotonic across tiers.
+    """
+    similarity = max(0.0, 1.0 - (rank / max(total, 1)))
+    date_str = claim.occurred_at.date().isoformat()
+    content = (
+        f"As of {date_str} — {claim.attribute}: {_render_claim_value(claim.value)} "
+        f"(source: {claim.source_provenance})"
+    )
+    memory = Memory(
+        id=claim.claim_id,
+        type=MemoryType.fact,
+        topic=[f"longmemeval/{project_id}"],
+        content=content,
+        source=MemorySource.conversation,
+        confidence=claim.detector_confidence,
+        token_count=0,
+        created_at=claim.occurred_at,
+        updated_at=claim.occurred_at,
+        accessed_at=claim.occurred_at,
+        project_id=project_id,
+        status=MemoryStatus.active,
+    )
+    return MemoryRecall(memory=memory, similarity=similarity)
+
+
 async def _retrieve_turns(
     pool: asyncpg.Pool,
     embedder: EmbeddingProvider,
@@ -216,6 +274,7 @@ async def retrieve(
     project_id: str,
     policy: RetrievalPolicy | None = None,
     tier: Tier = "belief",
+    user_id: str = _BENCHMARK_USER_ID,
 ) -> list[MemoryRecall]:
     """Run the question-type-appropriate retrieval and return ranked memories.
 
@@ -234,12 +293,46 @@ async def retrieve(
       * ``'auto'`` — for multi-session and temporal-reasoning questions
         use turns; everything else stays on belief. Caller is responsible
         for ingesting both shapes if 'auto' is requested.
+      * ``'belief-view'`` — query the materialized ``belief_claims`` view
+        (supersession-collapsed current claims) and fall back to turn-tier
+        recall when no claim matches. Use with ``--mode turns`` + a prior
+        ``materialize_question`` pass. ``belief_claims`` has no ``project_id``
+        column, so sandbox isolation here relies on per-question cleanup of
+        claims plus the ``user_id`` filter — safe under the default
+        sequential, cleanup-on path.
+
+    ``user_id`` scopes the belief-view claim lookup (no effect on other tiers,
+    which isolate by ``project_id``).
     """
     policy = policy or policy_for(question_type)
 
     if tier == "auto":
         base_type = question_type.removesuffix("_abs")
         tier = "turns" if base_type in ("multi-session", "temporal-reasoning") else "belief"
+
+    if tier == "belief-view":
+        claims = await search_belief_claims(
+            pool,
+            query=question,
+            user_id=user_id,
+            scope="global",
+            limit=policy.top_k,
+        )
+        if claims:
+            total = len(claims)
+            return [
+                _claim_to_recall(c, rank=i, total=total, project_id=project_id)
+                for i, c in enumerate(claims)
+            ]
+        # No claim matched — augment-not-gate: fall through to the turn
+        # substrate so non-belief questions still get answered.
+        return await _retrieve_turns(
+            pool, embedder,
+            question=question,
+            question_type=question_type,
+            project_id=project_id,
+            policy=policy,
+        )
 
     if tier == "turns":
         return await _retrieve_turns(

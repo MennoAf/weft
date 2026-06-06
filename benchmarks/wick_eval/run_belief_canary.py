@@ -9,12 +9,19 @@ Usage:
 
 Output:
   One JSON line to stdout with keys:
-    - overall_over_extraction_rate (float)
-    - total_turns (int)
-    - total_emitted_claims (int)
-    - total_extra_claims (int)
-    - total_missed_claims (int)
-    - false_positive_turns (list[str])
+    - overall_over_extraction_rate (float) — extra/emitted on exact attribute
+      strings. NOTE: drifts run-to-run because it penalizes attribute-naming
+      divergence on legitimate claims (the detector may emit
+      "reading.current_book" where the gold says "reading.current-book").
+      Not a reliable gate against a non-deterministic detector.
+    - abstention_violation_rate (float) — the robust §6.2 over-extraction
+      signal: fraction of no-claim turns (gold expected_claims == []) on which
+      the detector emitted any claim. Naming-independent; this is the gate.
+    - total_turns / total_emitted_claims / total_extra_claims /
+      total_missed_claims (int)
+    - no_claim_turns (int) / abstention_violations (int)
+    - false_positive_turns (list[str]) — turns with any exact-string over-extraction
+    - abstention_violation_turns (list[str]) — no-claim turns that emitted a claim
 """
 
 from __future__ import annotations
@@ -54,6 +61,15 @@ async def _run_canary(fixture: list[dict[str, Any]]) -> dict[str, Any]:
     total_extra_claims = 0
     total_missed_claims = 0
     false_positive_turns: list[str] = []
+
+    # Abstention-violation tracking: the robust §6.2 over-extraction signal.
+    # A "no-claim turn" is one whose gold expected_claims is empty (greetings,
+    # questions, tool/system output, third-party narration, adversarial
+    # injections). Any claim emitted on such a turn is unambiguous
+    # over-extraction — independent of attribute-naming convention, so it does
+    # not drift run-to-run the way the exact-string over_extraction_rate does.
+    no_claim_turns = 0
+    abstention_violation_turns: list[str] = []
 
     for entry in fixture:
         turn_id = entry.get("turn_id", "unknown")
@@ -135,6 +151,12 @@ async def _run_canary(fixture: list[dict[str, Any]]) -> dict[str, Any]:
         if over_extraction:
             false_positive_turns.append(turn_id)
 
+        # Abstention-violation: gold says no claim, detector emitted one anyway.
+        if not expected_claims:
+            no_claim_turns += 1
+            if emitted_attributes:
+                abstention_violation_turns.append(turn_id)
+
         logger.debug(
             "canary.turn_processed: turn_id=%s emitted=%r expected=%r "
             "over=%r missed=%r",
@@ -152,13 +174,21 @@ async def _run_canary(fixture: list[dict[str, Any]]) -> dict[str, Any]:
         else 0.0
     )
 
+    abstention_violation_rate = (
+        len(abstention_violation_turns) / no_claim_turns if no_claim_turns else 0.0
+    )
+
     return {
         "overall_over_extraction_rate": round(overall_over_extraction_rate, 4),
+        "abstention_violation_rate": round(abstention_violation_rate, 4),
         "total_turns": total_turns,
         "total_emitted_claims": total_emitted_claims,
         "total_extra_claims": total_extra_claims,
         "total_missed_claims": total_missed_claims,
+        "no_claim_turns": no_claim_turns,
+        "abstention_violations": len(abstention_violation_turns),
         "false_positive_turns": false_positive_turns,
+        "abstention_violation_turns": abstention_violation_turns,
     }
 
 
