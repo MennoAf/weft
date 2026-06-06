@@ -4360,11 +4360,25 @@ async def weft_tracker_list(
     open_only: bool = False,
     project_id: str | None = None,
     entity_id: str | None = None,
+    context_filter: dict[str, str] | None = None,
+    since: str | None = None,
     limit: int = 100,
 ) -> dict:
-    """List trackers, newest-touch first. Filter by kind, state, scope."""
+    """List trackers, newest-touch first. Filter by kind, state, scope.
+
+    context_filter: match top-level keys in the JSONB context column by
+    string equality (one ``context->>key = value`` clause per pair, ANDed).
+    Use this to partition the kind=trace catchall — e.g.
+    ``{"wick_kind": "authority_skip"}`` isolates Wick authority-skip events.
+    since: ISO8601 datetime; bounds results to created_at >= since.
+    """
     try:
         from weft.trackers import list_trackers
+        since_dt = None
+        if since is not None:
+            since_dt = datetime.fromisoformat(since)
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
         app: AppContext = ctx.request_context.lifespan_context
         async with acquire(app.pool):
             trs = await list_trackers(
@@ -4374,6 +4388,8 @@ async def weft_tracker_list(
                 open_only=open_only,
                 project_id=project_id,
                 entity_id=entity_id,
+                context_filter=context_filter,
+                since=since_dt,
                 limit=limit,
             )
             return {"trackers": [t.to_dict() for t in trs], "count": len(trs)}

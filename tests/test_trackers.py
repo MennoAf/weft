@@ -334,6 +334,80 @@ class TestListQueries:
         assert tr_open.id in ids
         assert tr_closed.id not in ids
 
+    async def test_filter_by_context_single_key(self, pool):
+        # All three are kind=trace (the Wick catchall); only context.wick_kind
+        # distinguishes them — exactly the partition Wick's read path needs.
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="skip-a",
+            context={"wick_kind": "authority_skip", "action": "dispatch"},
+        ))
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="skip-b",
+            context={"wick_kind": "authority_skip", "action": "merge"},
+        ))
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="approval",
+            context={"wick_kind": "approval_outcome", "action": "dispatch"},
+        ))
+        result = await list_trackers(
+            pool, kind=TrackerKind.trace,
+            context_filter={"wick_kind": "authority_skip"},
+        )
+        assert {t.title for t in result} == {"skip-a", "skip-b"}
+
+    async def test_filter_by_context_multi_key_ands(self, pool):
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="approve-dispatch",
+            context={"wick_kind": "approval_outcome", "action": "dispatch"},
+        ))
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="approve-merge",
+            context={"wick_kind": "approval_outcome", "action": "merge"},
+        ))
+        result = await list_trackers(
+            pool,
+            context_filter={"wick_kind": "approval_outcome", "action": "merge"},
+        )
+        assert {t.title for t in result} == {"approve-merge"}
+
+    async def test_filter_by_context_no_match(self, pool):
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="skip",
+            context={"wick_kind": "authority_skip"},
+        ))
+        result = await list_trackers(
+            pool, context_filter={"wick_kind": "does_not_exist"},
+        )
+        assert result == []
+
+    async def test_filter_since_window(self, pool):
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.task, title="before",
+        ))
+        cutoff = datetime.now(timezone.utc)
+        after = await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.task, title="after",
+        ))
+        result = await list_trackers(pool, since=cutoff)
+        ids = {t.id for t in result}
+        assert after.id in ids
+        assert {t.title for t in result} == {"after"}
+
+    async def test_context_filter_combines_with_project(self, pool):
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="warp-skip", project_id="warp",
+            context={"wick_kind": "authority_skip"},
+        ))
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.trace, title="other-skip", project_id="other",
+            context={"wick_kind": "authority_skip"},
+        ))
+        result = await list_trackers(
+            pool, project_id="warp",
+            context_filter={"wick_kind": "authority_skip"},
+        )
+        assert {t.title for t in result} == {"warp-skip"}
+
 
 # ---------------------------------------------------------------------------
 # MCP tool layer — verifies the wrappers parse args and route correctly.
@@ -382,6 +456,29 @@ class TestMCPLayer:
             ctx, tracker_id=tid, final_state="done", note="merged",
         )
         assert closed["state"] == "done"
+
+    async def test_list_via_tool_context_filter_and_since(self, ctx):
+        from weft.mcp.tools import weft_tracker_create, weft_tracker_list
+
+        await weft_tracker_create(
+            ctx, kind="trace", title="skip",
+            context={"wick_kind": "authority_skip"},
+        )
+        cutoff = datetime.now(timezone.utc).isoformat()
+        await weft_tracker_create(
+            ctx, kind="trace", title="approval",
+            context={"wick_kind": "approval_outcome"},
+        )
+
+        # context_filter partitions the kind=trace catchall.
+        skips = await weft_tracker_list(
+            ctx, kind="trace", context_filter={"wick_kind": "authority_skip"},
+        )
+        assert {t["title"] for t in skips["trackers"]} == {"skip"}
+
+        # since (ISO string) bounds the window; only the post-cutoff row.
+        recent = await weft_tracker_list(ctx, kind="trace", since=cutoff)
+        assert {t["title"] for t in recent["trackers"]} == {"approval"}
 
     async def test_due_via_tool(self, ctx):
         from weft.mcp.tools import weft_tracker_create, weft_tracker_due
