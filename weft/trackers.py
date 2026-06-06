@@ -281,8 +281,26 @@ async def list_trackers(
     open_only: bool = False,
     project_id: str | None = None,
     entity_id: str | None = None,
+    context_filter: dict[str, str] | None = None,
+    since: datetime | None = None,
     limit: int = 100,
 ) -> list[Tracker]:
+    """List trackers, newest-touch first, narrowed by the given filters.
+
+    ``context_filter`` matches top-level keys in the JSONB ``context``
+    column by string equality — one ``context ->> key = value`` clause per
+    pair, ANDed together. This is the read counterpart to the generic
+    ``context`` writes that Wick's operational records use: every Wick
+    interchange record collapses to ``kind=trace`` and carries its true
+    kind under ``context.wick_kind``, so a consumer isolates (say)
+    authority-skip events with ``context_filter={"wick_kind":
+    "authority_skip"}``. Only string-valued equality is supported;
+    callers needing range/containment semantics should add a dedicated
+    surface rather than overloading this.
+
+    ``since`` bounds results to ``created_at >= since`` (timezone-aware
+    UTC datetime).
+    """
     conditions: list[str] = []
     params: list[Any] = []
     idx = 1
@@ -309,6 +327,18 @@ async def list_trackers(
     if entity_id is not None:
         conditions.append(f"entity_id = ${idx}")
         params.append(entity_id)
+        idx += 1
+
+    if context_filter:
+        for key, value in context_filter.items():
+            conditions.append(f"context ->> ${idx} = ${idx + 1}")
+            params.append(key)
+            params.append(value)
+            idx += 2
+
+    if since is not None:
+        conditions.append(f"created_at >= ${idx}")
+        params.append(since)
         idx += 1
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
