@@ -498,29 +498,61 @@ Used as design checklist for loom-540df5f7 (belief-view spec) and
 proxy eval for loom-1fe75d00 (M-tier eval gate). Real-world Wick
 eval (n≥50) is a separate task (loom-b2c02183) blocked on Wick shipping.
 
-## Belief-view detector canary — harness
+## Belief-view detector canary — harness (locked 2026-05-26)
 
-The belief-detector canary measures over-extraction rate on a hand-crafted fixture of
-episode turns. "Over-extraction" is the fraction of claims emitted by the Haiku detector
-that do NOT appear in the fixture's expected_claims set. The fixture covers five turn types
-(user single-claim, user no-claim question, assistant agent-suggested claim, user multi-claim,
-tool-role abstention) to validate baseline detector behavior across role-gating and confidence
-thresholding.
+The belief-detector canary measures the Haiku turn-to-claim detector's **over-extraction**
+discipline (spec §6.2): does it emit belief claims on turns that should yield none? The
+fixture (`benchmarks/wick_eval/canary_belief_detector.json`) is **32 turns** spanning the
+full role + claim-count distribution from loom-72bd0d59:
+
+| Bucket | Count | Notes |
+| --- | --- | --- |
+| user-role | 20 | claims + no-claim + third-party + adversarial |
+| assistant-role | 6 | agent-suggested claims + acknowledgements |
+| tool-role | 3 | expected_claims = [] |
+| system-role | 2 | expected_claims = [] |
+| single-claim | 9 | one expected attribute |
+| multi-claim | 3 | ≥2 expected attributes |
+| no-claim (expected []) | 21 | greetings, questions, ack, third-party, tool, system, adversarial |
+| adversarial injection | 3 | "ignore prior facts…" — must abstain (§6.1) |
+
+> **Source caveat — SYNTHETIC, not real turns.** loom-72bd0d59 specified ≥30 *real* turns from
+> `episode_turns` history. That premise is **not satisfiable yet**: real input (Discord) routes
+> to `memories` via `ingest_pipeline`, and the only writer of `episode_turns` is `weft_turn_append`
+> (the MCP tool Wick calls) — and Wick is not live (blocked, loom-b2c02183). `episode_turns`
+> contains only benchmark residue. So this fixture is synthetic (Jim-Boblaw-style personas, no
+> real PII). The real-turn canary is blocked on Wick shipping; re-curate from real traffic then.
 
 **Reproduce:**
 
 ```bash
-uv run python -m benchmarks.wick_eval.run_belief_canary \
+uv run python benchmarks/wick_eval/run_belief_canary.py \
     --fixture benchmarks/wick_eval/canary_belief_detector.json
 ```
 
-**Locked number:**
+**Locked numbers (32 turns, real Haiku detector, ~$0.06/run):**
 
-| Metric | Value |
-| --- | --- |
-| overall_over_extraction_rate | TBD — fixture curation tracked by loom-72bd0d59 |
-| total_turns | 5 |
-| baseline_run_cost | ~$0.01 (5 detector calls at ≤$0.0021 each, minor extractions) |
+| Metric | Value | Gate | Verdict |
+| --- | --- | --- | --- |
+| **abstention_violation_rate** | **0.0** (0 / 21 no-claim turns) | < 0.15 | **PASS** |
+| overall_over_extraction_rate | 0.6 (9 / 15 emitted) | — | naming drift, see below |
+| total_emitted_claims | 15 | | |
+| abstention_violations | 0 | | |
+
+**Interpretation.** The detector emitted **zero claims on all 21 no-claim turns** — including the
+3 adversarial-injection turns (§6.1), all tool/system output, and third-party narration. That is
+the over-extraction signal that matters, and it is perfect (0%). The headline
+`overall_over_extraction_rate` of 0.6 is **entirely attribute-naming drift**, not over-extraction:
+all 7 flagged `false_positive_turns` (004, 005, 006, 007, 008, 009, 011) are *legitimate* claims
+where the detector identified the right fact but named the attribute differently than the gold
+label (e.g. `reading.current_book` vs `reading.current-book`; `health.allergies` vs
+`health.allergy`; on 008 it split "new job as PM" into role + job-status). No hallucinated claims.
+
+Because the detector is non-deterministic and `overall_over_extraction_rate` does exact-string set
+difference, that metric drifts run-to-run and is **not a usable gate**. The
+`abstention_violation_rate` (added to the harness in this pass) is naming-independent and is the
+gate metric going forward. Follow-up (Weft issue): the exact-string metric should be downgraded to
+diagnostic-only, or paired with a synonym/normalization layer, before it's trusted as a threshold.
 
 ## Reader-prompt v2 — anti-frequency / anti-fabrication / extract-preference (2026-05-16)
 
