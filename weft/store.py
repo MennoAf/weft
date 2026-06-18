@@ -1148,6 +1148,94 @@ async def record_feedback(
     }
 
 
+async def get_recent_recall_queries(
+    pool: asyncpg.Pool,
+    *,
+    window_minutes: int = 30,
+    limit: int = 200,
+) -> list[dict]:
+    """Fetch recent weft_recall_queries rows for re-ask detection.
+
+    Returns rows ordered by created_at ASC (oldest first) for the calling
+    user within the last ``window_minutes``. Only rows NOT already marked
+    as re-ask misses are returned (avoids double-processing).
+
+    Returned dicts have the same field shape as ``QueryRow.from_dict``
+    expects: query_id, query_text, created_at, tool_name, project_id,
+    tier, mode, retrieval_mode, result_count.
+    """
+    rows = await get_db(pool).fetch(
+        """
+        SELECT query_id, query_text, created_at, tool_name, project_id,
+               tier, mode, retrieval_mode, result_count
+        FROM weft_recall_queries
+        WHERE created_at >= now() - make_interval(mins => $1)
+          AND is_reask_miss = FALSE
+        ORDER BY created_at ASC
+        LIMIT $2
+        """,
+        window_minutes,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def apply_reask_feedback(
+    pool: asyncpg.Pool,
+    missed_query_id: str,
+    satisfying_memory_id: str,
+) -> dict | None:
+    """Apply usefulness feedback for a detected re-ask miss.
+
+    When the re-ask detector identifies (original_query, reask_query) pairs,
+    call this function with:
+      * ``missed_query_id`` — the query_id of the ORIGINAL (missed) query.
+      * ``satisfying_memory_id`` — the memory.id that answered the SECOND
+        (successful) re-ask, which we want to boost since it was the right
+        answer all along.
+
+    This function is IDEMPOTENT: it claims the miss row atomically before
+    boosting the EMA, so scheduler retries and partial failures cannot
+    double-boost the usefulness score.
+
+    Steps:
+    1. Atomically claim the row by flipping ``is_reask_miss`` from FALSE to
+       TRUE in a single UPDATE.  If 0 rows are affected (already processed,
+       or concurrent claim won), return ``None`` immediately — no EMA boost.
+    2. Only when the claim affects exactly 1 row: call ``record_feedback`` to
+       apply the EMA boost to ``satisfying_memory_id``.
+
+    Returns:
+      * The ``record_feedback`` result dict (with ``usefulness_score`` after
+        the boost) on a fresh claim.
+      * ``None`` when the row was already processed (idempotent no-op).
+
+    Errors are NOT swallowed — this runs in a scheduler context where the
+    caller wraps in try/except per-pair.
+    """
+    # 1. Atomically claim the miss row.  The WHERE clause guarantees this
+    #    only affects an unprocessed row; asyncpg returns a status string
+    #    like 'UPDATE 1' or 'UPDATE 0'.
+    status = await get_db(pool).execute(
+        """
+        UPDATE weft_recall_queries
+        SET is_reask_miss = TRUE,
+            reask_satisfying_memory_id = $2
+        WHERE query_id = $1
+          AND is_reask_miss = FALSE
+        """,
+        missed_query_id,
+        satisfying_memory_id,
+    )
+
+    if status != "UPDATE 1":
+        # Already processed or row not found — idempotent no-op.
+        return None
+
+    # 2. Fresh claim: boost the satisfying memory via the existing EMA path.
+    return await record_feedback(pool, satisfying_memory_id, helpful=True)
+
+
 # --- Relationships ---
 
 

@@ -14,8 +14,12 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
+from weft.alerts import create_alert
+from weft.autonomy import AutonomyTier, get_policy_by_action, update_policy_tier
 from weft.db.connection import get_db
 from weft.models import (
+    AlertCreate,
+    AlertType,
     CalibrationCreate,
     CalibrationOutcome,
     CalibrationRecord,
@@ -60,7 +64,14 @@ async def record_calibration(
     pool: asyncpg.Pool,
     create: CalibrationCreate,
 ) -> CalibrationRecord:
-    """Record an agent action calibration event. Returns the created record."""
+    """Record an agent action calibration event. Returns the created record.
+
+    After recording, evaluates whether the action category warrants an
+    autonomy tier promotion. If the evaluate_tier_change recommendation is
+    'promote' and a matching policy exists, the tier is auto-applied via
+    update_policy_tier (recording a policy_calibration_events row with reason
+    prefixed 'auto-calibration'). Demotions are NOT auto-applied here.
+    """
     record_id = _weft_id()
     context_json = json.dumps(create.context)
 
@@ -85,7 +96,164 @@ async def record_calibration(
         create.project_id,
         context_json,
     )
-    return _row_to_record(row)
+    record = _row_to_record(row)
+
+    # Auto-apply promotions — demotions handled separately via alerts
+    await _maybe_auto_promote(
+        pool,
+        action_category=create.action_category,
+        project_id=create.project_id,
+        agent_id=create.agent_id,
+    )
+
+    # Create a demotion-proposal alert if rejection rate crosses threshold
+    await _maybe_alert_demotion(
+        pool,
+        action_category=create.action_category,
+        project_id=create.project_id,
+        agent_id=create.agent_id,
+    )
+
+    return record
+
+
+async def _maybe_auto_promote(
+    pool: asyncpg.Pool,
+    *,
+    action_category: str,
+    project_id: str | None,
+    agent_id: str | None,
+) -> None:
+    """Evaluate and auto-apply a promotion if thresholds are met.
+
+    Calls evaluate_tier_change; if the recommendation is 'promote', looks up
+    the policy for the action category and promotes it via update_policy_tier
+    (which records the policy_calibration_events row). Only promotions are
+    handled here — demotions must NOT be auto-applied.
+    """
+    try:
+        evaluation = await evaluate_tier_change(
+            pool,
+            action_category,
+            project_id=project_id,
+        )
+    except Exception:
+        logger.exception(
+            "evaluate_tier_change failed for action_category=%s; skipping auto-promotion",
+            action_category,
+        )
+        return
+
+    if evaluation.get("recommendation") != "promote":
+        return
+
+    policy = await get_policy_by_action(pool, action_category)
+    if policy is None:
+        logger.debug(
+            "Auto-calibration: no policy found for action_category=%s; skipping",
+            action_category,
+        )
+        return
+
+    if policy.tier == AutonomyTier.always:
+        # Already at the highest promotable tier; nothing to do
+        return
+
+    reason = f"auto-calibration: {evaluation.get('reason', '')}"
+    try:
+        await update_policy_tier(
+            pool,
+            policy.id,
+            AutonomyTier.always,
+            reason=reason,
+            agent_id=agent_id,
+        )
+        logger.info(
+            "Auto-calibration promoted policy %s (action=%s) to always",
+            policy.id,
+            action_category,
+        )
+    except (ValueError, LookupError):
+        logger.exception(
+            "Auto-calibration: update_policy_tier failed for policy %s; skipping",
+            policy.id,
+        )
+
+
+async def _maybe_alert_demotion(
+    pool: asyncpg.Pool,
+    *,
+    action_category: str,
+    project_id: str | None,
+    agent_id: str | None,
+) -> None:
+    """Create a demotion-proposal alert if rejection rate crosses the threshold.
+
+    Calls evaluate_tier_change; if the recommendation is 'demote', inserts an
+    alert (via create_alert) proposing the demotion for human review. The alert
+    body includes the action category, observed rejection rate, and the
+    recommended new tier. The autonomy tier is NEVER changed here — this is the
+    human-as-judge half of the loop.
+
+    Errors are swallowed so that calibration recording is never broken by alert
+    creation failures.
+    """
+    try:
+        evaluation = await evaluate_tier_change(
+            pool,
+            action_category,
+            project_id=project_id,
+        )
+    except Exception:
+        logger.exception(
+            "evaluate_tier_change failed for action_category=%s; skipping demotion alert",
+            action_category,
+        )
+        return
+
+    if evaluation.get("recommendation") != "demote":
+        return
+
+    stats = evaluation.get("stats", {})
+    rejection_rate = stats.get("rejection_rate", 0.0)
+    reason = evaluation.get("reason", "")
+
+    body = (
+        f"Action category '{action_category}' has a rejection rate of "
+        f"{rejection_rate:.0%} and is recommended for demotion to a lower tier. "
+        f"Reason: {reason}. "
+        f"Recommended new tier: ask (human review required). "
+        f"No tier change has been applied — please review and decide."
+    )
+
+    try:
+        await create_alert(
+            pool,
+            AlertCreate(
+                alert_type=AlertType.custom,
+                title=f"Demotion proposed for action: {action_category}",
+                body=body,
+                trigger_at=datetime.now(timezone.utc),
+                payload={
+                    "action_category": action_category,
+                    "rejection_rate": rejection_rate,
+                    "recommended_tier": "ask",
+                    "stats": stats,
+                },
+                project_id=project_id,
+                agent_id=agent_id,
+            ),
+        )
+        logger.info(
+            "Demotion alert created for action_category=%s (rejection_rate=%.0f%%)",
+            action_category,
+            rejection_rate * 100,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to create demotion alert for action_category=%s; skipping",
+            action_category,
+        )
 
 
 async def get_calibration(
@@ -242,6 +410,53 @@ async def delete_calibration(
 
 
 # --- Tier evaluation ---
+
+
+async def count_auto_originated_tier_changes(
+    pool: asyncpg.Pool,
+    *,
+    since: datetime | None = None,
+) -> int:
+    """Count auto-originated tier changes from policy_calibration_events.
+
+    Returns the count of rows in policy_calibration_events WHERE reason
+    LIKE 'auto-calibration%' within an optional time window. This is the
+    calibration loop's aliveness PROOF: >0 per month means the loop fires
+    without a human pump; zero while calibration_records grow is the dead tell.
+
+    Args:
+        pool: Database connection pool.
+        since: Optional lower-bound timestamp. If omitted, counts all time.
+
+    Returns:
+        Count of auto-originated tier changes.
+    """
+    conditions: list[str] = []
+    params: list = []
+    idx = 1
+
+    # Filter by reason prefix
+    conditions.append(f"reason LIKE ${ idx}")
+    params.append("auto-calibration%")
+    idx += 1
+
+    # Optional time window
+    if since is not None:
+        conditions.append(f"created_at >= ${idx}")
+        params.append(since)
+        idx += 1
+
+    where = " AND ".join(conditions)
+    row = await get_db(pool).fetchrow(
+        f"""
+        SELECT count(*) AS total
+        FROM policy_calibration_events
+        WHERE {where}
+        """,
+        *params,
+    )
+
+    return row["total"] if row else 0
 
 
 async def evaluate_tier_change(
