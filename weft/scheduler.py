@@ -698,6 +698,155 @@ async def quarantine_review_loop(
         raise
 
 
+# --- Re-ask feedback loop ---
+
+_REASK_FEEDBACK_INTERVAL = 3600  # check every hour (matches memory_hygiene_loop cadence)
+_REASK_WINDOW_MINUTES = 30  # same window as detect_reasked_queries default
+
+
+async def _run_reask_feedback_pass(pool: asyncpg.Pool) -> int:
+    """Execute one pass of the re-ask feedback loop. Returns the number of pairs processed.
+
+    Designed to be callable in isolation (unit-testable without infinite loop machinery).
+    One pass:
+      1. Fetch recent unprocessed recall queries from the observation window.
+      2. Run pure detect_reasked_queries over the rows.
+      3. For each detected (original, reask) pair, source the satisfying_memory_id
+         from the most recently accessed memory at or near the re-ask query's
+         created_at timestamp.
+      4. Call apply_reask_feedback — idempotent, so scheduler retries are safe.
+
+    == Sourcing satisfying_memory_id ==
+
+    The weft_recall_queries table records query text but NOT which memory IDs were
+    returned per query. Ideal attribution (a memory_access_log join keyed on
+    session+time) does not yet exist. The current approach picks the memory with
+    the most recent accessed_at <= reask.created_at + 5s as the best available
+    proxy for "the memory that answered the re-ask". This is correct for the
+    single-user OSS case and will be replaced when a per-query result-id column
+    lands (tracking loom-fdd9282a — RLS-context hardening + attribution seam).
+
+    If no recently-accessed memory is found (e.g., all queries returned 0 results),
+    the pair is silently skipped — no boost, no stamp.
+
+    == Multi-tenant seam (loom-fdd9282a) ==
+
+    TODO(loom-fdd9282a): In the multi-tenant SaaS path, this pass must be
+    scoped per-user — the query to get_recent_recall_queries must carry an
+    app.user_id context var (RLS), and the memory lookup below must be similarly
+    scoped. Today we run a single global pass, which is correct for single-user
+    deployments. When per-user scoping lands, replace this function body with
+    a fan-out over active users, each wrapped in an RLS context.
+    """
+    from weft.reask import detect_reasked_queries
+    from weft.store import apply_reask_feedback, get_recent_recall_queries
+
+    rows = await get_recent_recall_queries(pool, window_minutes=_REASK_WINDOW_MINUTES)
+    if not rows:
+        return 0
+
+    pairs = detect_reasked_queries(rows)
+    if not pairs:
+        return 0
+
+    processed = 0
+    for original, reask in pairs:
+        try:
+            # Source the satisfying_memory_id: pick the memory most recently
+            # accessed at or before the re-ask query time (within a 5-second
+            # grace window to account for async logging lag).
+            #
+            # TODO(loom-fdd9282a): once per-query result_ids are stored on
+            # weft_recall_queries, replace this lookup with a direct join on
+            # reask.query_id → result_ids[0]. The current proxy is correct for
+            # single-user deployments but loses attribution precision under
+            # concurrent agents or high recall volume.
+            from weft.db.connection import get_db
+            row = await get_db(pool).fetchrow(
+                """
+                SELECT id FROM memories
+                WHERE accessed_at <= $1::timestamptz + interval '5 seconds'
+                ORDER BY accessed_at DESC
+                LIMIT 1
+                """,
+                reask.created_at,
+            )
+            if row is None:
+                logger.debug(
+                    "reask_feedback.no_satisfying_memory",
+                    extra={
+                        "original_query_id": original.query_id,
+                        "reask_query_id": reask.query_id,
+                    },
+                )
+                continue
+
+            satisfying_memory_id = row["id"]
+            result = await apply_reask_feedback(
+                pool, original.query_id, satisfying_memory_id
+            )
+            if result is not None:
+                # Fresh claim: EMA boost was applied.
+                logger.info(
+                    "reask_feedback.boosted",
+                    extra={
+                        "original_query_id": original.query_id,
+                        "satisfying_memory_id": satisfying_memory_id,
+                        "new_usefulness_score": result.get("usefulness_score"),
+                    },
+                )
+                processed += 1
+            # result=None means already processed (idempotent no-op) — not an error.
+        except Exception:
+            logger.exception(
+                "reask_feedback.pair_error",
+                extra={
+                    "original_query_id": original.query_id,
+                    "reask_query_id": reask.query_id,
+                },
+            )
+            # Per-pair isolation: one failure does not abort the rest of the pass.
+
+    return processed
+
+
+async def reask_feedback_loop(
+    pool: asyncpg.Pool,
+    *,
+    interval: int = _REASK_FEEDBACK_INTERVAL,
+) -> None:
+    """Periodic re-ask detection and usefulness-score correction. Runs until cancelled.
+
+    On each pass, fetches recent recall queries, detects near-duplicate re-asks
+    (queries repeated because the first retrieval missed), and applies a usefulness
+    boost (EMA) to the memory that satisfied the re-ask.
+
+    This is the energizing loop for the compounding-recall improvement cycle.
+    Each pass is idempotent: apply_reask_feedback atomically claims miss rows,
+    so retries and scheduler restarts cannot double-boost any score.
+
+    Interval defaults to 3600s (1 hour) — same cadence as memory_hygiene_loop
+    and loom_awareness_loop — because re-ask correction is not latency-sensitive.
+    """
+    logger.info("reask_feedback.started", extra={"interval": interval})
+    try:
+        while True:
+            try:
+                processed = await _run_reask_feedback_pass(pool)
+                if processed:
+                    logger.info(
+                        "reask_feedback.cycle_complete",
+                        extra={"pairs_processed": processed},
+                    )
+            except Exception:
+                logger.exception("reask_feedback.loop_error")
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("reask_feedback.stopped")
+        raise
+
+
 async def _post_brief_to_slack(channel: str, brief_result) -> None:
     """Post the assembled brief to Slack via Block Kit."""
     import ssl

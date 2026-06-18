@@ -3127,14 +3127,36 @@ async def weft_check_health(
 
     Evaluates check-in patterns, Loom task awareness, and memory hygiene
     without creating alerts or writing to the database. Returns a unified
-    summary of findings and any evaluator errors."""
+    summary of findings and any evaluator errors.
+
+    Also surfaces two PROOF metrics for the compounding recall loop:
+    - reask_rate: fraction of recent recall queries that are near-duplicate
+      re-asks (a rising rate signals the loop is not correcting misses).
+    - auto_originated_tier_changes_30d: count of autonomy tier changes
+      auto-originated by the calibration loop in the last 30 days (zero
+      while calibration_records grow is the dead tell the loop has stalled)."""
     try:
+        from weft.calibration import count_auto_originated_tier_changes
         from weft.health_check import run_all_evaluators, summary_to_dict
+        from weft.reask import compute_reask_rate
+        from weft.store import get_recent_recall_queries
 
         app: AppContext = ctx.request_context.lifespan_context
         async with acquire(app.pool):
             result = await run_all_evaluators(app.pool)
-        return summary_to_dict(result)
+            # PROOF metric 1: re-ask rate (query-based, last 30 min window)
+            reask_rows = await get_recent_recall_queries(app.pool, window_minutes=30)
+            reask_rate = compute_reask_rate(reask_rows)
+            # PROOF metric 2: auto-originated tier changes in the last 30 days
+            since_30d = datetime.now(timezone.utc) - timedelta(days=30)
+            auto_tier_count = await count_auto_originated_tier_changes(
+                app.pool, since=since_30d
+            )
+
+        payload = summary_to_dict(result)
+        payload["reask_rate"] = reask_rate
+        payload["auto_originated_tier_changes_30d"] = auto_tier_count
+        return payload
     except _DB_ERRORS as e:
         return _db_error_response("weft_check_health", e)
     except Exception as e:
