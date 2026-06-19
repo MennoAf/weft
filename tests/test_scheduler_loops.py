@@ -440,6 +440,17 @@ class TestDiscordBotLoop:
         monkeypatch.setenv("WEFT_DISCORD_BRIEF_CHANNEL_ID", "12345")
         monkeypatch.delenv("WEFT_DISCORD_IDEA_DUMP_CHANNEL_ID", raising=False)
 
+        # DEFAULT_CHANNEL_MAP is populated once at config-module import time from
+        # the channel env vars. Under full-suite ordering it may already be
+        # non-empty (another test imported config with a channel var set), which
+        # trips the loop's "any channel mapped → enable inbound via sentinel 0"
+        # branch and makes idea_dump_channel_id == 0 instead of None. This test's
+        # scenario is "no channels mapped at all", so pin the map empty rather
+        # than inherit whatever the import-time env happened to be.
+        import weft.discord.config as discord_config
+
+        monkeypatch.setattr(discord_config, "DEFAULT_CHANNEL_MAP", {})
+
         from weft.discord.bot import Bot
 
         # Capture the Bot constructor call to inspect the instance
