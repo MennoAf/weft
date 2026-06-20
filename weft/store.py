@@ -1232,7 +1232,33 @@ async def apply_reask_feedback(
         # Already processed or row not found — idempotent no-op.
         return None
 
-    # 2. Fresh claim: boost the satisfying memory via the existing EMA path.
+    # 2. Fetch the query_text and user_id from the now-claimed row so we can
+    #    enqueue a replay for the implicated episode(s).  The row is guaranteed
+    #    to exist because we just updated it; a None result would be a bug.
+    claimed_row = await get_db(pool).fetchrow(
+        "SELECT query_text, user_id FROM weft_recall_queries WHERE query_id = $1",
+        missed_query_id,
+    )
+    if claimed_row is not None:
+        from weft.replay import enqueue_replay_on_miss  # late import: avoids circular dep
+
+        try:
+            await enqueue_replay_on_miss(
+                pool,
+                query_text=claimed_row["query_text"],
+                user_id=claimed_row["user_id"],
+            )
+        except Exception as exc:
+            # Enqueue failures must not abort the EMA boost — the two operations
+            # are independent.  Log at warning level so observability is preserved.
+            logger.warning(
+                "apply_reask_feedback: enqueue_replay_on_miss failed "
+                "(query_id=%s): %s",
+                missed_query_id,
+                exc,
+            )
+
+    # 3. Fresh claim: boost the satisfying memory via the existing EMA path.
     return await record_feedback(pool, satisfying_memory_id, helpful=True)
 
 

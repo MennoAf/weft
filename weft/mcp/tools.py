@@ -3129,14 +3129,21 @@ async def weft_check_health(
     without creating alerts or writing to the database. Returns a unified
     summary of findings and any evaluator errors.
 
-    Also surfaces two PROOF metrics for the compounding recall loop:
+    Also surfaces PROOF metrics for the compounding recall loop:
     - reask_rate: fraction of recent recall queries that are near-duplicate
       re-asks (a rising rate signals the loop is not correcting misses).
     - auto_originated_tier_changes_30d: count of autonomy tier changes
       auto-originated by the calibration loop in the last 30 days (zero
-      while calibration_records grow is the dead tell the loop has stalled)."""
+      while calibration_records grow is the dead tell the loop has stalled).
+    - replay_queue_depth: count of pending rows in replay_queue (episodes
+      awaiting belief re-extraction; rises when the replay loop falls behind).
+    - replay_claims_30d: count of belief_claims written by the replay loop in
+      the last 30 days. Returns 0 until Epic 3 wires the replay writer.
+      Epic 3 MUST set detector_version to a value starting with 'replay-'
+      (e.g. 'replay-v1') when writing replay-origin claims."""
     try:
         from weft.calibration import count_auto_originated_tier_changes
+        from weft.db.connection import get_db
         from weft.health_check import run_all_evaluators, summary_to_dict
         from weft.reask import compute_reask_rate
         from weft.store import get_recent_recall_queries
@@ -3152,10 +3159,36 @@ async def weft_check_health(
             auto_tier_count = await count_auto_originated_tier_changes(
                 app.pool, since=since_30d
             )
+            # PROOF metric 3: pending replay_queue depth (real query; 0 when
+            # no replays are queued, rises as the loop enqueues missed episodes)
+            db = get_db(app.pool)
+            replay_queue_depth: int = await db.fetchval(
+                "SELECT count(*) FROM replay_queue WHERE status = 'pending'"
+            )
+            # PROOF metric 4: replay-origin belief_claims in last 30 days.
+            # Returns 0 now (no replay writer exists yet). Epic 3 MUST write
+            # belief_claims with detector_version LIKE 'replay-%' (e.g.
+            # 'replay-v1') so this query naturally returns real counts post-E3
+            # without any code change here.
+            # NOTE: source_provenance cannot carry 'replay' — the CHECK
+            # constraint on belief_claims only allows ('user_stated',
+            # 'agent_suggested', 'joint_decision'). detector_version is the
+            # correct unconstrained field for the replay-origin marker.
+            replay_claims_30d: int = await db.fetchval(
+                """
+                SELECT count(*)
+                FROM belief_claims
+                WHERE detector_version LIKE 'replay-%'
+                  AND occurred_at >= $1
+                """,
+                since_30d,
+            )
 
         payload = summary_to_dict(result)
         payload["reask_rate"] = reask_rate
         payload["auto_originated_tier_changes_30d"] = auto_tier_count
+        payload["replay_queue_depth"] = replay_queue_depth
+        payload["replay_claims_30d"] = replay_claims_30d
         return payload
     except _DB_ERRORS as e:
         return _db_error_response("weft_check_health", e)
