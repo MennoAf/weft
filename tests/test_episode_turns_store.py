@@ -499,3 +499,203 @@ async def test_delete_turns_for_graduated_episode_rejects_negative_ttl(pool):
     """delete_turns_for_graduated_episode raises ValueError when older_than_days<0."""
     with pytest.raises(ValueError, match="ttl_days must be positive"):
         await delete_turns_for_graduated_episode(pool, older_than_days=-3)
+
+
+# --- Replay queue retention tests ---
+
+
+async def test_replay_retention_after_graduation_with_pending_queue(pool):
+    """Graduated episode with pending replay_queue retains its turns."""
+    ep = await _make_episode(pool)
+
+    # Create turns with low importance scores (would be deleted without replay_queue guard).
+    t1 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="keep via replay"),
+    )
+    t2 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.assistant, content="keep via replay 2"),
+    )
+
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id IN ($1, $2)", t1.id, t2.id,
+    )
+
+    # Graduate the episode 100 days ago (well past TTL).
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+
+    # Create a pending replay_queue entry covering these turns.
+    rq_id = f"rq-{asyncio.current_task().get_name()}"
+    await pool.execute(
+        """
+        INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        rq_id,
+        ep.id,
+        [t1.id, t2.id],
+        "test replay",
+        "pending",
+        "test-user",
+    )
+
+    # Run deletion with aggressive thresholds.
+    result = await delete_turns_after_graduation(
+        pool,
+        high_threshold=0.7,
+        ttl_days_scored=90,
+        ttl_days_no_score=30,
+    )
+
+    # Turns should be retained due to pending replay_queue.
+    assert result["scored_deleted"] == 0
+    surviving = [t.id for t in await list_turns(pool, ep.id)]
+    assert t1.id in surviving
+    assert t2.id in surviving
+
+
+async def test_replay_retention_after_graduation_without_queue(pool):
+    """Identical graduated episode without replay_queue entry has turns deleted."""
+    ep = await _make_episode(pool)
+
+    # Create turns with low importance scores (will be deleted).
+    t1 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="will delete"),
+    )
+    t2 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.assistant, content="will delete 2"),
+    )
+
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id IN ($1, $2)", t1.id, t2.id,
+    )
+
+    # Graduate the episode 100 days ago.
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+
+    # No replay_queue entry — turns should be deleted.
+    result = await delete_turns_after_graduation(
+        pool,
+        high_threshold=0.7,
+        ttl_days_scored=90,
+        ttl_days_no_score=30,
+    )
+
+    # Turns should be deleted (no replay_queue to protect them).
+    assert result["scored_deleted"] == 2
+    surviving = [t.id for t in await list_turns(pool, ep.id)]
+    assert len(surviving) == 0
+
+
+async def test_replay_retention_fallback_with_pending_queue(pool):
+    """Age-only fallback skips turns protected by pending replay_queue."""
+    ep = await _make_episode(pool)
+
+    # Create turns (score-blind fallback deletes NULL-score turns).
+    t1 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="retain via replay"),
+    )
+    t2 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.assistant, content="retain via replay 2"),
+    )
+    # importance_score stays NULL
+
+    # Graduate the episode 60 days ago (past age-only TTL of 30 days).
+    await _graduate_episode_aged(pool, ep.id, days_ago=60)
+
+    # Create a pending replay_queue entry covering these turns.
+    rq_id = f"rq-fallback-{asyncio.current_task().get_name()}"
+    await pool.execute(
+        """
+        INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        rq_id,
+        ep.id,
+        [t1.id, t2.id],
+        "test replay fallback",
+        "pending",
+        "test-user",
+    )
+
+    # Run age-only deletion.
+    deleted = await delete_turns_for_graduated_episode(pool, older_than_days=30)
+
+    # Turns should be retained due to pending replay_queue.
+    assert deleted == 0
+    surviving = [t.id for t in await list_turns(pool, ep.id)]
+    assert t1.id in surviving
+    assert t2.id in surviving
+
+
+# --- Replay queue retention tests for delete_turns_below_importance ---
+
+
+async def test_replay_retention_below_importance_with_pending_queue(pool):
+    """Low-importance graduated turn with pending replay_queue is RETAINED by delete_turns_below_importance."""
+    ep = await _make_episode(pool)
+
+    # Create a low-importance turn (will be deleted without replay_queue guard).
+    t_low = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="low importance"),
+    )
+
+    # Set importance score below the threshold.
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id = $1", t_low.id,
+    )
+
+    # Graduate the episode 100 days ago (well past TTL of 30 days).
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+
+    # Create a pending replay_queue entry covering this turn.
+    rq_id = f"rq-below-importance-{asyncio.current_task().get_name()}"
+    await pool.execute(
+        """
+        INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        rq_id,
+        ep.id,
+        [t_low.id],
+        "test replay retention for below-importance",
+        "pending",
+        "test-user",
+    )
+
+    # Run deletion with aggressive threshold.
+    deleted = await delete_turns_below_importance(
+        pool, threshold=0.7, older_than_days=30,
+    )
+
+    # Turn should be retained due to pending replay_queue.
+    assert deleted == 0
+    surviving = [t.id for t in await list_turns(pool, ep.id)]
+    assert t_low.id in surviving
+
+
+async def test_replay_retention_below_importance_without_queue(pool):
+    """Identical low-importance graduated turn WITHOUT replay_queue entry IS deleted."""
+    ep = await _make_episode(pool)
+
+    # Create a low-importance turn (will be deleted).
+    t_low = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="delete me"),
+    )
+
+    # Set importance score below the threshold.
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id = $1", t_low.id,
+    )
+
+    # Graduate the episode 100 days ago (well past TTL of 30 days).
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+
+    # No replay_queue entry — turn should be deleted.
+    deleted = await delete_turns_below_importance(
+        pool, threshold=0.7, older_than_days=30,
+    )
+
+    # Turn should be deleted (no replay_queue to protect it).
+    assert deleted == 1
+    surviving = [t.id for t in await list_turns(pool, ep.id)]
+    assert len(surviving) == 0

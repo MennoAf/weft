@@ -63,6 +63,7 @@ SCOPED_CRUD_TABLES: tuple[str, ...] = (
     "alert_state",
     "belief_claims",
     "weft_recall_queries",
+    "replay_queue",
 )
 
 # Tables that have a ``user_id`` column but use a service policy by design.

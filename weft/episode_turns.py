@@ -252,6 +252,11 @@ async def delete_turns_below_importance(
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM replay_queue rq
+              WHERE rq.status = 'pending'
+                AND episode_turns.id = ANY(rq.turn_ids)
+          )
         """,
         threshold,
         str(older_than_days),
@@ -288,6 +293,11 @@ async def delete_turns_for_graduated_episode(
               SELECT 1 FROM belief_claims bc
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM replay_queue rq
+              WHERE rq.status = 'pending'
+                AND episode_turns.id = ANY(rq.turn_ids)
           )
         """,
         str(older_than_days),
@@ -354,6 +364,11 @@ async def delete_turns_after_graduation(
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM replay_queue rq
+              WHERE rq.status = 'pending'
+                AND episode_turns.id = ANY(rq.turn_ids)
+          )
         """,
         high_threshold,
         str(ttl_days_scored),
@@ -378,6 +393,11 @@ async def delete_turns_after_graduation(
               SELECT 1 FROM belief_claims bc
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM replay_queue rq
+              WHERE rq.status = 'pending'
+                AND episode_turns.id = ANY(rq.turn_ids)
           )
         """,
         str(ttl_days_no_score),
