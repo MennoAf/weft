@@ -81,7 +81,16 @@ async def register_pgvector_codec(pool: asyncpg.Pool) -> None:
 
 
 async def create_pool(config: WeftConfig) -> asyncpg.Pool:
-    """Create an asyncpg connection pool from config."""
+    """Create an asyncpg connection pool from config.
+
+    If the initial connection fails and the DSN points to Supabase, this
+    attempts to restore (unpause) the project via the Management API before
+    retrying — but ONLY when ``config.supabase_access_token`` is set. Supabase
+    free-tier projects auto-pause after ~1 week idle; without this the first
+    connection after a pause dies with a raw socket error. When no token is
+    configured, a paused project yields a clear actionable error (dashboard
+    link) instead of auto-restoring. See ``weft.supabase``.
+    """
     dsn = config.database.url
     # asyncpg doesn't accept psycopg2 scheme from testcontainers
     if "+psycopg2" in dsn:
@@ -102,7 +111,74 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         kwargs["ssl"] = ctx
-    return await asyncpg.create_pool(dsn, **kwargs)
+
+    try:
+        return await asyncpg.create_pool(dsn, **kwargs)
+    except (ConnectionRefusedError, OSError) as exc:
+        # A paused Supabase project refuses connections at the socket layer,
+        # which asyncpg propagates as ConnectionRefusedError / TimeoutError /
+        # socket.gaierror — all OSError subclasses. Only intercept when the DSN
+        # is Supabase; everything else re-raises unchanged.
+        from weft.supabase import (
+            extract_project_ref,
+            is_supabase_dsn,
+            restore_project,
+            wait_for_restore,
+        )
+
+        if not is_supabase_dsn(dsn):
+            raise
+
+        project_ref = extract_project_ref(dsn)
+        if not project_ref:
+            raise ConnectionError(
+                f"Connection to Supabase failed: {exc}\n"
+                "Your Supabase project may be paused. Unpause it at "
+                "https://supabase.com/dashboard"
+            ) from exc
+
+        token = config.supabase_access_token
+        if not token:
+            # No token → don't auto-restore (account-scoped token, opt-in only).
+            # Still upgrade the cryptic socket error into an actionable message.
+            raise ConnectionError(
+                f"Connection to Supabase failed (project likely paused): {exc}\n\n"
+                "To auto-restore, set SUPABASE_ACCESS_TOKEN in your environment.\n"
+                "Generate one at: https://supabase.com/dashboard/account/tokens\n\n"
+                f"Or manually unpause project '{project_ref}' at:\n"
+                f"https://supabase.com/dashboard/project/{project_ref}"
+            ) from exc
+
+        logger.warning(
+            "Connection to Supabase failed — attempting to restore paused "
+            "project %s",
+            project_ref,
+        )
+        restored = await restore_project(project_ref, token)
+        if not restored:
+            raise ConnectionError(
+                f"Failed to restore Supabase project '{project_ref}'. "
+                "Check your SUPABASE_ACCESS_TOKEN or restore manually at:\n"
+                f"https://supabase.com/dashboard/project/{project_ref}"
+            ) from exc
+
+        logger.info(
+            "Restore request accepted — waiting for project %s to come online…",
+            project_ref,
+        )
+        ready = await wait_for_restore(project_ref, token, timeout=120, poll_interval=5)
+        if not ready:
+            raise ConnectionError(
+                f"Supabase project '{project_ref}' restore was accepted but the "
+                "database did not become available within 120s. Check status at:\n"
+                f"https://supabase.com/dashboard/project/{project_ref}"
+            ) from exc
+
+        logger.info(
+            "Supabase project %s is back online — retrying connection",
+            project_ref,
+        )
+        return await asyncpg.create_pool(dsn, **kwargs)
 
 
 async def set_user_context(conn: asyncpg.Connection) -> None:
