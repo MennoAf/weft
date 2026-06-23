@@ -294,6 +294,14 @@ class WeftConfig(BaseModel):
     # boot the Supabase JS SDK and call ``supabase.auth.oauth.*``. Public
     # by design; safe to embed in HTML.
     supabase_anon_key: str | None = None
+    # Supabase Management API token (account-scoped) used ONLY to auto-restore a
+    # paused project on a failed connection (see weft.db.connection.create_pool).
+    # SECURITY: this is an ACCOUNT-WIDE token — it can restore/modify/delete any
+    # project on the account, not just this one. Safe for single-user self-host
+    # (you own the account); do NOT set it in a hosted multi-tenant deployment.
+    # When unset, auto-restore is disabled and a paused project yields a clear
+    # actionable error instead of a raw socket failure.
+    supabase_access_token: str | None = None
     log_level: str = "INFO"
 
     # ------------------------------------------------------------------
@@ -633,6 +641,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.supabase_url = supabase_url.rstrip("/")
     if supabase_anon_key := os.environ.get("SUPABASE_ANON_KEY"):
         config.supabase_anon_key = supabase_anon_key.strip()
+    if supabase_token := os.environ.get("SUPABASE_ACCESS_TOKEN"):
+        config.supabase_access_token = supabase_token.strip()
     if poll_interval := os.environ.get("WEFT_ALERT_POLL_INTERVAL"):
         config.alert.poll_interval = int(poll_interval)
     if batch_size := os.environ.get("WEFT_ALERT_BATCH_SIZE"):

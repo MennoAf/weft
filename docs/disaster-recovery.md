@@ -154,6 +154,35 @@ DATABASE_URL="postgresql://..." weft mcp
 
 Then update `.mcp.json` to point to `http://localhost:8000/mcp`.
 
+## Scenario 5: Paused Supabase Project (free tier)
+
+Supabase free-tier projects auto-pause after ~1 week of inactivity. The first
+connection after a pause is refused at the socket layer, so `weft` startup fails
+with a raw `OSError`/`ConnectionRefusedError`.
+
+`create_pool` (in `weft/db/connection.py`) intercepts this for Supabase DSNs:
+
+- **No token configured (default):** it does **not** auto-restore — it raises a
+  clear error pointing at the dashboard so you can unpause manually.
+- **`SUPABASE_ACCESS_TOKEN` set:** it calls the Supabase Management API to
+  restore (unpause) the project, polls up to 120s for `ACTIVE_HEALTHY`, then
+  retries the connection automatically.
+
+```bash
+# Opt in to auto-restore (single-user / self-host only — see the warning):
+export SUPABASE_ACCESS_TOKEN="sbp_..."   # https://supabase.com/dashboard/account/tokens
+```
+
+> ⚠️ **Security:** `SUPABASE_ACCESS_TOKEN` is an **account-scoped** Management
+> API token — it can restore, modify, or delete **any** project on the account,
+> not just this one. Only set it for a single-user deployment whose account you
+> own. **Do not** set it in a hosted/multi-tenant deployment; leave it unset and
+> rely on the manual-unpause path (or Supabase's "pause protection" on a paid
+> plan).
+
+To unpause manually instead, open
+`https://supabase.com/dashboard/project/<project-ref>` and click *Restore*.
+
 ## Last Resort: Markdown Fallback
 
 If no JSON backup is available, Weft can still serve memories from `~/.weft/fallback.md` — a text export without embeddings or relationships.
