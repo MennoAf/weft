@@ -35,6 +35,29 @@ from weft.replay import ReaskPair, resolve_implicated_turns
 USER_ID = "test-user-default"
 
 
+def test_replay_module_constants_lock_cross_module_contract():
+    """The replay status/detector-prefix constants are the single source of truth.
+
+    Locks the values that the v53 CHECK constraint, the retention guards, the
+    health depth/claims metrics, and the future E2.L7 writer all depend on. A
+    drift here (e.g. someone "fixes" the prefix to 'replayed-') would silently
+    pin replay_claims_30d at 0 — exactly the failure this extraction prevents.
+    """
+    from weft.replay import (
+        REPLAY_DETECTOR_VERSION_PREFIX,
+        REPLAY_QUEUE_STATUS_DONE,
+        REPLAY_QUEUE_STATUS_PENDING,
+    )
+
+    assert REPLAY_QUEUE_STATUS_PENDING == "pending"
+    assert REPLAY_QUEUE_STATUS_DONE == "done"
+    # E2.L7's belief_claims must start with this prefix or they go uncounted.
+    assert REPLAY_DETECTOR_VERSION_PREFIX == "replay-"
+    assert f"{REPLAY_DETECTOR_VERSION_PREFIX}v1".startswith(
+        REPLAY_DETECTOR_VERSION_PREFIX
+    )
+
+
 def _claim_id() -> str:
     return f"belief-{uuid.uuid4().hex[:10]}"
 
@@ -380,4 +403,59 @@ async def test_enqueue_on_miss(pool):
     assert len(pending_rows_after) == 1, (
         f"Expected still exactly 1 pending row after second re-ask, "
         f"got {len(pending_rows_after)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_failure_increments_counter_but_boosts_ema(pool, monkeypatch):
+    """A forced enqueue failure bumps replay.enqueue.failed and still boosts EMA.
+
+    done_when assertion for loom-3c4a0be3: the swallowed enqueue failure must
+    (a) increment the aggregate counter so a persistent break is visible in
+    weft_check_health, and (b) NOT abort the EMA boost — the two operations are
+    independent, and the boost is the load-bearing half of apply_reask_feedback.
+    """
+    import weft.replay
+    from weft.counters import COUNTER_REPLAY_ENQUEUE_FAILED, get_counter
+    from weft.models import MemoryCreate, MemoryType
+    from weft.store import apply_reask_feedback, log_recall_query, store_memory
+
+    # Force the enqueue path to blow up (late import in store.py resolves this).
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("simulated enqueue failure")
+
+    monkeypatch.setattr(weft.replay, "enqueue_replay_on_miss", _boom)
+
+    # Minimal setup: a logged (missable) recall query + a satisfying memory.
+    await log_recall_query(
+        pool, tool_name="recall", query_text="what did I say about the deadline"
+    )
+    rows = await pool.fetch(
+        "SELECT query_id FROM weft_recall_queries "
+        "WHERE query_text = 'what did I say about the deadline'"
+    )
+    assert len(rows) == 1
+    missed_query_id = rows[0]["query_id"]
+
+    mem = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="The deadline is Friday",
+            topic=["deadline"],
+            confidence=0.8,
+        ),
+    )
+
+    before = await get_counter(pool, COUNTER_REPLAY_ENQUEUE_FAILED)
+
+    # Enqueue raises inside apply_reask_feedback; the EMA boost must still run.
+    result = await apply_reask_feedback(pool, missed_query_id, mem.id)
+
+    assert result is not None, (
+        "EMA boost was aborted by the enqueue failure — record_feedback did not run"
+    )
+    after = await get_counter(pool, COUNTER_REPLAY_ENQUEUE_FAILED)
+    assert after == before + 1, (
+        f"replay.enqueue.failed not incremented: {before} -> {after}"
     )

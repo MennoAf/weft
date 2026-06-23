@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -932,3 +933,274 @@ class TestConsolidationLock:
         # One should run, the other should be skipped
         skipped_count = sum(1 for r in results if r.skipped)
         assert skipped_count >= 1, "At least one concurrent run should be skipped"
+
+
+# ---------------------------------------------------------------------------
+# Aggregation replay sub-pass (E2.L8) — consolidate() drains replay_queue via
+# the Batch API. Only the Anthropic batch client is mocked; replay_queue
+# lifecycle, RLS, the materializer write path, and belief_claims run real.
+# ---------------------------------------------------------------------------
+
+
+class _AsyncBatchResults:
+    """Minimal async-iterable standing in for ``batches.results(...)``."""
+
+    def __init__(self, items):
+        self._it = iter(items)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+def _mock_batch_client(custom_id: str, claims: list):
+    """An AsyncAnthropic-shaped mock whose batch ends immediately with `claims`.
+
+    Mirrors the SDK's async surface: create/retrieve are coroutines returning a
+    batch with processing_status='ended'; results is a coroutine returning an
+    async iterator of per-request responses (output_config.format envelope).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    batch_obj = MagicMock(id="batch-test", processing_status="ended")
+    text_block = MagicMock(type="text", text=json.dumps({"claims": claims}))
+    item = MagicMock(custom_id=custom_id)
+    item.result.type = "succeeded"
+    item.result.message = MagicMock(content=[text_block])
+
+    client = MagicMock()
+    client.messages.batches.create = AsyncMock(return_value=batch_obj)
+    client.messages.batches.retrieve = AsyncMock(return_value=batch_obj)
+    client.messages.batches.results = AsyncMock(return_value=_AsyncBatchResults([item]))
+    return client
+
+
+def _mock_escalating_batch_client(haiku_by_id: dict, sonnet_by_id: dict):
+    """Two-batch mock for the Haiku -> Sonnet escalation path (loom-b37df10f).
+
+    ``create`` is called once per batch; the tier is read from the submitted
+    requests' ``model`` ('sonnet' substring => the escalation batch). ``results``
+    returns one succeeded item per submitted custom_id carrying that id's claims
+    for the batch's tier (empty list => abstention). Lets a test give Haiku and
+    Sonnet different answers for the same turn-set.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    submitted: dict[str, list] = {}
+
+    def _create(requests):
+        model = requests[0]["params"]["model"]
+        batch_id = "batch-sonnet" if "sonnet" in model else "batch-haiku"
+        submitted[batch_id] = [r["custom_id"] for r in requests]
+        return MagicMock(id=batch_id, processing_status="ended")
+
+    def _results(batch_id):
+        claims_map = sonnet_by_id if batch_id == "batch-sonnet" else haiku_by_id
+        items = []
+        for cid in submitted[batch_id]:
+            text_block = MagicMock(
+                type="text", text=json.dumps({"claims": claims_map.get(cid, [])})
+            )
+            item = MagicMock(custom_id=cid)
+            item.result.type = "succeeded"
+            item.result.message = MagicMock(content=[text_block])
+            items.append(item)
+        return _AsyncBatchResults(items)
+
+    client = MagicMock()
+    client.messages.batches.create = AsyncMock(side_effect=_create)
+    client.messages.batches.retrieve = AsyncMock(
+        side_effect=lambda bid: MagicMock(id=bid, processing_status="ended")
+    )
+    client.messages.batches.results = AsyncMock(side_effect=_results)
+    return client
+
+
+class TestConsolidationReplayPass:
+    """consolidate()'s 4th sub-pass drains the replay_queue via the Batch API."""
+
+    async def _seed_pending_replay(self, pool, contents):
+        """Create an episode + one user turn per content, enqueue a pending row."""
+        import uuid
+
+        from weft.episode_turns import append_turn
+        from weft.episodes import create_episode
+        from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
+
+        ep = await create_episode(pool, EpisodeCreate(title=f"agg-{uuid.uuid4().hex[:6]}"))
+        turn_ids = []
+        for content in contents:
+            turn = await append_turn(
+                pool,
+                EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content=content),
+            )
+            turn_ids.append(turn.id)
+        rq_id = f"rq-{uuid.uuid4().hex[:10]}"
+        await pool.execute(
+            """
+            INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status)
+            VALUES ($1, $2, $3, 'reask-miss', 'pending')
+            """,
+            rq_id,
+            ep.id,
+            turn_ids,
+        )
+        return rq_id, turn_ids
+
+    async def test_consolidate_replay_pass_writes_claim_and_marks_done(self, pool):
+        """done_when (loom-6611a897): a single consolidate() run drains a pending
+        replay_queue row via the Batch API, writes the enumeration claim with the
+        replay- PROOF prefix, marks the row done, and reports a replay-pass count.
+        """
+        from unittest.mock import patch
+
+        from weft.replay_executor import REPLAY_AGGREGATE_DETECTOR_VERSION
+
+        rq_id, turn_ids = await self._seed_pending_replay(
+            pool,
+            [
+                "Met with the Windward team on Monday.",
+                "Had another Windward sync on Wednesday.",
+                "Third Windward meeting this week was Friday.",
+            ],
+        )
+
+        claims = [
+            {
+                "attribute": "meetings.windward_count",
+                "value": {"count": 3, "period": "this week"},
+                "confidence": 0.9,
+                "source_provenance": "user_stated",
+                "evidence_turn_ids": turn_ids,
+            }
+        ]
+        client = _mock_batch_client(rq_id, claims)
+
+        with patch("weft.views.belief_detector._get_client", return_value=client):
+            report = await consolidate(pool)
+
+        # The batch was submitted (not the inline per-turn create path).
+        assert client.messages.batches.create.await_count == 1
+
+        # Report carries the replay-pass counts.
+        assert report.replay_claims_written == 1
+        assert report.replay_rows_done == 1
+        assert report.to_dict()["replay_claims_written"] == 1
+
+        # Queue row driven terminal.
+        status = await pool.fetchval(
+            "SELECT status FROM replay_queue WHERE id = $1", rq_id
+        )
+        assert status == "done"
+
+        # Claim landed with the replay- PROOF prefix (counts toward replay_claims_30d).
+        rows = await pool.fetch(
+            "SELECT detector_version, evidence_turn_ids FROM belief_claims "
+            "WHERE attribute = 'meetings.windward_count'"
+        )
+        assert len(rows) == 1
+        assert rows[0]["detector_version"] == REPLAY_AGGREGATE_DETECTOR_VERSION
+        assert rows[0]["detector_version"].startswith("replay-")
+        assert set(rows[0]["evidence_turn_ids"]) == set(turn_ids)
+
+    async def test_consolidate_with_no_pending_replay_is_a_noop(self, pool):
+        """With nothing queued, the replay pass writes no claims and never calls
+        the batch client."""
+        from unittest.mock import patch
+
+        client = _mock_batch_client("unused", [])
+        with patch("weft.views.belief_detector._get_client", return_value=client):
+            report = await consolidate(pool)
+
+        assert report.replay_claims_written == 0
+        assert report.replay_rows_done == 0
+        assert client.messages.batches.create.await_count == 0
+
+    async def test_consolidate_replay_escalates_weak_haiku_to_sonnet(self, pool):
+        """A weak Haiku batch result (below the 0.85 review bar) escalates the
+        turn-set to a SECOND Sonnet batch in the production consolidate() path;
+        the adopted claim carries the Sonnet tier and the replay- PROOF prefix.
+
+        Regression guard for loom-b37df10f: the Sonnet escalation tier was
+        DORMANT in production — it lived only on the inline run_replay_executor,
+        which has no production caller. consolidate() drives the batch path, so
+        this is the test that proves Sonnet actually fires in prod.
+        """
+        from unittest.mock import patch
+
+        from weft.replay_executor import REPLAY_AGGREGATE_SONNET_DETECTOR_VERSION
+
+        rq_id, turn_ids = await self._seed_pending_replay(
+            pool,
+            [
+                "Met with the Windward team on Monday.",
+                "Had another Windward sync on Wednesday.",
+                "Third Windward meeting this week was Friday.",
+            ],
+        )
+        weak = [
+            {
+                "attribute": "meetings.windward_count",
+                "value": {"count": 3, "period": "this week"},
+                "confidence": 0.5,  # below REVIEW_CONFIDENCE (0.85) -> escalate
+                "source_provenance": "user_stated",
+                "evidence_turn_ids": turn_ids,
+            }
+        ]
+        strong = [{**weak[0], "confidence": 0.95}]
+        client = _mock_escalating_batch_client({rq_id: weak}, {rq_id: strong})
+
+        with patch("weft.views.belief_detector._get_client", return_value=client):
+            report = await consolidate(pool)
+
+        # Two batches submitted: cheap Haiku, then the Sonnet escalation.
+        assert client.messages.batches.create.await_count == 2
+        assert report.replay_claims_written == 1
+        assert report.replay_rows_done == 1
+
+        status = await pool.fetchval(
+            "SELECT status FROM replay_queue WHERE id = $1", rq_id
+        )
+        assert status == "done"
+
+        rows = await pool.fetch(
+            "SELECT detector_version FROM belief_claims "
+            "WHERE attribute = 'meetings.windward_count'"
+        )
+        assert len(rows) == 1
+        assert rows[0]["detector_version"] == REPLAY_AGGREGATE_SONNET_DETECTOR_VERSION
+        assert rows[0]["detector_version"].startswith("replay-")
+
+    async def test_consolidate_replay_sonnet_abstains_keeps_row_done(self, pool):
+        """When Haiku abstains and the Sonnet escalation also abstains, the row
+        is still consumed (terminal 'done') with no claim — it cannot pin its
+        turns forever. Mirrors the inline _detect_with_escalation fallback."""
+        from unittest.mock import patch
+
+        rq_id, turn_ids = await self._seed_pending_replay(
+            pool,
+            [
+                "Met with the Windward team on Monday.",
+                "Had another Windward sync on Wednesday.",
+                "Third Windward meeting this week was Friday.",
+            ],
+        )
+        # Haiku abstains -> escalate; Sonnet abstains too -> keep (empty) Haiku.
+        client = _mock_escalating_batch_client({rq_id: []}, {rq_id: []})
+
+        with patch("weft.views.belief_detector._get_client", return_value=client):
+            report = await consolidate(pool)
+
+        assert client.messages.batches.create.await_count == 2
+        assert report.replay_claims_written == 0
+        assert report.replay_rows_done == 1
+
+        status = await pool.fetchval(
+            "SELECT status FROM replay_queue WHERE id = $1", rq_id
+        )
+        assert status == "done"

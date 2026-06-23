@@ -1250,13 +1250,18 @@ async def apply_reask_feedback(
             )
         except Exception as exc:
             # Enqueue failures must not abort the EMA boost — the two operations
-            # are independent.  Log at warning level so observability is preserved.
+            # are independent.  Log at warning level so observability is preserved,
+            # and bump the aggregate counter so a persistently-broken enqueue is
+            # visible in weft_check_health, not just buried per-occurrence in logs.
             logger.warning(
                 "apply_reask_feedback: enqueue_replay_on_miss failed "
                 "(query_id=%s): %s",
                 missed_query_id,
                 exc,
             )
+            from weft.counters import COUNTER_REPLAY_ENQUEUE_FAILED, increment_counter
+
+            await increment_counter(pool, COUNTER_REPLAY_ENQUEUE_FAILED)
 
     # 3. Fresh claim: boost the satisfying memory via the existing EMA path.
     return await record_feedback(pool, satisfying_memory_id, helpful=True)

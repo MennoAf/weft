@@ -530,6 +530,33 @@ class TestStamping:
         with patch("weft.views.belief_detector._get_client", return_value=mock_client):
             result = await detect_belief_updates(turn)
         assert result[0].evidence_turn_id == turn_id
+        # Single-turn claims leave the multi-turn span unset; evidence_span()
+        # falls back to the single id so consumers can treat both uniformly.
+        assert result[0].evidence_turn_ids is None
+        assert result[0].evidence_span() == [turn_id]
+
+    def test_evidence_span_fallback_for_single_turn_claim(self):
+        """evidence_span() returns [evidence_turn_id] when the plural span is None,
+        and the explicit plural list when an aggregate detector sets it."""
+        single = ClaimUpdate(
+            attribute="sleep.recent_hours",
+            value={"hours": 7},
+            confidence=0.9,
+            source_provenance="user_stated",
+            evidence_turn_id="et-solo",
+        )
+        assert single.evidence_turn_ids is None
+        assert single.evidence_span() == ["et-solo"]
+
+        multi = ClaimUpdate(
+            attribute="meetings.count",
+            value={"count": 3},
+            confidence=0.9,
+            source_provenance="user_stated",
+            evidence_turn_id="et-1",
+            evidence_turn_ids=["et-1", "et-2", "et-3"],
+        )
+        assert multi.evidence_span() == ["et-1", "et-2", "et-3"]
 
     @pytest.mark.asyncio
     async def test_detector_version_stamped(self):

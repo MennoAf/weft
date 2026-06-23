@@ -48,6 +48,23 @@ from weft.views.belief_query import search_belief_claims
 
 logger = logging.getLogger(__name__)
 
+# Replay-queue lifecycle status values — single source of truth for the status
+# strings used across replay.py, episode_turns.py (retention guards), and
+# mcp/tools.py (health depth metric). Mirrors the CHECK constraint in
+# migration v53 (status IN ('pending', 'done')).
+REPLAY_QUEUE_STATUS_PENDING = "pending"
+REPLAY_QUEUE_STATUS_DONE = "done"
+# Unrecoverable-error terminal (migration v55). The executor marks a row failed
+# rather than leaving it pending, so the retention guard (which pins turns for
+# 'pending' rows) cannot leak its turns forever. See loom-ebef8ec1.
+REPLAY_QUEUE_STATUS_FAILED = "failed"
+
+# Detector-version prefix marking belief_claims written by the replay loop.
+# Load-bearing cross-module PROOF convention: weft_check_health counts claims
+# with detector_version LIKE 'replay-%', so the E2.L7 replay writer MUST stamp
+# its belief_claims with this prefix or replay_claims_30d stays pinned at 0.
+REPLAY_DETECTOR_VERSION_PREFIX = "replay-"
+
 
 @dataclass
 class ReaskPair:
@@ -288,13 +305,13 @@ async def enqueue_replay_on_miss(
         # Claim-first idempotency: only INSERT when no pending row exists for
         # this episode.  A 'done' row does not block a new 'pending' row.
         status = await get_db(pool).execute(
-            """
+            f"""
             INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id)
-            SELECT $1, $2, $3, $4, 'pending', $5
+            SELECT $1, $2, $3, $4, '{REPLAY_QUEUE_STATUS_PENDING}', $5
             WHERE NOT EXISTS (
                 SELECT 1 FROM replay_queue
                 WHERE episode_id = $2
-                  AND status = 'pending'
+                  AND status = '{REPLAY_QUEUE_STATUS_PENDING}'
             )
             """,
             rq_id,

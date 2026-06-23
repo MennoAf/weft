@@ -290,7 +290,10 @@ async def _write_single_claim(
     )
 
     new_id = _new_claim_id()
-    evidence = [update.evidence_turn_id]
+    # Multi-turn aggregate claims carry their full contributing span in
+    # evidence_turn_ids; single-turn claims leave it None and evidence_span()
+    # falls back to [evidence_turn_id] (identical to the prior behaviour).
+    evidence = update.evidence_span()
     provenance = update.source_provenance
     confidence = float(update.confidence)
     detector_ver = update.detector_version
