@@ -63,6 +63,7 @@ from benchmarks.longmemeval.materialize import (
     materialize_question,
 )
 from benchmarks.longmemeval.reader import Reader
+from benchmarks.longmemeval.replay_drive import ReplayExecutorKind, drive_replay
 from benchmarks.longmemeval.router import Tier, policy_for, retrieve
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,17 @@ class RunStats:
     materialize_claims_superseded: int = 0
     materialize_abstentions: int = 0
     materialize_errors: int = 0
+    # Replay-loop aggregates (tier=replay only). The recall-gap replay loop is
+    # enqueued + drained per question on top of belief-view materialization;
+    # these count the multi-turn aggregate claims it wrote. A run with
+    # claims_written=0 across all questions means the loop ran but the detector
+    # found no enumerations — a real (null) result, not an inert path.
+    replay_rows_enqueued: int = 0
+    replay_rows_processed: int = 0
+    replay_rows_done: int = 0
+    replay_rows_failed: int = 0
+    replay_claims_written: int = 0
+    replay_claims_superseded: int = 0
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started_at if self.started_at else 0.0
@@ -230,6 +242,7 @@ async def _run_one(
     warm_boost_rounds: int = 0,
     warm_boost_queries_per_round: int = 10,
     detector: Detector | None = None,
+    replay_executor: ReplayExecutorKind = "inline",
 ) -> tuple[str, dict]:
     """Run the full pipeline for one question.
 
@@ -290,12 +303,12 @@ async def _run_one(
     # has no episode_turns to materialize, so the tier degrades to its
     # turn-recall fallback (which is also empty) — guard with a clear warning.
     materialize_telemetry: dict | None = None
-    if tier == "belief-view":
+    if tier in ("belief-view", "replay"):
         if mode != "turns":
             logger.warning(
-                "tier='belief-view' requires --mode turns (no episode_turns to "
+                "tier=%r requires --mode turns (no episode_turns to "
                 "materialize in mode=%r); claims will be empty for q=%s",
-                mode, instance.question_id,
+                tier, mode, instance.question_id,
             )
         mat_stats = await materialize_question(
             pool, project_id,
@@ -309,11 +322,27 @@ async def _run_one(
             # not of an empty haystack. Loud because the run would otherwise
             # complete and bill the Reader against claim-less recalls.
             logger.warning(
-                "belief-view materialization fetched ZERO turns for q=%s "
+                "tier=%r materialization fetched ZERO turns for q=%s "
                 "(project_id=%s) despite mode=turns — check pool identity/RLS "
                 "(see materialize._fetch_question_turns)",
-                instance.question_id, project_id,
+                tier, instance.question_id, project_id,
             )
+
+    # 2.7. Replay loop (tier=replay only) — enqueue + drain the recall-gap
+    # replay substrate on top of the per-turn claims just materialized. This is
+    # the load-bearing step that makes the replay path actually execute on the
+    # benchmark: without it the substrate is inert and a before/after measures
+    # nothing (see replay_drive.py). The aggregate detector writes its multi-turn
+    # 'replay-' claims into belief_claims so the recall below can read them.
+    replay_telemetry: dict | None = None
+    if tier == "replay":
+        replay_stats = await drive_replay(
+            pool,
+            question=instance.question,
+            user_id=BENCHMARK_USER_ID,
+            executor=replay_executor,
+        )
+        replay_telemetry = replay_stats.to_dict()
 
     # 3. Recall — question-type-aware policy lives in router.policy_for().
     # The CLI top_k acts as a floor: if a caller bumps top_k above the
@@ -354,6 +383,8 @@ async def _run_one(
         telemetry["warm_boost"] = warm_boost_telemetry
     if materialize_telemetry is not None:
         telemetry["materialize"] = materialize_telemetry
+    if replay_telemetry is not None:
+        telemetry["replay"] = replay_telemetry
 
     # Recall@k instrumentation — only meaningful when we have side-maps.
     # Session-level: compare source sessions of top-k retrieved turns
@@ -471,6 +502,7 @@ async def run_benchmark(
     tier: Tier = "belief",
     warm_boost_rounds: int = 0,
     warm_boost_queries_per_round: int = 10,
+    replay_executor: ReplayExecutorKind = "inline",
     pool: asyncpg.Pool | None = None,
     embedder: EmbeddingProvider | None = None,
     reader: Reader | None = None,
@@ -563,6 +595,7 @@ async def run_benchmark(
                         warm_boost_rounds=warm_boost_rounds,
                         warm_boost_queries_per_round=warm_boost_queries_per_round,
                         detector=detector,
+                        replay_executor=replay_executor,
                     )
                 except MaterializationAborted:
                     # Consecutive-failure burst — detector/DB is down. Every
@@ -598,6 +631,14 @@ async def run_benchmark(
                         stats.materialize_claims_superseded += int(mat.get("claims_superseded", 0))
                         stats.materialize_abstentions += int(mat.get("abstentions", 0))
                         stats.materialize_errors += int(mat.get("errors", 0))
+                    rp = telemetry.get("replay")
+                    if rp is not None:
+                        stats.replay_rows_enqueued += int(rp.get("rows_enqueued", 0))
+                        stats.replay_rows_processed += int(rp.get("rows_processed", 0))
+                        stats.replay_rows_done += int(rp.get("rows_done", 0))
+                        stats.replay_rows_failed += int(rp.get("rows_failed", 0))
+                        stats.replay_claims_written += int(rp.get("claims_written", 0))
+                        stats.replay_claims_superseded += int(rp.get("claims_superseded", 0))
 
                     out.write(
                         json.dumps(
@@ -698,7 +739,16 @@ async def run_benchmark(
                     "claims_superseded": stats.materialize_claims_superseded,
                     "abstentions": stats.materialize_abstentions,
                     "errors": stats.materialize_errors,
-                } if tier == "belief-view" else None,
+                } if tier in ("belief-view", "replay") else None,
+                "replay": {
+                    "executor": replay_executor,
+                    "rows_enqueued": stats.replay_rows_enqueued,
+                    "rows_processed": stats.replay_rows_processed,
+                    "rows_done": stats.replay_rows_done,
+                    "rows_failed": stats.replay_rows_failed,
+                    "claims_written": stats.replay_claims_written,
+                    "claims_superseded": stats.replay_claims_superseded,
+                } if tier == "replay" else None,
             },
             indent=2,
         ),
@@ -733,7 +783,7 @@ async def run_benchmark(
 )
 @click.option(
     "--tier",
-    type=click.Choice(["belief", "turns", "auto", "belief-view"]),
+    type=click.Choice(["belief", "turns", "auto", "belief-view", "replay"]),
     default="belief",
     show_default=True,
     help=(
@@ -743,7 +793,24 @@ async def run_benchmark(
         "everything else stays on belief. 'belief-view' materializes claims "
         "from the turns substrate then reads the supersession-collapsed "
         "belief_claims view, falling back to turn recall on a miss (use with "
-        "--mode turns; targets knowledge-update questions)."
+        "--mode turns; targets knowledge-update questions). 'replay' does "
+        "everything belief-view does AND drives the recall-gap replay loop "
+        "(enqueue + drain the aggregate detector) per question, so multi-turn "
+        "enumeration claims land before recall — the A/B partner to belief-view "
+        "for measuring the replay substrate (use with --mode turns)."
+    ),
+)
+@click.option(
+    "--replay-executor",
+    type=click.Choice(["inline", "batch"]),
+    default="inline",
+    show_default=True,
+    help=(
+        "Only with --tier replay. 'inline' makes synchronous Haiku/Sonnet calls "
+        "(deterministic, no batch polling). 'batch' drives the Anthropic Batch "
+        "API — exactly the production consolidate() path (50%% cheaper) but "
+        "polls up to ~300s per question. Both produce IDENTICAL claims; the flag "
+        "trades fidelity vs speed, not result."
     ),
 )
 @click.option(
@@ -842,6 +909,7 @@ def cli(
     no_cleanup: bool,
     warm_boost_rounds: int,
     warm_boost_queries_per_round: int,
+    replay_executor: str,
     log_level: str,
 ) -> None:
     """Run Weft against the LongMemEval benchmark, write hypotheses JSONL."""
@@ -849,20 +917,23 @@ def cli(
         level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # belief-view guard rails — both misconfigurations burn real Reader spend
-    # producing garbage, so they hard-fail (before any env/key checks) instead
-    # of warning per question.
-    if tier == "belief-view" and mode != "turns":
+    # belief-view / replay guard rails — both tiers materialize claims from the
+    # turns substrate, so both share the same two misconfigurations that burn
+    # real Reader spend producing garbage. Hard-fail (before any env/key checks)
+    # instead of warning per question. 'replay' inherits both because it runs
+    # the belief-view path plus the replay loop on top.
+    claim_tiers = ("belief-view", "replay")
+    if tier in claim_tiers and mode != "turns":
         raise click.UsageError(
-            "--tier belief-view requires --mode turns: the materializer reads "
+            f"--tier {tier} requires --mode turns: the materializer reads "
             f"episode_turns, which mode={mode!r} never writes — every recall "
             "would be empty while the Reader still bills per question."
         )
-    if tier == "belief-view" and no_cleanup:
+    if tier in claim_tiers and no_cleanup:
         raise click.UsageError(
-            "--tier belief-view is incompatible with --no-cleanup: "
+            f"--tier {tier} is incompatible with --no-cleanup: "
             "belief_claims has no project_id scoping, so claims from one "
-            "question leak into every later question's belief-view recall "
+            "question leak into every later question's claim recall "
             "and silently corrupt the run."
         )
 
@@ -898,7 +969,9 @@ def cli(
     warm_slug = f"_warm{warm_boost_rounds}" if warm_boost_rounds > 0 else ""
     if os.environ.get("WEFT_TURN_RERANK_DISABLE") == "1":
         warm_slug = f"{warm_slug}_rerankoff"
-    output_path = output_dir / f"{split_name}_{mode}{tier_slug}{slug}{warm_slug}_{timestamp}.jsonl"
+    # Suffix the replay executor so inline-vs-batch A/B runs don't collide.
+    replay_slug = f"_{replay_executor}" if tier == "replay" else ""
+    output_path = output_dir / f"{split_name}_{mode}{tier_slug}{replay_slug}{slug}{warm_slug}_{timestamp}.jsonl"
 
     stats = asyncio.run(
         run_benchmark(
@@ -914,6 +987,7 @@ def cli(
             tier=tier,
             warm_boost_rounds=warm_boost_rounds,
             warm_boost_queries_per_round=warm_boost_queries_per_round,
+            replay_executor=replay_executor,  # type: ignore[arg-type]
         )
     )
 
@@ -935,7 +1009,7 @@ def cli(
         )
         click.echo(f"  recall jsonl: {stats.recall_jsonl_path}")
         click.echo(f"  recall summary: {stats.recall_summary_path}")
-    if tier == "belief-view":
+    if tier in ("belief-view", "replay"):
         click.echo(
             f"  materialize: turns={stats.materialize_turns_total} "
             f"claims={stats.materialize_claims_written} "
@@ -946,8 +1020,23 @@ def cli(
         if stats.materialize_errors:
             click.echo(
                 f"  WARNING: {stats.materialize_errors} materialization "
-                "errors — the belief-view under-read those turns; treat the "
+                "errors — the claim view under-read those turns; treat the "
                 "score as a lower bound, not a gate result.",
+            )
+    if tier == "replay":
+        click.echo(
+            f"  replay ({replay_executor}): enqueued={stats.replay_rows_enqueued} "
+            f"processed={stats.replay_rows_processed} "
+            f"done={stats.replay_rows_done} failed={stats.replay_rows_failed} "
+            f"agg_claims={stats.replay_claims_written} "
+            f"superseded={stats.replay_claims_superseded}"
+        )
+        if stats.replay_claims_written == 0:
+            click.echo(
+                "  NOTE: replay wrote 0 aggregate claims — the loop RAN but the "
+                "detector found no multi-turn enumerations. This is a real null "
+                "result (replay had no effect here), not an inert path; compare "
+                "the score against a --tier belief-view run to confirm.",
             )
     click.echo(
         f"\nNext: feed this file to LongMemEval's evaluator:\n"
@@ -1004,6 +1093,29 @@ def cli(
 #        --question-type knowledge-update \
 #        --question-type knowledge-update_abs
 #     Then score with the judge (step 4) and record in tests/baselines.md.
+#
+# 3c. REPLAY-LOOP A/B (recall-gap substrate, loom-dcfaf656) — does the multi-turn
+#     aggregate detector lift multi-session / temporal recall? Run the SAME
+#     subset twice and diff the judge scores: the only delta between the two is
+#     the replay loop (enqueue + drain) running on top of identical per-turn
+#     materialization. If --tier replay does not beat --tier belief-view on
+#     these classes, the loop's dead-tell fired (route back to the E2 detector
+#     prompt / E1 linkage). The replay claims ARE on the read path here — unlike
+#     a default run, where the substrate is inert (see replay_drive.py).
+#       # Baseline (no aggregate claims):
+#    uv run python -m benchmarks.longmemeval.adapter \
+#        --dataset ../LongMemEval/data/longmemeval_m.json \
+#        --mode turns --tier belief-view \
+#        --question-type multi-session --question-type temporal-reasoning
+#       # Treatment (aggregate claims via the replay loop):
+#    uv run python -m benchmarks.longmemeval.adapter \
+#        --dataset ../LongMemEval/data/longmemeval_m.json \
+#        --mode turns --tier replay --replay-executor inline \
+#        --question-type multi-session --question-type temporal-reasoning
+#     Swap --replay-executor batch for a production-exact (consolidate()) pass —
+#     identical claims, Batch-API dispatch, ~300s/question polling. Watch the
+#     run summary's "replay: agg_claims=N" line: N=0 across all questions means
+#     the loop ran but found no enumerations (a real null, not an inert path).
 #
 # 4. Score the resulting JSONL with the LongMemEval judge wrapper. This
 #    runs the upstream evaluator inside an ephemeral uv env (no Weft dep

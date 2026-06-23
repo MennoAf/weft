@@ -55,7 +55,7 @@ from weft.turn_recall import route_query_to_tier, temporal_anchor
 from weft.views.belief_query import BeliefClaimResult, search_belief_claims
 
 
-Tier = Literal["belief", "turns", "auto", "belief-view"]
+Tier = Literal["belief", "turns", "auto", "belief-view", "replay"]
 
 # Owner identity benchmark turns + claims are written under. Mirrors
 # adapter.BENCHMARK_USER_ID; duplicated here to avoid a router→adapter import
@@ -300,6 +300,11 @@ async def retrieve(
         column, so sandbox isolation here relies on per-question cleanup of
         claims plus the ``user_id`` filter — safe under the default
         sequential, cleanup-on path.
+      * ``'replay'`` — identical READ to ``'belief-view'``; the adapter
+        additionally drives the recall-gap replay loop (enqueue + drain) after
+        materialization, so the claim view also holds the multi-turn aggregate
+        (``replay-`` stamped) claims the single-turn detector cannot produce.
+        Same sandbox-isolation caveats as ``belief-view``.
 
     ``user_id`` scopes the belief-view claim lookup (no effect on other tiers,
     which isolate by ``project_id``).
@@ -310,7 +315,12 @@ async def retrieve(
         base_type = question_type.removesuffix("_abs")
         tier = "turns" if base_type in ("multi-session", "temporal-reasoning") else "belief"
 
-    if tier == "belief-view":
+    if tier in ("belief-view", "replay"):
+        # 'replay' reads the SAME claim view as 'belief-view' — the difference is
+        # purely on the WRITE side: the adapter ran the replay loop (enqueue +
+        # drain) before this recall, so belief_claims now also holds the
+        # multi-turn aggregate (replay-stamped) claims. Both tiers fall back to
+        # turn recall on an empty claim match (augment-not-gate).
         claims = await search_belief_claims(
             pool,
             query=question,
