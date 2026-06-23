@@ -4,13 +4,16 @@ Part of the trilogy: Loom (orchestration) → Warp (builder agent) → Weft (mem
 Project context lives in Weft itself — `weft_prime(project_id="weft")` loads it.
 
 ## Loom project
-Active build work tracks in **`weft-wick`** (id: `6605fce2-9cde-4e56-b1f4-441db72d2687`) — the Weft V2 build driven by Wick's needs (user-scope tier, provenance, trackers, Phase 2+ poisoning defense, Phase 2.5 credential-bound caller mode). On boot, switch the Loom project context there:
+Active build work tracks in **`weft-public`** (id: `aa3131c9-5ed6-49dd-b907-2e22f35691de`) —
+making Weft public-ready ("going all in"): hardening, packaging, docs, productization.
+Owned by Jason's user account, so it's accessible (unlike the old weft-wick). This repo is
+**bound** to it: `.loom/config.yaml` carries the `project_id` and `.mcp.json` pins
+`LOOM_PROJECT_DIR` + `LOOM_PROJECT_ID`, so a reloaded session resolves here automatically —
+no `loom_switch_project` needed on boot. Lead agent: **Reed** (`reed`, role `lead`).
 
-```python
-loom_switch_project(project_id="6605fce2-9cde-4e56-b1f4-441db72d2687")
-```
-
-The legacy `weft` project (id `0bd76172-...`) holds historical V1 tasks — leave it alone unless explicitly asked.
+Predecessors: the **`weft-wick`** build (id `6605fce2-...`) is **complete** and is not
+reachable from the default Loom identity (RLS denies access) — don't switch to it. The legacy
+**`weft`** project (id `0bd76172-...`) holds historical V1 tasks — leave it alone unless asked.
 
 ## Commands
 ```bash
