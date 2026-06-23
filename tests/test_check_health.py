@@ -386,6 +386,43 @@ class TestCheckHealthReplayMetrics:
         assert payload["replay_claims_30d"] == 0
 
     @pytest.mark.asyncio
+    async def test_check_health_failure_counters_surface_and_reflect_increments(self, pool):
+        """failure_counters appears in the payload, defaults to 0, reflects bumps.
+
+        done_when for loom-3c4a0be3: the swallowed-failure counters are readable
+        via the health surface. Mirrors the exact augmentation in
+        weft_check_health (tools.py) — keep in sync if that wiring changes.
+        """
+        from weft.counters import (
+            COUNTER_REPLAY_ENQUEUE_FAILED,
+            FAILURE_COUNTERS,
+            get_counters,
+            increment_counter,
+        )
+        from weft.health_check import run_all_evaluators, summary_to_dict
+
+        # Empty DB: every reserved counter present and zero.
+        payload = summary_to_dict(await run_all_evaluators(pool))
+        payload["failure_counters"] = await get_counters(pool, FAILURE_COUNTERS)
+
+        assert "failure_counters" in payload, (
+            f"'failure_counters' missing from health payload. Keys: {list(payload.keys())}"
+        )
+        assert set(payload["failure_counters"]) == set(FAILURE_COUNTERS)
+        assert all(v == 0 for v in payload["failure_counters"].values()), (
+            f"Expected all-zero counters on empty DB, got {payload['failure_counters']}"
+        )
+
+        # A swallowed failure bumps its counter; the health surface reflects it.
+        await increment_counter(pool, COUNTER_REPLAY_ENQUEUE_FAILED)
+        await increment_counter(pool, COUNTER_REPLAY_ENQUEUE_FAILED)
+
+        payload2 = summary_to_dict(await run_all_evaluators(pool))
+        payload2["failure_counters"] = await get_counters(pool, FAILURE_COUNTERS)
+
+        assert payload2["failure_counters"][COUNTER_REPLAY_ENQUEUE_FAILED] == 2
+
+    @pytest.mark.asyncio
     async def test_check_health_replay_queue_depth_reflects_seeded_pending_row(self, pool):
         """replay_queue_depth rises when a pending row is seeded.
 
@@ -471,4 +508,89 @@ class TestCheckHealthReplayMetrics:
         )
         assert count_after == 1, (
             f"Expected replay_claims_30d=1 after seeding replay-origin claim, got {count_after}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_health_replay_claims_30d_reflects_real_executor_write(self, pool):
+        """End-to-end (L10 finalization): the REAL replay executor writing an
+        aggregate claim drives replay_claims_30d above zero through the exact
+        production query.
+
+        Prior `-k replay_claims` coverage seeded a belief_claim directly. Here we
+        run run_replay_executor (with a mocked detector LLM) so the executor
+        itself stamps detector_version with the 'replay-' PROOF prefix, then
+        assert the health surface's query reflects it. Closes the recall-gap
+        PROOF loop: missed enumeration -> replay_queue -> executor ->
+        replay_claims_30d > 0.
+        """
+        import json
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from weft.episode_turns import append_turn
+        from weft.episodes import create_episode
+        from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
+        from weft.replay import REPLAY_DETECTOR_VERSION_PREFIX
+        from weft.replay_executor import run_replay_executor
+
+        since_30d = datetime.now(timezone.utc) - timedelta(days=30)
+        # The exact query weft_check_health runs for replay_claims_30d (tools.py) —
+        # keep in sync if that wiring changes.
+        replay_claims_sql = f"""
+            SELECT count(*)
+            FROM belief_claims
+            WHERE detector_version LIKE '{REPLAY_DETECTOR_VERSION_PREFIX}%'
+              AND occurred_at >= $1
+        """
+
+        # No replay-origin claims yet -> metric is 0.
+        assert await pool.fetchval(replay_claims_sql, since_30d) == 0
+
+        # Seed an episode whose turns enumerate a cross-turn fact, then queue it.
+        ep = await create_episode(pool, EpisodeCreate(title=f"l10-{uuid.uuid4().hex[:6]}"))
+        turn_ids: list[str] = []
+        for content in (
+            "Met Windward Monday.",
+            "Windward again Wednesday.",
+            "Third Windward sync Friday.",
+        ):
+            turn = await append_turn(
+                pool,
+                EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content=content),
+            )
+            turn_ids.append(turn.id)
+        rq_id = f"rq-{uuid.uuid4().hex[:10]}"
+        await pool.execute(
+            "INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status) "
+            "VALUES ($1, $2, $3, 'reask-miss', 'pending')",
+            rq_id,
+            ep.id,
+            turn_ids,
+        )
+
+        # Mock the detector LLM so the REAL executor stamps a replay- claim.
+        agg_claim = [
+            {
+                "attribute": "meetings.windward_count",
+                "value": {"count": 3, "period": "this week"},
+                "confidence": 0.9,
+                "source_provenance": "user_stated",
+                "evidence_turn_ids": turn_ids,
+            }
+        ]
+        response = MagicMock()
+        response.content = [MagicMock(text=json.dumps(agg_claim))]
+        client = AsyncMock()
+        client.messages.create = AsyncMock(return_value=response)
+        with patch("weft.views.belief_detector._get_client", return_value=client):
+            result = await run_replay_executor(pool)
+
+        assert result.claims_written >= 1, (
+            f"Executor wrote no claims: {result}"
+        )
+
+        # The health surface's replay_claims_30d query now reflects the write.
+        count_after = await pool.fetchval(replay_claims_sql, since_30d)
+        assert count_after >= 1, (
+            f"Expected replay_claims_30d>=1 after real executor write, got {count_after}"
         )

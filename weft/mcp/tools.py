@@ -3140,12 +3140,21 @@ async def weft_check_health(
     - replay_claims_30d: count of belief_claims written by the replay loop in
       the last 30 days. Returns 0 until Epic 3 wires the replay writer.
       Epic 3 MUST set detector_version to a value starting with 'replay-'
-      (e.g. 'replay-v1') when writing replay-origin claims."""
+      (e.g. 'replay-v1') when writing replay-origin claims.
+    - failure_counters: aggregate counts for silently-swallowed failure sites
+      (replay.enqueue.failed, calibration.auto_promote.failed,
+      replay.executor.failed). A rising count while the corresponding success
+      metric stays flat is the tell that a log-and-continue path is broken."""
     try:
         from weft.calibration import count_auto_originated_tier_changes
+        from weft.counters import FAILURE_COUNTERS, get_counters
         from weft.db.connection import get_db
         from weft.health_check import run_all_evaluators, summary_to_dict
         from weft.reask import compute_reask_rate
+        from weft.replay import (
+            REPLAY_DETECTOR_VERSION_PREFIX,
+            REPLAY_QUEUE_STATUS_PENDING,
+        )
         from weft.store import get_recent_recall_queries
 
         app: AppContext = ctx.request_context.lifespan_context
@@ -3163,32 +3172,47 @@ async def weft_check_health(
             # no replays are queued, rises as the loop enqueues missed episodes)
             db = get_db(app.pool)
             replay_queue_depth: int = await db.fetchval(
-                "SELECT count(*) FROM replay_queue WHERE status = 'pending'"
+                f"SELECT count(*) FROM replay_queue WHERE status = '{REPLAY_QUEUE_STATUS_PENDING}'"
             )
             # PROOF metric 4: replay-origin belief_claims in last 30 days.
-            # Returns 0 now (no replay writer exists yet). Epic 3 MUST write
-            # belief_claims with detector_version LIKE 'replay-%' (e.g.
-            # 'replay-v1') so this query naturally returns real counts post-E3
-            # without any code change here.
+            # The replay executor (E2.L7) stamps detector_version with the
+            # 'replay-' prefix (both the Haiku REPLAY_AGGREGATE_DETECTOR_VERSION
+            # and the escalated Sonnet REPLAY_AGGREGATE_SONNET_DETECTOR_VERSION),
+            # so this query returns real counts as the loop mints claims — no
+            # code change here needed when the writer runs.
+            # DEAD-TELL (rollback signal): replay_claims_30d climbing while
+            # reask_rate stays flat on replayed topics means the loop is minting
+            # claims that are NOT what the misses needed — i.e. the replay path
+            # is producing volume without closing recall gaps. Treat a rising
+            # replay_claims_30d with no corresponding reask_rate decline as a
+            # signal to roll back / re-examine the aggregate detector, not as
+            # healthy progress.
             # NOTE: source_provenance cannot carry 'replay' — the CHECK
             # constraint on belief_claims only allows ('user_stated',
             # 'agent_suggested', 'joint_decision'). detector_version is the
             # correct unconstrained field for the replay-origin marker.
             replay_claims_30d: int = await db.fetchval(
-                """
+                f"""
                 SELECT count(*)
                 FROM belief_claims
-                WHERE detector_version LIKE 'replay-%'
+                WHERE detector_version LIKE '{REPLAY_DETECTOR_VERSION_PREFIX}%'
                   AND occurred_at >= $1
                 """,
                 since_30d,
             )
+            # Aggregate failure counters: silently-swallowed failure sites
+            # log-and-continue, so a persistent break is invisible without an
+            # aggregate signal. A rising replay.enqueue.failed while
+            # replay_queue_depth stays pinned at 0 is the "enqueue is silently
+            # broken" tell. replay.executor.failed reads 0 until E2.L7 lands.
+            failure_counters = await get_counters(app.pool, FAILURE_COUNTERS)
 
         payload = summary_to_dict(result)
         payload["reask_rate"] = reask_rate
         payload["auto_originated_tier_changes_30d"] = auto_tier_count
         payload["replay_queue_depth"] = replay_queue_depth
         payload["replay_claims_30d"] = replay_claims_30d
+        payload["failure_counters"] = failure_counters
         return payload
     except _DB_ERRORS as e:
         return _db_error_response("weft_check_health", e)

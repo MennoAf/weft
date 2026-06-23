@@ -142,6 +142,12 @@ async def _maybe_auto_promote(
             "evaluate_tier_change failed for action_category=%s; skipping auto-promotion",
             action_category,
         )
+        from weft.counters import (
+            COUNTER_CALIBRATION_AUTO_PROMOTE_FAILED,
+            increment_counter,
+        )
+
+        await increment_counter(pool, COUNTER_CALIBRATION_AUTO_PROMOTE_FAILED)
         return
 
     if evaluation.get("recommendation") != "promote":
@@ -178,6 +184,12 @@ async def _maybe_auto_promote(
             "Auto-calibration: update_policy_tier failed for policy %s; skipping",
             policy.id,
         )
+        from weft.counters import (
+            COUNTER_CALIBRATION_AUTO_PROMOTE_FAILED,
+            increment_counter,
+        )
+
+        await increment_counter(pool, COUNTER_CALIBRATION_AUTO_PROMOTE_FAILED)
 
 
 async def _maybe_alert_demotion(

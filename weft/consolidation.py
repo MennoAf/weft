@@ -67,6 +67,11 @@ class ConsolidationReport:
     duplicates_merged: list[tuple[str, str]] = field(default_factory=list)
     contradictions_flagged: list[tuple[str, str]] = field(default_factory=list)
     access_logs_pruned: int = 0
+    # 4th sub-pass: aggregation replay (E2.L8). rows_done counts queued replay
+    # rows driven terminal this run; claims_written counts enumeration beliefs
+    # the replay detector wrote back.
+    replay_rows_done: int = 0
+    replay_claims_written: int = 0
     errors: list[str] = field(default_factory=list)
     skipped: bool = False
 
@@ -88,6 +93,8 @@ class ConsolidationReport:
                 for a, b in self.contradictions_flagged
             ],
             "access_logs_pruned": self.access_logs_pruned,
+            "replay_rows_done": self.replay_rows_done,
+            "replay_claims_written": self.replay_claims_written,
             "total_actions": self.total_actions,
             "errors": self.errors,
         }
@@ -571,6 +578,22 @@ async def consolidate(
             except Exception as e:
                 report.errors.append(f"Contradiction detection failed: {e}")
                 logger.exception("Contradiction detection subsystem failed")
+
+            # 4th sub-pass: aggregation replay (E2.L8). Drains the replay_queue
+            # via the Batch API, writing cross-turn enumeration beliefs the
+            # per-turn detector structurally can't see. Skipped on dry_run (it
+            # mutates belief_claims + the queue, not the `memories` table the
+            # other sub-passes' dry_run guards cover).
+            if not dry_run:
+                try:
+                    from weft.replay_executor import run_replay_executor_batch
+
+                    replay = await run_replay_executor_batch(pool)
+                    report.replay_rows_done = replay.rows_done
+                    report.replay_claims_written = replay.claims_written
+                except Exception as e:
+                    report.errors.append(f"Aggregation replay failed: {e}")
+                    logger.exception("Aggregation replay subsystem failed")
         finally:
             await lock_conn.execute(
                 "SELECT pg_advisory_unlock($1)", _CONSOLIDATION_LOCK_ID,
@@ -588,10 +611,13 @@ async def consolidate(
         logger.warning("Access log pruning failed: %s", e)
 
     logger.info(
-        "Consolidation complete: %d decayed, %d merged, %d contradictions",
+        "Consolidation complete: %d decayed, %d merged, %d contradictions, "
+        "%d replay rows (%d claims)",
         len(report.decayed),
         len(report.duplicates_merged),
         len(report.contradictions_flagged),
+        report.replay_rows_done,
+        report.replay_claims_written,
     )
 
     return report

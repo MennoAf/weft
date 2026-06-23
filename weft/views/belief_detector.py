@@ -101,7 +101,7 @@ _CONFUSABLE_MAP = str.maketrans(
 
 @dataclass
 class ClaimUpdate:
-    """A single belief claim extracted from one turn.
+    """A single belief claim extracted from one or more turns.
 
     ``attribute`` and ``value`` are None for abstention records.
     ``confidence`` is 0.0 for abstentions.
@@ -109,6 +109,14 @@ class ClaimUpdate:
     All ClaimUpdate objects are stamped with ``evidence_turn_id`` (the
     originating turn's id) and ``detector_version`` (the module constant) by
     the detector — callers must not set these fields.
+
+    ``evidence_turn_ids`` is the multi-turn span for aggregate/enumeration
+    claims (see weft.views.aggregate_detector): when an extraction is derived
+    from a SET of turns rather than one, this carries every contributing turn
+    id. The single-turn detector leaves it None, in which case the span is just
+    ``[evidence_turn_id]``. Consumers (the E2.L7 replay writer / materializer)
+    should persist ``evidence_turn_ids`` when present and fall back to
+    ``[evidence_turn_id]`` otherwise — see :meth:`evidence_span`.
     """
 
     attribute: str | None
@@ -118,6 +126,18 @@ class ClaimUpdate:
     evidence_turn_id: str
     reason: str | None = None
     detector_version: str = field(default=DETECTOR_VERSION)
+    evidence_turn_ids: list[str] | None = None
+
+    def evidence_span(self) -> list[str]:
+        """The full list of evidence turn ids backing this claim.
+
+        Returns the multi-turn ``evidence_turn_ids`` when set (aggregate
+        claims), otherwise the single ``[evidence_turn_id]``. Lets consumers
+        treat single- and multi-turn claims uniformly.
+        """
+        if self.evidence_turn_ids:
+            return list(self.evidence_turn_ids)
+        return [self.evidence_turn_id]
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ import asyncpg
 
 from weft.db.connection import get_db
 from weft.models import EpisodeTurn, EpisodeTurnCreate, TurnRole
+from weft.replay import REPLAY_QUEUE_STATUS_PENDING
 from weft.tokens import estimate_tokens
 
 # Retention thresholds imported from episodes to keep a single source of truth.
@@ -148,6 +149,28 @@ async def get_turn(pool: asyncpg.Pool, turn_id: str) -> EpisodeTurn | None:
     return _row_to_turn(row) if row else None
 
 
+async def get_turns_by_ids(
+    pool: asyncpg.Pool, turn_ids: list[str]
+) -> list[EpisodeTurn]:
+    """Fetch multiple turns by ID, preserving the order of ``turn_ids``.
+
+    Ids that resolve to no row (deleted, or invisible under the current RLS
+    context) are simply absent from the result. Used by the replay executor to
+    hydrate a replay_queue row's ``turn_ids`` into EpisodeTurn objects.
+    """
+    if not turn_ids:
+        return []
+    rows = await get_db(pool).fetch(
+        """
+        SELECT * FROM episode_turns
+        WHERE id = ANY($1::text[])
+        ORDER BY array_position($1::text[], id)
+        """,
+        turn_ids,
+    )
+    return [_row_to_turn(r) for r in rows]
+
+
 async def list_turns(
     pool: asyncpg.Pool,
     episode_id: str,
@@ -237,7 +260,7 @@ async def delete_turns_below_importance(
             f"ttl_days must be positive: older_than_days={older_than_days}"
         )
     result = await get_db(pool).execute(
-        """
+        f"""
         DELETE FROM episode_turns
         WHERE importance_score IS NOT NULL
           AND importance_score < $1
@@ -254,7 +277,7 @@ async def delete_turns_below_importance(
           )
           AND NOT EXISTS (
               SELECT 1 FROM replay_queue rq
-              WHERE rq.status = 'pending'
+              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
                 AND episode_turns.id = ANY(rq.turn_ids)
           )
         """,
@@ -281,7 +304,7 @@ async def delete_turns_for_graduated_episode(
             f"ttl_days must be positive: older_than_days={older_than_days}"
         )
     result = await get_db(pool).execute(
-        """
+        f"""
         DELETE FROM episode_turns
         WHERE episode_id IN (
             SELECT id FROM episodes
@@ -296,7 +319,7 @@ async def delete_turns_for_graduated_episode(
           )
           AND NOT EXISTS (
               SELECT 1 FROM replay_queue rq
-              WHERE rq.status = 'pending'
+              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
                 AND episode_turns.id = ANY(rq.turn_ids)
           )
         """,
@@ -349,7 +372,7 @@ async def delete_turns_after_graduation(
     # superseded belief_claim are skipped — provenance-loss prevention
     # per docs/architecture/belief_view.md §6.4.
     scored_result = await db.execute(
-        """
+        f"""
         DELETE FROM episode_turns
         WHERE importance_score IS NOT NULL
           AND importance_score < $1
@@ -366,7 +389,7 @@ async def delete_turns_after_graduation(
           )
           AND NOT EXISTS (
               SELECT 1 FROM replay_queue rq
-              WHERE rq.status = 'pending'
+              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
                 AND episode_turns.id = ANY(rq.turn_ids)
           )
         """,
@@ -380,7 +403,7 @@ async def delete_turns_after_graduation(
     # applies — a NULL-score turn is still anchored if a belief_claim
     # references it.
     no_score_result = await db.execute(
-        """
+        f"""
         DELETE FROM episode_turns
         WHERE importance_score IS NULL
           AND episode_id IN (
@@ -396,7 +419,7 @@ async def delete_turns_after_graduation(
           )
           AND NOT EXISTS (
               SELECT 1 FROM replay_queue rq
-              WHERE rq.status = 'pending'
+              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
                 AND episode_turns.id = ANY(rq.turn_ids)
           )
         """,
