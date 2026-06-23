@@ -37,3 +37,6 @@ tests/acceptance/cases_local/*
 
 # Drafts / personal writing — kept local until ready to publish.
 posts/
+
+# Antigravity / Gemini CLI local config (symlink into ~/.gemini) — tool artifact.
+.antigravitycli/
