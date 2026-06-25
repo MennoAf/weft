@@ -48,6 +48,11 @@ from anthropic import AsyncAnthropic
 
 from weft.models import Memory
 from weft.tokens import estimate_tokens
+from weft.views._pricing import (
+    HAIKU_INPUT_PRICE_PER_TOKEN as _HAIKU_INPUT_PRICE_PER_TOKEN,
+    HAIKU_OUTPUT_PRICE_PER_TOKEN as _HAIKU_OUTPUT_PRICE_PER_TOKEN,
+    haiku_cost_usd,
+)
 from weft.views.belief_detector import _MODEL, _strip_fences
 
 logger = logging.getLogger(__name__)
@@ -73,9 +78,9 @@ MAX_SYNTH_COST_PER_CALL_USD = 0.10
 # actual call is still hard-capped by budget_tokens via max_tokens.
 EXPECTED_OUTPUT_TOKENS = 700
 
-# Haiku pricing (as of 2026) — mirrors the derivation in belief_detector.py docstring.
-_HAIKU_INPUT_PRICE_PER_TOKEN = 1.00 / 1_000_000   # $1.00 / 1M tokens
-_HAIKU_OUTPUT_PRICE_PER_TOKEN = 5.00 / 1_000_000  # $5.00 / 1M tokens
+# Haiku pricing now lives in weft.views._pricing (shared with belief_detector);
+# re-exported above under the module-local _HAIKU_*_PRICE_PER_TOKEN names that
+# the rest of this module and its tests reference.
 
 # System prompt token overhead estimate (conservative).
 _SYSTEM_PROMPT_TOKEN_OVERHEAD = 400
@@ -110,6 +115,11 @@ class SynthesisResult:
     content: str | None = None
     provenance: dict[str, list[str]] | None = None
     cost_usd: float | None = None
+    # Real token counts from the Haiku response usage (0 when no call was made:
+    # empty/abstained, or an API error before a response). Threaded onto the
+    # cost_entries row so topic_synthesis spend is attributable, not 0/0.
+    input_tokens: int = 0
+    output_tokens: int = 0
 
     @property
     def synthesized(self) -> bool:
@@ -168,10 +178,7 @@ def _get_client() -> AsyncAnthropic:
 
 def _projected_cost(input_tokens: int, output_tokens: int) -> float:
     """Return the projected USD cost for a single Haiku call."""
-    return (
-        input_tokens * _HAIKU_INPUT_PRICE_PER_TOKEN
-        + output_tokens * _HAIKU_OUTPUT_PRICE_PER_TOKEN
-    )
+    return haiku_cost_usd(input_tokens, output_tokens)
 
 
 def _estimate_input_tokens(user_message: str) -> int:
@@ -338,6 +345,8 @@ async def synthesize_digest(
             memory_count=memory_count,
             projected_cost_usd=projected,
             cost_usd=actual_cost,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
         )
 
     return SynthesisResult(
@@ -347,4 +356,6 @@ async def synthesize_digest(
         content=parsed["content"],
         provenance=parsed["provenance"],
         cost_usd=actual_cost,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
     )
