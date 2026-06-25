@@ -304,3 +304,73 @@ async def test_gather_entity_secondary_truncated_when_at_limit(pool):
     # Primary memory must still be present (it was tag-matched)
     returned_ids = {m.id for m in result["memories"]}
     assert primary_id in returned_ids, "Primary tag-matched memory must be in results"
+
+
+# ---------------------------------------------------------------------------
+# (6) Entity-secondary user isolation — user B's memory not returned via entity path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_entity_secondary_does_not_leak_other_user_memory(pool):
+    """Entity-secondary merge must NOT return another user's memory.
+
+    Strategy:
+    - User A: seed a memory with tag T (enters primary set), create an entity,
+      link user A's memory to that entity.
+    - User B: seed a memory WITHOUT tag T (so it cannot enter via the primary
+      path), link it to the SAME entity.
+    - gather_topic_memories(tags=[T], user_id=user_A) must:
+        a) return user A's tagged memory (primary path)
+        b) find the entity via entity_mentions on user A's memory (secondary path)
+        c) NOT include user B's entity-linked memory (user-visibility filter)
+
+    This test catches the superuser-pool blind spot: testcontainers bypasses
+    RLS entirely, so without the application-level visibility predicate on the
+    secondary query, user B's memory would be returned.
+    """
+    user_a = _unique_user_id()
+    user_b = _unique_user_id()
+    tag = f"tg-tag-{uuid.uuid4().hex[:8]}"
+
+    # User A: seed a primary memory with tag T
+    a_primary_id = await _seed_memory(pool, user_a, tag, "user A primary tagged memory")
+
+    # Create an entity owned by user A
+    tok_a = current_user_id.set(user_a)
+    try:
+        async with acquire(pool):
+            entity = await store_entity(
+                pool,
+                EntityCreate(
+                    name=f"shared-entity-{uuid.uuid4().hex[:8]}",
+                    entity_type=EntityType.concept,
+                    user_id=user_a,
+                ),
+            )
+            # Link user A's memory to the entity
+            await link_mention(pool, entity.id, a_primary_id)
+    finally:
+        current_user_id.reset(tok_a)
+
+    # User B: seed a memory WITHOUT tag T (so it ONLY enters via entity-secondary)
+    b_id = await _seed_memory(pool, user_b, "unrelated-tag", "user B entity-linked memory")
+
+    # Link user B's memory to the SAME entity (as user B)
+    tok_b = current_user_id.set(user_b)
+    try:
+        async with acquire(pool):
+            await link_mention(pool, entity.id, b_id)
+    finally:
+        current_user_id.reset(tok_b)
+
+    # Gather as user A — entity secondary should find the entity but must NOT
+    # include user B's memory due to the user-visibility predicate.
+    result = await gather_topic_memories(pool, [tag], user_a)
+    returned_ids = {m.id for m in result["memories"]}
+
+    assert a_primary_id in returned_ids, "User A's own tagged memory must be returned"
+    assert b_id not in returned_ids, (
+        f"User B's memory {b_id} must NOT appear in user A's gather via the "
+        "entity-secondary path (entity-secondary user-visibility filter failure)"
+    )
