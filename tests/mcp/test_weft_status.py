@@ -128,6 +128,25 @@ async def _count_cost_entries(pool, entry_type: str, reference_id: str) -> list:
     return list(rows)
 
 
+async def _recall_query_rows(pool, tool_name: str, query_text: str) -> list:
+    """Fetch weft_recall_queries rows for a tool_name + query_text.
+
+    The testcontainer role is a superuser, so this bypasses RLS — we read the
+    rows regardless of which user_id they were attributed to.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT * FROM weft_recall_queries
+        WHERE tool_name = $1
+          AND query_text = $2
+        ORDER BY created_at DESC
+        """,
+        tool_name,
+        query_text,
+    )
+    return list(rows)
+
+
 # ---------------------------------------------------------------------------
 # (1) synthesize=False returns Tier-1 shape, ZERO synthesize_digest calls (V2)
 # ---------------------------------------------------------------------------
@@ -291,6 +310,40 @@ class TestTier2Synthesized:
         rows = await _count_cost_entries(pool, "topic_synthesis", tag)
         assert len(rows) == 1
         assert rows[0]["entry_type"] == "topic_synthesis"
+
+    async def test_synthesized_cost_entry_carries_token_counts(self, ctx, pool):
+        """loom-97e0e019: the synthesized cost row carries the result's real
+        input/output token counts (not 0/0), and total = input + output."""
+        from weft.mcp.tools import weft_status
+
+        user_id = _uid()
+        tag = f"tag-{uuid.uuid4().hex[:8]}"
+        mem_id = await _seed_memory(pool, user_id, tag, "Token-threading memory")
+
+        synth_result = SynthesisResult(
+            status="synthesized",
+            memory_count=1,
+            projected_cost_usd=0.001,
+            content="Narrative with real usage.",
+            provenance={mem_id: ["usage"]},
+            cost_usd=0.0031,
+            input_tokens=2487,
+            output_tokens=613,
+        )
+
+        with patch(
+            "weft.mcp.tools.get_user_id", return_value=user_id
+        ), patch(
+            "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=synth_result
+        ):
+            await weft_status(ctx, topic=tag, synthesize=True)
+
+        rows = await _count_cost_entries(pool, "topic_synthesis", tag)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["input_tokens"] == 2487
+        assert row["output_tokens"] == 613
+        assert row["total_tokens"] == 2487 + 613
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +594,65 @@ class TestAbstention:
         assert cached is None, (
             "Abstained path must NOT write a digest to the cache"
         )
+
+
+# ---------------------------------------------------------------------------
+# (6) weft_status logs a recall_query row carrying was_empty (loom-8bfddc55)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallQueryLog:
+    async def test_empty_topic_logs_one_row_was_empty(self, ctx, pool):
+        """A weft_status ask on a topic with NO memories writes exactly ONE
+        recall_query row with result_count == 0 (the was_empty signal)."""
+        from weft.mcp.tools import weft_status
+
+        user_id = _uid()
+        # Unique topic that resolves to nothing for this user.
+        tag = f"empty-{uuid.uuid4().hex[:8]}"
+
+        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+            result = await weft_status(ctx, topic=tag, synthesize=False)
+
+        assert result["memories"] == []
+
+        rows = await _recall_query_rows(pool, "status", tag)
+        assert len(rows) == 1, f"expected exactly 1 recall_query row, got {len(rows)}"
+        row = rows[0]
+        assert row["tool_name"] == "status"
+        assert row["result_count"] == 0, "was_empty signal: result_count must be 0"
+        # Attributed to the caller, not NULL (RLS user context was applied).
+        assert row["user_id"] == user_id
+
+    async def test_nonempty_topic_logs_row_with_count(self, ctx, pool):
+        """A weft_status ask on a topic WITH memories writes a recall_query row
+        whose result_count reflects the gathered count (was_empty == False)."""
+        from weft.mcp.tools import weft_status
+
+        user_id = _uid()
+        tag = f"tag-{uuid.uuid4().hex[:8]}"
+        await _seed_memory(pool, user_id, tag, "one")
+        await _seed_memory(pool, user_id, tag, "two")
+
+        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+            await weft_status(ctx, topic=tag, synthesize=False)
+
+        rows = await _recall_query_rows(pool, "status", tag)
+        assert len(rows) == 1
+        assert rows[0]["result_count"] == 2
+        assert rows[0]["result_count"] != 0  # was_empty == False
+
+    async def test_each_call_logs_exactly_one_row(self, ctx, pool):
+        """Two weft_status asks on the same topic produce two rows (one per call)."""
+        from weft.mcp.tools import weft_status
+
+        user_id = _uid()
+        tag = f"tag-{uuid.uuid4().hex[:8]}"
+        await _seed_memory(pool, user_id, tag, "content")
+
+        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+            await weft_status(ctx, topic=tag, synthesize=False)
+            await weft_status(ctx, topic=tag, synthesize=False)
+
+        rows = await _recall_query_rows(pool, "status", tag)
+        assert len(rows) == 2

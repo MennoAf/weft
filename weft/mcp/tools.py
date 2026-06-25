@@ -1391,14 +1391,39 @@ async def weft_status(
             user_id=user_id,
             budget_tokens=budget_tokens,
         )
-        was_empty = len(gather_result["memories"]) == 0
+        memory_count = len(gather_result["memories"])
+        was_empty = memory_count == 0
         logger.debug(
             "weft_status: topic=%r resolved_tags=%r memory_count=%d was_empty=%s",
             topic,
             resolved_tags,
-            len(gather_result["memories"]),
+            memory_count,
             was_empty,
         )
+
+        # L1 Resolution Ratchet feed: log this topic ask as a recall_query row so
+        # the compounding loop can read was_empty (result_count == 0) signals from
+        # weft_status, the same way weft_recall logs its calls. result_count
+        # carries was_empty: 0 means the topic resolved to nothing.
+        #
+        # log_recall_query relies on the app.user_id GUC default to fill the
+        # NOT-NULL user_id column, and acquire() issues SET LOCAL app.user_id
+        # from the current_user_id contextvar AT ENTRY — so the contextvar must
+        # be set BEFORE entering acquire(), not inside it. (In prod the auth
+        # middleware has already set it; setting it here also covers callers
+        # that haven't, e.g. tests.) log_recall_query swallows its own DB errors
+        # and must never break the user path.
+        tok = current_user_id.set(user_id)
+        try:
+            async with acquire(app.pool):
+                await log_recall_query(
+                    app.pool,
+                    tool_name="status",
+                    query_text=topic,
+                    result_count=memory_count,
+                )
+        finally:
+            current_user_id.reset(tok)
 
         memories_payload = [
             {
@@ -1475,9 +1500,9 @@ async def weft_status(
                         entry_type=CostEntryType.topic_synthesis,
                         reference_id=topic,
                         model=_MODEL,
-                        input_tokens=0,
-                        output_tokens=0,
-                        total_tokens=0,
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens,
+                        total_tokens=result.input_tokens + result.output_tokens,
                         estimated_cost_usd=result.cost_usd,
                         metadata={},
                     ),
