@@ -23,6 +23,7 @@ from weft.views.belief_detector import (
     MAX_COST_PER_CALL_USD,
     DETECTOR_VERSION,
     ClaimUpdate,
+    _salvage_partial_array,
     _validate_attribute,
     detect_belief_updates,
 )
@@ -93,8 +94,8 @@ class TestCostCeiling:
 
     def test_cost_constant_value(self):
         """Static cost value matches documented derivation."""
-        # (800 / 1_000_000 * 1.00) + (256 / 1_000_000 * 5.00) = 0.00208
-        assert MAX_COST_PER_CALL_USD == pytest.approx(0.0021, abs=0.0001)
+        # (800 / 1_000_000 * 1.00) + (512 / 1_000_000 * 5.00) = 0.00336
+        assert MAX_COST_PER_CALL_USD == pytest.approx(0.0034, abs=0.0001)
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +449,57 @@ class TestJsonParsing:
         assert len(result) == 1
         assert result[0].attribute is None
         assert result[0].reason == "parse_error"
+
+    def test_salvage_recovers_complete_objects_from_truncation(self):
+        """A truncated array yields its complete leading objects, not None."""
+        # Two complete claims, then a third cut off at the output ceiling.
+        truncated = (
+            '[{"attribute": "sleep.recent_hours", "value": {"hours": 7}, '
+            '"confidence": 0.9, "source_provenance": "user_stated"},'
+            '{"attribute": "exercise.weekly_frequency", "value": {"n": 3}, '
+            '"confidence": 0.88, "source_provenance": "user_stated"},'
+            '{"attribute": "recipe.fafda", "value": {"cuisine": '
+        )
+        salvaged = _salvage_partial_array(truncated)
+        assert salvaged is not None
+        assert len(salvaged) == 2
+        assert salvaged[0]["attribute"] == "sleep.recent_hours"
+        assert salvaged[1]["attribute"] == "exercise.weekly_frequency"
+
+    def test_salvage_returns_none_for_non_array(self):
+        """Non-array garbage must not be coerced into claims."""
+        assert _salvage_partial_array("{not valid json!!!") is None
+        assert _salvage_partial_array("plain prose, no bracket") is None
+
+    def test_salvage_handles_trailing_comma_truncation(self):
+        """First object complete, truncated right after the comma."""
+        truncated = (
+            '[{"attribute": "location.zip-code", "value": "23456", '
+            '"confidence": 0.95, "source_provenance": "agent_suggested"},'
+        )
+        salvaged = _salvage_partial_array(truncated)
+        assert salvaged is not None and len(salvaged) == 1
+        assert salvaged[0]["attribute"] == "location.zip-code"
+
+    @pytest.mark.asyncio
+    async def test_truncated_response_salvages_claims_not_abstention(self):
+        """End-to-end: a truncated LLM response surfaces the complete claim."""
+        truncated = (
+            '[{"attribute": "sleep.recent_hours", "value": {"hours": 7}, '
+            '"confidence": 0.9, "source_provenance": "user_stated"},'
+            '{"attribute": "exercise.weekly_freq", "value": {"n": '
+        )
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=truncated)]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        turn = _make_turn(content="I slept 7 hours and run 3x a week.")
+        with patch("weft.views.belief_detector._get_client", return_value=mock_client):
+            result = await detect_belief_updates(turn)
+        # The one complete, valid claim survives; no parse_error abstention.
+        assert len(result) == 1
+        assert result[0].attribute == "sleep.recent_hours"
+        assert result[0].reason != "parse_error"
 
     @pytest.mark.asyncio
     async def test_fenced_json_is_stripped_and_parsed(self):

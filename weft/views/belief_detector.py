@@ -9,12 +9,17 @@ Cost calculation (static, Haiku 4.5 as of 2026):
   - Input pricing:  $1.00 / 1M tokens
   - Output pricing: $5.00 / 1M tokens
   - Estimated input tokens per call: ~800  (system prompt + few-shot + turn)
-  - Max output tokens per call:       256
-  - Worst-case cost = (800 / 1_000_000) * 1.00 + (256 / 1_000_000) * 5.00
-                    = 0.0008 + 0.00128
-                    = $0.00208 per call
+  - Max output tokens per call:       512
+  - Worst-case cost = (800 / 1_000_000) * 1.00 + (512 / 1_000_000) * 5.00
+                    = 0.0008 + 0.00256
+                    = $0.00336 per call
 
 Well within the $0.005 per-turn budget.
+
+The 512-token output ceiling (raised from 256) leaves room for multi-claim
+turns to finish their JSON array. When a response still truncates, the parser
+salvages every complete object from the partial array rather than dropping the
+whole turn (see ``_salvage_partial_array``).
 """
 
 from __future__ import annotations
@@ -38,11 +43,11 @@ logger = logging.getLogger(__name__)
 
 DETECTOR_VERSION = "belief-detector-v1.0"
 _MODEL = "claude-haiku-4-5-20251001"
-_MAX_TOKENS = 256  # constrained output for cost control
+_MAX_TOKENS = 512  # output ceiling; multi-claim turns truncated at 256 (see docstring)
 
 # Static cost ceiling (see module docstring for derivation).
 # Asserted by tests to remain under the $0.005 per-turn budget.
-MAX_COST_PER_CALL_USD = 0.0021
+MAX_COST_PER_CALL_USD = 0.0034
 
 # Attribute key format: lowercase dot-namespaced + kebab/snake name.
 # Examples: "sleep.recent_hours", "recipe.bourbon-pb-oatmeal-cookies"
@@ -229,7 +234,9 @@ Example 6 — abstention: narrative about someone else
   Output: []
 
 Return ONLY a valid JSON array. Empty array [] is the correct output when no \
-factual belief about the user is asserted. No markdown, no explanation.\
+factual belief about the user is asserted. No markdown, no explanation. Emit \
+compact single-line JSON with no indentation or extra whitespace, and keep \
+each "reason" under 15 words, so the array always fits in the output budget.\
 """
 
 # ---------------------------------------------------------------------------
@@ -291,6 +298,41 @@ def _strip_fences(raw: str) -> str:
     return raw
 
 
+def _salvage_partial_array(raw: str) -> list[Any] | None:
+    """Recover complete objects from a truncated JSON array.
+
+    Haiku occasionally hits the output-token ceiling mid-array, producing valid
+    objects followed by a half-written one (e.g. ``[{...}, {"attribute": "x",``).
+    ``json.loads`` rejects the whole thing. This scans from the opening ``[`` and
+    decodes complete top-level values one at a time, stopping at the first
+    incomplete one. Returns the list of recovered values, or None if nothing
+    before the truncation point parsed (so the caller still abstains).
+
+    Only the array body is scanned — a response with no ``[`` returns None, so
+    non-array garbage ("{not valid json") is not silently coerced into claims.
+    """
+    start = raw.find("[")
+    if start == -1:
+        return None
+    decoder = json.JSONDecoder()
+    idx = start + 1
+    n = len(raw)
+    recovered: list[Any] = []
+    while idx < n:
+        # Skip whitespace and the commas between elements.
+        while idx < n and raw[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= n or raw[idx] == "]":
+            break
+        try:
+            value, end = decoder.raw_decode(raw, idx)
+        except json.JSONDecodeError:
+            break  # the trailing element is truncated — stop here
+        recovered.append(value)
+        idx = end
+    return recovered or None
+
+
 def _abstention(turn_id: str, reason: str) -> list[ClaimUpdate]:
     """Return a canonical abstention record."""
     return [
@@ -322,13 +364,26 @@ def _parse_claims(
     try:
         parsed = json.loads(raw_json)
     except json.JSONDecodeError as exc:
-        logger.warning(
-            "belief_detector.parse_error: turn_id=%s error=%s raw=%r",
-            turn.id,
-            exc,
-            raw_json[:200],
-        )
-        return _abstention(turn.id, "parse_error")
+        # Most parse failures are output-token truncation mid-array: the leading
+        # objects are valid, only the trailing one is cut off. Salvage the
+        # complete ones rather than discarding the whole turn's claims.
+        salvaged = _salvage_partial_array(raw_json)
+        if salvaged is not None:
+            logger.warning(
+                "belief_detector.parse_salvaged: turn_id=%s recovered=%d error=%s",
+                turn.id,
+                len(salvaged),
+                exc,
+            )
+            parsed = salvaged
+        else:
+            logger.warning(
+                "belief_detector.parse_error: turn_id=%s error=%s raw=%r",
+                turn.id,
+                exc,
+                raw_json[:200],
+            )
+            return _abstention(turn.id, "parse_error")
 
     if not isinstance(parsed, list):
         logger.warning(

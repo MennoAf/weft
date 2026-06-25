@@ -1031,7 +1031,19 @@ def cli(
             f"agg_claims={stats.replay_claims_written} "
             f"superseded={stats.replay_claims_superseded}"
         )
-        if stats.replay_claims_written == 0:
+        if stats.questions_failed and stats.questions_done == 0:
+            # Every question errored before recall — the replay loop never
+            # actually ran (e.g. a missing replay_queue table). agg_claims=0
+            # here means "crashed", NOT "no enumerations found". Do not print
+            # the reassuring null-result note: the results file is invalid.
+            click.echo(
+                f"  ERROR: all {stats.questions_failed} questions FAILED — the "
+                "replay loop did not run (see the traceback above; a missing "
+                "replay_queue table means migrations v53/v55 are unapplied). "
+                "agg_claims=0 is a crash, not a null result; the hypotheses "
+                "file is empty/invalid and must NOT be judged."
+            )
+        elif stats.replay_claims_written == 0:
             click.echo(
                 "  NOTE: replay wrote 0 aggregate claims — the loop RAN but the "
                 "detector found no multi-turn enumerations. This is a real null "
