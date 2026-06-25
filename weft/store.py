@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import asyncpg
 
-from weft.auth import get_caller_mode
+from weft.auth import current_user_id, get_caller_mode
 from weft.db.connection import acquire, get_db
 from weft.models import (
     Memory,
@@ -94,6 +94,28 @@ async def store_memory(
         write_provenance,
         review_status,
     )
+
+    # V3 write-invalidation: flip any cached digest for this memory's topic tags
+    # to stale=true so the next read regenerates a fresh digest.
+    #
+    # Design note — resolving "same transaction boundary" vs "best-effort non-raising":
+    # We call mark_stale_for_tags via get_db(pool) (inside topic_digest_cache),
+    # which reuses _current_conn when inside an acquire() context. This means the
+    # stale flip is on the SAME connection/transaction as the memory INSERT (atomic
+    # on the happy path). The try/except in mark_stale_for_tags ensures that any
+    # DB error here is swallowed with a warning — it never aborts the memory write.
+    if create.topic:
+        try:
+            from weft.topic_digest_cache import mark_stale_for_tags
+            user_id_val = current_user_id.get()
+            if user_id_val:
+                await mark_stale_for_tags(pool, user_id_val, create.topic)
+        except Exception as _exc:
+            logger.warning(
+                "store_memory: digest invalidation hook failed (id=%s): %s",
+                memory_id,
+                _exc,
+            )
 
     return Memory(
         id=memory_id,
