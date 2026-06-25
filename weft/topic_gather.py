@@ -5,9 +5,10 @@ with NO limit cap — proving V1 completeness. Uses the ``= ANY(topic)`` predica
 already established in ``weft/store.py`` but issues its own unbounded query
 rather than routing through the limit=10/50-capped search functions.
 
-Secondary: merges entity-linked memories via the entity_mentions JOIN
-(``weft/entities.py:get_entity_memories``, LIMIT 100). If the entity set
-hits that 100-cap, ``truncated=True`` is returned to surface the incompleteness.
+Secondary: merges entity-linked memories via an inline entity_mentions JOIN
+(scoped to the caller's user-visibility predicate, capped at LIMIT 100). If
+the entity set hits that 100-cap, ``truncated=True`` is returned to surface
+the incompleteness.
 
 RLS enforcement: sets ``current_user_id`` contextvar before calling ``acquire()``
 so the RLS SELECT policy filters correctly. Also adds application-level user_id
@@ -22,14 +23,13 @@ from typing import TypedDict
 import asyncpg
 
 from weft.db.connection import acquire
-from weft.entities import get_entity_memories
 from weft.models import Memory
 from weft.schema.versioning import SYSTEM_GLOBAL_USER_ID
 from weft.store import _row_to_memory
 
 logger = logging.getLogger(__name__)
 
-# The LIMIT used by get_entity_memories — if the entity-linked set reaches
+# The LIMIT on the entity-secondary query — if the entity-linked set reaches
 # this number, we cannot know whether rows were dropped.
 _ENTITY_MEMORIES_LIMIT = 100
 
@@ -56,7 +56,7 @@ async def gather_topic_memories(
     here.  Every matching active memory is returned; ``complete`` reflects
     whether the primary gather was unbounded (always True from the primary
     path).  ``truncated`` is set True when the entity-graph secondary merge
-    would exceed the LIMIT 100 cap inside ``get_entity_memories``.
+    would exceed the LIMIT 100 cap on the entity-secondary query.
 
     Args:
         pool: asyncpg pool.
@@ -140,7 +140,13 @@ async def _gather(
         # --- Secondary: entity-linked memories ---
         # Look up entities linked to memories in the primary set, then gather
         # additional entity-linked memories that may not be in the primary set.
-        # Uses get_entity_memories (LIMIT 100) — if the set hits the cap, truncated=True.
+        # Uses an inline query with LIMIT 100 — if the set hits the cap, truncated=True.
+        #
+        # Defense-in-depth: applies the same user-visibility predicate as the
+        # primary query (caller-owned OR system-global OR workspace-member) so
+        # that the secondary path cannot leak other users' memories even when
+        # the pool runs as a superuser (e.g., in testcontainers environments
+        # where RLS is bypassed entirely).
         truncated = False
         seen_ids: set[str] = {m.id for m in primary_memories}
 
@@ -156,9 +162,37 @@ async def _gather(
             )
             entity_ids = [r["entity_id"] for r in entity_rows]
 
-            # For each entity, gather its memories (returns up to 100)
+            # For each entity, gather its memories with user-visibility filter.
+            # Mirrors the primary query's visibility predicate:
+            #   user_id = caller OR user_id = SYSTEM_GLOBAL_USER_ID OR workspace-member
             for entity_id in entity_ids:
-                entity_mems = await get_entity_memories(pool, entity_id, limit=_ENTITY_MEMORIES_LIMIT)
+                entity_mem_rows = await conn.fetch(
+                    """
+                    SELECT m.* FROM memories m
+                    JOIN entity_mentions em ON m.id = em.memory_id
+                    WHERE em.entity_id = $1
+                      AND m.status = 'active'
+                      AND (
+                        m.user_id = $2
+                        OR m.user_id = $3
+                        OR (
+                          m.workspace_id IS NOT NULL
+                          AND EXISTS (
+                            SELECT 1 FROM workspace_members wm
+                            WHERE wm.workspace_id = m.workspace_id
+                              AND wm.member_identity->>'user_id' = $2
+                          )
+                        )
+                      )
+                    ORDER BY em.mentioned_at DESC
+                    LIMIT $4
+                    """,
+                    entity_id,
+                    user_id,
+                    SYSTEM_GLOBAL_USER_ID,
+                    _ENTITY_MEMORIES_LIMIT,
+                )
+                entity_mems = [_row_to_memory(r) for r in entity_mem_rows]
 
                 # If we got exactly the limit cap, rows may have been dropped
                 if len(entity_mems) >= _ENTITY_MEMORIES_LIMIT:
@@ -170,8 +204,8 @@ async def _gather(
                         primary_memories.append(mem)
                         seen_ids.add(mem.id)
 
-        # Re-sort merged set by created_at ASC to maintain ordering invariant
-        primary_memories.sort(key=lambda m: m.created_at)
+        # Re-sort merged set by (created_at, id) ASC for deterministic tiebreak
+        primary_memories.sort(key=lambda m: (m.created_at, m.id))
 
         return TopicGatherResult(
             memories=primary_memories,
