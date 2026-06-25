@@ -1,25 +1,39 @@
 """Tier-2 topic-digest synthesizer — Haiku narrative pass with provenance + cost cap.
 
 Implements ``synthesize_digest(memories, *, budget_tokens)`` per the contract
-specified in documents/prds/topic-digest-recall.md §Validation V4, V5.
+specified in documents/prds/topic-digest-recall.md §Validation V4, V5, refined by
+the cost-policy decision (Weft weft-d58f7350, loom-8e41000e).
 
 The synthesizer:
   - Feeds a list of Memory objects to Haiku, asking it to produce a narrative
     "status" answer in which every sentence is grounded in the supplied memory ids.
   - Returns a provenance map ``{memory_id: [spans]}`` where keys are ONLY ids
     present in the input set (hallucinated ids are filtered out at parse time).
-  - Abstains (returns None) when the projected cost of the call would exceed
-    MAX_SYNTH_COST_PER_CALL_USD — no call is made in that case.
+  - Abstains when the *projected* cost of the call would exceed
+    MAX_SYNTH_COST_PER_CALL_USD — no call is made in that case. The result
+    carries the projected cost and memory count so the caller can record the
+    abstention (synthesis fire-rate is a health metric for deterministic recall).
 
-Cost calculation (Haiku 4.5 as of 2026):
+Cost projection (Haiku 4.5 as of 2026):
   - Input pricing:  $1.00 / 1M tokens
   - Output pricing: $5.00 / 1M tokens
-  Projected cost = (estimated_input_tokens / 1_000_000) * 1.00
-                 + (budget_tokens / 1_000_000) * 5.00
-  At budget_tokens=2000 and ~500-token system prompt + 1500 content tokens:
-    = (2000 / 1_000_000) * 1.00 + (2000 / 1_000_000) * 5.00
-    = 0.002 + 0.010 = $0.012
-  Exceeds the cap at large inputs — abstention kicks in to prevent overspend.
+
+  The pre-call projection charges EXPECTED output (EXPECTED_OUTPUT_TOKENS), NOT
+  the ``budget_tokens`` ceiling. ``budget_tokens`` is the *worst-case* output the
+  model can emit — but it is already hard-capped by ``max_tokens`` on the API
+  call, so projecting it against the cost cap double-guards an already-bounded
+  quantity and (at the old $0.01 cap) consumed the entire budget before a single
+  input token was counted, making the feature a no-op at defaults. Projecting
+  expected output instead lets the cap headroom bound the genuinely UNBOUNDED
+  cost — the input, since the Tier-1 gather has no limit on the topic[] path:
+
+  projected = (estimated_input_tokens / 1M) * 1.00
+            + (EXPECTED_OUTPUT_TOKENS    / 1M) * 5.00
+
+  At cap = $0.10 this allows ~96K input tokens before abstaining — enough to
+  synthesize the hottest real topics (CI ~431 memories, Weft, Loom); abstention
+  is the pathological-topic backstop, not the default path. The ACTUAL cost is
+  always computed from response usage after the call.
 """
 
 from __future__ import annotations
@@ -27,7 +41,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from anthropic import AsyncAnthropic
 
@@ -43,11 +58,20 @@ logger = logging.getLogger(__name__)
 
 SYNTHESIZER_VERSION = "topic-synthesis-v1.0"
 
-# Hard cost ceiling for a single synthesis call.
-# Higher than the belief detector's per-call cap because narrative output
-# is longer than a single claim extraction.
+# Hard cost ceiling for the *projected* cost of a single synthesis call.
+# Raised from $0.01 to $0.10 per the cost-policy decision (weft-d58f7350):
+# synthesis is opt-in and fires deliberately, so a dime-scale ceiling for a
+# deep overview of even the hottest topic is acceptable, and it keeps real
+# topics off the abstain path (abstention is the pathological-case backstop).
 # Defined as a named constant per V5: "no inline literal."
-MAX_SYNTH_COST_PER_CALL_USD = 0.01
+MAX_SYNTH_COST_PER_CALL_USD = 0.10
+
+# Expected output size used in the PRE-CALL cost projection (NOT the worst-case
+# budget_tokens ceiling — see module docstring). A narrative "status of this
+# topic" answer realistically lands well under the budget; charging the full
+# budget against the cap is what made the feature a no-op at defaults. The
+# actual call is still hard-capped by budget_tokens via max_tokens.
+EXPECTED_OUTPUT_TOKENS = 700
 
 # Haiku pricing (as of 2026) — mirrors the derivation in belief_detector.py docstring.
 _HAIKU_INPUT_PRICE_PER_TOKEN = 1.00 / 1_000_000   # $1.00 / 1M tokens
@@ -55,6 +79,42 @@ _HAIKU_OUTPUT_PRICE_PER_TOKEN = 5.00 / 1_000_000  # $5.00 / 1M tokens
 
 # System prompt token overhead estimate (conservative).
 _SYSTEM_PROMPT_TOKEN_OVERHEAD = 400
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+
+SynthesisStatus = Literal["synthesized", "abstained", "error", "empty"]
+
+
+@dataclass
+class SynthesisResult:
+    """Outcome of a synthesis attempt.
+
+    Carries enough for the caller to record telemetry on BOTH outcomes:
+      - ``synthesized``: a Haiku call was made; ``content``/``provenance`` are
+        populated and ``cost_usd`` is the actual incurred cost (from usage).
+      - ``abstained``: projected cost exceeded the cap; no call was made.
+        ``projected_cost_usd`` and ``memory_count`` let the caller log the
+        abstention — synthesis fire-rate vs abstain-rate is the health signal
+        for whether the deterministic recall path needs more structure.
+      - ``error``: the call failed or the response could not be parsed.
+      - ``empty``: the input memory set was empty; no attempt was made.
+    """
+
+    status: SynthesisStatus
+    memory_count: int
+    projected_cost_usd: float
+    content: str | None = None
+    provenance: dict[str, list[str]] | None = None
+    cost_usd: float | None = None
+
+    @property
+    def synthesized(self) -> bool:
+        return self.status == "synthesized"
+
 
 # ---------------------------------------------------------------------------
 # Prompt
@@ -198,47 +258,56 @@ async def synthesize_digest(
     memories: list[Memory],
     *,
     budget_tokens: int = 2000,
-) -> dict[str, Any] | None:
+) -> SynthesisResult:
     """Synthesise a narrative digest over a set of memories.
 
     Args:
         memories: The memory objects to synthesise over. Must be non-empty
-            for a meaningful result; an empty list returns None immediately.
-        budget_tokens: Maximum output tokens for the Haiku call. Also used
-            as the output-side of the cost projection — larger values allow
-            longer narratives but increase the projected cost.
+            for a meaningful result; an empty list returns an ``empty`` result.
+        budget_tokens: Maximum output tokens for the Haiku call (the API
+            ``max_tokens`` hard cap). NOTE: this is *not* used in the cost
+            projection — the pre-call check projects ``EXPECTED_OUTPUT_TOKENS``
+            instead (see module docstring), so a generous budget no longer
+            forces abstention.
 
     Returns:
-        A dict with keys:
-            - ``content`` (str): The narrative prose. Non-empty when synthesis
-              succeeds on a non-empty input.
-            - ``provenance`` (dict[str, list[str]]): Map from memory id to
-              citation spans. Keys are a SUBSET of the input memory ids (V4).
-            - ``cost`` (float): Actual incurred USD cost of the call.
-        Returns None when:
-            - ``memories`` is empty.
-            - Projected cost would exceed MAX_SYNTH_COST_PER_CALL_USD (V5).
-            - The LLM call fails or the response cannot be parsed.
+        A :class:`SynthesisResult`. ``status`` distinguishes the outcomes:
+            - ``synthesized``: ``content`` is non-empty prose (V4-filtered
+              ``provenance`` is a SUBSET of the input ids) and ``cost_usd`` is
+              the actual incurred cost from usage.
+            - ``abstained``: projected cost exceeded MAX_SYNTH_COST_PER_CALL_USD
+              (V5); no call was made. ``projected_cost_usd`` + ``memory_count``
+              are populated for telemetry.
+            - ``error``: the LLM call failed or the response could not be parsed.
+            - ``empty``: the input set was empty.
     """
     if not memories:
-        logger.debug("topic_synthesis.empty_input: returning None")
-        return None
+        logger.debug("topic_synthesis.empty_input")
+        return SynthesisResult(status="empty", memory_count=0, projected_cost_usd=0.0)
 
+    memory_count = len(memories)
     valid_ids: set[str] = {m.id for m in memories}
 
     # Render memories into a prompt-ready block.
     user_message = _render_memories(memories)
 
     # --- Cost pre-check (V5) ---
+    # Project EXPECTED output, NOT the budget_tokens ceiling — the cap headroom
+    # then bounds the unbounded input, not the already-max_tokens-bounded output.
     estimated_input = _estimate_input_tokens(user_message)
-    projected = _projected_cost(estimated_input, budget_tokens)
+    projected = _projected_cost(estimated_input, EXPECTED_OUTPUT_TOKENS)
     if projected > MAX_SYNTH_COST_PER_CALL_USD:
         logger.warning(
-            "topic_synthesis.cost_cap_exceeded: projected=%.6f cap=%.6f; abstaining",
+            "topic_synthesis.cost_cap_exceeded: projected=%.6f cap=%.6f memories=%d; abstaining",
             projected,
             MAX_SYNTH_COST_PER_CALL_USD,
+            memory_count,
         )
-        return None
+        return SynthesisResult(
+            status="abstained",
+            memory_count=memory_count,
+            projected_cost_usd=projected,
+        )
 
     # --- LLM call ---
     try:
@@ -250,10 +319,12 @@ async def synthesize_digest(
             messages=[{"role": "user", "content": user_message}],
         )
         raw = response.content[0].text.strip()
-        logger.debug("topic_synthesis.response: memories=%d raw=%s", len(memories), raw[:300])
+        logger.debug("topic_synthesis.response: memories=%d raw=%s", memory_count, raw[:300])
     except Exception as exc:  # noqa: BLE001
-        logger.warning("topic_synthesis.api_error: memories=%d error=%s", len(memories), exc)
-        return None
+        logger.warning("topic_synthesis.api_error: memories=%d error=%s", memory_count, exc)
+        return SynthesisResult(
+            status="error", memory_count=memory_count, projected_cost_usd=projected
+        )
 
     # Compute actual call cost from usage metadata.
     usage = response.usage
@@ -262,10 +333,18 @@ async def synthesize_digest(
     # --- Parse + provenance filter (V4) ---
     parsed = _parse_synthesis(raw, valid_ids)
     if parsed is None:
-        return None
+        return SynthesisResult(
+            status="error",
+            memory_count=memory_count,
+            projected_cost_usd=projected,
+            cost_usd=actual_cost,
+        )
 
-    return {
-        "content": parsed["content"],
-        "provenance": parsed["provenance"],
-        "cost": actual_cost,
-    }
+    return SynthesisResult(
+        status="synthesized",
+        memory_count=memory_count,
+        projected_cost_usd=projected,
+        content=parsed["content"],
+        provenance=parsed["provenance"],
+        cost_usd=actual_cost,
+    )

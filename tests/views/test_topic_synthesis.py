@@ -1,11 +1,16 @@
 """Tests for weft.views.topic_synthesis.
 
 All tests mock the Anthropic provider — no live API calls are made.
-Covers the four done_when assertions:
-  V4: provenance map cites ONLY memory ids present in the input set, ≥1 id cited.
-  V5: when projected cost > MAX_SYNTH_COST_PER_CALL_USD the function returns None.
+Covers the contract assertions, refined by the cost-policy decision
+(Weft weft-d58f7350, loom-8e41000e):
+  V4: provenance map cites ONLY memory ids present in the input set, >=1 id cited.
+  V5: when *projected* cost > MAX_SYNTH_COST_PER_CALL_USD the call abstains.
   named constant: MAX_SYNTH_COST_PER_CALL_USD is a module-level named constant.
   non-empty content: on a non-empty input set the returned content is non-empty.
+  projection fix: the projection uses EXPECTED_OUTPUT_TOKENS, not budget_tokens,
+    so defaults (budget_tokens=2000) no longer force abstention (the no-op bug).
+  structured result: synthesize_digest returns a SynthesisResult whose status +
+    projected_cost_usd + memory_count let the caller record fire/abstain telemetry.
 """
 
 from __future__ import annotations
@@ -17,8 +22,10 @@ import pytest
 
 from weft.models import Memory, MemoryType
 from weft.views.topic_synthesis import (
+    EXPECTED_OUTPUT_TOKENS,
     MAX_SYNTH_COST_PER_CALL_USD,
     SYNTHESIZER_VERSION,
+    SynthesisResult,
     _projected_cost,
     synthesize_digest,
 )
@@ -54,29 +61,36 @@ def _mock_response(content: str, provenance: dict) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Module-level named constant (done_when assertion #3)
+# Module-level named constant
 # ---------------------------------------------------------------------------
 
 
 class TestNamedConstant:
     def test_max_synth_cost_is_module_level_named_constant(self):
-        """MAX_SYNTH_COST_PER_CALL_USD must be a module-level named constant = 0.01."""
+        """MAX_SYNTH_COST_PER_CALL_USD must be a module-level named constant = 0.10."""
         import weft.views.topic_synthesis as mod
 
         assert hasattr(mod, "MAX_SYNTH_COST_PER_CALL_USD"), (
             "MAX_SYNTH_COST_PER_CALL_USD must be defined at module level"
         )
-        assert mod.MAX_SYNTH_COST_PER_CALL_USD == pytest.approx(0.01), (
-            f"Expected 0.01, got {mod.MAX_SYNTH_COST_PER_CALL_USD}"
+        assert mod.MAX_SYNTH_COST_PER_CALL_USD == pytest.approx(0.10), (
+            f"Expected 0.10, got {mod.MAX_SYNTH_COST_PER_CALL_USD}"
         )
 
     def test_max_synth_cost_value(self):
-        """The imported constant value is 0.01."""
-        assert MAX_SYNTH_COST_PER_CALL_USD == pytest.approx(0.01)
+        """The imported constant value is 0.10 (raised from 0.01 per weft-d58f7350)."""
+        assert MAX_SYNTH_COST_PER_CALL_USD == pytest.approx(0.10)
+
+    def test_expected_output_tokens_constant(self):
+        """EXPECTED_OUTPUT_TOKENS is a module-level constant used in the projection."""
+        assert isinstance(EXPECTED_OUTPUT_TOKENS, int)
+        assert 0 < EXPECTED_OUTPUT_TOKENS < 2000, (
+            "Expected output must be a positive fraction of a typical budget"
+        )
 
 
 # ---------------------------------------------------------------------------
-# V4: Provenance — keys must be a SUBSET of input ids, ≥1 cited
+# V4: Provenance — keys must be a SUBSET of input ids, >=1 cited
 # ---------------------------------------------------------------------------
 
 
@@ -100,12 +114,11 @@ class TestProvenanceV4:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_resp)
 
-        # Use a small budget_tokens to stay under the cost cap (this test is about V4, not V5).
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem_a, mem_b], budget_tokens=100)
 
-        assert result is not None
-        prov_keys = set(result["provenance"].keys())
+        assert result.status == "synthesized"
+        prov_keys = set(result.provenance.keys())
         assert prov_keys.issubset(input_ids), (
             f"Provenance keys {prov_keys} are not a subset of input ids {input_ids}"
         )
@@ -116,7 +129,7 @@ class TestProvenanceV4:
 
     @pytest.mark.asyncio
     async def test_provenance_at_least_one_id_for_nonempty_input(self):
-        """On a non-empty input with a well-formed model response, ≥1 id is cited (V4)."""
+        """On a non-empty input with a well-formed model response, >=1 id is cited (V4)."""
         mem = _make_memory(mem_id="weft-ccc333", content="Weft memory is working well.")
 
         mock_resp = _mock_response(
@@ -126,13 +139,12 @@ class TestProvenanceV4:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_resp)
 
-        # Use a small budget_tokens to stay under the cost cap (this test is about V4, not V5).
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem], budget_tokens=100)
 
-        assert result is not None
-        assert len(result["provenance"]) >= 1, "Must cite at least one memory id (V4)"
-        assert "weft-ccc333" in result["provenance"]
+        assert result.status == "synthesized"
+        assert len(result.provenance) >= 1, "Must cite at least one memory id (V4)"
+        assert "weft-ccc333" in result.provenance
 
     @pytest.mark.asyncio
     async def test_provenance_all_hallucinated_ids_are_dropped(self):
@@ -149,14 +161,13 @@ class TestProvenanceV4:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_resp)
 
-        # Use a small budget_tokens to stay under the cost cap (this test is about V4, not V5).
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem], budget_tokens=100)
 
-        assert result is not None
+        assert result.status == "synthesized"
         # All hallucinated — provenance must be empty after filtering.
-        assert "weft-fake0001" not in result["provenance"]
-        assert "weft-fake0002" not in result["provenance"]
+        assert "weft-fake0001" not in result.provenance
+        assert "weft-fake0002" not in result.provenance
 
     @pytest.mark.asyncio
     async def test_provenance_subset_with_multiple_memories(self):
@@ -176,19 +187,18 @@ class TestProvenanceV4:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_resp)
 
-        # Use a small budget_tokens to stay under the cost cap (this test is about V4, not V5).
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest(mems, budget_tokens=100)
 
-        assert result is not None
-        prov_keys = set(result["provenance"].keys())
+        assert result.status == "synthesized"
+        prov_keys = set(result.provenance.keys())
         assert prov_keys.issubset(input_ids)
         assert "weft-invented" not in prov_keys
         assert len(prov_keys) >= 1
 
 
 # ---------------------------------------------------------------------------
-# V5: Cost cap + abstention
+# V5: Cost cap + abstention (projection fix)
 # ---------------------------------------------------------------------------
 
 
@@ -203,31 +213,87 @@ class TestCostCapV5:
         assert _projected_cost(0, 0) == pytest.approx(0.0)
 
     @pytest.mark.asyncio
-    async def test_abstains_when_projected_cost_exceeds_cap(self):
-        """synthesize_digest returns None without an API call when projected cost > cap (V5)."""
-        # Create enough memories that the token estimate pushes projected cost over 0.01.
-        # At Haiku rates: cap = $0.01, budget_tokens = 2000.
-        # Output cost alone = 2000 * (5.00/1_000_000) = $0.01 — exactly the cap.
-        # We need to exceed it: budget_tokens=2001 with enough input tokens to push over.
-        # Simpler: use a very large budget_tokens value that guarantees the breach.
-        large_budget = 10_000  # output cost = 0.05 >> 0.01 cap
-        mems = [_make_memory(mem_id="weft-cost001", content="Content for cost test.")]
+    async def test_defaults_do_not_abstain(self):
+        """REGRESSION (the no-op bug): at the default budget_tokens=2000 and the
+        real $0.10 cap, a small-input synthesis must PROCEED, not abstain.
 
+        Before the projection fix, the worst-case output term (2000 * $5/1M =
+        $0.010) consumed the entire old $0.01 cap before any input was counted,
+        so synthesize_digest always returned None at defaults. This pins that
+        the feature is no longer a no-op at default parameters.
+        """
+        mem = _make_memory(mem_id="weft-default001", content="A normal-sized memory.")
+
+        mock_resp = _mock_response(
+            content="Synthesis at default budget.",
+            provenance={"weft-default001": ["Synthesis at default budget"]},
+        )
         mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_resp)
 
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
-            result = await synthesize_digest(mems, budget_tokens=large_budget)
+            result = await synthesize_digest([mem])  # default budget_tokens=2000
 
-        assert result is None, (
-            "synthesize_digest must return None when projected cost exceeds cap (V5)"
+        assert result.status == "synthesized", (
+            "Default parameters must NOT abstain (the no-op bug must stay fixed)"
+        )
+        mock_client.messages.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_large_budget_does_not_force_abstention(self):
+        """A large budget_tokens must NOT drive abstention — the projection
+        ignores it (output is already bounded by max_tokens). budget_tokens is
+        still passed through as the API max_tokens.
+        """
+        mem = _make_memory(mem_id="weft-bigbudget001", content="Short memory, big budget.")
+
+        mock_resp = _mock_response(
+            content="Synthesis with a large output budget.",
+            provenance={"weft-bigbudget001": ["Synthesis with a large output budget"]},
+        )
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_resp)
+
+        with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
+            result = await synthesize_digest([mem], budget_tokens=100_000)
+
+        assert result.status == "synthesized", (
+            "A large budget_tokens must not force abstention after the projection fix"
+        )
+        # budget_tokens flows through as the API hard cap.
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["max_tokens"] == 100_000
+
+    @pytest.mark.asyncio
+    async def test_abstains_when_projected_cost_exceeds_cap(self):
+        """When projected cost > cap, abstain WITHOUT an API call, and surface
+        the projected cost + memory_count for telemetry (V5)."""
+        import weft.views.topic_synthesis as mod
+
+        mems = [_make_memory(mem_id="weft-cost001", content="Content for cost test.")]
+        mock_client = AsyncMock()
+
+        original = mod.MAX_SYNTH_COST_PER_CALL_USD
+        try:
+            # A near-zero cap: even the expected-output + tiny-input projection breaches it.
+            mod.MAX_SYNTH_COST_PER_CALL_USD = 0.000001
+            with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
+                result = await synthesize_digest(mems, budget_tokens=2000)
+        finally:
+            mod.MAX_SYNTH_COST_PER_CALL_USD = original
+
+        assert result.status == "abstained", (
+            "synthesize_digest must abstain when projected cost exceeds cap (V5)"
         )
         mock_client.messages.create.assert_not_called()
+        # Telemetry fields populated on abstain.
+        assert result.memory_count == 1
+        assert result.projected_cost_usd > 0.000001
+        assert result.content is None
 
     @pytest.mark.asyncio
     async def test_does_not_abstain_when_cost_is_within_cap(self):
         """When projected cost is within the cap, the call proceeds (V5 inverse)."""
-        # Tiny budget → low projected cost.
-        tiny_budget = 10  # 10 output tokens * $5/1M = $0.00005 — well under cap
         mem = _make_memory(mem_id="weft-cheap001", content="A short memory.")
 
         mock_resp = _mock_response(
@@ -238,11 +304,10 @@ class TestCostCapV5:
         mock_client.messages.create = AsyncMock(return_value=mock_resp)
 
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
-            result = await synthesize_digest([mem], budget_tokens=tiny_budget)
+            result = await synthesize_digest([mem], budget_tokens=10)
 
-        # Should not abstain — call must have been made.
         mock_client.messages.create.assert_called_once()
-        assert result is not None
+        assert result.status == "synthesized"
 
     @pytest.mark.asyncio
     async def test_max_synth_cost_constant_gates_abstention(self):
@@ -263,18 +328,18 @@ class TestCostCapV5:
             with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
                 result = await synthesize_digest([mem], budget_tokens=50)
 
-            assert result is None, "Should abstain when cap is near-zero"
+            assert result.status == "abstained", "Should abstain when cap is near-zero"
             mock_client.messages.create.assert_not_called()
         finally:
             mod.MAX_SYNTH_COST_PER_CALL_USD = original
 
 
 # ---------------------------------------------------------------------------
-# Non-empty content (done_when assertion #4)
+# Structured result + non-empty content
 # ---------------------------------------------------------------------------
 
 
-class TestNonEmptyContent:
+class TestResultShape:
     @pytest.mark.asyncio
     async def test_content_is_nonempty_for_nonempty_input(self):
         """On a non-empty input set, the returned content must be non-empty."""
@@ -290,28 +355,28 @@ class TestNonEmptyContent:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_resp)
 
-        # Use a small budget_tokens to stay under the cost cap (this test is about content, not V5).
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem], budget_tokens=100)
 
-        assert result is not None
-        assert isinstance(result["content"], str)
-        assert len(result["content"]) > 0, "content must be non-empty for a non-empty input"
+        assert result.status == "synthesized"
+        assert isinstance(result.content, str)
+        assert len(result.content) > 0, "content must be non-empty for a non-empty input"
 
     @pytest.mark.asyncio
-    async def test_returns_none_for_empty_input(self):
-        """Empty memory list must return None immediately (no API call)."""
+    async def test_returns_empty_status_for_empty_input(self):
+        """Empty memory list returns an 'empty' result immediately (no API call)."""
         mock_client = AsyncMock()
 
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([])
 
-        assert result is None
+        assert result.status == "empty"
+        assert result.memory_count == 0
         mock_client.messages.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_result_includes_cost_field(self):
-        """The result dict must include a 'cost' field (non-negative float)."""
+    async def test_result_includes_actual_cost_on_synthesis(self):
+        """A synthesized result carries the actual incurred cost (non-negative float)."""
         mem = _make_memory(mem_id="weft-cost-field001", content="Memory with cost field.")
 
         mock_resp = _mock_response(
@@ -324,10 +389,18 @@ class TestNonEmptyContent:
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem], budget_tokens=50)
 
-        assert result is not None
-        assert "cost" in result
-        assert isinstance(result["cost"], float)
-        assert result["cost"] >= 0.0
+        assert result.status == "synthesized"
+        assert isinstance(result.cost_usd, float)
+        assert result.cost_usd >= 0.0
+        assert result.synthesized is True
+
+    def test_synthesis_result_is_dataclass(self):
+        """SynthesisResult carries the telemetry-relevant fields."""
+        r = SynthesisResult(status="abstained", memory_count=431, projected_cost_usd=0.12)
+        assert r.status == "abstained"
+        assert r.memory_count == 431
+        assert r.projected_cost_usd == pytest.approx(0.12)
+        assert r.synthesized is False
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +410,8 @@ class TestNonEmptyContent:
 
 class TestErrorHandling:
     @pytest.mark.asyncio
-    async def test_api_error_returns_none(self):
-        """An API error during the synthesis call returns None gracefully."""
+    async def test_api_error_returns_error_status(self):
+        """An API error during the synthesis call yields an 'error' result."""
         mem = _make_memory(mem_id="weft-err001", content="Error test memory.")
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(side_effect=Exception("API down"))
@@ -346,11 +419,12 @@ class TestErrorHandling:
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem], budget_tokens=50)
 
-        assert result is None
+        assert result.status == "error"
+        assert result.content is None
 
     @pytest.mark.asyncio
-    async def test_malformed_json_returns_none(self):
-        """If the model returns malformed JSON, synthesize_digest returns None."""
+    async def test_malformed_json_returns_error_status(self):
+        """If the model returns malformed JSON, the result status is 'error'."""
         mem = _make_memory(mem_id="weft-json001", content="JSON test memory.")
 
         mock_resp = MagicMock()
@@ -362,7 +436,7 @@ class TestErrorHandling:
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem], budget_tokens=50)
 
-        assert result is None
+        assert result.status == "error"
 
     @pytest.mark.asyncio
     async def test_fenced_json_is_handled(self):
@@ -384,6 +458,17 @@ class TestErrorHandling:
         with patch("weft.views.topic_synthesis._get_client", return_value=mock_client):
             result = await synthesize_digest([mem], budget_tokens=50)
 
-        assert result is not None
-        assert result["content"] == "Synthesis from fenced output."
-        assert "weft-fence001" in result["provenance"]
+        assert result.status == "synthesized"
+        assert result.content == "Synthesis from fenced output."
+        assert "weft-fence001" in result.provenance
+
+
+# ---------------------------------------------------------------------------
+# Module exports
+# ---------------------------------------------------------------------------
+
+
+def test_synthesizer_version_exported():
+    """SYNTHESIZER_VERSION remains a module-level string (provenance tag)."""
+    assert isinstance(SYNTHESIZER_VERSION, str)
+    assert SYNTHESIZER_VERSION
