@@ -27,8 +27,9 @@ from typing import Sequence
 
 import asyncpg
 
+from weft.auth import current_user_id
 from weft.counters import increment_counter
-from weft.db.connection import get_db
+from weft.db.connection import acquire
 
 logger = logging.getLogger(__name__)
 
@@ -100,17 +101,13 @@ async def resolve_topic(
     """
     token = _normalize_token(topic_string)
 
-    # Step 1: alias lookup under RLS
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            # Sanitize user_id (same guard as weft/db/connection.py)
-            if not user_id.replace("-", "").replace("_", "").isalnum():
-                logger.warning(
-                    "resolve_topic: rejecting suspicious user_id %r", user_id
-                )
-            else:
-                await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
-
+    # Step 1: alias lookup under RLS. acquire() sets app.user_id (with the same
+    # alphanumeric guard this code used to inline) and runs inside a transaction,
+    # so the SELECT + hit_count UPDATE are atomic.
+    row = None
+    tok = current_user_id.set(user_id)
+    try:
+        async with acquire(pool) as conn:
             row = await conn.fetchrow(
                 """
                 SELECT resolved_tags
@@ -138,6 +135,8 @@ async def resolve_topic(
                     user_id,
                     token,
                 )
+    finally:
+        current_user_id.reset(tok)
 
     if row is not None:
         # Increment the named counter (best-effort, outside transaction).
@@ -181,15 +180,12 @@ async def record_alias(
     normalized_token = _normalize_token(token)
     tags_list = list(resolved_tags)
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            if not user_id.replace("-", "").replace("_", "").isalnum():
-                logger.warning(
-                    "record_alias: rejecting suspicious user_id %r", user_id
-                )
-                return
-            await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
-
+    # acquire() sets app.user_id (with the same alphanumeric guard this code
+    # used to inline) so the RLS INSERT/UPDATE policy is satisfied, and runs
+    # inside a transaction.
+    tok = current_user_id.set(user_id)
+    try:
+        async with acquire(pool) as conn:
             await conn.execute(
                 """
                 INSERT INTO topic_resolution_aliases
@@ -205,6 +201,8 @@ async def record_alias(
                 tags_list,
                 source,
             )
+    finally:
+        current_user_id.reset(tok)
 
     logger.debug(
         "record_alias: upserted token=%r user=%s source=%s tags=%r",
