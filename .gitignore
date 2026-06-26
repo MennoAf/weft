@@ -39,4 +39,5 @@ tests/acceptance/cases_local/*
 posts/
 
 # Antigravity / Gemini CLI local config (symlink into ~/.gemini) — tool artifact.
-.antigravitycli/
+.antigravitycli/documents/.DS_Store
+.DS_Store

@@ -1776,9 +1776,24 @@
     "weft_status": {
       "parameters": [
         {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "topic"
+        },
+        {
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "synthesize"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "budget_tokens"
         }
       ]
     },

@@ -34,6 +34,7 @@ from typing import Any
 from anthropic import AsyncAnthropic
 
 from weft.models import EpisodeTurn, TurnRole
+from weft.views._pricing import HAIKU_MODEL, haiku_cost_usd
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +43,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DETECTOR_VERSION = "belief-detector-v1.0"
-_MODEL = "claude-haiku-4-5-20251001"
+_MODEL = HAIKU_MODEL
 _MAX_TOKENS = 512  # output ceiling; multi-claim turns truncated at 256 (see docstring)
 
-# Static cost ceiling (see module docstring for derivation).
-# Asserted by tests to remain under the $0.005 per-turn budget.
-MAX_COST_PER_CALL_USD = 0.0034
+# Estimated input tokens per call (system prompt + few-shot + turn) — the basis
+# for the static cost ceiling below.
+_EST_INPUT_TOKENS = 800
+
+# Static cost ceiling, derived from the shared Haiku rates (worst case = the
+# ~800-token input + the 512-token output cap). Rounds to $0.0034, asserted by
+# tests to remain under the $0.005 per-turn budget. Deriving it from
+# haiku_cost_usd keeps the price knowledge in one place (weft.views._pricing).
+MAX_COST_PER_CALL_USD = round(haiku_cost_usd(_EST_INPUT_TOKENS, _MAX_TOKENS), 4)
 
 # Attribute key format: lowercase dot-namespaced + kebab/snake name.
 # Examples: "sleep.recent_hours", "recipe.bourbon-pb-oatmeal-cookies"

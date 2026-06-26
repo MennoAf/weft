@@ -32,6 +32,8 @@ def test_cost_entry_type_values():
     assert CostEntryType.session.value == "session"
     assert CostEntryType.task.value == "task"
     assert CostEntryType.tool_call.value == "tool_call"
+    # Tier-2 topic-digest synthesis fire/abstain telemetry (weft-d58f7350).
+    assert CostEntryType.topic_synthesis.value == "topic_synthesis"
 
 
 def test_cost_entry_create_defaults():
