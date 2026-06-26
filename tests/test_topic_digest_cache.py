@@ -80,6 +80,95 @@ async def test_write_then_read_returns_fresh_row(pool):
 
 
 # ---------------------------------------------------------------------------
+# (1b) provenance round-trips as a dict (regression: JSONB type-drift on hit)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_digest_provenance_is_dict_not_str(pool):
+    """read_digest must return provenance as a dict, matching cold synthesis.
+
+    Regression for the cache-hit type-drift bug: write_digest json.dumps the
+    provenance into a JSONB column, but asyncpg hands JSONB back as a raw str
+    (no JSON codec is registered on the pool — only pgvector). Without a
+    json.loads in read_digest, a cache HIT returns provenance as a str while
+    cold synthesis (SynthesisResult.provenance) returns a dict — so a consumer
+    doing ``digest["provenance"][mem_id]`` works cold and breaks warm.
+
+    This test fails (str, not dict) without the read_digest decode fix.
+    """
+    user_id = _uid()
+    topic = f"topic-{uuid.uuid4().hex[:8]}"
+    prov = {"mem-abc": ["span one", "span two"], "mem-xyz": ["span three"]}
+
+    tok = current_user_id.set(user_id)
+    try:
+        async with acquire(pool):
+            await write_digest(
+                pool,
+                user_id=user_id,
+                topic=topic,
+                content="Digest with a non-trivial provenance map.",
+                detector_version="v1-test",
+                provenance=prov,
+            )
+    finally:
+        current_user_id.reset(tok)
+
+    tok = current_user_id.set(user_id)
+    try:
+        async with acquire(pool):
+            row = await read_digest(pool, user_id=user_id, topic=topic, scope="global")
+    finally:
+        current_user_id.reset(tok)
+
+    assert row is not None
+    # The crux: a dict, not a JSON string.
+    assert isinstance(row["provenance"], dict), (
+        f"provenance must round-trip as a dict, got {type(row['provenance']).__name__}: "
+        f"{row['provenance']!r}"
+    )
+    assert row["provenance"] == prov
+    # The operation that breaks on warm calls when provenance is a str:
+    assert row["provenance"]["mem-abc"] == ["span one", "span two"]
+
+
+@pytest.mark.asyncio
+async def test_read_digest_null_provenance_stays_none(pool):
+    """A digest written with provenance=None reads back as None, not 'null'.
+
+    Guards the isinstance(str) branch: NULL JSONB comes back as Python None
+    (not the string 'null'), so json.loads must not run on it.
+    """
+    user_id = _uid()
+    topic = f"topic-{uuid.uuid4().hex[:8]}"
+
+    tok = current_user_id.set(user_id)
+    try:
+        async with acquire(pool):
+            await write_digest(
+                pool,
+                user_id=user_id,
+                topic=topic,
+                content="Digest with no provenance.",
+                detector_version="v1-test",
+                provenance=None,
+            )
+    finally:
+        current_user_id.reset(tok)
+
+    tok = current_user_id.set(user_id)
+    try:
+        async with acquire(pool):
+            row = await read_digest(pool, user_id=user_id, topic=topic, scope="global")
+    finally:
+        current_user_id.reset(tok)
+
+    assert row is not None
+    assert row["provenance"] is None
+
+
+# ---------------------------------------------------------------------------
 # (2) A digest with stale=true is NOT served as fresh (read returns None)
 # ---------------------------------------------------------------------------
 

@@ -24,6 +24,7 @@ Loom task: loom-78432e69.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any
@@ -78,7 +79,18 @@ async def read_digest(
     # stale=True → not fresh; return None so caller regenerates
     if row["stale"]:
         return None
-    return dict(row)
+    result = dict(row)
+    # asyncpg returns JSONB as a raw str (no JSON codec registered on the
+    # pool — see weft/db/connection.py, which only registers pgvector). Decode
+    # provenance back to a dict so a cache HIT returns the SAME shape as cold
+    # synthesis (SynthesisResult.provenance is a dict). Without this, warm
+    # callers doing ``digest["provenance"][mem_id]`` break while cold callers
+    # succeed. Guarded on ``isinstance(str)`` so it stays correct if a pool-level
+    # JSONB codec is ever registered (which would hand back a dict already).
+    prov = result.get("provenance")
+    if isinstance(prov, str):
+        result["provenance"] = json.loads(prov)
+    return result
 
 
 async def write_digest(
@@ -111,8 +123,6 @@ async def write_digest(
     Returns:
         The digest_id of the written row.
     """
-    import json
-
     row_id = digest_id or _td_id()
     provenance_json = json.dumps(provenance) if provenance is not None else None
 
