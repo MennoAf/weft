@@ -1493,20 +1493,27 @@ async def weft_status(
                 finally:
                     current_user_id.reset(tok)
 
-            async with acquire(app.pool):
-                await record_cost(
-                    app.pool,
-                    CostEntryCreate(
-                        entry_type=CostEntryType.topic_synthesis,
-                        reference_id=topic,
-                        model=_MODEL,
-                        input_tokens=result.input_tokens,
-                        output_tokens=result.output_tokens,
-                        total_tokens=result.input_tokens + result.output_tokens,
-                        estimated_cost_usd=result.cost_usd,
-                        metadata={},
-                    ),
-                )
+            # Set user context BEFORE acquire() so its SET LOCAL app.user_id
+            # fires and the cost_entries.user_id GUC default resolves to the
+            # caller (not NULL). See weft-49bd0550 / weft-93733760.
+            tok = current_user_id.set(user_id)
+            try:
+                async with acquire(app.pool):
+                    await record_cost(
+                        app.pool,
+                        CostEntryCreate(
+                            entry_type=CostEntryType.topic_synthesis,
+                            reference_id=topic,
+                            model=_MODEL,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                            total_tokens=result.input_tokens + result.output_tokens,
+                            estimated_cost_usd=result.cost_usd,
+                            metadata={},
+                        ),
+                    )
+            finally:
+                current_user_id.reset(tok)
 
             response["digest"] = {
                 "content": result.content,
@@ -1516,25 +1523,31 @@ async def weft_status(
             }
 
         elif result.status == "abstained":
-            # Record abstention in cost_entries (V telemetry) — no cache write
-            async with acquire(app.pool):
-                await record_cost(
-                    app.pool,
-                    CostEntryCreate(
-                        entry_type=CostEntryType.topic_synthesis,
-                        reference_id=topic,
-                        model=_MODEL,
-                        input_tokens=0,
-                        output_tokens=0,
-                        total_tokens=0,
-                        estimated_cost_usd=0.0,
-                        metadata={
-                            "abstained": True,
-                            "projected": result.projected_cost_usd,
-                            "memory_count": result.memory_count,
-                        },
-                    ),
-                )
+            # Record abstention in cost_entries (V telemetry) — no cache write.
+            # Set user context BEFORE acquire() so the row is attributed to the
+            # caller, not NULL (weft-49bd0550 / weft-93733760).
+            tok = current_user_id.set(user_id)
+            try:
+                async with acquire(app.pool):
+                    await record_cost(
+                        app.pool,
+                        CostEntryCreate(
+                            entry_type=CostEntryType.topic_synthesis,
+                            reference_id=topic,
+                            model=_MODEL,
+                            input_tokens=0,
+                            output_tokens=0,
+                            total_tokens=0,
+                            estimated_cost_usd=0.0,
+                            metadata={
+                                "abstained": True,
+                                "projected": result.projected_cost_usd,
+                                "memory_count": result.memory_count,
+                            },
+                        ),
+                    )
+            finally:
+                current_user_id.reset(tok)
             # Graceful non-synthesized response — Tier-1 memories remain intact
             response["digest"] = None
             response["synthesis_status"] = "abstained"
