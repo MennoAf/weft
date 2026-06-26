@@ -344,6 +344,8 @@ class TestTier2Synthesized:
         assert row["input_tokens"] == 2487
         assert row["output_tokens"] == 613
         assert row["total_tokens"] == 2487 + 613
+        # weft-49bd0550: the cost row is attributed to the caller, not NULL.
+        assert row["user_id"] == user_id
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +514,8 @@ class TestAbstention:
             f"Abstained cost must be 0.0, got {row['estimated_cost_usd']}"
         )
         assert row["entry_type"] == "topic_synthesis"
+        # weft-49bd0550: the abstain row is attributed to the caller, not NULL.
+        assert row["user_id"] == user_id
 
     async def test_abstained_cost_entry_has_correct_metadata(self, ctx, pool):
         """Abstained cost_entries row carries metadata.abstained=True + projected + memory_count."""
