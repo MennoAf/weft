@@ -332,28 +332,31 @@ class TestWeftRecall:
 
 
 class TestWeftStatus:
-    async def test_recent_writes_in_status(self, app):
-        """weft_status includes recent_writes with provenance."""
+    async def test_topic_tier1_shape(self, app):
+        """weft_status(topic) returns Tier-1 shape: topic, resolved_tags, memories, complete, truncated."""
+        from unittest.mock import patch
+
         from weft.mcp.tools import weft_remember, weft_status
 
         ctx = _make_ctx(app)
-        result = await weft_remember(ctx, content="Status test memory", source="conversation")
+        # Store a memory under a known topic so Tier-1 returns something
+        result = await weft_remember(
+            ctx, content="Status test memory for topic gather",
+            type="fact", topic=["status-test-topic"], source="conversation",
+        )
         assert "id" in result, f"weft_remember failed: {result}"
 
-        # Verify memory actually exists in DB
-        count = await app.pool.fetchval("SELECT COUNT(*) FROM memories")
-        assert count >= 1
+        test_user = "test-user-default"  # conftest.py default
+        with patch("weft.mcp.tools.get_user_id", return_value=test_user):
+            result = await weft_status(ctx, topic="status-test-topic", synthesize=False)
 
-        result = await weft_status(ctx)
-        assert "recent_writes" in result
-        assert len(result["recent_writes"]) >= 1
-
-        write = result["recent_writes"][0]
-        assert "id" in write
-        assert "type" in write
-        assert "source" in write
-        assert "created_at" in write
-        assert "content" in write
+        assert "topic" in result
+        assert result["topic"] == "status-test-topic"
+        assert "resolved_tags" in result
+        assert "memories" in result
+        assert "complete" in result
+        assert "truncated" in result
+        assert "digest" in result
 
 
 # ---------------------------------------------------------------------------

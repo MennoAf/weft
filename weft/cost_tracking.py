@@ -26,6 +26,10 @@ class CostEntryType(str, Enum):
     session = "session"
     task = "task"
     tool_call = "tool_call"
+    # Tier-2 topic-digest synthesis (Haiku). One entry per FIRE (actual cost)
+    # and per ABSTAIN (cost 0, projected + memory_count in metadata). Fire-rate
+    # is a health metric for deterministic recall — see Weft weft-d58f7350.
+    topic_synthesis = "topic_synthesis"
 
 
 class CostEntry(BaseModel):

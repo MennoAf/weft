@@ -64,6 +64,13 @@ SCOPED_CRUD_TABLES: tuple[str, ...] = (
     "belief_claims",
     "weft_recall_queries",
     "replay_queue",
+    # Topic-digest recall (v56/v57): both carry full GUC-scoped CRUD policies
+    # plus the system-sentinel SELECT, same shape as belief_claims.
+    "topic_resolution_aliases",
+    "topic_digests",
+    # Shuttle observer/synthesis blackboard (v58): same scoped-CRUD + sentinel
+    # SELECT shape; landed via the shuttle_claims seam but never classified here.
+    "shuttle_claims",
 )
 
 # Tables that have a ``user_id`` column but use a service policy by design.

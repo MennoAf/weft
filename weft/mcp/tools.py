@@ -1350,22 +1350,207 @@ async def weft_focus(
 
 
 @mcp.tool()
-async def weft_status(ctx: Context) -> dict:
-    """Memory statistics: total, by topic, by type, by confidence, recently accessed."""
+async def weft_status(
+    ctx: Context,
+    topic: str,
+    synthesize: bool = False,
+    budget_tokens: int = 2000,
+) -> dict:
+    """Topic-anchored memory status: gather every active memory for a topic, optionally
+    synthesize into a narrative digest.
+
+    topic: The topic string to query (e.g. 'weft', 'loom', 'entity:Windward').
+    synthesize: False (default) returns Tier-1 only — complete memory set, zero LLM calls.
+                True requests Tier-2 — a cached or freshly synthesized narrative digest.
+    budget_tokens: Maximum output tokens for Tier-2 synthesis (default 2000).
+
+    Returns:
+      {
+        topic, resolved_tags: [str, ...],
+        memories: [ {id, type, content, topic, created_at}, ... ],  # complete, ordered by created_at
+        complete: bool, truncated: bool,
+        digest: { content, provenance: {memory_id: [...spans]}, generated_at, stale } | null,
+      }
+    """
     try:
+        from weft.auth import current_user_id
+        from weft.cost_tracking import CostEntryCreate, CostEntryType, record_cost
+        from weft.topic_digest_cache import read_digest, write_digest
+        from weft.topic_gather import gather_topic_memories
+        from weft.topic_resolution import resolve_topic
+        from weft.views.topic_synthesis import SYNTHESIZER_VERSION, _MODEL, synthesize_digest
+
         app: AppContext = ctx.request_context.lifespan_context
-        cached = await app.cache.get_stats()
-        if cached:
-            return cached
+        user_id = get_user_id()
+
+        # --- Tier-1: resolve + gather ---
+        resolved_tags = await resolve_topic(topic, user_id, app.pool)
+        gather_result = await gather_topic_memories(
+            app.pool,
+            tags=resolved_tags,
+            user_id=user_id,
+            budget_tokens=budget_tokens,
+        )
+        memory_count = len(gather_result["memories"])
+        was_empty = memory_count == 0
+        logger.debug(
+            "weft_status: topic=%r resolved_tags=%r memory_count=%d was_empty=%s",
+            topic,
+            resolved_tags,
+            memory_count,
+            was_empty,
+        )
+
+        # L1 Resolution Ratchet feed: log this topic ask as a recall_query row so
+        # the compounding loop can read was_empty (result_count == 0) signals from
+        # weft_status, the same way weft_recall logs its calls. result_count
+        # carries was_empty: 0 means the topic resolved to nothing.
+        #
+        # log_recall_query relies on the app.user_id GUC default to fill the
+        # NOT-NULL user_id column, and acquire() issues SET LOCAL app.user_id
+        # from the current_user_id contextvar AT ENTRY — so the contextvar must
+        # be set BEFORE entering acquire(), not inside it. (In prod the auth
+        # middleware has already set it; setting it here also covers callers
+        # that haven't, e.g. tests.) log_recall_query swallows its own DB errors
+        # and must never break the user path.
+        tok = current_user_id.set(user_id)
+        try:
+            async with acquire(app.pool):
+                await log_recall_query(
+                    app.pool,
+                    tool_name="status",
+                    query_text=topic,
+                    result_count=memory_count,
+                )
+        finally:
+            current_user_id.reset(tok)
+
+        memories_payload = [
+            {
+                "id": m.id,
+                "type": m.type.value,
+                "content": m.content,
+                "topic": m.topic,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in gather_result["memories"]
+        ]
+
+        response: dict = {
+            "topic": topic,
+            "resolved_tags": resolved_tags,
+            "memories": memories_payload,
+            "complete": gather_result["complete"],
+            "truncated": gather_result["truncated"],
+            "digest": None,
+        }
+
+        if not synthesize:
+            return response
+
+        # --- Tier-2: cache read → synthesize → cache write ---
         async with acquire(app.pool):
-            stats = await get_stats(app.pool)
-            # Add recent writes with provenance (not cached — always fresh)
-            stats["recent_writes"] = await get_recent_writes(app.pool, limit=10)
-        await app.cache.set_stats(stats)
-        return stats
+            # Set user context so RLS-scoped cache reads/writes work
+            tok = current_user_id.set(user_id)
+            try:
+                cached_digest = await read_digest(
+                    app.pool, user_id=user_id, topic=topic, scope="global"
+                )
+            finally:
+                current_user_id.reset(tok)
+
+        if cached_digest is not None:
+            # Cache hit — zero model calls, zero cost_entries row (V6)
+            response["digest"] = {
+                "content": cached_digest["content"],
+                "provenance": cached_digest["provenance"],
+                "generated_at": cached_digest["generated_at"].isoformat()
+                if hasattr(cached_digest["generated_at"], "isoformat")
+                else str(cached_digest["generated_at"]),
+                "stale": cached_digest["stale"],
+            }
+            return response
+
+        # Cache miss — call synthesizer
+        result = await synthesize_digest(
+            gather_result["memories"], budget_tokens=budget_tokens
+        )
+
+        if result.status == "synthesized":
+            # Write cache entry + record cost
+            async with acquire(app.pool):
+                tok = current_user_id.set(user_id)
+                try:
+                    await write_digest(
+                        app.pool,
+                        user_id=user_id,
+                        topic=topic,
+                        content=result.content,
+                        detector_version=SYNTHESIZER_VERSION,
+                        scope="global",
+                        provenance=result.provenance,
+                    )
+                finally:
+                    current_user_id.reset(tok)
+
+            async with acquire(app.pool):
+                await record_cost(
+                    app.pool,
+                    CostEntryCreate(
+                        entry_type=CostEntryType.topic_synthesis,
+                        reference_id=topic,
+                        model=_MODEL,
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens,
+                        total_tokens=result.input_tokens + result.output_tokens,
+                        estimated_cost_usd=result.cost_usd,
+                        metadata={},
+                    ),
+                )
+
+            response["digest"] = {
+                "content": result.content,
+                "provenance": result.provenance,
+                "generated_at": None,
+                "stale": False,
+            }
+
+        elif result.status == "abstained":
+            # Record abstention in cost_entries (V telemetry) — no cache write
+            async with acquire(app.pool):
+                await record_cost(
+                    app.pool,
+                    CostEntryCreate(
+                        entry_type=CostEntryType.topic_synthesis,
+                        reference_id=topic,
+                        model=_MODEL,
+                        input_tokens=0,
+                        output_tokens=0,
+                        total_tokens=0,
+                        estimated_cost_usd=0.0,
+                        metadata={
+                            "abstained": True,
+                            "projected": result.projected_cost_usd,
+                            "memory_count": result.memory_count,
+                        },
+                    ),
+                )
+            # Graceful non-synthesized response — Tier-1 memories remain intact
+            response["digest"] = None
+            response["synthesis_status"] = "abstained"
+
+        else:
+            # error or empty — graceful fallback, no cache write, no cost record
+            response["digest"] = None
+            response["synthesis_status"] = result.status
+
+        return response
+
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_status", e)
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_status: %s", e)
-        return {"degraded": True, "error": "Database unavailable", "total": 0}
+        return {"degraded": True, "error": "Database unavailable", "topic": topic}
 
 
 @mcp.tool()
