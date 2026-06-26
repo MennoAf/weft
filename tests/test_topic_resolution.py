@@ -1,7 +1,7 @@
 """Integration tests for weft/topic_resolution.py — L1 Resolution Ratchet.
 
 done_when assertions:
-  (1) naive resolve('weft') returns {'weft', 'entity:Weft'}.
+  (1) naive resolve('weft') returns {'weft', 'entity:weft'}.
   (2) when a topic_resolution_aliases row exists for a token, resolve()
         returns its resolved_tags and the alias path is consulted BEFORE
         naive normalization.
@@ -35,7 +35,7 @@ def _test_user() -> str:
 
 
 # ---------------------------------------------------------------------------
-# (1) Naive normalization: resolve('weft') → {'weft', 'entity:Weft'}
+# (1) Naive normalization: resolve('weft') → {'weft', 'entity:weft'}
 # ---------------------------------------------------------------------------
 
 
@@ -43,13 +43,30 @@ def _test_user() -> str:
 async def test_naive_resolve_weft(pool):
     """resolve_topic('weft', ...) with no alias row returns naive tags.
 
-    Expected: {'weft', 'entity:Weft'} — lower + Title-case entity tag.
+    Expected: {'weft', 'entity:weft'} — lower + lowercase entity tag (canonical).
     """
     user_id = _test_user()
     result = await resolve_topic("weft", user_id, pool)
-    assert set(result) == {"weft", "entity:Weft"}, (
-        f"Naive resolve('weft') should return {{'weft', 'entity:Weft'}}, got {result}"
+    assert set(result) == {"weft", "entity:weft"}, (
+        f"Naive resolve('weft') should return {{'weft', 'entity:weft'}}, got {result}"
     )
+
+
+@pytest.mark.asyncio
+async def test_naive_resolve_lowercases_mixedcase_input(pool):
+    """resolve_topic('Weft', ...) yields a LOWERCASE entity tag, not Title-case.
+
+    Regression for the entity-tag casing bug (weft-6318d198): a mixed-case
+    topic input must resolve to ``entity:weft`` so it exact-matches the
+    canonical lowercase tag written at ingest. A Title-cased ``entity:Weft``
+    here would systematically miss lowercase-named entities in the gather.
+    """
+    user_id = _test_user()
+    result = await resolve_topic("Weft", user_id, pool)
+    assert set(result) == {"weft", "entity:weft"}, (
+        f"resolve('Weft') must canonicalize to lowercase, got {result}"
+    )
+    assert "entity:Weft" not in result, "entity tag must be lowercase, not Title-case"
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +93,7 @@ async def test_alias_path_consulted_before_naive(pool):
         f"Expected alias tags {custom_tags!r}, got {result!r}"
     )
     # Confirm the alias result is NOT the naive normalization
-    naive = {"weft", "entity:Weft"}
+    naive = {"weft", "entity:weft"}
     # The result has additional tags beyond naive — proves alias path was taken
     assert set(result) != naive or len(result) != len(naive), (
         "resolve_topic returned only naive tags, alias path was not taken"
@@ -182,7 +199,7 @@ async def test_naive_resolve_does_not_increment_counter(pool):
         f"Counter should not change on naive resolve (was {before}, now {after})"
     )
     # And the result is naive
-    assert set(result) == {"weft", "entity:Weft"}
+    assert set(result) == {"weft", "entity:weft"}
 
 
 # ---------------------------------------------------------------------------

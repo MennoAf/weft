@@ -447,7 +447,14 @@ async def route(
             topics = [f"intent:{intent.type}"]
             if intent.entities:
                 for e in intent.entities:
-                    topics.append(f"entity:{e.name}")
+                    # Canonical lowercase entity tag: the topic-gather match
+                    # (weft/topic_gather.py) is case-sensitive exact, and the
+                    # resolver (weft/topic_resolution._naive_normalize) emits a
+                    # lowercase entity tag. Writing the raw (mixed-case) e.name
+                    # would make a lowercase-resolved query miss this memory.
+                    # The entity's display name is preserved in the entities
+                    # table; only the tag string is canonicalized.
+                    topics.append(f"entity:{e.name.lower()}")
             # Source-supplied topics (e.g. ["discord", "brain-dump"]) — append
             # after auto-topics so they're easy to spot in recall queries.
             if intent.extra_topics:

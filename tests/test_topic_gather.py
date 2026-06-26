@@ -26,6 +26,7 @@ from weft.entities import link_mention, store_entity
 from weft.models import EntityCreate, EntityType, MemoryCreate, MemorySource, MemoryType
 from weft.store import store_memory
 from weft.topic_gather import gather_topic_memories
+from weft.topic_resolution import resolve_topic
 
 
 # ---------------------------------------------------------------------------
@@ -373,4 +374,40 @@ async def test_entity_secondary_does_not_leak_other_user_memory(pool):
     assert b_id not in returned_ids, (
         f"User B's memory {b_id} must NOT appear in user A's gather via the "
         "entity-secondary path (entity-secondary user-visibility filter failure)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (6) E2E: resolve(mixed-case) → gather finds a canonically lowercase-tagged
+#     memory. The actual entity-tag casing bug scenario (weft-6318d198).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_then_gather_matches_lowercase_entity_tag(pool):
+    """A memory tagged 'entity:weft' is found when resolving the input 'Weft'.
+
+    End-to-end regression for weft-6318d198: ingest now writes canonical
+    lowercase entity tags (entity:{e.name.lower()}) and the resolver emits a
+    lowercase entity tag, so the case-sensitive gather match succeeds. Before
+    the fix, resolve('Weft') produced 'entity:Weft' and missed the stored
+    lowercase 'entity:weft' entirely.
+    """
+    user_id = _unique_user_id()
+    # Simulate a canonically-ingested memory: lowercase entity tag, no bare tag.
+    mem_id = await _seed_memory(
+        pool, user_id, "entity:weft", "Weft is the memory layer."
+    )
+
+    # User queries with a mixed-case topic string.
+    resolved = await resolve_topic("Weft", user_id, pool)
+    assert "entity:weft" in resolved, (
+        f"resolver must emit the lowercase entity tag, got {resolved}"
+    )
+
+    result = await gather_topic_memories(pool, resolved, user_id)
+    returned_ids = {m.id for m in result["memories"]}
+    assert mem_id in returned_ids, (
+        "gather must find the lowercase-entity-tagged memory via the "
+        f"resolved tags {resolved}; got ids {returned_ids}"
     )
