@@ -69,6 +69,26 @@ async def test_naive_resolve_lowercases_mixedcase_input(pool):
     assert "entity:Weft" not in result, "entity tag must be lowercase, not Title-case"
 
 
+@pytest.mark.asyncio
+async def test_naive_resolve_already_prefixed_input_not_double_wrapped(pool):
+    """resolve_topic('entity:Windward', ...) must NOT double-prefix the entity tag.
+
+    Regression for the double-prefix bug: when the input topic already carries
+    the ``entity:`` prefix, _naive_normalize previously emitted
+    [``entity:windward``, ``entity:entity:windward``] — re-wrapping the prefixed
+    string. The second tag is malformed and never matches the canonical stored
+    tag in the case-sensitive gather. The resolver should lowercase and return
+    the single prefixed tag.
+    """
+    user_id = _test_user()
+    result = await resolve_topic("entity:Windward", user_id, pool)
+    assert set(result) == {"entity:windward"}, (
+        f"already-prefixed input must resolve to a single lowercase entity tag, "
+        f"got {result}"
+    )
+    assert "entity:entity:windward" not in result, "must not double-prefix"
+
+
 # ---------------------------------------------------------------------------
 # (2) Alias path consulted BEFORE naive normalization
 # ---------------------------------------------------------------------------
