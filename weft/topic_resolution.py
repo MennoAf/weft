@@ -69,8 +69,15 @@ def _naive_normalize(topic_string: str) -> list[str]:
     ``entity:Weft`` here would systematically MISS lowercase-named entities
     (e.g. stored ``entity:weft``) — the latent bug this canonicalization closes.
     Migration v60 backfilled pre-existing mixed-case ``entity:*`` tags to lower.
+
+    When the input ALREADY carries the ``entity:`` prefix (e.g. ``entity:Windward``)
+    the caller is explicitly asking for that entity tag, so we lowercase it and
+    return it as-is — re-wrapping would yield a malformed double-prefixed
+    ``entity:entity:windward`` that never matches the canonical stored tag.
     """
     lower = topic_string.strip().lower()
+    if lower.startswith("entity:"):
+        return [lower]
     return [lower, f"entity:{lower}"]
 
 
