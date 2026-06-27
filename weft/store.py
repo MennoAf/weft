@@ -1175,31 +1175,80 @@ async def get_recent_recall_queries(
     *,
     window_minutes: int = 30,
     limit: int = 200,
+    user_id: str | None = None,
+    scope_to_user: bool = False,
 ) -> list[dict]:
     """Fetch recent weft_recall_queries rows for re-ask detection.
 
-    Returns rows ordered by created_at ASC (oldest first) for the calling
-    user within the last ``window_minutes``. Only rows NOT already marked
-    as re-ask misses are returned (avoids double-processing).
+    Returns rows ordered by created_at ASC (oldest first) within the last
+    ``window_minutes``. Only rows NOT already marked as re-ask misses are
+    returned (avoids double-processing).
+
+    User scoping: when ``scope_to_user`` is True the query adds an explicit
+    ``user_id IS NOT DISTINCT FROM $user_id`` predicate (NULL-safe: pass
+    user_id=None to scope to the unauthenticated single-user rows). This is
+    defense-in-depth that does NOT rely on RLS — required when the caller is a
+    system/scheduler context that may bypass RLS (see scheduler's per-user
+    fan-out, loom-fdd9282a). When ``scope_to_user`` is False (default) the
+    behavior is unchanged: rows are filtered by RLS / the caller's app.user_id
+    only — correct for an authenticated per-request caller.
 
     Returned dicts have the same field shape as ``QueryRow.from_dict``
     expects: query_id, query_text, created_at, tool_name, project_id,
     tier, mode, retrieval_mode, result_count.
     """
+    conditions = [
+        "created_at >= now() - make_interval(mins => $1)",
+        "is_reask_miss = FALSE",
+    ]
+    params: list = [window_minutes]
+    idx = 2
+    if scope_to_user:
+        conditions.append(f"user_id IS NOT DISTINCT FROM ${idx}")
+        params.append(user_id)
+        idx += 1
+    where = " AND ".join(conditions)
+    params.append(limit)
     rows = await get_db(pool).fetch(
-        """
+        f"""
         SELECT query_id, query_text, created_at, tool_name, project_id,
                tier, mode, retrieval_mode, result_count
         FROM weft_recall_queries
-        WHERE created_at >= now() - make_interval(mins => $1)
-          AND is_reask_miss = FALSE
+        WHERE {where}
         ORDER BY created_at ASC
-        LIMIT $2
+        LIMIT ${idx}
         """,
-        window_minutes,
-        limit,
+        *params,
     )
     return [dict(r) for r in rows]
+
+
+async def get_distinct_reask_user_ids(
+    pool: asyncpg.Pool,
+    *,
+    window_minutes: int = 30,
+) -> list[str | None]:
+    """List distinct user_ids with unprocessed recall queries in the window.
+
+    SYSTEM / ADMIN enumerator for the scheduler's per-user re-ask fan-out
+    (loom-fdd9282a). It deliberately reads across users, so it MUST run only
+    from a trusted system context (the scheduler), never on a user-facing
+    request path. The returned ids are then each processed under their own
+    per-user scope so no user's data bleeds into another's pass.
+
+    Returns one ``None`` entry for the unauthenticated single-user deployment
+    (recall queries written with a NULL user_id).
+    """
+    rows = await get_db(pool).fetch(
+        """
+        SELECT DISTINCT user_id
+        FROM weft_recall_queries
+        WHERE created_at >= now() - make_interval(mins => $1)
+          AND is_reask_miss = FALSE
+        """,
+        window_minutes,
+    )
+    return [r["user_id"] for r in rows]
 
 
 async def apply_reask_feedback(

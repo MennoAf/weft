@@ -227,6 +227,63 @@ async def test_demotion_alert_created_tier_unchanged(pool):
 
 
 @pytest.mark.asyncio
+async def test_untrusted_agent_approvals_do_not_promote(pool):
+    """Crafted approving records from an untrusted 'agent' origin must NOT
+    drive an auto-promotion to 'always' (privilege-escalation guard).
+
+    A supervisor-origin run over the same threshold DOES promote, proving the
+    trusted path still works and the block is origin-specific, not a regression.
+    """
+    from weft.auth import current_caller_mode
+
+    policy = await create_policy(
+        pool,
+        ActionPolicyCreate(action="rm_rf_workspace", tier=AutonomyTier.earned),
+    )
+
+    # Untrusted: an autonomous agent floods its own approvals.
+    token = current_caller_mode.set("agent")
+    try:
+        for _ in range(_PROMO_COUNT):
+            await record_calibration(
+                pool,
+                CalibrationCreate(
+                    action_category="rm_rf_workspace",
+                    action_description="Delete the workspace",
+                    outcome=CalibrationOutcome.approved,
+                ),
+            )
+    finally:
+        current_caller_mode.reset(token)
+
+    not_promoted = await get_policy(pool, policy.id)
+    assert not_promoted is not None
+    assert not_promoted.tier == AutonomyTier.earned, (
+        "Agent-origin approvals must not auto-promote to 'always'; tier was "
+        f"{not_promoted.tier}"
+    )
+
+    # Trusted: the same volume from a supervisor (human-attested) DOES promote.
+    # Default caller mode is 'supervisor', so no context override is needed.
+    for _ in range(_PROMO_COUNT):
+        await record_calibration(
+            pool,
+            CalibrationCreate(
+                action_category="rm_rf_workspace",
+                action_description="Delete the workspace",
+                outcome=CalibrationOutcome.approved,
+            ),
+        )
+
+    promoted = await get_policy(pool, policy.id)
+    assert promoted is not None
+    assert promoted.tier == AutonomyTier.always, (
+        "Supervisor-origin approvals over the threshold should promote to "
+        f"'always'; tier was {promoted.tier}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_count_auto_originated_tier_changes(pool):
     """Verify count_auto_originated_tier_changes counts only auto-calibration events.
 
@@ -293,4 +350,27 @@ async def test_count_auto_originated_tier_changes(pool):
     assert count_after_manual == count, (
         f"Expected count to remain {count} after manual tier change, "
         f"got {count_after_manual}"
+    )
+
+    # Act: a malicious / mistaken manual tier change that SPOOFS the
+    # 'auto-calibration' reason prefix. The PROOF metric must not be foolable
+    # by the free-text reason field — only the auto_originated provenance
+    # column (set False here, the update_policy_tier default) counts.
+    policy3 = await create_policy(
+        pool,
+        ActionPolicyCreate(action="test_spoofed_reason", tier=AutonomyTier.earned),
+    )
+    await update_policy_tier(
+        pool,
+        policy3.id,
+        AutonomyTier.always,
+        reason="auto-calibration: forged provenance to inflate the PROOF metric",
+        agent_id="attacker",
+    )
+
+    # Assert: the spoofed-reason row is excluded — count is still unchanged.
+    count_after_spoof = await count_auto_originated_tier_changes(pool)
+    assert count_after_spoof == count, (
+        f"Spoofed 'auto-calibration' reason must NOT be counted; expected "
+        f"{count}, got {count_after_spoof}"
     )
