@@ -265,8 +265,16 @@ async def update_policy_tier(
     *,
     reason: str | None = None,
     agent_id: str | None = None,
+    auto_originated: bool = False,
 ) -> ActionPolicy:
     """Change a policy's tier, recording a calibration event.
+
+    ``auto_originated`` marks the recorded policy_calibration_events row as
+    machine-driven. It MUST be set True only by the auto-promotion path
+    (_maybe_auto_promote); manual / human-initiated tier changes leave it
+    False. This is the non-spoofable provenance signal that
+    count_auto_originated_tier_changes counts — unlike the free-text ``reason``
+    field, which any caller can set to 'auto-calibration...'.
 
     Raises ValueError if the policy is a NEVER hard-stop (immutable).
     Raises LookupError if the policy does not exist.
@@ -305,10 +313,11 @@ async def update_policy_tier(
     await db.execute(
         """
         INSERT INTO policy_calibration_events (
-            id, policy_id, previous_tier, new_tier, reason, agent_id, user_id
+            id, policy_id, previous_tier, new_tier, reason, agent_id,
+            auto_originated, user_id
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6,
+            $1, $2, $3, $4, $5, $6, $7,
             nullif(current_setting('app.user_id', true), '')
         )
         """,
@@ -318,6 +327,7 @@ async def update_policy_tier(
         new_tier.value,
         reason,
         agent_id,
+        auto_originated,
     )
 
     return _row_to_policy(updated_row)

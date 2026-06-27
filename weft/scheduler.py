@@ -705,109 +705,140 @@ _REASK_WINDOW_MINUTES = 30  # same window as detect_reasked_queries default
 
 
 async def _run_reask_feedback_pass(pool: asyncpg.Pool) -> int:
-    """Execute one pass of the re-ask feedback loop. Returns the number of pairs processed.
+    """Execute one pass of the re-ask feedback loop. Returns pairs processed.
 
-    Designed to be callable in isolation (unit-testable without infinite loop machinery).
-    One pass:
-      1. Fetch recent unprocessed recall queries from the observation window.
+    Per-user fan-out (loom-fdd9282a). The pass enumerates the distinct users
+    with unprocessed recall queries in the window, then processes each user
+    in strict isolation via _run_reask_feedback_pass_for_user. No user's
+    queries, memories, or boosts ever bleed into another user's pass — the
+    enumerator is the ONLY cross-user read, and it is a system-context query
+    that hands each user_id to a per-user scope.
+
+    Designed to be callable in isolation (unit-testable without infinite loop
+    machinery). Single-user deployments resolve to exactly one [None] user_id,
+    so behavior there is unchanged.
+    """
+    from weft.store import get_distinct_reask_user_ids
+
+    user_ids = await get_distinct_reask_user_ids(
+        pool, window_minutes=_REASK_WINDOW_MINUTES
+    )
+
+    processed = 0
+    for user_id in user_ids:
+        processed += await _run_reask_feedback_pass_for_user(pool, user_id)
+    return processed
+
+
+async def _run_reask_feedback_pass_for_user(
+    pool: asyncpg.Pool, user_id: str | None
+) -> int:
+    """Run one re-ask feedback pass scoped to a single user. Returns pairs processed.
+
+    Steps:
+      1. Fetch this user's recent unprocessed recall queries (explicit
+         user scope — does NOT rely on RLS, which a system caller may bypass).
       2. Run pure detect_reasked_queries over the rows.
-      3. For each detected (original, reask) pair, source the satisfying_memory_id
-         from the most recently accessed memory at or near the re-ask query's
-         created_at timestamp.
-      4. Call apply_reask_feedback — idempotent, so scheduler retries are safe.
+      3. For each (original, reask) pair, source the satisfying_memory_id from
+         the user's OWN most-recently-accessed memory near the re-ask time.
+      4. Call apply_reask_feedback — idempotent, so retries are safe.
+
+    == Isolation (loom-fdd9282a) ==
+
+    Both the query fetch and the satisfying-memory lookup carry an explicit
+    ``user_id IS NOT DISTINCT FROM $user_id`` predicate, so attribution can
+    never cross a tenant boundary even when the scheduler runs RLS-bypassing.
+    The user identity is ALSO set on the contextvar for the duration of the
+    pass, so the apply_reask_feedback write path runs under that user's RLS
+    context as belt-and-suspenders.
 
     == Sourcing satisfying_memory_id ==
 
-    The weft_recall_queries table records query text but NOT which memory IDs were
-    returned per query. Ideal attribution (a memory_access_log join keyed on
-    session+time) does not yet exist. The current approach picks the memory with
-    the most recent accessed_at <= reask.created_at + 5s as the best available
-    proxy for "the memory that answered the re-ask". This is correct for the
-    single-user OSS case and will be replaced when a per-query result-id column
-    lands (tracking loom-fdd9282a — RLS-context hardening + attribution seam).
-
-    If no recently-accessed memory is found (e.g., all queries returned 0 results),
-    the pair is silently skipped — no boost, no stamp.
-
-    == Multi-tenant seam (loom-fdd9282a) ==
-
-    TODO(loom-fdd9282a): In the multi-tenant SaaS path, this pass must be
-    scoped per-user — the query to get_recent_recall_queries must carry an
-    app.user_id context var (RLS), and the memory lookup below must be similarly
-    scoped. Today we run a single global pass, which is correct for single-user
-    deployments. When per-user scoping lands, replace this function body with
-    a fan-out over active users, each wrapped in an RLS context.
+    weft_recall_queries records query text but NOT which memory IDs were
+    returned per query. The current proxy picks the user's memory with the
+    most recent accessed_at <= reask.created_at + 5s. It will be replaced when
+    a per-query result-id column lands. If no recently-accessed memory is
+    found, the pair is silently skipped — no boost, no stamp.
     """
+    from weft.auth import current_user_id
+    from weft.db.connection import get_db
     from weft.reask import detect_reasked_queries
     from weft.store import apply_reask_feedback, get_recent_recall_queries
 
-    rows = await get_recent_recall_queries(pool, window_minutes=_REASK_WINDOW_MINUTES)
-    if not rows:
-        return 0
+    # Bind the user identity so nested write paths (apply_reask_feedback's
+    # acquire()) run under this user's RLS context.
+    token = current_user_id.set(user_id)
+    try:
+        rows = await get_recent_recall_queries(
+            pool,
+            window_minutes=_REASK_WINDOW_MINUTES,
+            user_id=user_id,
+            scope_to_user=True,
+        )
+        if not rows:
+            return 0
 
-    pairs = detect_reasked_queries(rows)
-    if not pairs:
-        return 0
+        pairs = detect_reasked_queries(rows)
+        if not pairs:
+            return 0
 
-    processed = 0
-    for original, reask in pairs:
-        try:
-            # Source the satisfying_memory_id: pick the memory most recently
-            # accessed at or before the re-ask query time (within a 5-second
-            # grace window to account for async logging lag).
-            #
-            # TODO(loom-fdd9282a): once per-query result_ids are stored on
-            # weft_recall_queries, replace this lookup with a direct join on
-            # reask.query_id → result_ids[0]. The current proxy is correct for
-            # single-user deployments but loses attribution precision under
-            # concurrent agents or high recall volume.
-            from weft.db.connection import get_db
-            row = await get_db(pool).fetchrow(
-                """
-                SELECT id FROM memories
-                WHERE accessed_at <= $1::timestamptz + interval '5 seconds'
-                ORDER BY accessed_at DESC
-                LIMIT 1
-                """,
-                reask.created_at,
-            )
-            if row is None:
-                logger.debug(
-                    "reask_feedback.no_satisfying_memory",
+        processed = 0
+        for original, reask in pairs:
+            try:
+                # Source the satisfying_memory_id from THIS user's memories only:
+                # the most recent accessed_at <= re-ask time (+5s grace for async
+                # logging lag). The explicit user_id predicate is the tenant
+                # boundary — never source another user's memory.
+                row = await get_db(pool).fetchrow(
+                    """
+                    SELECT id FROM memories
+                    WHERE accessed_at <= $1::timestamptz + interval '5 seconds'
+                      AND user_id IS NOT DISTINCT FROM $2
+                    ORDER BY accessed_at DESC
+                    LIMIT 1
+                    """,
+                    reask.created_at,
+                    user_id,
+                )
+                if row is None:
+                    logger.debug(
+                        "reask_feedback.no_satisfying_memory",
+                        extra={
+                            "original_query_id": original.query_id,
+                            "reask_query_id": reask.query_id,
+                        },
+                    )
+                    continue
+
+                satisfying_memory_id = row["id"]
+                result = await apply_reask_feedback(
+                    pool, original.query_id, satisfying_memory_id
+                )
+                if result is not None:
+                    # Fresh claim: EMA boost was applied.
+                    logger.info(
+                        "reask_feedback.boosted",
+                        extra={
+                            "original_query_id": original.query_id,
+                            "satisfying_memory_id": satisfying_memory_id,
+                            "new_usefulness_score": result.get("usefulness_score"),
+                        },
+                    )
+                    processed += 1
+                # result=None means already processed (idempotent no-op).
+            except Exception:
+                logger.exception(
+                    "reask_feedback.pair_error",
                     extra={
                         "original_query_id": original.query_id,
                         "reask_query_id": reask.query_id,
                     },
                 )
-                continue
+                # Per-pair isolation: one failure does not abort the rest.
 
-            satisfying_memory_id = row["id"]
-            result = await apply_reask_feedback(
-                pool, original.query_id, satisfying_memory_id
-            )
-            if result is not None:
-                # Fresh claim: EMA boost was applied.
-                logger.info(
-                    "reask_feedback.boosted",
-                    extra={
-                        "original_query_id": original.query_id,
-                        "satisfying_memory_id": satisfying_memory_id,
-                        "new_usefulness_score": result.get("usefulness_score"),
-                    },
-                )
-                processed += 1
-            # result=None means already processed (idempotent no-op) — not an error.
-        except Exception:
-            logger.exception(
-                "reask_feedback.pair_error",
-                extra={
-                    "original_query_id": original.query_id,
-                    "reask_query_id": reask.query_id,
-                },
-            )
-            # Per-pair isolation: one failure does not abort the rest of the pass.
-
-    return processed
+        return processed
+    finally:
+        current_user_id.reset(token)
 
 
 async def reask_feedback_loop(

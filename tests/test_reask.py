@@ -940,3 +940,112 @@ class TestReaskFeedbackLoopBody:
         assert score_after_second == score_after_first, (
             f"Score changed on second pass: {score_after_first} → {score_after_second}"
         )
+
+    async def test_reask_pass_does_not_bleed_across_users(self, pool):
+        """Per-user isolation (loom-fdd9282a): a system-context re-ask pass must
+        never attribute one user's re-ask to another user's memory.
+
+        Setup is adversarial: user B owns the globally-most-recently-accessed
+        memory, so a single unscoped global pass (the old behavior) would boost
+        B's memory for A's re-ask. The fan-out scopes every lookup to the owning
+        user, so A's own memory is boosted and B's is left untouched.
+        """
+        from weft.models import MemoryCreate, MemoryType
+        from weft.scheduler import _run_reask_feedback_pass
+        from weft.store import get_memory, store_memory
+
+        USER_A = "user-aaaa-bleed"
+        USER_B = "user-bbbb-bleed"
+
+        # A's memory, accessed slightly in the past (a valid satisfying proxy).
+        mem_a = await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.fact,
+                content="User A memory for cross-user bleed test",
+                topic=["test"],
+                confidence=0.8,
+            ),
+        )
+        await pool.execute(
+            "UPDATE memories SET user_id = $1, accessed_at = now() - interval '6 seconds' WHERE id = $2",
+            USER_A,
+            mem_a.id,
+        )
+
+        # B's memory, accessed MORE recently than A's — the bait. A global
+        # ORDER BY accessed_at DESC lookup would wrongly select this for A.
+        mem_b = await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.fact,
+                content="User B memory for cross-user bleed test",
+                topic=["test"],
+                confidence=0.8,
+            ),
+        )
+        await pool.execute(
+            "UPDATE memories SET user_id = $1, accessed_at = now() WHERE id = $2",
+            USER_B,
+            mem_b.id,
+        )
+
+        score_a_before = (await get_memory(pool, mem_a.id)).usefulness_score
+        score_b_before = (await get_memory(pool, mem_b.id)).usefulness_score
+
+        # A re-asks: two identical queries owned by user A, within the window.
+        await pool.execute(
+            "INSERT INTO weft_recall_queries (query_id, user_id, tool_name, query_text, created_at) "
+            "VALUES ($1, $2, 'recall', $3, now() - interval '10 seconds')",
+            "rq-bleed-a-1",
+            USER_A,
+            "cross user bleed test query unique",
+        )
+        await pool.execute(
+            "INSERT INTO weft_recall_queries (query_id, user_id, tool_name, query_text, created_at) "
+            "VALUES ($1, $2, 'recall', $3, now() - interval '5 seconds')",
+            "rq-bleed-a-2",
+            USER_A,
+            "cross user bleed test query unique",
+        )
+
+        processed = await _run_reask_feedback_pass(pool)
+        assert processed >= 1, "A's re-ask pair should have been processed"
+
+        score_a_after = (await get_memory(pool, mem_a.id)).usefulness_score
+        score_b_after = (await get_memory(pool, mem_b.id)).usefulness_score
+
+        assert score_a_after > score_a_before, (
+            "User A's own memory should be boosted by A's re-ask"
+        )
+        assert score_b_after == score_b_before, (
+            "User B's memory must NOT be touched by A's re-ask — cross-user "
+            f"bleed detected: {score_b_before} → {score_b_after}"
+        )
+
+    async def test_get_recent_recall_queries_scope_to_user_isolates(self, pool):
+        """get_recent_recall_queries(scope_to_user=True) returns only the named
+        user's rows even in a system context that may bypass RLS."""
+        from weft.store import get_recent_recall_queries
+
+        await pool.execute(
+            "INSERT INTO weft_recall_queries (query_id, user_id, tool_name, query_text) "
+            "VALUES ($1, $2, 'recall', $3)",
+            "rq-scope-a",
+            "user-scope-a",
+            "scope isolation query a",
+        )
+        await pool.execute(
+            "INSERT INTO weft_recall_queries (query_id, user_id, tool_name, query_text) "
+            "VALUES ($1, $2, 'recall', $3)",
+            "rq-scope-b",
+            "user-scope-b",
+            "scope isolation query b",
+        )
+
+        a_rows = await get_recent_recall_queries(
+            pool, window_minutes=60, user_id="user-scope-a", scope_to_user=True
+        )
+        a_ids = {r["query_id"] for r in a_rows}
+        assert "rq-scope-a" in a_ids
+        assert "rq-scope-b" not in a_ids, "user A's scoped fetch leaked user B's row"
