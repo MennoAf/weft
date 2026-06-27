@@ -785,6 +785,10 @@ class CalibrationRecord(BaseModel):
     project_id: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
     user_id: str | None = None
+    # Trust tier of the caller that attested this outcome (weft/auth.py caller
+    # mode): 'supervisor' (trusted) vs 'agent' (untrusted). Only trusted-origin
+    # approvals drive auto-promotion. See calibration.TRUSTED_CALIBRATION_ORIGINS.
+    origin: str = "supervisor"
     created_at: datetime = Field(default_factory=_now)
 
     def to_dict(self) -> dict[str, Any]:
