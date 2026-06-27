@@ -4,7 +4,7 @@ resolve_topic(topic_string, user_id, pool) -> list[str]:
     FIRST looks up topic_resolution_aliases by normalized token under RLS.
     If a row exists, bumps hit_count, increments the topic_resolution.alias_hits
     counter, and returns resolved_tags.
-    ELSE naive-normalizes to [lower(topic_string), 'entity:' + Title(topic_string)].
+    ELSE naive-normalizes to [lower(topic_string), 'entity:' + lower(topic_string)].
 
 record_alias(token, resolved_tags, source, user_id, pool) upserts a row.
 
@@ -22,7 +22,6 @@ Spec: Loom task loom-04e8c1af.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Sequence
 
 import asyncpg
@@ -61,15 +60,18 @@ def _normalize_token(topic_string: str) -> str:
 
 
 def _naive_normalize(topic_string: str) -> list[str]:
-    """Naive normalization: [lower(topic_string), 'entity:' + Title(topic_string)].
+    """Naive normalization: [lower(topic_string), 'entity:' + lower(topic_string)].
 
-    Title-cases the first letter of each word segment for the entity tag,
-    mirroring the entity-tagging convention (e.g. 'weft' → 'entity:Weft').
+    The entity tag is lowercased to match the CANONICAL lowercase convention:
+    entity tags are written lowercase at ingest (``entity:{e.name.lower()}`` in
+    weft/ingest_pipeline.py) and the gather step (weft/topic_gather.py) does a
+    case-sensitive ``= ANY(topic)`` exact match. Emitting a Title-cased
+    ``entity:Weft`` here would systematically MISS lowercase-named entities
+    (e.g. stored ``entity:weft``) — the latent bug this canonicalization closes.
+    Migration v60 backfilled pre-existing mixed-case ``entity:*`` tags to lower.
     """
     lower = topic_string.strip().lower()
-    # Title case: capitalize first letter of each alphanumeric word
-    titled = re.sub(r"[a-z0-9]+", lambda m: m.group(0).capitalize(), lower)
-    return [lower, f"entity:{titled}"]
+    return [lower, f"entity:{lower}"]
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +91,10 @@ async def resolve_topic(
        (SET LOCAL app.user_id so RLS INSERT/UPDATE policies are satisfied).
        If a row exists → bump hit_count + increment alias_hits counter + return
        resolved_tags.
-    2. ELSE → naive normalization: [lower(topic_string), 'entity:' + Title(topic_string)].
+    2. ELSE → naive normalization: [lower(topic_string), 'entity:' + lower(topic_string)].
 
     Args:
-        topic_string: The raw topic input (e.g. 'weft', 'Weft', 'entity:Weft').
+        topic_string: The raw topic input (e.g. 'weft', 'Weft', 'entity:weft').
         user_id: The owner identity; used to scope the RLS lookup and write.
         pool: asyncpg connection pool.
 
