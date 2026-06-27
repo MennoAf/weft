@@ -35,6 +35,13 @@ _DEMO_MIN_RECORDS = 3           # Minimum calibrations before considering demoti
 _DEMO_REJECTION_RATE = 0.5     # 50% rejection rate triggers demotion
 _EVAL_WINDOW_DAYS = 30          # Look at records from the last 30 days
 
+# Calibration origins (weft/auth.py caller modes) trusted to drive auto-
+# promotion. An approval attested by an untrusted 'agent' caller can never push
+# an action's autonomy tier to 'always' — only 'supervisor' (Face / human /
+# Orchestrator) approvals count toward promotion. Demotion intentionally counts
+# all origins (an untrusted rejection can still raise a human-review alert).
+TRUSTED_CALIBRATION_ORIGINS = ("supervisor",)
+
 
 # --- Row mapping ---
 
@@ -53,6 +60,7 @@ def _row_to_record(row: asyncpg.Record) -> CalibrationRecord:
         project_id=row["project_id"],
         context=context or {},
         user_id=row["user_id"],
+        origin=row["origin"],
         created_at=row["created_at"],
     )
 
@@ -75,15 +83,21 @@ async def record_calibration(
     record_id = _weft_id()
     context_json = json.dumps(create.context)
 
+    # Stamp the caller's trust tier (supervisor vs agent) so the promotion path
+    # can distinguish attested human approvals from untrusted agent self-reports.
+    from weft.auth import get_caller_mode
+
+    origin = get_caller_mode()
+
     row = await get_db(pool).fetchrow(
         """
         INSERT INTO calibration_records (
             id, action_category, action_description, outcome,
-            agent_id, project_id, context, user_id
+            agent_id, project_id, context, origin, user_id
         )
         VALUES (
             $1, $2, $3, $4,
-            $5, $6, $7::jsonb,
+            $5, $6, $7::jsonb, $8,
             nullif(current_setting('app.user_id', true), '')
         )
         RETURNING *
@@ -95,6 +109,7 @@ async def record_calibration(
         create.agent_id,
         create.project_id,
         context_json,
+        origin,
     )
     record = _row_to_record(row)
 
@@ -173,6 +188,7 @@ async def _maybe_auto_promote(
             AutonomyTier.always,
             reason=reason,
             agent_id=agent_id,
+            auto_originated=True,
         )
         logger.info(
             "Auto-calibration promoted policy %s (action=%s) to always",
@@ -326,8 +342,13 @@ async def get_calibration_summary(
     action_category: str | None = None,
     project_id: str | None = None,
     since: datetime | None = None,
+    origin_in: tuple[str, ...] | None = None,
 ) -> dict:
     """Return aggregate calibration statistics.
+
+    ``origin_in`` optionally restricts to records whose ``origin`` is in the
+    given trust set (e.g. TRUSTED_CALIBRATION_ORIGINS) — used by the promotion
+    path so untrusted approvals don't count toward granting autonomy.
 
     Returns dict with keys:
         total, approved, rejected, modified, approval_rate, by_category
@@ -349,6 +370,11 @@ async def get_calibration_summary(
     if since is not None:
         conditions.append(f"created_at >= ${idx}")
         params.append(since)
+        idx += 1
+
+    if origin_in is not None:
+        conditions.append(f"origin = ANY(${idx})")
+        params.append(list(origin_in))
         idx += 1
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
@@ -428,17 +454,32 @@ async def count_auto_originated_tier_changes(
     pool: asyncpg.Pool,
     *,
     since: datetime | None = None,
+    user_id: str | None = None,
+    scope_to_user: bool = False,
 ) -> int:
     """Count auto-originated tier changes from policy_calibration_events.
 
-    Returns the count of rows in policy_calibration_events WHERE reason
-    LIKE 'auto-calibration%' within an optional time window. This is the
+    Returns the count of rows in policy_calibration_events WHERE
+    auto_originated = TRUE within an optional time window. This is the
     calibration loop's aliveness PROOF: >0 per month means the loop fires
     without a human pump; zero while calibration_records grow is the dead tell.
+
+    The filter is the dedicated ``auto_originated`` provenance column (set TRUE
+    only by the auto-promotion path), NOT the free-text ``reason`` field — a
+    caller cannot spoof the metric by writing a manual event whose reason
+    starts with 'auto-calibration'.
+
+    User scoping: with ``scope_to_user`` True, an explicit
+    ``user_id IS NOT DISTINCT FROM $user_id`` predicate is added (NULL-safe).
+    This is defense-in-depth for system/scheduler callers that may bypass RLS;
+    a per-request authenticated caller can leave it False and rely on RLS /
+    its app.user_id (the documented trusted-context path — loom-fdd9282a).
 
     Args:
         pool: Database connection pool.
         since: Optional lower-bound timestamp. If omitted, counts all time.
+        user_id: Explicit user scope (used with scope_to_user).
+        scope_to_user: When True, restrict the count to ``user_id``.
 
     Returns:
         Count of auto-originated tier changes.
@@ -447,15 +488,19 @@ async def count_auto_originated_tier_changes(
     params: list = []
     idx = 1
 
-    # Filter by reason prefix
-    conditions.append(f"reason LIKE ${ idx}")
-    params.append("auto-calibration%")
-    idx += 1
+    # Filter on the non-spoofable provenance column
+    conditions.append("auto_originated = TRUE")
 
     # Optional time window
     if since is not None:
         conditions.append(f"created_at >= ${idx}")
         params.append(since)
+        idx += 1
+
+    # Optional explicit user scope (defense-in-depth beyond RLS)
+    if scope_to_user:
+        conditions.append(f"user_id IS NOT DISTINCT FROM ${idx}")
+        params.append(user_id)
         idx += 1
 
     where = " AND ".join(conditions)
@@ -516,7 +561,9 @@ async def evaluate_tier_change(
     approval_rate = approved / total
     rejection_rate = rejected / total
 
-    # Check demotion first (safety takes priority)
+    # Check demotion first (safety takes priority). Demotion counts ALL origins:
+    # an untrusted agent's rejections should still be able to flag a tier as
+    # over-trusted for human review — the fail-safe direction.
     if total >= _DEMO_MIN_RECORDS and rejection_rate >= _DEMO_REJECTION_RATE:
         result["recommendation"] = "demote"
         result["reason"] = (
@@ -526,19 +573,39 @@ async def evaluate_tier_change(
         result["stats"]["rejection_rate"] = rejection_rate
         return result
 
-    # Check promotion
-    if total >= _PROMO_MIN_RECORDS and approval_rate >= _PROMO_APPROVAL_RATE:
+    # Check promotion using TRUSTED-origin records only. Granting autonomy
+    # (tier -> always) is the privilege-escalation direction, so an untrusted
+    # 'agent' caller's approvals must never count here — only 'supervisor'
+    # (attested human / Face / Orchestrator) approvals do.
+    trusted = await get_calibration_summary(
+        pool,
+        action_category=action_category,
+        project_id=project_id,
+        since=since,
+        origin_in=TRUSTED_CALIBRATION_ORIGINS,
+    )
+    trusted_total = trusted["total"]
+    trusted_approval_rate = trusted["approval_rate"]
+    result["stats"]["trusted_total"] = trusted_total
+    result["stats"]["trusted_approval_rate"] = trusted_approval_rate
+
+    if (
+        trusted_total >= _PROMO_MIN_RECORDS
+        and trusted_approval_rate >= _PROMO_APPROVAL_RATE
+    ):
         result["recommendation"] = "promote"
         result["reason"] = (
-            f"Approval rate {approval_rate:.0%} >= {_PROMO_APPROVAL_RATE:.0%} "
-            f"threshold over {total} records"
+            f"Trusted approval rate {trusted_approval_rate:.0%} >= "
+            f"{_PROMO_APPROVAL_RATE:.0%} threshold over {trusted_total} "
+            f"trusted-origin records"
         )
         result["stats"]["approval_rate"] = approval_rate
         return result
 
     result["reason"] = (
-        f"Insufficient evidence: {total} records, "
-        f"{approval_rate:.0%} approval, {rejection_rate:.0%} rejection"
+        f"Insufficient evidence: {total} records "
+        f"({trusted_total} trusted), {approval_rate:.0%} approval "
+        f"({trusted_approval_rate:.0%} trusted), {rejection_rate:.0%} rejection"
     )
     result["stats"]["approval_rate"] = approval_rate
     result["stats"]["rejection_rate"] = rejection_rate
