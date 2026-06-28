@@ -2744,7 +2744,13 @@ async def weft_entity_context(
     """Load an entity and its linked memories within a token budget.
 
     Returns the entity metadata and as many linked memories as fit
-    within budget_tokens. Memories ordered by mention time (newest first)."""
+    within budget_tokens. Memories ordered by mention time (newest first).
+
+    The response includes:
+    - truncated: True if the entity's total memory set exceeds the 100-row cap
+    - memory_count: Number of memories returned in this response (after token budget filtering)
+    - memories_truncated: Number of memories dropped due to token budget (not including
+      the database-level 100-row cap)"""
     try:
         app: AppContext = ctx.request_context.lifespan_context
         async with acquire(app.pool):
@@ -2752,7 +2758,7 @@ async def weft_entity_context(
             if ent is None:
                 return {"error": f"Entity {entity_id} not found"}
 
-            memories = await get_entity_memories(app.pool, entity_id)
+            memories, db_truncated = await get_entity_memories(app.pool, entity_id)
 
             # Reserve tokens for entity metadata
             ent_text = f"{ent.name}: {ent.description or ''}"
@@ -2773,6 +2779,7 @@ async def weft_entity_context(
             result["tokens_used"] = total_tokens
             result["tokens_budget"] = budget_tokens
             result["memories_truncated"] = len(memories) - len(packed)
+            result["truncated"] = db_truncated
             return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_entity_context", e)

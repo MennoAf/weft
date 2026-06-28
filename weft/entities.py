@@ -273,8 +273,12 @@ async def get_entity_memories(
     entity_id: str,
     *,
     limit: int = 100,
-):
-    """Get memories linked to an entity, ordered by mention time (newest first)."""
+) -> tuple[list, bool]:
+    """Get memories linked to an entity, ordered by mention time (newest first).
+
+    Returns a tuple of (memories, truncated) where truncated=True if the result
+    hit the limit cap (indicating there may be more rows beyond the limit).
+    """
     rows = await get_db(pool).fetch(
         """
         SELECT m.* FROM memories m
@@ -286,7 +290,10 @@ async def get_entity_memories(
         entity_id,
         limit,
     )
-    return [_row_to_memory(r) for r in rows]
+    memories = [_row_to_memory(r) for r in rows]
+    # If we got exactly the limit, rows may have been dropped
+    truncated = len(memories) >= limit
+    return memories, truncated
 
 
 async def get_memory_entities(
