@@ -368,7 +368,7 @@ async def search_by_vector(
                1 - (embedding <=> $1::vector) AS similarity
         FROM memories
         {where}
-        ORDER BY embedding <=> $1::vector
+        ORDER BY embedding <=> $1::vector, id
         LIMIT ${idx}
     """
     params.append(limit)
@@ -691,7 +691,7 @@ async def search_cross_project(
                1 - (embedding <=> $1::vector) AS similarity
         FROM memories
         {where}
-        ORDER BY embedding <=> $1::vector
+        ORDER BY embedding <=> $1::vector, id
         LIMIT ${idx}
     """
     params.append(limit)

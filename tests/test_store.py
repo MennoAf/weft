@@ -651,3 +651,137 @@ async def test_null_embedding_appears_in_list(pool):
     memories = await list_memories(pool, project_id="durability-test")
     found = [m for m in memories if m.id == mem.id]
     assert len(found) == 1
+
+
+# ── Deterministic vector ordering (tie-breaking by id) ──────────────────
+
+async def test_vector_search_deterministic_on_distance_tie(pool):
+    """Two memories at identical embedding distance return in stable id order.
+
+    PRD §V3: vector ORDER BY must carry a deterministic secondary key (id).
+    This test verifies that repeated calls to search_by_vector return results
+    in the same order when two memories have identical vector distance.
+    """
+    from weft.embeddings import get_provider
+
+    provider = get_provider("fastembed")
+
+    # Create a query embedding
+    query_text = "test query for distance tie"
+    query_emb = await provider.embed(query_text)
+
+    # Create two memories with the SAME embedding (guaranteed distance tie)
+    identical_emb = await provider.embed("identical content for tie test")
+
+    mem1 = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="Memory A (distance tie)",
+            topic=["deterministic-test"],
+        ),
+        embedding=identical_emb,
+    )
+
+    mem2 = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="Memory B (distance tie)",
+            topic=["deterministic-test"],
+        ),
+        embedding=identical_emb,
+    )
+
+    # Search multiple times and verify consistent ordering
+    results_list = []
+    for _ in range(5):
+        results = await search_by_vector(pool, query_emb, limit=10)
+        # Filter to just our tie-test memories
+        tie_results = [r for r in results if r.memory.topic and "deterministic-test" in r.memory.topic]
+        if tie_results:
+            results_list.append([r.memory.id for r in tie_results])
+
+    # All searches should return the same order (deterministic by id)
+    assert len(results_list) > 0, "Should have found at least one search result"
+
+    # All result lists should be identical
+    first_order = results_list[0]
+    for order in results_list[1:]:
+        assert order == first_order, (
+            f"Unstable ordering detected: {first_order} != {order}. "
+            "This indicates the vector ORDER BY lacks a deterministic secondary key."
+        )
+
+    # The order should be deterministic by ID (sorted ascending)
+    expected_order = sorted([mem1.id, mem2.id])
+    assert first_order == expected_order, (
+        f"Expected id-sorted order {expected_order}, got {first_order}"
+    )
+
+
+async def test_search_cross_project_deterministic_on_distance_tie(pool):
+    """Verify search_cross_project also has deterministic ordering on ties.
+
+    Both vector ORDER BY sites (search_by_vector and search_cross_project)
+    must carry the secondary id key for determinism.
+    """
+    from weft.embeddings import get_provider
+
+    provider = get_provider("fastembed")
+
+    # Create identical embeddings for a distance tie
+    identical_emb = await provider.embed("cross project tie test content")
+
+    # Create memories in different projects with identical embeddings
+    mem1 = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="Cross-project memory A",
+            topic=["cross-project-tie"],
+            project_id="proj-other-1",
+        ),
+        embedding=identical_emb,
+    )
+
+    mem2 = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="Cross-project memory B",
+            topic=["cross-project-tie"],
+            project_id="proj-other-2",
+        ),
+        embedding=identical_emb,
+    )
+
+    # Query from a different project
+    query_emb = await provider.embed("cross project search query")
+
+    # Search cross-project multiple times
+    results_list = []
+    for _ in range(5):
+        from weft.store import search_cross_project
+        results = await search_cross_project(
+            pool,
+            query_emb,
+            exclude_project_id="proj-current",
+            limit=10,
+        )
+        # Filter to our tie-test memories
+        tie_results = [r for r in results if r.memory.topic and "cross-project-tie" in r.memory.topic]
+        if tie_results:
+            results_list.append([r.memory.id for r in tie_results])
+
+    # All searches should return consistent ordering
+    if len(results_list) > 0:
+        first_order = results_list[0]
+        for order in results_list[1:]:
+            assert order == first_order, (
+                f"search_cross_project: Unstable ordering detected: {first_order} != {order}"
+            )
+
+        # Verify ordering is by ID
+        expected_order = sorted([mem1.id, mem2.id])
+        assert first_order == expected_order
