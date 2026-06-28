@@ -358,8 +358,9 @@ async def test_get_entity_memories(pool):
     await link_mention(pool, ent.id, m1.id)
     await link_mention(pool, ent.id, m2.id)
 
-    memories = await get_entity_memories(pool, ent.id)
+    memories, truncated = await get_entity_memories(pool, ent.id)
     assert len(memories) == 2
+    assert truncated is False  # 2 memories, limit is 100, so not truncated
 
 
 async def test_get_entity_memories_excludes_archived(pool):
@@ -371,8 +372,9 @@ async def test_get_entity_memories_excludes_archived(pool):
         "UPDATE memories SET status = 'archived' WHERE id = $1", mem.id,
     )
 
-    memories = await get_entity_memories(pool, ent.id)
+    memories, truncated = await get_entity_memories(pool, ent.id)
     assert len(memories) == 0
+    assert truncated is False  # No active memories, so not truncated
 
 
 async def test_get_entity_memories_respects_limit(pool):
@@ -381,8 +383,9 @@ async def test_get_entity_memories_respects_limit(pool):
         mem = await _make_memory(pool, f"mem-{i}")
         await link_mention(pool, ent.id, mem.id)
 
-    memories = await get_entity_memories(pool, ent.id, limit=5)
+    memories, truncated = await get_entity_memories(pool, ent.id, limit=5)
     assert len(memories) == 5
+    assert truncated is True  # 10 total memories but limit is 5, so truncated
 
 
 # --- get_memory_entities ---
