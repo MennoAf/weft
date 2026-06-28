@@ -393,10 +393,11 @@ def _mock_memory(memory_id="weft-mem-1"):
     return m
 
 
-def _mock_entity(entity_id="weft-ent-1", name="Bob"):
+def _mock_entity(entity_id="weft-ent-1", name="Bob", status="active"):
     m = MagicMock()
     m.id = entity_id
     m.name = name
+    m.status = status
     return m
 
 
@@ -553,15 +554,17 @@ class TestRoute:
             confidence=0.95,
             entities=[EntityRef(name="Alice", entity_type="person")],
         )
-        new_entity = _mock_entity("weft-alice", "Alice")
+        new_entity = _mock_entity("weft-alice", "Alice", status="active")
 
         with patch("weft.store.store_memory", new_callable=AsyncMock) as mock_store, \
              patch("weft.entities.search_entities", new_callable=AsyncMock) as mock_search, \
              patch("weft.entities.store_entity", new_callable=AsyncMock) as mock_create, \
+             patch("weft.entities.get_entity", new_callable=AsyncMock) as mock_get, \
              patch("weft.entities.link_mention", new_callable=AsyncMock) as mock_link:
             mock_store.return_value = _mock_memory()
             mock_search.return_value = []
             mock_create.return_value = new_entity
+            mock_get.return_value = new_entity  # Mock get_entity to return active entity
             mock_link.return_value = True
 
             result = await route([intent], pool, provider)

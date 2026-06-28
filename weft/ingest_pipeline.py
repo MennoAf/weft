@@ -312,14 +312,19 @@ async def resolve_entities(
     project_id: str | None = None,
     _cache: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Resolve entity references to entity IDs.
+    """Resolve entity references to entity IDs (two-tier: auto-merge / candidate / new).
 
-    Searches for existing entities by embedding similarity. Creates new ones
-    if no match is found. Uses a within-batch cache to deduplicate entities
-    that appear multiple times in the same batch.
+    Searches for existing entities by embedding similarity. Implements two-tier matching:
+    - cosine ≥0.85: auto-merge/link (uses existing entity)
+    - 0.6 ≤ cosine <0.85: record as candidate (creates candidate entity, NOT auto-linked)
+    - cosine <0.6: create new entity
+
+    Uses a within-batch cache to deduplicate entities that appear multiple times
+    in the same batch.
 
     Returns:
-        Dict mapping entity name → entity ID.
+        Dict mapping entity name → entity ID. Includes both active and candidate
+        entities; the route() function decides whether to link based on entity status.
     """
     from weft.entities import search_entities, store_entity
     from weft.models import EntityCreate, EntityType
@@ -341,7 +346,7 @@ async def resolve_entities(
             resolved[name] = _cache[cache_key]
             continue
 
-        # Search by embedding similarity
+        # Search by embedding similarity (lower threshold to catch all candidates)
         embedding = None
         try:
             embedding = await embedding_provider.embed(name)
@@ -356,23 +361,56 @@ async def resolve_entities(
                 entity_type=etype,
                 project_id=project_id,
                 limit=3,
-                threshold=0.6,
+                threshold=0.4,  # Lower threshold to capture candidates
             )
 
             if matches:
                 # Pick highest similarity match
                 best_entity, best_sim = max(matches, key=lambda x: x[1])
-                resolved[name] = best_entity.id
-                _cache[cache_key] = best_entity.id
-                logger.debug(
-                    "resolve_entities.found: %s → %s (sim=%.3f)",
-                    name, best_entity.id, best_sim,
-                )
-                continue
+
+                if best_sim >= 0.85:
+                    # Auto-merge: high confidence match to existing entity
+                    resolved[name] = best_entity.id
+                    _cache[cache_key] = best_entity.id
+                    logger.debug(
+                        "resolve_entities.auto_merge: %s → %s (sim=%.3f)",
+                        name, best_entity.id, best_sim,
+                    )
+                    continue
+                elif best_sim >= 0.6:
+                    # Candidate: possible match, requires review before linking
+                    # Create candidate entity but do NOT link to memory
+                    try:
+                        etype_for_create = (
+                            EntityType(entity_ref.entity_type)
+                            if entity_ref.entity_type in [e.value for e in EntityType]
+                            else EntityType.concept
+                        )
+                        candidate = await store_entity(
+                            pool,
+                            EntityCreate(
+                                name=name,
+                                entity_type=etype_for_create,
+                                project_id=project_id,
+                            ),
+                            embedding=embedding,
+                            status="candidate",
+                        )
+                        resolved[name] = candidate.id
+                        _cache[cache_key] = candidate.id
+                        logger.debug(
+                            "resolve_entities.candidate: %s → %s (sim=%.3f, existing: %s)",
+                            name, candidate.id, best_sim, best_entity.id,
+                        )
+                        continue
+                    except Exception:
+                        logger.exception("resolve_entities.candidate_create_error: %s", name)
+                        # Fall through to create new entity as fallback
+                # else: best_sim < 0.6, fall through to create new entity
         except Exception:
             logger.exception("resolve_entities.search_error: %s", name)
 
-        # Create new entity
+        # Create new entity (no match found, or failed to create candidate)
         try:
             etype = (
                 EntityType(entity_ref.entity_type)
@@ -387,6 +425,7 @@ async def resolve_entities(
                     project_id=project_id,
                 ),
                 embedding=embedding,
+                status="active",
             )
             resolved[name] = entity.id
             _cache[cache_key] = entity.id
@@ -414,7 +453,7 @@ async def route(
     is caught, logged, and does not abort the rest.
     """
     from weft.alerts import create_alert
-    from weft.entities import link_mention
+    from weft.entities import get_entity, link_mention
     from weft.models import (
         AlertChannel,
         AlertCreate,
@@ -497,10 +536,19 @@ async def route(
                 result.memories_created += 1
 
                 # --- Link entities to memory ---
+                # Only link active entities; skip candidates (status='candidate')
+                # which require review before being merged into mentions.
                 for entity_name, entity_id in entity_ids.items():
                     try:
-                        await link_mention(pool, entity_id, memory.id)
-                        result.entities_linked += 1
+                        entity = await get_entity(pool, entity_id)
+                        if entity and entity.status == "active":
+                            await link_mention(pool, entity_id, memory.id)
+                            result.entities_linked += 1
+                        elif entity and entity.status == "candidate":
+                            logger.debug(
+                                "route.skip_candidate_link: candidate=%s memory=%s",
+                                entity_id, memory.id,
+                            )
                     except Exception:
                         logger.exception(
                             "route.link_error: entity=%s memory=%s",
