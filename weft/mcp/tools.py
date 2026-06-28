@@ -319,6 +319,16 @@ async def weft_remember(
             memory = await store_memory(app.pool, create, embedding=embedding)
             await app.cache.set_memory(memory)
             await app.cache.invalidate_stats()
+            # Canary enrollment: O(1) INSERT, no LLM call (PRD §V5, loom-c27ab1d2).
+            # Runs inside the acquire() context so app.user_id GUC is active.
+            try:
+                from weft.canary import enroll_canary
+                await enroll_canary(app.pool, memory.id, content)
+            except Exception as _canary_err:
+                logger.warning(
+                    "weft_remember: canary enrollment failed (non-fatal, id=%s): %s",
+                    memory.id, _canary_err,
+                )
             result = memory.to_dict()
             if embedding_failed:
                 result["warning"] = (
