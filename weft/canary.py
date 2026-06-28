@@ -67,6 +67,66 @@ PROBE_TEXT_MAX_CHARS = 512
 # results to be a hit; anything beyond is a miss.
 DEFAULT_AUDIT_TOP_K = 10
 
+# ---------------------------------------------------------------------------
+# Eval-case minting (CL1 compounding loop, loom-add4d5c8)
+# ---------------------------------------------------------------------------
+
+# Sentinel: "use the default path from benchmarks.enumeration_eval.mint if
+# the package is available; otherwise no-op."  Distinct from None so callers
+# can explicitly pass None to DISABLE minting even when benchmarks is present.
+_EVAL_CASE_SENTINEL = object()
+
+
+def _default_eval_case_store_path():
+    """Return DEFAULT_MINTED_CASES_PATH from benchmarks, or None if unavailable."""
+    try:
+        from benchmarks.enumeration_eval.mint import DEFAULT_MINTED_CASES_PATH  # noqa: PLC0415
+        return DEFAULT_MINTED_CASES_PATH
+    except ImportError:
+        return None
+
+
+def _try_mint_eval_case(
+    query: str,
+    satisfying_memory_id: str,
+    source: str,
+    *,
+    probe_id: str | None = None,
+    path: "Any",
+) -> None:
+    """Best-effort eval case minting.  Logs and swallows all errors.
+
+    Args:
+        query: The query / probe_text to record.
+        satisfying_memory_id: The memory that should surface for this query.
+        source: ``'canary'`` (direct miss) or ``'reask'`` (is_reask_miss event).
+        probe_id: The recall_canary probe_id for traceability.
+        path: Destination JSONL path (resolved before this call).  None means skip.
+    """
+    if path is None:
+        return
+    try:
+        from benchmarks.enumeration_eval.mint import mint_eval_case  # noqa: PLC0415
+        minted = mint_eval_case(
+            query,
+            satisfying_memory_id,
+            source,
+            probe_id=probe_id,
+            path=path,
+        )
+        if minted:
+            logger.debug(
+                "_try_mint_eval_case: minted eval case memory_id=%s source=%s",
+                satisfying_memory_id,
+                source,
+            )
+        # else: duplicate — fine, no log needed
+    except ImportError:
+        logger.debug("_try_mint_eval_case: benchmarks package not available, skipping mint")
+    except Exception as exc:
+        # Never crash the audit over a minting failure — best-effort only.
+        logger.warning("_try_mint_eval_case: unexpected error: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Enrollment
@@ -130,7 +190,11 @@ async def enroll_canary(
 # ---------------------------------------------------------------------------
 
 
-async def _sync_reask_bootstrap_probes(pool: asyncpg.Pool) -> int:
+async def _sync_reask_bootstrap_probes(
+    pool: asyncpg.Pool,
+    *,
+    eval_case_store_path: "Any" = None,
+) -> int:
     """Auto-enroll new is_reask_miss events as high-confidence ``reaREDACTED`` probes.
 
     Queries ``weft_recall_queries`` for rows where ``is_reask_miss = TRUE`` and a
@@ -198,6 +262,16 @@ async def _sync_reask_bootstrap_probes(pool: asyncpg.Pool) -> int:
                     probe_id,
                     row["reask_satisfying_memory_id"],
                 )
+                # CL1: mint a known-answer eval case for each new reask probe.
+                # The original query → satisfying memory is a proven known-answer
+                # pair from the is_reask_miss signal.
+                _try_mint_eval_case(
+                    row["query_text"],
+                    row["reask_satisfying_memory_id"],
+                    "reask",
+                    probe_id=probe_id,
+                    path=eval_case_store_path,
+                )
             # else: expected conflict/skip — fine, no logging needed
         except Exception as exc:
             # UNEXPECTED error (network, schema issue, RLS violation, …).
@@ -238,6 +312,7 @@ async def run_canary_audit(
     user_id: str | None = None,
     top_k: int = DEFAULT_AUDIT_TOP_K,
     active_probing_enabled: bool = False,
+    eval_case_store_path: Any = _EVAL_CASE_SENTINEL,
 ) -> dict[str, Any]:
     """Run the daily recall canary audit against fixed materialization.
 
@@ -271,6 +346,14 @@ async def run_canary_audit(
             ``memory_id`` must appear within these results to be a hit.
         active_probing_enabled: RI-4 gate.  ``False`` (default) runs only
             ``reaREDACTED`` probes.  ``True`` also runs ``active`` probes.
+        eval_case_store_path: Path to the JSONL eval-case store for the CL1
+            compounding loop.  On a miss, a known-answer case is appended so
+            the ``benchmarks.enumeration_eval`` harness can exercise it on the
+            next run.  Default (``_EVAL_CASE_SENTINEL``): use
+            ``benchmarks.enumeration_eval.mint.DEFAULT_MINTED_CASES_PATH`` when
+            the ``benchmarks`` package is available; silently skip when it is
+            not.  Pass ``None`` to disable minting explicitly.  Pass an explicit
+            ``Path`` to redirect minting (e.g. to a ``tmp_path`` in tests).
 
     Returns:
         ``dict`` with keys:
@@ -287,6 +370,11 @@ async def run_canary_audit(
     """
     # Late import to avoid circular dependency: canary ← store ← (many things).
     from weft.store import search_by_vector
+
+    # --- Resolve eval-case store path (CL1) ---
+    # Sentinel means "auto-detect": use the benchmarks default if available.
+    if eval_case_store_path is _EVAL_CASE_SENTINEL:
+        eval_case_store_path = _default_eval_case_store_path()
 
     # --- Guard: user scoping must be established ---
     # Without a user_id argument AND without the app.user_id GUC the audit
@@ -311,7 +399,10 @@ async def run_canary_audit(
             }
 
     # --- Phase 1: bootstrap from is_reask_miss events ---
-    bootstrap_synced = await _sync_reask_bootstrap_probes(pool)
+    # eval_case_store_path is threaded in so reask misses also mint eval cases.
+    bootstrap_synced = await _sync_reask_bootstrap_probes(
+        pool, eval_case_store_path=eval_case_store_path
+    )
 
     # --- Phase 2: select enabled probes (parameterized — no f-string interpolation) ---
     probe_types = ["active", "reaREDACTED"] if active_probing_enabled else ["reaREDACTED"]
@@ -399,6 +490,15 @@ async def run_canary_audit(
             )
             # Best-effort counter: never raises (counters.py contract).
             await increment_counter(pool, COUNTER_CANARY_MISS)
+            # CL1: mint a known-answer eval case for every new miss so the
+            # enumeration harness can track and exercise it going forward.
+            _try_mint_eval_case(
+                probe_text,
+                memory_id,
+                "canary",
+                probe_id=probe_id,
+                path=eval_case_store_path,
+            )
             logger.debug(
                 "canary miss: probe_id=%s memory_id=%s probe_type=%s",
                 probe_id,
