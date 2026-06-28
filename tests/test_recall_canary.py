@@ -30,7 +30,7 @@ from weft.counters import get_counter
 from weft.db.connection import get_db
 from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemoryType
-from weft.store import store_memory
+from weft.store import delete_memory, store_memory
 
 
 # ---------------------------------------------------------------------------
@@ -346,3 +346,133 @@ async def test_reask_bootstrap_sync_idempotent(pool, embedder):
         mem.id,
     )
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix #1: non-degenerate audit guard
+# ---------------------------------------------------------------------------
+
+
+async def test_zero_probe_audit_signals_invalid(pool, embedder):
+    """A 0-probe audit must be distinguishable from a real all-pass audit.
+
+    Done-when gate: when run_canary_audit checks 0 probes it must return
+    audit_valid=False and status='skipped', NOT a healthy-looking miss_rate=0.0
+    that a scheduler would silently treat as all-green.
+    """
+    # No probes enrolled — the audit has nothing to check.
+    result = await run_canary_audit(pool, embedder)
+
+    assert result["probes_checked"] == 0
+    assert result["misses"] == 0
+    assert result["audit_valid"] is False, (
+        "A 0-probe audit must set audit_valid=False; "
+        "miss_rate=0.0 with probes_checked=0 is NOT a valid all-pass result."
+    )
+    assert result["status"] == "skipped"
+
+
+async def test_real_all_pass_audit_is_valid(pool, embedder):
+    """A real all-pass (probes_checked > 0, misses=0) has audit_valid=True.
+
+    Contrast with test_zero_probe_audit_signals_invalid: when probes actually
+    ran and all hit, the result is genuinely healthy — audit_valid=True.
+    """
+    content = "The golden retriever played fetch on the sunny beach"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["dogs"]),
+        embedding=emb,
+    )
+    await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
+
+    result = await run_canary_audit(pool, embedder, top_k=5)
+
+    assert result["probes_checked"] == 1
+    assert result["misses"] == 0
+    assert result["audit_valid"] is True, (
+        "A real all-pass audit (probes checked, none missed) must have audit_valid=True."
+    )
+    assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Fix #2: orphan-probe cleanup on delete/archive
+# ---------------------------------------------------------------------------
+
+
+async def test_orphan_probe_disabled_on_soft_delete(pool, embedder):
+    """Soft-deleting (archiving) a memory must disable its canary probes.
+
+    Rationale: an orphan probe for an archived memory always misses (the memory
+    is no longer surfaced in active recall) → pollutes canary.miss and grows
+    unbounded if not cleaned up.
+    """
+    content = "Memory that will be soft-deleted for orphan-probe test"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["orphan-test"]),
+        embedding=emb,
+    )
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
+
+    # Confirm probe is enabled before deletion.
+    row_before = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row_before["enabled"] is True
+
+    # Soft-delete the memory.
+    deleted = await delete_memory(pool, mem.id)
+    assert deleted is True
+
+    # Probe must now be disabled.
+    row_after = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row_after["enabled"] is False, (
+        "Soft-deleting a memory must set enabled=FALSE on its canary probes."
+    )
+
+    # Disabled probe must be excluded from the next audit.
+    result = await run_canary_audit(pool, embedder)
+    assert result["probes_checked"] == 0, (
+        "The orphan probe for an archived memory must not appear in run_canary_audit."
+    )
+    assert result["audit_valid"] is False  # 0 probes → skipped
+
+
+async def test_orphan_probe_disabled_on_hard_delete(pool, embedder):
+    """Hard-deleting a memory must disable its canary probes (probe row is kept).
+
+    The probe row is retained (for history) but flipped to enabled=FALSE so
+    it cannot pollute future audit runs.
+    """
+    content = "Memory that will be hard-deleted for orphan-probe test"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["orphan-test-hard"]),
+        embedding=emb,
+    )
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
+
+    # Hard-delete the memory.
+    deleted = await delete_memory(pool, mem.id, hard=True)
+    assert deleted is True
+
+    # Probe row must still exist but be disabled.
+    row = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row is not None, "Probe row must be retained after hard-delete of its memory."
+    assert row["enabled"] is False, (
+        "Hard-deleting a memory must set enabled=FALSE on its canary probes."
+    )
+
+    # Audit must exclude the disabled probe.
+    result = await run_canary_audit(pool, embedder)
+    assert result["probes_checked"] == 0
+    assert result["audit_valid"] is False  # 0 probes → skipped
