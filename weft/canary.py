@@ -143,8 +143,14 @@ async def _sync_reask_bootstrap_probes(pool: asyncpg.Pool) -> int:
     scheduler's per-user fan-out (``get_distinct_reask_user_ids``) ensures this
     is called once per user per audit cycle.
 
+    ``ON CONFLICT DO NOTHING`` handles expected PK collisions (e.g. rare probe_id
+    hash collision) silently.  Any other exception is an UNEXPECTED error and is
+    logged at ERROR level so it surfaces rather than being silently swallowed.
+
     Returns:
-        Number of new ``reaREDACTED`` probes enrolled.
+        Number of new ``reaREDACTED`` probes enrolled (skipped conflicts and
+        errors are excluded).  Callers can detect partial failure by comparing
+        this against the WARNING log line that names attempted vs enrolled.
     """
     # Find is_reask_miss rows not yet enrolled as reaREDACTED probes.
     # The NOT EXISTS subquery avoids duplicate enrollment for the same
@@ -166,31 +172,57 @@ async def _sync_reask_bootstrap_probes(pool: asyncpg.Pool) -> int:
         PROBE_TEXT_MAX_CHARS,
     )
 
+    attempted = len(rows)
     enrolled = 0
+    errors = 0
+
     for row in rows:
         probe_id = f"cp-{uuid.uuid4().hex[:10]}"
         try:
-            await get_db(pool).execute(
+            result = await get_db(pool).execute(
                 """
                 INSERT INTO recall_canary (probe_id, memory_id, probe_text, probe_type)
                 VALUES ($1, $2, $3, 'reaREDACTED')
+                ON CONFLICT DO NOTHING
                 """,
                 probe_id,
                 row["reask_satisfying_memory_id"],
                 row["query_text"][:PROBE_TEXT_MAX_CHARS],
             )
-            enrolled += 1
-            logger.debug(
-                "_sync_reask_bootstrap_probes: enrolled probe_id=%s memory_id=%s",
-                probe_id,
-                row["reask_satisfying_memory_id"],
-            )
+            # asyncpg returns "INSERT 0 1" when a row was inserted, "INSERT 0 0"
+            # when ON CONFLICT skipped it.  Only count actual inserts.
+            if result.split()[-1] == "1":
+                enrolled += 1
+                logger.debug(
+                    "_sync_reask_bootstrap_probes: enrolled probe_id=%s memory_id=%s",
+                    probe_id,
+                    row["reask_satisfying_memory_id"],
+                )
+            # else: expected conflict/skip — fine, no logging needed
         except Exception as exc:
-            logger.warning(
-                "_sync_reask_bootstrap_probes: insert failed for memory_id=%s: %s",
+            # UNEXPECTED error (network, schema issue, RLS violation, …).
+            # Log at ERROR so it surfaces; do not silently continue past it.
+            errors += 1
+            logger.error(
+                "_sync_reask_bootstrap_probes: unexpected error for memory_id=%s: %s",
                 row["reask_satisfying_memory_id"],
                 exc,
             )
+
+    if errors:
+        logger.warning(
+            "_sync_reask_bootstrap_probes: %d/%d probes enrolled, %d unexpected errors",
+            enrolled,
+            attempted,
+            errors,
+        )
+    elif attempted:
+        logger.debug(
+            "_sync_reask_bootstrap_probes: %d/%d probes enrolled",
+            enrolled,
+            attempted,
+        )
+
     return enrolled
 
 
@@ -247,27 +279,70 @@ async def run_canary_audit(
         * ``misses`` (int): number of probes that failed to surface their memory.
         * ``miss_rate`` (float): ``misses / probes_checked``, or 0.0 if none checked.
         * ``bootstrap_synced`` (int): new ``reaREDACTED`` probes enrolled this run.
+        * ``audit_valid`` (bool): ``True`` when the audit ran with ≥1 probe and valid
+          user scoping.  ``False`` when the audit was a no-op (skipped).  A caller
+          MUST check this before treating ``miss_rate=0.0`` as a healthy signal —
+          a skipped audit and a true all-pass both produce ``miss_rate=0.0``.
+        * ``status`` (str): ``'ok'`` for a valid run, ``'skipped'`` for a no-op.
     """
     # Late import to avoid circular dependency: canary ← store ← (many things).
     from weft.store import search_by_vector
 
+    # --- Guard: user scoping must be established ---
+    # Without a user_id argument AND without the app.user_id GUC the audit
+    # would silently run against an empty (or system-only) probe set, producing
+    # a miss_rate=0.0 that looks healthy but measured nothing meaningful.
+    if user_id is None:
+        guc_uid = await get_db(pool).fetchval(
+            "SELECT nullif(current_setting('app.user_id', true), '')"
+        )
+        if guc_uid is None:
+            logger.warning(
+                "canary audit: no user scoping in effect — user_id not passed and "
+                "app.user_id GUC is empty. Returning audit_valid=False (skipped)."
+            )
+            return {
+                "probes_checked": 0,
+                "misses": 0,
+                "miss_rate": 0.0,
+                "bootstrap_synced": 0,
+                "audit_valid": False,
+                "status": "skipped",
+            }
+
     # --- Phase 1: bootstrap from is_reask_miss events ---
     bootstrap_synced = await _sync_reask_bootstrap_probes(pool)
 
-    # --- Phase 2: select enabled probes ---
-    if active_probing_enabled:
-        type_filter = "AND probe_type IN ('active', 'reaREDACTED')"
-    else:
-        type_filter = "AND probe_type = 'reaREDACTED'"
+    # --- Phase 2: select enabled probes (parameterized — no f-string interpolation) ---
+    probe_types = ["active", "reaREDACTED"] if active_probing_enabled else ["reaREDACTED"]
 
     probes = await get_db(pool).fetch(
-        f"""
+        """
         SELECT probe_id, memory_id, probe_text, probe_type
         FROM recall_canary
-        WHERE enabled = TRUE {type_filter}
+        WHERE enabled = TRUE AND probe_type = ANY($1::text[])
         ORDER BY probe_id
         """,
+        probe_types,
     )
+
+    # --- Guard: 0 enabled probes → audit_valid=False ---
+    # A 0-probe result has miss_rate=0.0, identical to a healthy all-pass.
+    # Signal explicitly so schedulers/callers can distinguish the two.
+    if not probes:
+        logger.warning(
+            "canary audit: 0 enabled probes found — audit_valid=False "
+            "(bootstrap_synced=%d). This is NOT a genuine all-pass result.",
+            bootstrap_synced,
+        )
+        return {
+            "probes_checked": 0,
+            "misses": 0,
+            "miss_rate": 0.0,
+            "bootstrap_synced": bootstrap_synced,
+            "audit_valid": False,
+            "status": "skipped",
+        }
 
     probes_checked = 0
     misses = 0
@@ -362,4 +437,6 @@ async def run_canary_audit(
         "misses": misses,
         "miss_rate": miss_rate,
         "bootstrap_synced": bootstrap_synced,
+        "audit_valid": True,
+        "status": "ok",
     }
