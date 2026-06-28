@@ -16,6 +16,7 @@ from fastmcp import Context
 from weft.config.user_identity import get_user_id
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
+from weft.fsck import list_orphan_memories
 from weft.mcp.server import AppContext, mcp
 from weft.behaviors import (
     delete_behavior,
@@ -5112,3 +5113,40 @@ async def weft_turn_append(
         return _input_error_response("weft_turn_append", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_turn_append", e)
+
+
+@mcp.tool()
+async def weft_fsck(ctx: Context) -> dict:
+    """List orphan memories: active memories reachable ONLY by vector cosine.
+
+    Orphans are memories with NO topic tags AND NO entity mentions AND NO
+    episode membership. They hide in the vector index but cannot be recalled
+    through tag/entity/episode navigators — a leading indicator of future
+    recall misses.
+
+    Returns: {
+        "orphan_count": int,
+        "orphans": [
+            {"memory_id": str, "reason": str},
+            ...
+        ]
+    }
+
+    The reason field always reads "vector-only reachable" for now.
+    Collections do not exist yet, so that edge is vacuously absent.
+    """
+    try:
+        cid = set_correlation_id()
+        logger.debug("weft_fsck start [%s]", cid)
+        app: AppContext = ctx.request_context.lifespan_context
+        caller_uid = get_user_id()
+
+        async with acquire(app.pool):
+            orphans = await list_orphan_memories(app.pool, user_id=caller_uid)
+
+        return {
+            "orphan_count": len(orphans),
+            "orphans": orphans,
+        }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_fsck", e)
