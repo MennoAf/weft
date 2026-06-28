@@ -24,8 +24,16 @@ async def store_entity(
     pool: asyncpg.Pool,
     create: EntityCreate,
     embedding: list[float] | None = None,
+    status: str = "active",
 ) -> Entity:
-    """Store a new entity. Returns the created Entity."""
+    """Store a new entity. Returns the created Entity.
+
+    Args:
+        pool: Database connection pool.
+        create: Entity creation model.
+        embedding: Optional embedding vector.
+        status: Entity status ('active', 'candidate', etc.). Defaults to 'active'.
+    """
     entity_id = _weft_id()
     now = datetime.now(timezone.utc)
 
@@ -40,7 +48,7 @@ async def store_entity(
             created_at, updated_at, embedding
         ) VALUES ($1, $2, $3, $4, $5, $6, $7,
                   COALESCE($8, nullif(current_setting('app.user_id', true), '')),
-                  'active', 0, $9, $9, $10::vector)
+                  $9, 0, $10, $10, $11::vector)
         """,
         entity_id,
         create.name,
@@ -50,6 +58,7 @@ async def store_entity(
         create.project_id,
         create.agent_id,
         create.user_id,
+        status,
         now,
         embedding,
     )
@@ -62,7 +71,7 @@ async def store_entity(
         description=create.description,
         project_id=create.project_id,
         agent_id=create.agent_id,
-        status="active",
+        status=status,
         mention_count=0,
         created_at=now,
         updated_at=now,
