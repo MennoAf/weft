@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import median
+from typing import Any
 
 import asyncpg
 
@@ -293,5 +295,99 @@ async def run_enumeration_eval(
 
         results.append(stats)
         logger.info("RecallStats: %s", stats.to_dict())
+
+    return results
+
+
+async def run_minted_case_eval(
+    pool: asyncpg.Pool,
+    user_id: str,
+    *,
+    path: "Path | str | None" = None,
+    top_k: int = 10,
+    embedder: Any = None,
+) -> list[dict]:
+    """Exercise minted known-answer eval cases from the JSONL store.
+
+    Reads every case from the minted_cases JSONL and runs ``search_by_vector``
+    for each query, checking whether ``satisfying_memory_id`` appears in the
+    top-K results.  Returns one result dict per case.
+
+    This is the "Feedback" leg of the CL1 compounding loop (loom-add4d5c8):
+    Signal(miss) → Store(eval case) → **Feedback(harness exercises it)** → Proof.
+
+    Args:
+        pool: asyncpg pool.
+        user_id: User identity for RLS scoping of ``search_by_vector``.
+        path: Path to the JSONL store.  Defaults to
+            ``benchmarks.enumeration_eval.mint.DEFAULT_MINTED_CASES_PATH``.
+        top_k: Number of results to retrieve per case; the satisfying memory
+            must appear within this many results to count as a hit.
+        embedder: Embedding provider (``async embed(text) -> list[float]``).
+            Defaults to ``FastEmbedProvider`` (768-dim).
+
+    Returns:
+        List of dicts, one per minted case::
+
+            {
+                "query": str,
+                "satisfying_memory_id": str,
+                "source": str,          # "canary" | "reask"
+                "hit": bool,            # True if satisfying_memory_id in top_k
+            }
+
+        Empty list if the JSONL store has no cases.
+    """
+    from benchmarks.enumeration_eval.mint import load_minted_cases
+    from weft.store import search_by_vector
+    from weft.embeddings import get_provider
+
+    cases = load_minted_cases(path)
+    if not cases:
+        logger.debug("run_minted_case_eval: 0 minted cases found (path=%s)", path)
+        return []
+
+    if embedder is None:
+        embedder = get_provider("fastembed", dimensions=768)
+
+    results: list[dict] = []
+    for case in cases:
+        query: str = case["query"]
+        satisfying_memory_id: str = case["satisfying_memory_id"]
+
+        try:
+            embedding = await embedder.embed(query)
+            search_results = await search_by_vector(
+                pool,
+                embedding,
+                limit=top_k,
+                threshold=0.0,
+                user_id=user_id,
+            )
+            result_ids = {r.memory.id for r in search_results}
+            hit = satisfying_memory_id in result_ids
+        except Exception as exc:
+            logger.warning(
+                "run_minted_case_eval: error for query=%r memory_id=%s: %s",
+                query,
+                satisfying_memory_id,
+                exc,
+            )
+            hit = False
+
+        logger.info(
+            "run_minted_case_eval: query=%r satisfying_memory_id=%s hit=%s",
+            query[:60],
+            satisfying_memory_id,
+            hit,
+        )
+        results.append(
+            {
+                "query": query,
+                "satisfying_memory_id": satisfying_memory_id,
+                "source": case.get("source", "unknown"),
+                "hit": hit,
+            }
+        )
 
     return results
