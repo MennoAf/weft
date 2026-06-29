@@ -1,7 +1,14 @@
-"""Tests for weft_fsck — orphan memory detection in vector index only.
+"""Tests for weft_fsck — orphan memory detection (provenance-first spec).
 
 Tests the full lifecycle: seed orphan (no tags/entities/episodes) →
 verify orphan detection → add tag edge → verify orphan is removed.
+
+Corrected orphan definition (weft-ede3f70a / weft-ab1e37c0 / weft-f0768396):
+  (a) Merge candidate (review_status='pending_review') — NOT a defect.
+  (b) Dream-link (memory_relationships row) — NOT a defect.
+  Genuine similarity-only (no structural edge, no merge, no link) — IS a defect.
+
+Synthetic persona: "Jim Boblaw" (test data only — never a real user).
 """
 
 from __future__ import annotations
@@ -19,8 +26,9 @@ from weft.models import (
     MemoryCreate,
     MemoryStatus,
     MemoryType,
+    RelationType,
 )
-from weft.store import store_memory, update_memory
+from weft.store import add_relationship, store_memory, update_memory
 
 
 @pytest.fixture
@@ -226,4 +234,143 @@ async def test_multiple_orphans_detected(pool, provider):
     # Verify count matches
     assert len([o for o in orphans if o["memory_id"] in orphan_ids]) == 3, (
         "Should detect exactly 3 orphans"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Provenance-first exclusions (corrected spec)
+# ---------------------------------------------------------------------------
+
+
+async def test_merge_candidate_not_orphan(pool, provider):
+    """Exclusion (a): a memory pending a duplicate-belief merge is NOT an orphan.
+
+    The L2 dedup path marks a new memory as review_status='pending_review' when
+    it is a cross-project merge candidate (0.6 ≤ sim < 0.85).  Fsck must read
+    review_status FIRST and skip such memories — they are a planned merge step,
+    not a graph defect.
+
+    Synthetic persona: Jim Boblaw.
+    """
+    content = "Jim Boblaw prefers dark mode in all editors and IDEs"
+    embedding = await provider.embed(content)
+
+    memory = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.preference,
+            content=content,
+            topic=[],  # No structural edges — would be orphan if not pending_review
+            confidence=0.7,
+        ),
+        embedding=embedding,
+    )
+    memory_id = memory.id
+
+    # Simulate L2 marking this memory as a cross-project merge candidate.
+    await pool.execute(
+        "UPDATE memories SET review_status = 'pending_review' WHERE id = $1",
+        memory_id,
+    )
+
+    # Provenance-first exclusion (a): review_status='pending_review' → NOT orphan.
+    orphans = await list_orphan_memories(pool)
+    orphan_ids = {o["memory_id"] for o in orphans}
+    assert memory_id not in orphan_ids, (
+        f"Merge candidate {memory_id} (pending_review) must NOT be flagged as orphan"
+    )
+
+
+async def test_dream_link_not_orphan(pool, provider):
+    """Exclusion (b): a memory with a dream-link (memory_relationships row) is NOT an orphan.
+
+    A 'dream-link' is a blessed similarity-inferred relationship between two
+    distinct memories stored in memory_relationships.  Any memory with such a
+    link is reachable via the structural graph, not purely by vector similarity.
+    Fsck must recognise it and exclude the memory from the orphan list.
+
+    Asymmetric scoping: the memory_relationships check carries no project_id
+    filter so cross-project dream-links are correctly excluded for the
+    associative half (beliefs).  This test exercises that path with two
+    memories that would otherwise appear as genuine orphans.
+
+    Synthetic persona: Jim Boblaw.
+    """
+    # Memory A: has topic tags — not at risk of being orphan; anchors the link.
+    content_a = "Jim Boblaw works on distributed systems reliability at scale"
+    embedding_a = await provider.embed(content_a)
+    memory_a = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content=content_a,
+            topic=["distributed-systems", "reliability"],
+            confidence=0.9,
+        ),
+        embedding=embedding_a,
+    )
+
+    # Memory B: no structural edges — orphan candidate until dream-link is added.
+    content_b = "Jim Boblaw's systems work prioritises fault tolerance over throughput"
+    embedding_b = await provider.embed(content_b)
+    memory_b = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content=content_b,
+            topic=[],  # Empty — orphan without the dream-link
+            confidence=0.8,
+        ),
+        embedding=embedding_b,
+    )
+
+    # Confirm B is initially orphan (no dream-link yet — genuine similarity-only).
+    orphans_before = await list_orphan_memories(pool)
+    orphan_ids_before = {o["memory_id"] for o in orphans_before}
+    assert memory_b.id in orphan_ids_before, (
+        f"Memory B {memory_b.id} should be orphan before dream-link is added"
+    )
+
+    # Add the dream-link: a memory_relationships row from A → B.
+    await add_relationship(pool, memory_a.id, memory_b.id, RelationType.related_to)
+
+    # Provenance-first exclusion (b): dream-link present → B is NOT orphan.
+    orphans_after = await list_orphan_memories(pool)
+    orphan_ids_after = {o["memory_id"] for o in orphans_after}
+    assert memory_b.id not in orphan_ids_after, (
+        f"Memory B {memory_b.id} with dream-link must NOT be flagged as orphan"
+    )
+    assert memory_a.id not in orphan_ids_after, (
+        f"Memory A {memory_a.id} with topic tags must NOT be flagged as orphan"
+    )
+
+
+async def test_genuine_similarity_only_is_orphan(pool, provider):
+    """A memory with no structural edges AND no merge/link explanation IS an orphan.
+
+    This is the positive case: similarity-only reachable memories with no
+    pending_review status and no memory_relationships row are genuine defects.
+
+    Synthetic persona: Jim Boblaw.
+    """
+    content = "Jim Boblaw's general preference for minimalist tooling"
+    embedding = await provider.embed(content)
+
+    memory = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.preference,
+            content=content,
+            topic=[],          # No topic
+            confidence=0.75,
+        ),
+        embedding=embedding,
+    )
+    memory_id = memory.id
+
+    # No pending_review, no memory_relationships → genuine orphan.
+    orphans = await list_orphan_memories(pool)
+    orphan_ids = {o["memory_id"] for o in orphans}
+    assert memory_id in orphan_ids, (
+        f"Genuine similarity-only memory {memory_id} must be flagged as orphan"
     )

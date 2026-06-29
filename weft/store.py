@@ -273,6 +273,7 @@ async def search_by_vector(
     sources: list[str] | None = None,
     include_agent_provenance: bool = True,
     include_pending_review: bool = False,
+    facet_boost_project_id: str | None = None,
 ) -> list[MemoryRecall]:
     """Search memories by vector similarity (cosine distance).
 
@@ -293,6 +294,13 @@ async def search_by_vector(
     filters. See ``list_memories`` for semantics. Both filters are pushed
     into the WHERE clause so the ANN top-K stays meaningful when agent /
     quarantined rows dominate the pool.
+
+    facet_boost_project_id: When set, the hard project_id wall is dropped and
+    a post-query ranking boost (_FACET_BOOST) is applied to memories whose
+    project_facets contains this project.  Use for associative/belief recall
+    where a belief shared across projects should surface in all of them.
+    The catalog path (retrieval_mode='code') must NOT use this parameter —
+    pass project_id for the hard wall instead.
     """
     conditions = ["embedding IS NOT NULL"]
     params: list = []
@@ -326,7 +334,10 @@ async def search_by_vector(
         params.append(topic)
         idx += 1
 
-    if project_id is not None:
+    # Facet-boost path: no project wall — beliefs surface across projects,
+    # ranked up when project_facets contains the caller's project.
+    # Catalog path: project_id wall is kept for hard scoping.
+    if facet_boost_project_id is None and project_id is not None:
         conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
         idx += 1
@@ -363,6 +374,10 @@ async def search_by_vector(
 
     where = "WHERE " + " AND ".join(conditions)
 
+    # Over-fetch when facet boost is active so the re-rank has enough
+    # candidates to surface boosted items that the raw distance order missed.
+    fetch_limit = limit * 2 if facet_boost_project_id is not None else limit
+
     query = f"""
         SELECT *,
                1 - (embedding <=> $1::vector) AS similarity
@@ -371,14 +386,23 @@ async def search_by_vector(
         ORDER BY embedding <=> $1::vector, id
         LIMIT ${idx}
     """
-    params.append(limit)
+    params.append(fetch_limit)
 
     rows = await get_db(pool).fetch(query, *params)
 
     results = []
     for row in rows:
         memory = _row_to_memory(row)
-        results.append(MemoryRecall(memory=memory, similarity=float(row["similarity"])))
+        sim = float(row["similarity"])
+        if facet_boost_project_id is not None and facet_boost_project_id in memory.project_facets:
+            sim = sim * _FACET_BOOST
+        results.append(MemoryRecall(memory=memory, similarity=sim))
+
+    if facet_boost_project_id is not None:
+        # Re-rank by boosted similarity descending; tie-break by id for determinism.
+        results.sort(key=lambda r: (-r.similarity, r.memory.id))
+        results = results[:limit]
+
     return results
 
 
@@ -397,6 +421,7 @@ async def search_by_keyword(
     sources: list[str] | None = None,
     include_agent_provenance: bool = True,
     include_pending_review: bool = False,
+    facet_boost_project_id: str | None = None,
 ) -> list[MemoryRecall]:
     """Search memories by full-text keyword match (BM25 ranking via ts_rank).
 
@@ -407,6 +432,10 @@ async def search_by_keyword(
     memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
 
     include_agent_provenance / include_pending_review: see ``list_memories``.
+
+    facet_boost_project_id: When set, drops the project_id wall and boosts
+    memories whose project_facets contains this project.  Mirror of the
+    same parameter on search_by_vector.
     """
     conditions = ["search_tsv IS NOT NULL"]
     params: list = []
@@ -437,7 +466,9 @@ async def search_by_keyword(
         params.append(topic)
         idx += 1
 
-    if project_id is not None:
+    # Facet-boost path: no project wall — beliefs surface across projects.
+    # Catalog path: keep the hard wall.
+    if facet_boost_project_id is None and project_id is not None:
         conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
         params.append(project_id)
         idx += 1
@@ -474,6 +505,9 @@ async def search_by_keyword(
 
     where = "WHERE " + " AND ".join(conditions)
 
+    # Over-fetch when facet boost is active so the re-rank has candidates.
+    fetch_limit = limit * 2 if facet_boost_project_id is not None else limit
+
     sql = f"""
         SELECT *,
                ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
@@ -482,7 +516,7 @@ async def search_by_keyword(
         ORDER BY rank DESC
         LIMIT ${idx}
     """
-    params.append(limit)
+    params.append(fetch_limit)
 
     rows = await get_db(pool).fetch(sql, *params)
 
@@ -493,7 +527,14 @@ async def search_by_keyword(
         # for compatibility with MemoryRecall.similarity
         raw_rank = float(row["rank"])
         similarity = min(1.0, raw_rank)
+        if facet_boost_project_id is not None and facet_boost_project_id in memory.project_facets:
+            similarity = similarity * _FACET_BOOST
         results.append(MemoryRecall(memory=memory, similarity=similarity))
+
+    if facet_boost_project_id is not None:
+        results.sort(key=lambda r: (-r.similarity, r.memory.id))
+        results = results[:limit]
+
     return results
 
 
@@ -520,6 +561,7 @@ async def search_hybrid(
     sources: list[str] | None = None,
     include_agent_provenance: bool = True,
     include_pending_review: bool = False,
+    facet_boost_project_id: str | None = None,
 ) -> list[MemoryRecall]:
     """Hybrid search combining vector similarity and BM25 keyword matching.
 
@@ -532,6 +574,9 @@ async def search_hybrid(
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
     memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
+
+    facet_boost_project_id: Forwarded to both sub-searches.  See
+    search_by_vector for semantics.
     """
     # Fetch broader candidate sets from both methods, then fuse
     candidate_limit = limit * 3  # over-fetch to ensure good fusion
@@ -551,6 +596,7 @@ async def search_hybrid(
         sources=sources,
         include_agent_provenance=include_agent_provenance,
         include_pending_review=include_pending_review,
+        facet_boost_project_id=facet_boost_project_id,
     )
 
     keyword_results = await search_by_keyword(
@@ -567,6 +613,7 @@ async def search_hybrid(
         sources=sources,
         include_agent_provenance=include_agent_provenance,
         include_pending_review=include_pending_review,
+        facet_boost_project_id=facet_boost_project_id,
     )
 
     # Build rank maps (1-indexed)
@@ -613,6 +660,12 @@ async def search_hybrid(
 
 
 _CROSS_PROJECT_PENALTY = 0.8
+
+# Facet-boost: ranking multiplier applied to beliefs whose project_facets
+# contains the current project.  A 15% lift is enough to pull a same-project
+# belief above a slightly-lower-similarity cross-project belief without
+# drowning out clearly-more-relevant cross-project hits.
+_FACET_BOOST = 1.15
 
 
 async def search_cross_project(
@@ -1621,4 +1674,5 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         review_after=row["review_after"] if row.get("review_after") is not None else None,
         write_provenance=row["write_provenance"] if row.get("write_provenance") is not None else "supervisor",
         review_status=row["review_status"] if row.get("review_status") is not None else "active",
+        project_facets=list(row["project_facets"]) if row.get("project_facets") else [],
     )
