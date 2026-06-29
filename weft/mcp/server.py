@@ -36,6 +36,7 @@ from weft.mcp.oauth_metadata import handle_authorization_server_metadata
 from weft.mcp.slack_commands import handle_slash_checkin
 from weft.cost_enforcement import cost_enforcement_loop
 from weft.scheduler import (
+    canary_audit_loop,
     daily_brief_loop,
     discord_bot_loop,
     loom_awareness_loop,
@@ -529,6 +530,9 @@ async def lifespan(server: FastMCP):
     ctx._reask_feedback_task = asyncio.create_task(
         reask_feedback_loop(pool)
     )
+    ctx._canary_audit_task = asyncio.create_task(
+        canary_audit_loop(pool, embedding)
+    )
     ctx._quarantine_review_task = None
     if config.quarantine_review.enabled:
         ctx._quarantine_review_task = asyncio.create_task(
@@ -561,7 +565,7 @@ async def lifespan(server: FastMCP):
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._discord_bot_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._reask_feedback_task, ctx._quarantine_review_task, ctx._cost_enforcement_task):
+        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._discord_bot_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._reask_feedback_task, ctx._canary_audit_task, ctx._quarantine_review_task, ctx._cost_enforcement_task):
             if task is not None:
                 task.cancel()
                 try:
