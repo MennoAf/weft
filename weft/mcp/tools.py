@@ -301,6 +301,7 @@ async def weft_remember(
             embedding_failed = True
         async with acquire(app.pool):
             # Pre-insert dedup check (requires embedding)
+            dedup = None  # track for post-store L2 handling
             if embedding and not pinned:
                 from weft.consolidation import check_dedup_on_store
                 dedup = await check_dedup_on_store(
@@ -310,6 +311,7 @@ async def weft_remember(
                     project_id=resolved_project,
                 )
                 if dedup.is_duplicate:
+                    # facet_appended (cross-project auto-merge) or within-project dedup
                     result = dedup.existing_memory.to_dict()
                     result["dedup"] = dedup.to_dict()
                     if dedup.existing_memory:
@@ -320,6 +322,33 @@ async def weft_remember(
             memory = await store_memory(app.pool, create, embedding=embedding)
             await app.cache.set_memory(memory)
             await app.cache.invalidate_stats()
+
+            # L2 post-store handling ─────────────────────────────────────────
+            # (a) Cross-project merge candidate: route through the quarantine review
+            #     surface (weft_quarantine_review) so a supervisor can approve/reject.
+            if dedup is not None and dedup.action == "merge_candidate":
+                from weft.db.connection import get_db as _get_db
+                await _get_db(app.pool).execute(
+                    "UPDATE memories SET review_status = 'pending_review' WHERE id = $1",
+                    memory.id,
+                )
+                memory = memory.model_copy(update={"review_status": "pending_review"})
+                logger.info(
+                    "weft_remember: merge candidate %s marked pending_review "
+                    "(existing=%s, sim=%.3f)",
+                    memory.id,
+                    dedup.existing_memory.id if dedup.existing_memory else "?",
+                    dedup.similarity,
+                )
+
+            # (b) Initialize project_facets for project-scoped stores so future
+            #     cross-project dedup can find and facet-merge this belief.
+            if resolved_project:
+                from weft.consolidation import init_project_facets
+                await init_project_facets(app.pool, memory.id, resolved_project)
+                memory = memory.model_copy(update={"project_facets": [resolved_project]})
+            # ────────────────────────────────────────────────────────────────
+
             # Canary enrollment: O(1) INSERT, no LLM call (PRD §V5, loom-c27ab1d2).
             # Runs inside the acquire() context so app.user_id GUC is active.
             try:
