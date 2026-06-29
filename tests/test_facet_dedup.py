@@ -20,15 +20,34 @@ import math
 
 import pytest
 
+from weft.config import RetrievalConfig
 from weft.consolidation import (
     _FACET_AUTO_MERGE_THRESHOLD,
     _FACET_CANDIDATE_THRESHOLD,
     check_dedup_on_store,
     init_project_facets,
 )
+from weft.store import _FACET_BOOST
 from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemoryType
 from weft.store import store_memory
+
+
+# ---------------------------------------------------------------------------
+# Config source-of-truth (loom-6947beca): the facet magic numbers live in
+# RetrievalConfig; the module constants derive from its defaults.
+# ---------------------------------------------------------------------------
+
+
+def test_facet_constants_sourced_from_config():
+    cfg = RetrievalConfig()
+    assert _FACET_BOOST == cfg.facet_boost
+    assert _FACET_AUTO_MERGE_THRESHOLD == cfg.facet_auto_merge_threshold
+    assert _FACET_CANDIDATE_THRESHOLD == cfg.facet_candidate_threshold
+    # Defaults must match the historical literals so behavior is unchanged.
+    assert cfg.facet_boost == 1.15
+    assert cfg.facet_auto_merge_threshold == 0.85
+    assert cfg.facet_candidate_threshold == 0.6
 
 
 # ---------------------------------------------------------------------------

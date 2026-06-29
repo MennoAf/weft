@@ -46,6 +46,9 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "retrieval.similarity_threshold": ("retrieval", "similarity_threshold"),
     "retrieval.context_budget_tokens": ("retrieval", "context_budget_tokens"),
     "retrieval.contradiction_check_on_write": ("retrieval", "contradiction_check_on_write"),
+    "retrieval.facet_boost": ("retrieval", "facet_boost"),
+    "retrieval.facet_auto_merge_threshold": ("retrieval", "facet_auto_merge_threshold"),
+    "retrieval.facet_candidate_threshold": ("retrieval", "facet_candidate_threshold"),
     "decay.enabled": ("decay", "enabled"),
     "decay.half_life_days": ("decay", "half_life_days"),
     "decay.floor_score": ("decay", "floor_score"),
@@ -91,6 +94,12 @@ class RetrievalConfig(BaseModel):
     contradiction_check_on_write: bool = True
     cross_project_search: bool = True
     cross_project_limit: int = 3
+    # Facet-based recall (Memory v2 Phase 1). Single source of truth for the
+    # three facet magic numbers; the module-level constants in store.py /
+    # consolidation.py derive from these defaults so behavior is identical.
+    facet_boost: float = 1.15  # post-query rank multiplier for facet-overlap beliefs
+    facet_auto_merge_threshold: float = 0.85  # cross-project sim>=: append a facet
+    facet_candidate_threshold: float = 0.6  # cross-project sim in [this, auto): review
 
 
 class DecayConfig(BaseModel):
