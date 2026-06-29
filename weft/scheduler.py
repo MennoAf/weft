@@ -878,6 +878,144 @@ async def reask_feedback_loop(
         raise
 
 
+# --- Recall canary audit loop ---
+
+# The canary audit is a *daily* health check, but the loop polls more often so a
+# server restart (Fly bluegreen deploy, machine auto-start) doesn't reset a
+# single long sleep. Each poll asks whether an audit is actually due before
+# running: a bare ``sleep(86400)`` would re-audit on every boot, inflating the
+# per-probe ``audit_count`` / ``miss_count`` counters (which are not yet
+# transactional — see the Phase 0 audit P2s).
+_CANARY_AUDIT_POLL_INTERVAL = 3600   # check hourly whether a daily audit is due
+_CANARY_AUDIT_MIN_AGE_HOURS = 23     # don't re-run within ~a day (restart-safe)
+
+
+async def _canary_audit_due(
+    pool: asyncpg.Pool, user_id: str, *, min_age_hours: float = _CANARY_AUDIT_MIN_AGE_HOURS
+) -> bool:
+    """Return True when the daily canary audit should run for *user_id*.
+
+    Uses ``max(last_audit_at)`` across the user's enabled probes as the
+    "last run" marker so the cadence survives restarts (a sleep-only loop would
+    re-audit on every boot). Returns True when no probe has ever been audited
+    (all ``last_audit_at`` NULL) so the first run after enrollment proceeds, and
+    fail-open True on query error — better to run than to silently never audit.
+
+    The ``current_user_id`` contextvar is bound for the duration so the read
+    runs under this user's RLS context (the scheduler is otherwise
+    unauthenticated; ``get_db`` returns the raw pool with no ``app.user_id``).
+    The explicit ``user_id = $1`` predicate is the belt-and-suspenders tenant
+    boundary regardless.
+    """
+    from datetime import datetime, timezone
+
+    from weft.auth import current_user_id
+    from weft.db.connection import get_db
+
+    token = current_user_id.set(user_id)
+    try:
+        last = await get_db(pool).fetchval(
+            """
+            SELECT max(last_audit_at) FROM recall_canary
+            WHERE enabled = TRUE AND user_id = $1
+            """,
+            user_id,
+        )
+    except Exception:
+        logger.exception("canary_audit.due_check_error")
+        return True
+    finally:
+        current_user_id.reset(token)
+
+    if last is None:
+        return True
+    age_hours = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+    return age_hours >= min_age_hours
+
+
+async def canary_audit_loop(
+    pool: asyncpg.Pool,
+    embedder,
+    *,
+    interval: int = _CANARY_AUDIT_POLL_INTERVAL,
+    min_age_hours: float = _CANARY_AUDIT_MIN_AGE_HOURS,
+) -> None:
+    """Periodic recall-canary audit — the reconciliation meter. Runs until cancelled.
+
+    Wires ``weft.canary.run_canary_audit`` to a daily cadence. Only the
+    high-confidence ``reaREDACTED`` probes run: ``active_probing_enabled``
+    stays at its ``False`` default until the active-probe miss baseline is
+    calibrated (RI-4).
+
+    Background scheduler tasks carry no HTTP middleware, so there is no
+    request-scoped ``app.user_id`` GUC and ``get_db(pool)`` returns the raw
+    pool. ``run_canary_audit``'s own guard therefore *skips* (audit_valid=False)
+    unless an explicit ``user_id`` is supplied. We bind it from
+    ``WEFT_DEFAULT_USER_ID`` — the deployment owner, same pattern as
+    ``slack_sync_loop`` / ``discord_bot_loop`` — and pass it through so probe
+    selection and vector search both scope to that user.
+
+    NOTE (single-user scope): ``run_canary_audit`` selects enabled probes via
+    RLS rather than an explicit ``user_id`` predicate, so a true multi-user
+    deployment would need per-user fan-out here (cf. ``reask_feedback_loop``'s
+    ``get_distinct_reask_user_ids``). Correct for the current single-owner
+    deployment; revisit before multi-tenant.
+    """
+    default_uid = os.environ.get("WEFT_DEFAULT_USER_ID")
+    if not default_uid:
+        logger.warning(
+            "canary_audit.no_default_user — set WEFT_DEFAULT_USER_ID to the "
+            "deployment owner's UUID; canary audit loop disabled"
+        )
+        return
+
+    # Bind identity for any nested write path that routes through acquire().
+    from weft.auth import current_user_id
+
+    current_user_id.set(default_uid)
+
+    logger.info(
+        "canary_audit.started",
+        extra={
+            "interval": interval,
+            "min_age_hours": min_age_hours,
+            "user_id": default_uid,
+        },
+    )
+    try:
+        while True:
+            try:
+                if await _canary_audit_due(pool, default_uid, min_age_hours=min_age_hours):
+                    from weft.canary import run_canary_audit
+
+                    result = await run_canary_audit(pool, embedder, user_id=default_uid)
+                    if result.get("audit_valid"):
+                        logger.info(
+                            "canary_audit.cycle",
+                            extra={
+                                "probes_checked": result.get("probes_checked"),
+                                "misses": result.get("misses"),
+                                "miss_rate": result.get("miss_rate"),
+                                "bootstrap_synced": result.get("bootstrap_synced"),
+                            },
+                        )
+                    else:
+                        logger.info(
+                            "canary_audit.skipped",
+                            extra={
+                                "status": result.get("status"),
+                                "bootstrap_synced": result.get("bootstrap_synced"),
+                            },
+                        )
+            except Exception:
+                logger.exception("canary_audit.loop_error")
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        logger.info("canary_audit.stopped")
+        raise
+
+
 async def _post_brief_to_slack(channel: str, brief_result) -> None:
     """Post the assembled brief to Slack via Block Kit."""
     import ssl
