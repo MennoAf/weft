@@ -747,7 +747,8 @@ async def check_dedup_on_store(
             # Auto-merge: append current project facet + strengthen confidence
             if current_project is not None:
                 db = get_db(pool)
-                await db.execute(
+                _facet = current_project.lower()
+                update_status = await db.execute(
                     """
                     UPDATE memories
                     SET project_facets = CASE
@@ -758,11 +759,22 @@ async def check_dedup_on_store(
                         confidence = GREATEST(confidence, $2),
                         updated_at = now()
                     WHERE id = $3
+                      AND (user_id IS NULL OR user_id = current_setting('app.user_id', true))
                     """,
-                    current_project,
+                    _facet,
                     new_confidence,
                     existing.id,
                 )
+                # asyncpg returns 'UPDATE N' — if 0 rows matched, row belongs to
+                # another user; fall back so the new memory stores normally.
+                updated_count = int(update_status.split()[-1]) if update_status else 0
+                if updated_count == 0:
+                    logger.info(
+                        "check_dedup: cross-project facet-append skipped for %s "
+                        "(0 rows matched — possible user_id mismatch)",
+                        existing.id,
+                    )
+                    return DedupResult(is_duplicate=False)
             logger.info(
                 "check_dedup: cross-project facet-appended %s (project=%s, sim=%.3f)",
                 existing.id, current_project, sim,
@@ -854,7 +866,7 @@ async def init_project_facets(
         SET project_facets = ARRAY[$1::text]
         WHERE id = $2 AND project_facets = '{}'::text[]
         """,
-        project_id,
+        project_id.lower(),
         memory_id,
     )
 
