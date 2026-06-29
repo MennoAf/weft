@@ -94,7 +94,8 @@ async def test_get_relationships_with_filter(pool):
 
 
 async def test_all_relation_types(pool):
-    """Verify all four relation types work: supersedes, related_to, contradicts, derived_from."""
+    """Verify every relation type works: supersedes, related_to, contradicts,
+    derived_from, merge_candidate."""
     m1 = await _make_memory(pool, "source memory")
     targets = {}
     for rtype in RelationType:
@@ -103,15 +104,10 @@ async def test_all_relation_types(pool):
         await add_relationship(pool, source_id=m1.id, target_id=t.id, relation=rtype)
 
     rels = await get_relationships(pool, m1.id)
-    assert len(rels) == 4
+    assert len(rels) == len(RelationType)
 
     found_types = {r.relation for r in rels}
-    assert found_types == {
-        RelationType.supersedes,
-        RelationType.related_to,
-        RelationType.contradicts,
-        RelationType.derived_from,
-    }
+    assert found_types == set(RelationType)
 
 
 async def test_get_relationships_as_target(pool):
