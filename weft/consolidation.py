@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from weft.auth import current_user_id
+from weft.db.connection import get_db
 from weft.models import (
     ContradictionWarning,
     Memory,
@@ -630,6 +631,26 @@ _MIN_CONTENT_LENGTH_FOR_CONTRADICTION = 50
 
 _DEFAULT_DEDUP_THRESHOLD = 0.92
 
+# Cross-project two-tier thresholds — mirror ingest_pipeline.resolve_entities.
+# Docstring there: "cosine ≥0.85: auto-merge/link, 0.6 ≤ cosine <0.85: candidate".
+# Do NOT change these independently; they share semantics with entity resolution.
+_FACET_AUTO_MERGE_THRESHOLD = 0.85   # cross-project auto-merge: append facet
+_FACET_CANDIDATE_THRESHOLD = 0.6     # cross-project mid-tier: record for review
+
+
+def _is_cross_project(
+    existing_project_id: str | None,
+    current_project: str | None,
+) -> bool:
+    """Return True only when both sides have an explicit project and they differ.
+
+    Both-global (None/None), same-project, and mixed-global cases are treated as
+    same-scope so the existing revise/deduplicate behavior is preserved.
+    """
+    if existing_project_id is None or current_project is None:
+        return False
+    return existing_project_id != current_project
+
 
 @dataclass
 class DedupResult:
@@ -638,7 +659,7 @@ class DedupResult:
     is_duplicate: bool
     existing_memory: Memory | None = None
     similarity: float = 0.0
-    action: str = "stored"  # "stored" | "revised" | "deduplicated"
+    action: str = "stored"  # "stored" | "revised" | "deduplicated" | "facet_appended" | "merge_candidate"
 
     def to_dict(self) -> dict:
         d: dict = {"action": self.action, "is_duplicate": self.is_duplicate}
@@ -660,35 +681,114 @@ async def check_dedup_on_store(
 ) -> DedupResult:
     """Check for near-duplicate active memories before storing.
 
-    Called from weft_remember BEFORE store_memory(). If a near-duplicate is
-    found (similarity >= threshold):
-    - If new content is substantively different (longer or meaningfully updated),
-      revise the existing memory in-place with the new content and return it.
-    - If effectively identical, return the existing memory with action='deduplicated'.
+    L2 cross-project two-tier logic (loom-a7664166):
+    Searches GLOBALLY (no project_id scope) so cross-project duplicates are found.
 
-    Pinned memories are never revised — new content is stored separately.
+    For cross-project matches (existing.project_id != current project, both non-None):
+      * sim >= _FACET_AUTO_MERGE_THRESHOLD (0.85) AND not pinned AND not contradictory:
+        → append current project to existing belief's project_facets (idempotent),
+          strengthen confidence; NO new row.  Action: "facet_appended"
+      * _FACET_CANDIDATE_THRESHOLD (0.6) <= sim < 0.85:
+        → signal to caller to store as pending_review merge candidate.
+          Action: "merge_candidate"
+
+    For same-scope matches (same project, both global, or either side is None):
+      → backward-compatible revise / deduplicate logic at `threshold`.
+
+    Contradiction gate (check_contradictions_on_store) still applies — a contradictory
+    value for the same subject blocks auto-merge and falls through to new-row insert.
+
+    All memory types reaching this function via weft_remember are "associative types"
+    (belief/preference/fact-style); the ingest pipeline writes via store_memory directly
+    and never calls this function.
+
+    Pinned memories are never revised or auto-merged — new content stores separately.
     Returns DedupResult with is_duplicate=False if no match found.
     """
     if len(content) < _MIN_CONTENT_LENGTH_FOR_CONTRADICTION:
         return DedupResult(is_duplicate=False)
 
+    # Effective current project (for cross-project comparison)
+    current_project: str | None = None if project_id is _UNSET else project_id  # type: ignore[assignment]
+
+    # Search GLOBALLY — project_id intentionally excluded — so cross-project
+    # near-duplicates are visible.  Use the lowest tier as the search floor.
     search_kwargs: dict = {}
     if memory_type is not None:
         search_kwargs["memory_type"] = memory_type
-    if project_id is not _UNSET:
-        search_kwargs["project_id"] = project_id
 
     similar = await search_by_vector(
-        pool, embedding, limit=5, threshold=threshold, status=MemoryStatus.active,
-        **search_kwargs,
+        pool, embedding, limit=5, threshold=_FACET_CANDIDATE_THRESHOLD,
+        status=MemoryStatus.active, **search_kwargs,
     )
 
     if not similar:
         return DedupResult(is_duplicate=False)
 
-    # Take the highest-similarity match
     best = similar[0]
     existing = best.memory
+    sim = best.similarity
+
+    if _is_cross_project(existing.project_id, current_project):
+        # ── Cross-project two-tier resolution ─────────────────────────────────
+        if sim >= _FACET_AUTO_MERGE_THRESHOLD:
+            # Safety gate: never auto-merge into a pinned memory
+            if existing.pinned:
+                return DedupResult(is_duplicate=False)
+
+            # Contradiction gate: conflicting values for the same subject must NOT merge
+            if _content_conflicts(content, existing.content):
+                logger.info(
+                    "check_dedup: cross-project contradiction gate blocked auto-merge "
+                    "of %s (sim=%.3f)", existing.id, sim,
+                )
+                return DedupResult(is_duplicate=False)
+
+            # Auto-merge: append current project facet + strengthen confidence
+            if current_project is not None:
+                db = get_db(pool)
+                await db.execute(
+                    """
+                    UPDATE memories
+                    SET project_facets = CASE
+                            WHEN NOT ($1 = ANY(project_facets))
+                                THEN array_append(project_facets, $1)
+                            ELSE project_facets
+                        END,
+                        confidence = GREATEST(confidence, $2),
+                        updated_at = now()
+                    WHERE id = $3
+                    """,
+                    current_project,
+                    new_confidence,
+                    existing.id,
+                )
+            logger.info(
+                "check_dedup: cross-project facet-appended %s (project=%s, sim=%.3f)",
+                existing.id, current_project, sim,
+            )
+            return DedupResult(
+                is_duplicate=True,
+                existing_memory=existing,
+                similarity=sim,
+                action="facet_appended",
+            )
+
+        # Mid-tier: signal caller to store the new memory with pending_review
+        logger.info(
+            "check_dedup: cross-project merge candidate %s (sim=%.3f)",
+            existing.id, sim,
+        )
+        return DedupResult(
+            is_duplicate=False,
+            existing_memory=existing,
+            similarity=sim,
+            action="merge_candidate",
+        )
+
+    # ── Same-scope: backward-compatible revise / deduplicate ──────────────────
+    if sim < threshold:
+        return DedupResult(is_duplicate=False)
 
     # Never revise pinned memories — let the new one store separately
     if existing.pinned:
@@ -712,26 +812,51 @@ async def check_dedup_on_store(
         )
         logger.info(
             "Pre-insert dedup: revised %s (sim=%.3f, new content %d chars)",
-            existing.id, best.similarity, len(content),
+            existing.id, sim, len(content),
         )
         return DedupResult(
             is_duplicate=True,
             existing_memory=updated or existing,
-            similarity=best.similarity,
+            similarity=sim,
             action="revised",
         )
     else:
-        # Effectively identical — bump access and return existing
+        # Effectively identical — return existing without insert
         logger.info(
             "Pre-insert dedup: deduplicated against %s (sim=%.3f)",
-            existing.id, best.similarity,
+            existing.id, sim,
         )
         return DedupResult(
             is_duplicate=True,
             existing_memory=existing,
-            similarity=best.similarity,
+            similarity=sim,
             action="deduplicated",
         )
+
+
+async def init_project_facets(
+    pool: asyncpg.Pool,
+    memory_id: str,
+    project_id: str,
+) -> None:
+    """Initialize project_facets for a newly stored memory.
+
+    Sets project_facets = ARRAY[project_id] when the column is still empty
+    (its DB default is '{}').  Idempotent — no-op if already populated.
+
+    Called from weft_remember after store_memory() for every project-scoped write
+    so that L2 cross-project dedup can later find and facet-merge the belief.
+    """
+    db = get_db(pool)
+    await db.execute(
+        """
+        UPDATE memories
+        SET project_facets = ARRAY[$1::text]
+        WHERE id = $2 AND project_facets = '{}'::text[]
+        """,
+        project_id,
+        memory_id,
+    )
 
 
 async def check_contradictions_on_store(
