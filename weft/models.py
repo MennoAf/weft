@@ -99,6 +99,7 @@ class Memory(BaseModel):
     review_after: datetime | None = None
     write_provenance: str = "supervisor"
     review_status: str = "active"
+    project_facets: list[str] = Field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""
@@ -133,6 +134,7 @@ class MemoryCreate(BaseModel):
     workspace_id: str | None = None
     pinned: bool = False
     review_after: datetime | None = None
+    project_facets: list[str] = Field(default_factory=list)
 
 
 class Workspace(BaseModel):
