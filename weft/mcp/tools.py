@@ -782,6 +782,23 @@ async def weft_recall(
         if mode in ("semantic", "hybrid"):
             embedding = await app.embedding.embed(query)
 
+        # Facet-boost recall (associative / face path):
+        # Drop the hard project wall and instead rank by facet overlap.
+        # The single query surfaces beliefs across all their registered
+        # projects, with a _FACET_BOOST multiplier when the current project
+        # is in project_facets.  The separate cross-project second-pass is
+        # retired for this path — a faceted belief surfaces through the
+        # primary ranked results, not a penalised second list.
+        #
+        # Catalog path (retrieval_mode='code'): the hard project_id wall is
+        # preserved unchanged — ingest scoping must not leak across repos.
+        facet_boost_project_id: str | None = None
+        if retrieval_mode == "face":
+            facet_boost_project_id = await _resolve_project_id(ctx, project_id)
+
+        # When facet boost is active, suppress the project wall in search calls.
+        _search_project_id = None if retrieval_mode == "face" else project_id
+
         async with acquire(app.pool):
             if mode == "keyword":
                 results = await search_by_keyword(
@@ -791,11 +808,12 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=_search_project_id,
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
                     include_agent_provenance=agent_provenance_ok,
+                    facet_boost_project_id=facet_boost_project_id,
                 )
             elif mode == "hybrid":
                 results = await search_hybrid(
@@ -807,11 +825,12 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=_search_project_id,
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
                     include_agent_provenance=agent_provenance_ok,
+                    facet_boost_project_id=facet_boost_project_id,
                 )
             else:  # semantic
                 results = await search_by_vector(
@@ -822,11 +841,12 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=_search_project_id,
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
                     include_agent_provenance=agent_provenance_ok,
+                    facet_boost_project_id=facet_boost_project_id,
                 )
 
             # Touch accessed memories and enrich with entities. When the
@@ -872,9 +892,10 @@ async def weft_recall(
                 response["total_matches"] = total_matches
                 response["showing"] = f"Showing {len(results)} of {total_matches} matches"
 
-            # Cross-project search: surface relevant memories from other projects
-            # (only when we have an embedding — semantic or hybrid mode)
-            if embedding is not None:
+            # Cross-project search: secondary pass for non-face modes only.
+            # Face mode uses facet-boost in the primary query (above), so
+            # cross-project beliefs already surface there — no separate pass.
+            if embedding is not None and retrieval_mode != "face":
                 resolved_project = await _resolve_project_id(ctx, project_id)
                 if resolved_project is not None:
                     try:
