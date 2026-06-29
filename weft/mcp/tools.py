@@ -239,6 +239,7 @@ async def weft_remember(
     check_contradictions: bool = True,
     pinned: bool = False,
     review_after: str | None = None,
+    project_facets: list[str] | None = None,
 ) -> dict:
     """Store a new memory with type, topics, content, confidence, and source.
     If project_id is omitted, auto-detects from the client's working directory.
@@ -249,7 +250,13 @@ async def weft_remember(
 
     review_after: optional lifecycle date. Accepts ISO timestamp or relative
     durations like '30d', '2w', '3m'. Memories past their review_after date
-    are flagged in the primer so the agent can confirm, revise, or archive them."""
+    are flagged in the primer so the agent can confirm, revise, or archive them.
+
+    project_facets: optional list of project names to pre-seed on the new memory's
+    project_facets column. Values are normalized to lowercase. When omitted, the
+    column is initialized to [detected project] via init_project_facets (current
+    default behaviour). Explicit facets let a caller pre-declare cross-project
+    membership (e.g. a belief known to span 'weft' and 'loom') on initial store."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_remember start [%s]", cid)
@@ -343,7 +350,18 @@ async def weft_remember(
 
             # (b) Initialize project_facets for project-scoped stores so future
             #     cross-project dedup can find and facet-merge this belief.
-            if resolved_project:
+            #     Explicit project_facets param (normalized to lowercase) seeds
+            #     directly; omitted falls back to auto-detection from project_id.
+            if project_facets is not None:
+                normalized_facets = [f.lower() for f in _coerce_list(project_facets) or []]
+                from weft.db.connection import get_db as _get_db
+                await _get_db(app.pool).execute(
+                    "UPDATE memories SET project_facets = $1::text[] WHERE id = $2",
+                    normalized_facets,
+                    memory.id,
+                )
+                memory = memory.model_copy(update={"project_facets": normalized_facets})
+            elif resolved_project:
                 from weft.consolidation import init_project_facets
                 await init_project_facets(app.pool, memory.id, resolved_project)
                 memory = memory.model_copy(update={"project_facets": [resolved_project]})
