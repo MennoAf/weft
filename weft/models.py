@@ -64,6 +64,10 @@ class RelationType(str, Enum):
     related_to = "related_to"
     contradicts = "contradicts"
     derived_from = "derived_from"
+    # Links a cross-project merge candidate (review_status='pending_review',
+    # 0.6<=sim<0.85) to the existing belief it would merge into. Edge points
+    # candidate(source) -> existing(target). Read by the quarantine merge action.
+    merge_candidate = "merge_candidate"
 
 
 def _weft_id() -> str:
