@@ -239,6 +239,7 @@ async def weft_remember(
     check_contradictions: bool = True,
     pinned: bool = False,
     review_after: str | None = None,
+    project_facets: list[str] | None = None,
 ) -> dict:
     """Store a new memory with type, topics, content, confidence, and source.
     If project_id is omitted, auto-detects from the client's working directory.
@@ -249,7 +250,13 @@ async def weft_remember(
 
     review_after: optional lifecycle date. Accepts ISO timestamp or relative
     durations like '30d', '2w', '3m'. Memories past their review_after date
-    are flagged in the primer so the agent can confirm, revise, or archive them."""
+    are flagged in the primer so the agent can confirm, revise, or archive them.
+
+    project_facets: optional list of project names to pre-seed on the new memory's
+    project_facets column. Values are normalized to lowercase. When omitted, the
+    column is initialized to [detected project] via init_project_facets (current
+    default behaviour). Explicit facets let a caller pre-declare cross-project
+    membership (e.g. a belief known to span 'weft' and 'loom') on initial store."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_remember start [%s]", cid)
@@ -301,6 +308,7 @@ async def weft_remember(
             embedding_failed = True
         async with acquire(app.pool):
             # Pre-insert dedup check (requires embedding)
+            dedup = None  # track for post-store L2 handling
             if embedding and not pinned:
                 from weft.consolidation import check_dedup_on_store
                 dedup = await check_dedup_on_store(
@@ -310,6 +318,7 @@ async def weft_remember(
                     project_id=resolved_project,
                 )
                 if dedup.is_duplicate:
+                    # facet_appended (cross-project auto-merge) or within-project dedup
                     result = dedup.existing_memory.to_dict()
                     result["dedup"] = dedup.to_dict()
                     if dedup.existing_memory:
@@ -320,6 +329,50 @@ async def weft_remember(
             memory = await store_memory(app.pool, create, embedding=embedding)
             await app.cache.set_memory(memory)
             await app.cache.invalidate_stats()
+
+            # L2 post-store handling ─────────────────────────────────────────
+            # (a) Cross-project merge candidate: route through the quarantine review
+            #     surface (weft_quarantine_review) so a supervisor can approve/reject.
+            if dedup is not None and dedup.action == "merge_candidate":
+                from weft.db.connection import get_db as _get_db
+                await _get_db(app.pool).execute(
+                    "UPDATE memories SET review_status = 'pending_review' WHERE id = $1",
+                    memory.id,
+                )
+                memory = memory.model_copy(update={"review_status": "pending_review"})
+                logger.info(
+                    "weft_remember: merge candidate %s marked pending_review "
+                    "(existing=%s, sim=%.3f)",
+                    memory.id,
+                    dedup.existing_memory.id if dedup.existing_memory else "?",
+                    dedup.similarity,
+                )
+
+            # (b) Initialize project_facets for project-scoped stores so future
+            #     cross-project dedup can find and facet-merge this belief.
+            #     Explicit project_facets param (normalized to lowercase) seeds
+            #     directly; omitted falls back to auto-detection from project_id.
+            if project_facets is not None:
+                normalized_facets = [f.lower() for f in _coerce_list(project_facets) or []]
+                # UNION: always include the resolved/detected current project (lowercased)
+                # so the belief is still boosted in the project it was stored under.
+                if resolved_project:
+                    rp = resolved_project.lower()
+                    if rp not in normalized_facets:
+                        normalized_facets = sorted(set(normalized_facets) | {rp})
+                from weft.db.connection import get_db as _get_db
+                await _get_db(app.pool).execute(
+                    "UPDATE memories SET project_facets = $1::text[] WHERE id = $2",
+                    normalized_facets,
+                    memory.id,
+                )
+                memory = memory.model_copy(update={"project_facets": normalized_facets})
+            elif resolved_project:
+                from weft.consolidation import init_project_facets
+                await init_project_facets(app.pool, memory.id, resolved_project)
+                memory = memory.model_copy(update={"project_facets": [resolved_project.lower()]})
+            # ────────────────────────────────────────────────────────────────
+
             # Canary enrollment: O(1) INSERT, no LLM call (PRD §V5, loom-c27ab1d2).
             # Runs inside the acquire() context so app.user_id GUC is active.
             try:
@@ -753,6 +806,24 @@ async def weft_recall(
         if mode in ("semantic", "hybrid"):
             embedding = await app.embedding.embed(query)
 
+        # Facet-boost recall (associative / face path):
+        # Drop the hard project wall and instead rank by facet overlap.
+        # The single query surfaces beliefs across all their registered
+        # projects, with a _FACET_BOOST multiplier when the current project
+        # is in project_facets.  The separate cross-project second-pass is
+        # retired for this path — a faceted belief surfaces through the
+        # primary ranked results, not a penalised second list.
+        #
+        # Catalog path (retrieval_mode='code'): the hard project_id wall is
+        # preserved unchanged — ingest scoping must not leak across repos.
+        facet_boost_project_id: str | None = None
+        if retrieval_mode == "face":
+            _raw_boost_id = await _resolve_project_id(ctx, project_id)
+            facet_boost_project_id = _raw_boost_id.lower() if _raw_boost_id else None
+
+        # When facet boost is active, suppress the project wall in search calls.
+        _search_project_id = None if retrieval_mode == "face" else project_id
+
         async with acquire(app.pool):
             if mode == "keyword":
                 results = await search_by_keyword(
@@ -762,11 +833,12 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=_search_project_id,
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
                     include_agent_provenance=agent_provenance_ok,
+                    facet_boost_project_id=facet_boost_project_id,
                 )
             elif mode == "hybrid":
                 results = await search_hybrid(
@@ -778,11 +850,12 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=_search_project_id,
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
                     include_agent_provenance=agent_provenance_ok,
+                    facet_boost_project_id=facet_boost_project_id,
                 )
             else:  # semantic
                 results = await search_by_vector(
@@ -793,11 +866,12 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=_search_project_id,
                     agent_id=agent_id,
                     sources=sources,
                     user_id=user_id,
                     include_agent_provenance=agent_provenance_ok,
+                    facet_boost_project_id=facet_boost_project_id,
                 )
 
             # Touch accessed memories and enrich with entities. When the
@@ -843,9 +917,10 @@ async def weft_recall(
                 response["total_matches"] = total_matches
                 response["showing"] = f"Showing {len(results)} of {total_matches} matches"
 
-            # Cross-project search: surface relevant memories from other projects
-            # (only when we have an embedding — semantic or hybrid mode)
-            if embedding is not None:
+            # Cross-project search: secondary pass for non-face modes only.
+            # Face mode uses facet-boost in the primary query (above), so
+            # cross-project beliefs already surface there — no separate pass.
+            if embedding is not None and retrieval_mode != "face":
                 resolved_project = await _resolve_project_id(ctx, project_id)
                 if resolved_project is not None:
                     try:
