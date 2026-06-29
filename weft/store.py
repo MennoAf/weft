@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import asyncpg
@@ -407,6 +408,37 @@ async def search_by_vector(
     return results
 
 
+_TSQUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def build_or_tsquery(query: str) -> str | None:
+    """Build a sanitized disjunctive tsquery string from raw query text.
+
+    Tokenizes to alphanumeric lexemes (splitting on underscores, hyphens,
+    punctuation, and whitespace), lowercases, de-duplicates preserving order,
+    and OR-joins with ``|`` for ``to_tsquery``. Returns ``None`` when no usable
+    lexeme remains, so callers short-circuit to "no keyword matches" instead of
+    emitting a query.
+
+    OR-by-design: ``plainto_tsquery`` ANDs every term, so a multi-term query
+    required one document to contain *every* term — a 7-term query matched 1 row
+    in a 2000+ corpus, leaving the keyword arm of hybrid fusion dead. Disjunctive
+    matching restores recall; ``ts_rank`` ordering preserves precision (more/rarer
+    term overlap ranks higher). Sanitizing to ``[a-z0-9]+`` is also what keeps
+    ``to_tsquery`` from raising on operator/punctuation characters in raw input —
+    never interpolate untokenized text into ``to_tsquery``.
+    """
+    seen: set[str] = set()
+    lexemes: list[str] = []
+    for token in _TSQUERY_TOKEN_RE.findall(query.lower()):
+        if token not in seen:
+            seen.add(token)
+            lexemes.append(token)
+    if not lexemes:
+        return None
+    return " | ".join(lexemes)
+
+
 async def search_by_keyword(
     pool: asyncpg.Pool,
     query: str,
@@ -426,8 +458,9 @@ async def search_by_keyword(
 ) -> list[MemoryRecall]:
     """Search memories by full-text keyword match (BM25 ranking via ts_rank).
 
-    Uses the search_tsv tsvector column with plainto_tsquery for robust
-    keyword matching including stemming and stop-word removal.
+    Uses the search_tsv tsvector column with a sanitized disjunctive
+    ``to_tsquery`` (see ``build_or_tsquery``) for OR-matching keyword recall,
+    ranked by ``ts_rank``. A query with no usable lexeme returns no results.
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
     memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
@@ -438,13 +471,20 @@ async def search_by_keyword(
     memories whose project_facets contains this project.  Mirror of the
     same parameter on search_by_vector.
     """
+    # Sanitized disjunctive tsquery. A query with no usable lexeme (empty,
+    # all-punctuation) short-circuits to no keyword matches — never an emitted
+    # (and potentially raising) to_tsquery call.
+    tsquery_str = build_or_tsquery(query)
+    if tsquery_str is None:
+        return []
+
     conditions = ["search_tsv IS NOT NULL"]
     params: list = []
     idx = 1
 
-    # $1 = tsquery
-    conditions.append(f"search_tsv @@ plainto_tsquery('english', ${idx})")
-    params.append(query)
+    # $1 = tsquery (OR-joined lexemes, passed to to_tsquery)
+    conditions.append(f"search_tsv @@ to_tsquery('english', ${idx})")
+    params.append(tsquery_str)
     idx += 1
 
     if status:
@@ -511,7 +551,7 @@ async def search_by_keyword(
 
     sql = f"""
         SELECT *,
-               ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
+               ts_rank(search_tsv, to_tsquery('english', $1)) AS rank
         FROM memories
         {where}
         ORDER BY rank DESC

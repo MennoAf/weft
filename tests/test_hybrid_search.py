@@ -7,6 +7,7 @@ import pytest
 from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemoryStatus, MemoryType
 from weft.store import (
+    build_or_tsquery,
     search_by_keyword,
     search_by_vector,
     search_hybrid,
@@ -17,6 +18,41 @@ from weft.store import (
 @pytest.fixture
 def provider():
     return get_provider("fastembed")
+
+
+# --- build_or_tsquery: pure-function unit tests (no DB) ---
+
+
+def test_build_or_tsquery_or_joins_lexemes():
+    """Multi-term query becomes an OR-joined tsquery string."""
+    assert build_or_tsquery("loc key catalog") == "loc | key | catalog"
+
+
+def test_build_or_tsquery_splits_underscores_and_hyphens():
+    """Underscores/hyphens are split into separate lexemes (loc_key -> loc, key)."""
+    assert build_or_tsquery("loc_key code-library") == "loc | key | code | library"
+
+
+def test_build_or_tsquery_dedupes_preserving_order():
+    """Repeated lexemes are de-duplicated, first occurrence wins."""
+    assert build_or_tsquery("code code library code") == "code | library"
+
+
+def test_build_or_tsquery_lowercases():
+    assert build_or_tsquery("PostgreSQL MVCC") == "postgresql | mvcc"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "!@#$%^&*()", "& | ! ( ) :", "''\"\""])
+def test_build_or_tsquery_empty_after_sanitization_returns_none(raw):
+    """Empty / all-punctuation input yields None so callers short-circuit."""
+    assert build_or_tsquery(raw) is None
+
+
+def test_build_or_tsquery_strips_operator_chars_no_injection():
+    """Operator/punctuation characters never survive into the tsquery string."""
+    out = build_or_tsquery("foo & bar | baz ! (qux):*")
+    assert out == "foo | bar | baz | qux"
+    assert all(c not in out for c in "&!():*")
 
 
 async def _seed_memories(pool, provider):
@@ -88,6 +124,78 @@ async def test_keyword_search_no_match(pool, provider):
     assert len(results) == 0
 
 
+async def test_keyword_search_is_disjunctive_not_conjunctive(pool, provider):
+    """RC1: a multi-term query matches docs sharing ANY term, not only ALL terms.
+
+    Three docs each hold exactly one distinct nonsense token; a query of all
+    three returns all three. Under the old plainto_tsquery (AND) this returned
+    zero, since no single doc held every term.
+    """
+    tokens = ["wobblefish", "zorptastic", "quibblenork"]
+    for tok in tokens:
+        emb = await provider.embed(tok)
+        await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.fact,
+                content=f"This document is about {tok} and nothing else notable.",
+                topic=["disjunctive-test"],
+                confidence=0.8,
+            ),
+            embedding=emb,
+        )
+    results = await search_by_keyword(pool, "wobblefish zorptastic quibblenork")
+    found = {tok for tok in tokens for r in results if tok in r.memory.content}
+    assert found == set(tokens), f"expected all 3 docs, got tokens {found}"
+
+
+async def test_keyword_search_ranks_more_overlap_higher(pool, provider):
+    """RC1/V2: a doc matching more query terms ranks above one matching fewer."""
+    emb_two = await provider.embed("two-term doc")
+    two = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="alphaword and betaword both appear in this document.",
+            topic=["overlap-test"],
+            confidence=0.8,
+        ),
+        embedding=emb_two,
+    )
+    emb_one = await provider.embed("one-term doc")
+    await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact,
+            content="only alphaword appears in this other document.",
+            topic=["overlap-test"],
+            confidence=0.8,
+        ),
+        embedding=emb_one,
+    )
+    results = await search_by_keyword(pool, "alphaword betaword")
+    assert len(results) == 2
+    assert results[0].memory.id == two.id, "two-term doc should rank first"
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    ["foo & bar", "baz | qux", "alphaword:* !betaword", "a (b) c", "what's this?"],
+)
+async def test_keyword_search_never_raises_on_operator_chars(pool, provider, hostile):
+    """RC1/V5: operator/punctuation input degrades gracefully, never raises."""
+    await _seed_memories(pool, provider)
+    results = await search_by_keyword(pool, hostile)  # must not raise
+    assert isinstance(results, list)
+
+
+async def test_keyword_search_empty_query_returns_empty(pool, provider):
+    """RC1/V5/AC4: all-punctuation query short-circuits to no matches, no raise."""
+    await _seed_memories(pool, provider)
+    assert await search_by_keyword(pool, "!@#$%^&*()") == []
+    assert await search_by_keyword(pool, "   ") == []
+
+
 async def test_keyword_search_filters(pool, provider):
     """Keyword search respects type and topic filters."""
     await _seed_memories(pool, provider)
@@ -112,7 +220,7 @@ async def test_keyword_search_limit(pool, provider):
 
 async def test_keyword_search_exclude_ids(pool, provider):
     """Keyword search excludes specified memory IDs."""
-    stored = await _seed_memories(pool, provider)
+    await _seed_memories(pool, provider)
     # Get all postgres results first
     all_results = await search_by_keyword(pool, "postgres")
     assert len(all_results) > 1
