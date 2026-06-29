@@ -71,6 +71,9 @@ SCOPED_CRUD_TABLES: tuple[str, ...] = (
     # Shuttle observer/synthesis blackboard (v58): same scoped-CRUD + sentinel
     # SELECT shape; landed via the shuttle_claims seam but never classified here.
     "shuttle_claims",
+    # Recall canary (v63, memory-v2 Phase 0): per-user known-answer probes;
+    # full GUC-scoped CRUD + system-sentinel SELECT, same shape as topic_digests.
+    "recall_canary",
 )
 
 # Tables that have a ``user_id`` column but use a service policy by design.

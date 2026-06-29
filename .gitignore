@@ -41,3 +41,6 @@ posts/
 # Antigravity / Gemini CLI local config (symlink into ~/.gemini) — tool artifact.
 .antigravitycli/documents/.DS_Store
 .DS_Store
+
+# Enumeration-eval runtime artifact (CL1 minted cases)
+benchmarks/enumeration_eval/minted_cases.jsonl

@@ -1,0 +1,57 @@
+{
+  "timestamp": 1927908.494767166,
+  "oracle_consistency": 1.0,
+  "candidate_avg_min_recall": 0.8361111111111111,
+  "candidate_avg_median_recall": 0.9722222222222222,
+  "candidate_avg_max_recall": 1.0,
+  "collections": [
+    {
+      "collection": "plants",
+      "topic_tag": "plants",
+      "expected_members": 12,
+      "oracle": {
+        "returned": 12,
+        "recall_at_membership": 1.0
+      },
+      "candidate": {
+        "runs": 5,
+        "min_recall": 0.8333333333333334,
+        "median_recall": 0.9166666666666666,
+        "max_recall": 1.0,
+        "spread": 0.16666666666666663
+      }
+    },
+    {
+      "collection": "medications",
+      "topic_tag": "medications",
+      "expected_members": 8,
+      "oracle": {
+        "returned": 8,
+        "recall_at_membership": 1.0
+      },
+      "candidate": {
+        "runs": 5,
+        "min_recall": 0.875,
+        "median_recall": 1.0,
+        "max_recall": 1.0,
+        "spread": 0.125
+      }
+    },
+    {
+      "collection": "books",
+      "topic_tag": "books",
+      "expected_members": 5,
+      "oracle": {
+        "returned": 5,
+        "recall_at_membership": 1.0
+      },
+      "candidate": {
+        "runs": 5,
+        "min_recall": 0.8,
+        "median_recall": 1.0,
+        "max_recall": 1.0,
+        "spread": 0.19999999999999996
+      }
+    }
+  ]
+}

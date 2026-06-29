@@ -368,7 +368,7 @@ async def search_by_vector(
                1 - (embedding <=> $1::vector) AS similarity
         FROM memories
         {where}
-        ORDER BY embedding <=> $1::vector
+        ORDER BY embedding <=> $1::vector, id
         LIMIT ${idx}
     """
     params.append(limit)
@@ -691,7 +691,7 @@ async def search_cross_project(
                1 - (embedding <=> $1::vector) AS similarity
         FROM memories
         {where}
-        ORDER BY embedding <=> $1::vector
+        ORDER BY embedding <=> $1::vector, id
         LIMIT ${idx}
     """
     params.append(limit)
@@ -1014,7 +1014,12 @@ async def upsert_by_topic(
 
 
 async def delete_memory(pool: asyncpg.Pool, memory_id: str, *, hard: bool = False) -> bool:
-    """Delete a memory. Soft-delete (archive) by default, hard-delete if specified."""
+    """Delete a memory. Soft-delete (archive) by default, hard-delete if specified.
+
+    When the operation succeeds, any associated recall-canary probes are disabled
+    (``enabled = FALSE``) so orphan probes for non-active memories cannot pollute
+    the canary miss-rate counter or grow unbounded.
+    """
     db = get_db(pool)
     if hard:
         result = await db.execute("DELETE FROM memories WHERE id = $1", memory_id)
@@ -1023,7 +1028,14 @@ async def delete_memory(pool: asyncpg.Pool, memory_id: str, *, hard: bool = Fals
             "UPDATE memories SET status = 'archived', updated_at = now() WHERE id = $1",
             memory_id,
         )
-    return result.split()[-1] != "0"
+    deleted = result.split()[-1] != "0"
+    if deleted:
+        await db.execute(
+            "UPDATE recall_canary SET enabled = FALSE WHERE memory_id = $1",
+            memory_id,
+        )
+        logger.debug("delete_memory: disabled canary probes for memory_id=%s", memory_id)
+    return deleted
 
 
 async def touch_memory(
