@@ -354,6 +354,12 @@ async def weft_remember(
             #     directly; omitted falls back to auto-detection from project_id.
             if project_facets is not None:
                 normalized_facets = [f.lower() for f in _coerce_list(project_facets) or []]
+                # UNION: always include the resolved/detected current project (lowercased)
+                # so the belief is still boosted in the project it was stored under.
+                if resolved_project:
+                    rp = resolved_project.lower()
+                    if rp not in normalized_facets:
+                        normalized_facets = sorted(set(normalized_facets) | {rp})
                 from weft.db.connection import get_db as _get_db
                 await _get_db(app.pool).execute(
                     "UPDATE memories SET project_facets = $1::text[] WHERE id = $2",
@@ -364,7 +370,7 @@ async def weft_remember(
             elif resolved_project:
                 from weft.consolidation import init_project_facets
                 await init_project_facets(app.pool, memory.id, resolved_project)
-                memory = memory.model_copy(update={"project_facets": [resolved_project]})
+                memory = memory.model_copy(update={"project_facets": [resolved_project.lower()]})
             # ────────────────────────────────────────────────────────────────
 
             # Canary enrollment: O(1) INSERT, no LLM call (PRD §V5, loom-c27ab1d2).
@@ -812,7 +818,8 @@ async def weft_recall(
         # preserved unchanged — ingest scoping must not leak across repos.
         facet_boost_project_id: str | None = None
         if retrieval_mode == "face":
-            facet_boost_project_id = await _resolve_project_id(ctx, project_id)
+            _raw_boost_id = await _resolve_project_id(ctx, project_id)
+            facet_boost_project_id = _raw_boost_id.lower() if _raw_boost_id else None
 
         # When facet boost is active, suppress the project wall in search calls.
         _search_project_id = None if retrieval_mode == "face" else project_id
