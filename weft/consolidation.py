@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from weft.auth import current_user_id
+from weft.config import RetrievalConfig
 from weft.db.connection import get_db
 from weft.models import (
     ContradictionWarning,
@@ -634,8 +635,10 @@ _DEFAULT_DEDUP_THRESHOLD = 0.92
 # Cross-project two-tier thresholds — mirror ingest_pipeline.resolve_entities.
 # Docstring there: "cosine ≥0.85: auto-merge/link, 0.6 ≤ cosine <0.85: candidate".
 # Do NOT change these independently; they share semantics with entity resolution.
-_FACET_AUTO_MERGE_THRESHOLD = 0.85   # cross-project auto-merge: append facet
-_FACET_CANDIDATE_THRESHOLD = 0.6     # cross-project mid-tier: record for review
+# Sourced from RetrievalConfig (single source of truth); the literal defaults
+# live there. See weft/config RetrievalConfig.facet_{auto_merge,candidate}_threshold.
+_FACET_AUTO_MERGE_THRESHOLD = RetrievalConfig().facet_auto_merge_threshold  # cross-project auto-merge: append facet
+_FACET_CANDIDATE_THRESHOLD = RetrievalConfig().facet_candidate_threshold    # cross-project mid-tier: record for review
 
 
 def _is_cross_project(

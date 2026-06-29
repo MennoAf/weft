@@ -70,6 +70,8 @@ from weft.models import (
 from weft.quarantine import (
     approve_pending as approve_pending_quarantine,
     list_pending as list_pending_quarantine,
+    mark_merge_candidate as mark_merge_candidate_quarantine,
+    merge_pending as merge_pending_quarantine,
     reject_pending as reject_pending_quarantine,
 )
 from weft.tokens import estimate_tokens
@@ -333,11 +335,17 @@ async def weft_remember(
             # L2 post-store handling ─────────────────────────────────────────
             # (a) Cross-project merge candidate: route through the quarantine review
             #     surface (weft_quarantine_review) so a supervisor can approve/reject.
-            if dedup is not None and dedup.action == "merge_candidate":
-                from weft.db.connection import get_db as _get_db
-                await _get_db(app.pool).execute(
-                    "UPDATE memories SET review_status = 'pending_review' WHERE id = $1",
-                    memory.id,
+            if (
+                dedup is not None
+                and dedup.action == "merge_candidate"
+                and dedup.existing_memory is not None
+            ):
+                # Mark pending_review + link candidate -> existing belief so the
+                # quarantine merge action knows what to append the facet to.
+                # Without the edge the candidate sits reviewable-but-orphaned
+                # (loom-c82bd8d8).
+                await mark_merge_candidate_quarantine(
+                    app.pool, memory.id, dedup.existing_memory.id,
                 )
                 memory = memory.model_copy(update={"review_status": "pending_review"})
                 logger.info(
@@ -1003,20 +1011,27 @@ async def weft_forget(
 @mcp.tool()
 async def weft_quarantine_review(
     ctx: Context,
-    action: Literal["list", "approve", "reject"] = "list",
+    action: Literal["list", "approve", "reject", "merge"] = "list",
     memory_id: str | None = None,
     limit: int = 50,
 ) -> dict:
     """Phase 2 / Layer 3 — review agent-provenance writes flagged as
-    instruction-shaped at write-time.
+    instruction-shaped at write-time, plus cross-project merge candidates.
 
     Actions:
     * ``list`` (default): return pending memories with their content,
-      provenance, and origin so the supervisor can decide.
+      provenance, and origin so the supervisor can decide. Rows that are
+      cross-project merge candidates (L2) carry a non-null
+      ``merge_target_id`` — the existing belief they would merge into.
     * ``approve``: re-provenance the row to 'supervisor' and flip
       ``review_status`` back to 'active'. Surfaces normally afterwards.
+      For a merge candidate this is the *keep-separate* outcome (promote
+      it to its own active belief).
     * ``reject``: hard-delete the row. Use when the heuristic correctly
       caught injected / poisoned content.
+    * ``merge``: cross-project merge-candidate only — append the
+      candidate's project facet to its linked target belief and archive
+      the candidate. Errors if the row is not a pending merge candidate.
 
     This tool is supervisor-only at the trust-tier level — calling it
     from agent-mode context defeats the whole layer. The Phase 2 gate
@@ -1055,6 +1070,22 @@ async def weft_quarantine_review(
                 if ok:
                     await app.cache.invalidate_memory(memory_id)
                 return {"memory_id": memory_id, "rejected": ok}
+            if action == "merge":
+                result = await merge_pending_quarantine(app.pool, memory_id)
+                if result is None:
+                    return {
+                        "memory_id": memory_id,
+                        "merged": False,
+                        "error": (
+                            "not a pending cross-project merge candidate "
+                            "(no merge_candidate link)"
+                        ),
+                    }
+                # Invalidate both the archived candidate and the updated target.
+                await app.cache.invalidate_memory(memory_id)
+                await app.cache.invalidate_memory(result["target_id"])
+                await app.cache.invalidate_stats()
+                return {"memory_id": memory_id, "merged": True, **result}
 
         return {"error": f"unknown action: {action}"}
     except _DB_ERRORS as e:

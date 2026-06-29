@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from weft.auth import current_user_id, get_caller_mode
+from weft.config import RetrievalConfig
 from weft.db.connection import acquire, get_db
 from weft.models import (
     Memory,
@@ -665,7 +666,9 @@ _CROSS_PROJECT_PENALTY = 0.8
 # contains the current project.  A 15% lift is enough to pull a same-project
 # belief above a slightly-lower-similarity cross-project belief without
 # drowning out clearly-more-relevant cross-project hits.
-_FACET_BOOST = 1.15
+# Sourced from RetrievalConfig (single source of truth); the literal default
+# lives there. See weft/config RetrievalConfig.facet_boost.
+_FACET_BOOST = RetrievalConfig().facet_boost
 
 
 async def search_cross_project(
