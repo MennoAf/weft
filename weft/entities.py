@@ -24,8 +24,16 @@ async def store_entity(
     pool: asyncpg.Pool,
     create: EntityCreate,
     embedding: list[float] | None = None,
+    status: str = "active",
 ) -> Entity:
-    """Store a new entity. Returns the created Entity."""
+    """Store a new entity. Returns the created Entity.
+
+    Args:
+        pool: Database connection pool.
+        create: Entity creation model.
+        embedding: Optional embedding vector.
+        status: Entity status ('active', 'candidate', etc.). Defaults to 'active'.
+    """
     entity_id = _weft_id()
     now = datetime.now(timezone.utc)
 
@@ -40,7 +48,7 @@ async def store_entity(
             created_at, updated_at, embedding
         ) VALUES ($1, $2, $3, $4, $5, $6, $7,
                   COALESCE($8, nullif(current_setting('app.user_id', true), '')),
-                  'active', 0, $9, $9, $10::vector)
+                  $9, 0, $10, $10, $11::vector)
         """,
         entity_id,
         create.name,
@@ -50,6 +58,7 @@ async def store_entity(
         create.project_id,
         create.agent_id,
         create.user_id,
+        status,
         now,
         embedding,
     )
@@ -62,7 +71,7 @@ async def store_entity(
         description=create.description,
         project_id=create.project_id,
         agent_id=create.agent_id,
-        status="active",
+        status=status,
         mention_count=0,
         created_at=now,
         updated_at=now,
@@ -264,8 +273,12 @@ async def get_entity_memories(
     entity_id: str,
     *,
     limit: int = 100,
-):
-    """Get memories linked to an entity, ordered by mention time (newest first)."""
+) -> tuple[list, bool]:
+    """Get memories linked to an entity, ordered by mention time (newest first).
+
+    Returns a tuple of (memories, truncated) where truncated=True if the result
+    hit the limit cap (indicating there may be more rows beyond the limit).
+    """
     rows = await get_db(pool).fetch(
         """
         SELECT m.* FROM memories m
@@ -277,7 +290,10 @@ async def get_entity_memories(
         entity_id,
         limit,
     )
-    return [_row_to_memory(r) for r in rows]
+    memories = [_row_to_memory(r) for r in rows]
+    # If we got exactly the limit, rows may have been dropped
+    truncated = len(memories) >= limit
+    return memories, truncated
 
 
 async def get_memory_entities(

@@ -684,6 +684,40 @@ def quarantine_review_llm(
     click.echo(f"  Watermark after:  {report.watermark_after}")
 
 
+@cli.command()
+def fsck():
+    """List orphan memories: active memories reachable ONLY by vector cosine.
+
+    Orphans are memories with NO topic tags AND NO entity mentions AND NO
+    episode membership. They hide in the vector index but cannot be recalled
+    through tag/entity/episode navigators — a leading indicator of future
+    recall misses.
+    """
+    async def _run():
+        import asyncpg
+        from weft.fsck import list_orphan_memories
+        from weft.config.user_identity import get_user_id
+
+        config = load_config()
+        pool = await asyncpg.create_pool(
+            config.database.url, min_size=1, max_size=2,
+        )
+        try:
+            caller_uid = get_user_id()
+            orphans = await list_orphan_memories(pool, user_id=caller_uid)
+            return orphans
+        finally:
+            await pool.close()
+
+    orphans = asyncio.run(_run())
+    click.echo(f"Found {len(orphans)} orphan memory(ies) in vector index only:")
+    if orphans:
+        for orphan in orphans:
+            click.echo(f"  - {orphan['memory_id']}: {orphan['reason']}")
+    else:
+        click.echo("  (None)")
+
+
 @cli.group()
 def obsidian():
     """Obsidian vault sync commands."""

@@ -16,6 +16,7 @@ from fastmcp import Context
 from weft.config.user_identity import get_user_id
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
+from weft.fsck import list_orphan_memories
 from weft.mcp.server import AppContext, mcp
 from weft.behaviors import (
     delete_behavior,
@@ -319,6 +320,16 @@ async def weft_remember(
             memory = await store_memory(app.pool, create, embedding=embedding)
             await app.cache.set_memory(memory)
             await app.cache.invalidate_stats()
+            # Canary enrollment: O(1) INSERT, no LLM call (PRD §V5, loom-c27ab1d2).
+            # Runs inside the acquire() context so app.user_id GUC is active.
+            try:
+                from weft.canary import enroll_canary
+                await enroll_canary(app.pool, memory.id, content)
+            except Exception as _canary_err:
+                logger.warning(
+                    "weft_remember: canary enrollment failed (non-fatal, id=%s): %s",
+                    memory.id, _canary_err,
+                )
             result = memory.to_dict()
             if embedding_failed:
                 result["warning"] = (
@@ -2744,7 +2755,13 @@ async def weft_entity_context(
     """Load an entity and its linked memories within a token budget.
 
     Returns the entity metadata and as many linked memories as fit
-    within budget_tokens. Memories ordered by mention time (newest first)."""
+    within budget_tokens. Memories ordered by mention time (newest first).
+
+    The response includes:
+    - truncated: True if the entity's total memory set exceeds the 100-row cap
+    - memory_count: Number of memories returned in this response (after token budget filtering)
+    - memories_truncated: Number of memories dropped due to token budget (not including
+      the database-level 100-row cap)"""
     try:
         app: AppContext = ctx.request_context.lifespan_context
         async with acquire(app.pool):
@@ -2752,7 +2769,7 @@ async def weft_entity_context(
             if ent is None:
                 return {"error": f"Entity {entity_id} not found"}
 
-            memories = await get_entity_memories(app.pool, entity_id)
+            memories, db_truncated = await get_entity_memories(app.pool, entity_id)
 
             # Reserve tokens for entity metadata
             ent_text = f"{ent.name}: {ent.description or ''}"
@@ -2773,6 +2790,7 @@ async def weft_entity_context(
             result["tokens_used"] = total_tokens
             result["tokens_budget"] = budget_tokens
             result["memories_truncated"] = len(memories) - len(packed)
+            result["truncated"] = db_truncated
             return result
     except _DB_ERRORS as e:
         return _db_error_response("weft_entity_context", e)
@@ -5095,3 +5113,40 @@ async def weft_turn_append(
         return _input_error_response("weft_turn_append", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_turn_append", e)
+
+
+@mcp.tool()
+async def weft_fsck(ctx: Context) -> dict:
+    """List orphan memories: active memories reachable ONLY by vector cosine.
+
+    Orphans are memories with NO topic tags AND NO entity mentions AND NO
+    episode membership. They hide in the vector index but cannot be recalled
+    through tag/entity/episode navigators — a leading indicator of future
+    recall misses.
+
+    Returns: {
+        "orphan_count": int,
+        "orphans": [
+            {"memory_id": str, "reason": str},
+            ...
+        ]
+    }
+
+    The reason field always reads "vector-only reachable" for now.
+    Collections do not exist yet, so that edge is vacuously absent.
+    """
+    try:
+        cid = set_correlation_id()
+        logger.debug("weft_fsck start [%s]", cid)
+        app: AppContext = ctx.request_context.lifespan_context
+        caller_uid = get_user_id()
+
+        async with acquire(app.pool):
+            orphans = await list_orphan_memories(app.pool, user_id=caller_uid)
+
+        return {
+            "orphan_count": len(orphans),
+            "orphans": orphans,
+        }
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_fsck", e)

@@ -1,0 +1,478 @@
+"""Tests for the recall canary system (Phase 0.5, loom-c27ab1d2).
+
+Done-when gate (non-degeneracy):
+  1. One audit cycle runs with probes_checked > 0.
+  2. A deliberately-planted below-cutoff probe is recorded as a canary_miss.
+  3. A known-surfacing probe is NOT flagged (miss_count stays 0).
+
+A no-op meter that just returns rate=0 with probes_checked=0 MUST fail the test.
+
+RI-4 design notes:
+  - Reask-bootstrap probes (derived from is_reask_miss signal) are the primary,
+    always-audited probe type.
+  - Active synthetic probes are gated behind active_probing_enabled and
+    collected at weft_remember write time but NOT audited by default.
+  - Fixed materialization: FastEmbed ONNX is deterministic; store.py tie-break
+    (ORDER BY ..., id) removes the last nondeterminism.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from weft.canary import (
+    COUNTER_CANARY_MISS,
+    PROBE_TEXT_MAX_CHARS,
+    enroll_canary,
+    run_canary_audit,
+)
+from weft.counters import get_counter
+from weft.db.connection import get_db
+from weft.embeddings import get_provider
+from weft.models import MemoryCreate, MemoryType
+from weft.store import delete_memory, store_memory
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def embedder():
+    """Local FastEmbed provider — deterministic ONNX, no API key."""
+    return get_provider("fastembed")
+
+
+@pytest.fixture(autouse=True)
+async def clean_canary(pool):
+    """Truncate recall_canary before each test.
+
+    conftest.py's TRUNCATE list predates this table (v63 is new).  This
+    autouse fixture fills the gap until conftest is updated.  Follow-up:
+    add 'recall_canary' to the TRUNCATE list in tests/conftest.py.
+    """
+    await pool.execute("TRUNCATE recall_canary")
+    yield
+
+
+# ---------------------------------------------------------------------------
+# Enrollment tests
+# ---------------------------------------------------------------------------
+
+
+async def test_enroll_canary_inserts_probe(pool):
+    """enroll_canary writes a row with correct probe_id / memory_id / probe_type."""
+    probe_id = await enroll_canary(pool, "mem-abc123", "cats love sunny spots")
+    row = await get_db(pool).fetchrow(
+        "SELECT memory_id, probe_text, probe_type, enabled, miss_count "
+        "FROM recall_canary WHERE probe_id = $1",
+        probe_id,
+    )
+    assert row is not None
+    assert row["memory_id"] == "mem-abc123"
+    assert row["probe_text"] == "cats love sunny spots"
+    assert row["probe_type"] == "active"
+    assert row["enabled"] is True
+    assert row["miss_count"] == 0
+
+
+async def test_enroll_canary_truncates_long_probe_text(pool):
+    """probe_text longer than PROBE_TEXT_MAX_CHARS is truncated at enrollment."""
+    long_text = "x" * (PROBE_TEXT_MAX_CHARS + 100)
+    probe_id = await enroll_canary(pool, "mem-trunc1", long_text)
+    row = await get_db(pool).fetchrow(
+        "SELECT probe_text FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row is not None
+    assert len(row["probe_text"]) == PROBE_TEXT_MAX_CHARS
+
+
+async def test_enroll_canary_reask_bootstrap_type(pool):
+    """reask-bootstrap probe_type is stored correctly."""
+    probe_id = await enroll_canary(
+        pool, "mem-rq001", "original missed query", probe_type="reask-bootstrap",
+    )
+    row = await get_db(pool).fetchrow(
+        "SELECT probe_type FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row is not None
+    assert row["probe_type"] == "reask-bootstrap"
+
+
+# ---------------------------------------------------------------------------
+# Non-degeneracy gate (the critical done_when test)
+# ---------------------------------------------------------------------------
+
+
+async def test_canary_audit_nondegeneracy(pool, embedder):
+    """Non-degeneracy gate: probes_checked > 0, below-cutoff miss is caught,
+    known-surfacing probe is NOT flagged.
+
+    Design:
+    - Memory A: "The orange cat sleeps in warm sunbeams" (semantic: cats)
+    - Memory B: "Quantum entanglement and particle physics" (semantic: physics)
+
+    Probe for A: probe_text = A's own content → vector search returns A → HIT.
+    Probe for B: probe_text = A's content (cats) → vector search returns A,
+                 NOT B, when top_k=1 → MISS.  This is the "below-cutoff" probe.
+
+    Using top_k=1 guarantees:
+    - A probe searching for cat content retrieves only the single most-similar
+      result.  Memory A (the cat memory) is the nearest neighbour to its own
+      embedding → A's probe hits.  Memory B (physics) is NOT the nearest
+      neighbour to cat content → B's probe misses.
+    """
+    cat_content = "The orange cat sleeps in warm sunbeams by the window"
+    physics_content = "Quantum entanglement and particle physics experiments"
+
+    cat_emb = await embedder.embed(cat_content)
+    physics_emb = await embedder.embed(physics_content)
+
+    cat_mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=cat_content, topic=["cats"]),
+        embedding=cat_emb,
+    )
+    physics_mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=physics_content, topic=["physics"]),
+        embedding=physics_emb,
+    )
+
+    # Probe A: searching for cat content should surface the cat memory → HIT.
+    await enroll_canary(
+        pool, cat_mem.id, cat_content, probe_type="reask-bootstrap",
+    )
+
+    # Probe B (deliberately-planted miss): also searches for cat content but
+    # expects to find the physics memory — which it won't.  This is the
+    # "below-cutoff probe" the done_when gate requires.
+    await enroll_canary(
+        pool, physics_mem.id, cat_content, probe_type="reask-bootstrap",
+    )
+
+    # Run audit with top_k=1 (only the single most-similar result is returned).
+    result = await run_canary_audit(pool, embedder, top_k=1)
+
+    # --- Done-when assertions ---
+
+    # 1. probes_checked > 0: the audit actually evaluated probes.
+    assert result["probes_checked"] > 0, (
+        "Audit must check at least one probe — a no-op meter logging rate=0 is rejected."
+    )
+
+    # 2. Below-cutoff probe was caught as a canary_miss.
+    assert result["misses"] >= 1, (
+        "The deliberately-mismatched probe (physics memory, cat probe_text) "
+        "must be recorded as a canary_miss."
+    )
+
+    # 3. Known-surfacing probe is NOT flagged.
+    assert result["misses"] < result["probes_checked"], (
+        "The surfacing probe (cat memory, cat probe_text) must NOT be a miss."
+    )
+
+    # 4. Global canary.miss counter was incremented.
+    total_misses = await get_counter(pool, COUNTER_CANARY_MISS)
+    assert total_misses >= 1, "canary.miss counter must be incremented for each miss."
+
+    # 5. Per-probe miss_count reflects the audit result.
+    cat_row = await get_db(pool).fetchrow(
+        "SELECT miss_count, audit_count FROM recall_canary WHERE memory_id = $1",
+        cat_mem.id,
+    )
+    physics_row = await get_db(pool).fetchrow(
+        "SELECT miss_count, audit_count FROM recall_canary WHERE memory_id = $1",
+        physics_mem.id,
+    )
+
+    assert cat_row is not None
+    assert physics_row is not None
+    assert cat_row["miss_count"] == 0, "Surfacing probe must have miss_count=0."
+    assert physics_row["miss_count"] == 1, "Below-cutoff probe must have miss_count=1."
+    assert cat_row["audit_count"] == 1
+    assert physics_row["audit_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Active probing gate (RI-4: active probes are off by default)
+# ---------------------------------------------------------------------------
+
+
+async def test_active_probes_excluded_by_default(pool, embedder):
+    """Active probes are NOT audited when active_probing_enabled=False (default).
+
+    This verifies the RI-4 gate: active probes accumulate in the table but
+    don't contribute to the canary_miss counter until explicitly enabled.
+    """
+    content = "Testing active probe gating"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["test"]),
+        embedding=emb,
+    )
+    # Enroll an active probe with MISMATCHED probe_text — would be a miss if audited.
+    await enroll_canary(pool, mem.id, "completely unrelated text", probe_type="active")
+
+    # Default audit: active_probing_enabled=False.
+    result = await run_canary_audit(pool, embedder)
+
+    # No reask-bootstrap probes exist, so no probes are checked.
+    assert result["probes_checked"] == 0
+    assert result["misses"] == 0
+
+
+async def test_active_probes_included_when_flag_set(pool, embedder):
+    """Active probes ARE audited when active_probing_enabled=True.
+
+    Verifies the flag correctly enables the active probing path.
+    """
+    cat_content = "Cats enjoy sleeping in warm patches of sunlight"
+    cat_emb = await embedder.embed(cat_content)
+    cat_mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=cat_content, topic=["cats"]),
+        embedding=cat_emb,
+    )
+
+    physics_content = "String theory and extra dimensional compactification"
+    physics_emb = await embedder.embed(physics_content)
+    physics_mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=physics_content, topic=["physics"]),
+        embedding=physics_emb,
+    )
+
+    # Active probes: cat memory with matching probe (should hit), physics with cat probe (miss).
+    await enroll_canary(pool, cat_mem.id, cat_content, probe_type="active")
+    await enroll_canary(pool, physics_mem.id, cat_content, probe_type="active")
+
+    result = await run_canary_audit(pool, embedder, top_k=1, active_probing_enabled=True)
+
+    assert result["probes_checked"] == 2
+    assert result["misses"] == 1
+    assert result["miss_rate"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Reask-bootstrap sync
+# ---------------------------------------------------------------------------
+
+
+async def test_reask_bootstrap_sync_enrolls_from_is_reask_miss(pool, embedder):
+    """The audit auto-enrolls is_reask_miss rows as reask-bootstrap probes.
+
+    Inserts a weft_recall_queries row with is_reask_miss=TRUE + a satisfying
+    memory_id, then runs the audit.  The sync should enroll the probe and
+    (if the memory exists and is retrievable) evaluate it.
+    """
+    content = "The satisfying memory that answered a re-ask"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["reask-test"]),
+        embedding=emb,
+    )
+
+    # Simulate a recorded re-ask miss: original query → satisfying memory.
+    await pool.execute(
+        """
+        INSERT INTO weft_recall_queries
+            (query_id, query_text, tool_name, created_at,
+             is_reask_miss, reask_satisfying_memory_id)
+        VALUES ($1, $2, 'recall', now() - interval '5 minutes',
+                TRUE, $3)
+        """,
+        "qid-test-reask-001",
+        content[:200],  # original query approximates the memory content
+        mem.id,
+    )
+
+    result = await run_canary_audit(pool, embedder, top_k=5)
+
+    # The sync should have enrolled one new reask-bootstrap probe.
+    assert result["bootstrap_synced"] == 1
+
+    # The audit should have checked the newly-enrolled probe.
+    assert result["probes_checked"] == 1
+
+    # A re-ask probe searching for its own content should find the memory → hit.
+    assert result["misses"] == 0
+
+    # Verify the probe was written to recall_canary.
+    canary_row = await get_db(pool).fetchrow(
+        "SELECT probe_type, memory_id FROM recall_canary WHERE memory_id = $1",
+        mem.id,
+    )
+    assert canary_row is not None
+    assert canary_row["probe_type"] == "reask-bootstrap"
+
+
+async def test_reask_bootstrap_sync_idempotent(pool, embedder):
+    """Running the audit twice does not double-enroll reask-bootstrap probes."""
+    content = "Idempotency test memory"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["idempotency"]),
+        embedding=emb,
+    )
+
+    await pool.execute(
+        """
+        INSERT INTO weft_recall_queries
+            (query_id, query_text, tool_name, created_at,
+             is_reask_miss, reask_satisfying_memory_id)
+        VALUES ($1, $2, 'recall', now() - interval '2 minutes', TRUE, $3)
+        """,
+        "qid-idem-001",
+        content[:200],
+        mem.id,
+    )
+
+    result1 = await run_canary_audit(pool, embedder)
+    result2 = await run_canary_audit(pool, embedder)
+
+    # Second audit should sync 0 new probes (already enrolled).
+    assert result1["bootstrap_synced"] == 1
+    assert result2["bootstrap_synced"] == 0
+
+    # Only one probe row for this memory.
+    count = await get_db(pool).fetchval(
+        "SELECT count(*) FROM recall_canary WHERE memory_id = $1 "
+        "AND probe_type = 'reask-bootstrap'",
+        mem.id,
+    )
+    assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix #1: non-degenerate audit guard
+# ---------------------------------------------------------------------------
+
+
+async def test_zero_probe_audit_signals_invalid(pool, embedder):
+    """A 0-probe audit must be distinguishable from a real all-pass audit.
+
+    Done-when gate: when run_canary_audit checks 0 probes it must return
+    audit_valid=False and status='skipped', NOT a healthy-looking miss_rate=0.0
+    that a scheduler would silently treat as all-green.
+    """
+    # No probes enrolled — the audit has nothing to check.
+    result = await run_canary_audit(pool, embedder)
+
+    assert result["probes_checked"] == 0
+    assert result["misses"] == 0
+    assert result["audit_valid"] is False, (
+        "A 0-probe audit must set audit_valid=False; "
+        "miss_rate=0.0 with probes_checked=0 is NOT a valid all-pass result."
+    )
+    assert result["status"] == "skipped"
+
+
+async def test_real_all_pass_audit_is_valid(pool, embedder):
+    """A real all-pass (probes_checked > 0, misses=0) has audit_valid=True.
+
+    Contrast with test_zero_probe_audit_signals_invalid: when probes actually
+    ran and all hit, the result is genuinely healthy — audit_valid=True.
+    """
+    content = "The golden retriever played fetch on the sunny beach"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["dogs"]),
+        embedding=emb,
+    )
+    await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
+
+    result = await run_canary_audit(pool, embedder, top_k=5)
+
+    assert result["probes_checked"] == 1
+    assert result["misses"] == 0
+    assert result["audit_valid"] is True, (
+        "A real all-pass audit (probes checked, none missed) must have audit_valid=True."
+    )
+    assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Fix #2: orphan-probe cleanup on delete/archive
+# ---------------------------------------------------------------------------
+
+
+async def test_orphan_probe_disabled_on_soft_delete(pool, embedder):
+    """Soft-deleting (archiving) a memory must disable its canary probes.
+
+    Rationale: an orphan probe for an archived memory always misses (the memory
+    is no longer surfaced in active recall) → pollutes canary.miss and grows
+    unbounded if not cleaned up.
+    """
+    content = "Memory that will be soft-deleted for orphan-probe test"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["orphan-test"]),
+        embedding=emb,
+    )
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
+
+    # Confirm probe is enabled before deletion.
+    row_before = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row_before["enabled"] is True
+
+    # Soft-delete the memory.
+    deleted = await delete_memory(pool, mem.id)
+    assert deleted is True
+
+    # Probe must now be disabled.
+    row_after = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row_after["enabled"] is False, (
+        "Soft-deleting a memory must set enabled=FALSE on its canary probes."
+    )
+
+    # Disabled probe must be excluded from the next audit.
+    result = await run_canary_audit(pool, embedder)
+    assert result["probes_checked"] == 0, (
+        "The orphan probe for an archived memory must not appear in run_canary_audit."
+    )
+    assert result["audit_valid"] is False  # 0 probes → skipped
+
+
+async def test_orphan_probe_disabled_on_hard_delete(pool, embedder):
+    """Hard-deleting a memory must disable its canary probes (probe row is kept).
+
+    The probe row is retained (for history) but flipped to enabled=FALSE so
+    it cannot pollute future audit runs.
+    """
+    content = "Memory that will be hard-deleted for orphan-probe test"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["orphan-test-hard"]),
+        embedding=emb,
+    )
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
+
+    # Hard-delete the memory.
+    deleted = await delete_memory(pool, mem.id, hard=True)
+    assert deleted is True
+
+    # Probe row must still exist but be disabled.
+    row = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row is not None, "Probe row must be retained after hard-delete of its memory."
+    assert row["enabled"] is False, (
+        "Hard-deleting a memory must set enabled=FALSE on its canary probes."
+    )
+
+    # Audit must exclude the disabled probe.
+    result = await run_canary_audit(pool, embedder)
+    assert result["probes_checked"] == 0
+    assert result["audit_valid"] is False  # 0 probes → skipped
