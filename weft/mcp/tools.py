@@ -13,7 +13,7 @@ from typing import Literal
 import asyncpg
 from fastmcp import Context
 
-from weft.config.user_identity import get_user_id
+from weft.auth import resolve_caller_user_id
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
 from weft.fsck import list_orphan_memories
@@ -280,7 +280,7 @@ async def weft_remember(
         resolved_project = await _resolve_project_id(ctx, project_id)
         if workspace_id is not None:
             from weft.workspaces import is_member as _ws_is_member
-            caller_uid = get_user_id()
+            caller_uid = resolve_caller_user_id()
             async with acquire(app.pool):
                 if not await _ws_is_member(app.pool, workspace_id, caller_uid):
                     raise ValueError(
@@ -673,7 +673,9 @@ async def weft_recall(
     retrieval_mode: 'face' (default — excludes codebase ingest noise), 'code' (includes ingest
     and code-context sources for agent-in-repo queries), or 'all' (no source filter).
 
-    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    user_id: Caller identity override. Defaults to the authenticated caller
+    (resolve_caller_user_id): the request credential's user_id when present,
+    else this installation's UUID.
     Filters to user-owned rows OR truly-global rows (user_id IS NULL).
     retrieval_mode and scope are orthogonal — user_id composes independently with both.
     These are three independent knobs: retrieval_mode (face/code/all), scope (user/project/agent),
@@ -691,7 +693,7 @@ async def weft_recall(
     is 'memory' or 'turn'.
     """
     if user_id is None:
-        user_id = get_user_id()
+        user_id = resolve_caller_user_id()
 
     # Tier dispatch happens FIRST. The turns and both paths don't reuse
     # the belief-tier helpers below — they have their own scoring,
@@ -1503,7 +1505,7 @@ async def weft_status(
         from weft.views.topic_synthesis import SYNTHESIZER_VERSION, _MODEL, synthesize_digest
 
         app: AppContext = ctx.request_context.lifespan_context
-        user_id = get_user_id()
+        user_id = resolve_caller_user_id()
 
         # --- Tier-1: resolve + gather ---
         resolved_tags = await resolve_topic(topic, user_id, app.pool)
@@ -2393,12 +2395,14 @@ async def weft_behavior_match(
     situation: free-text description of the current context or task.
     Returns behaviors ranked by relevance (similarity * confidence * priority).
 
-    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    user_id: Caller identity override. Defaults to the authenticated caller
+    (resolve_caller_user_id): the request credential's user_id when present,
+    else this installation's UUID.
     Filters to user-owned rows OR truly-global rows (user_id IS NULL).
     retrieval_mode and scope are orthogonal — user_id composes independently with both.
     """
     if user_id is None:
-        user_id = get_user_id()
+        user_id = resolve_caller_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -2442,12 +2446,14 @@ async def weft_behavior_list(
 
     Returns behaviors ordered by priority (highest first).
 
-    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    user_id: Caller identity override. Defaults to the authenticated caller
+    (resolve_caller_user_id): the request credential's user_id when present,
+    else this installation's UUID.
     Filters to user-owned rows OR truly-global rows (user_id IS NULL).
     retrieval_mode and scope are orthogonal — user_id composes independently with both.
     """
     if user_id is None:
-        user_id = get_user_id()
+        user_id = resolve_caller_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -2609,12 +2615,14 @@ async def weft_episode_timeline(
     If project_id is omitted, auto-detects from the client's working directory.
     Open episodes (no end time) match any range after their start.
 
-    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    user_id: Caller identity override. Defaults to the authenticated caller
+    (resolve_caller_user_id): the request credential's user_id when present,
+    else this installation's UUID.
     Filters to user-owned rows OR truly-global rows (user_id IS NULL).
     retrieval_mode and scope are orthogonal — user_id composes independently with both.
     """
     if user_id is None:
-        user_id = get_user_id()
+        user_id = resolve_caller_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -2831,12 +2839,14 @@ async def weft_entity_search(
     If project_id is omitted, auto-detects from the client's working directory.
     Returns entities ranked by relevance to the query.
 
-    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    user_id: Caller identity override. Defaults to the authenticated caller
+    (resolve_caller_user_id): the request credential's user_id when present,
+    else this installation's UUID.
     Filters to user-owned rows OR truly-global rows (user_id IS NULL).
     retrieval_mode and scope are orthogonal — user_id composes independently with both.
     """
     if user_id is None:
-        user_id = get_user_id()
+        user_id = resolve_caller_user_id()
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
@@ -2975,12 +2985,14 @@ async def weft_mode_list(ctx: Context, user_id: str | None = None) -> dict:
 
     Returns modes ordered by name with their weight configurations.
 
-    user_id: Local user identity override. Defaults to get_user_id() (this installation's UUID).
+    user_id: Caller identity override. Defaults to the authenticated caller
+    (resolve_caller_user_id): the request credential's user_id when present,
+    else this installation's UUID.
     Filters to user-owned rows OR truly-global rows (user_id IS NULL).
     retrieval_mode and scope are orthogonal — user_id composes independently with both.
     """
     if user_id is None:
-        user_id = get_user_id()
+        user_id = resolve_caller_user_id()
     try:
         from weft.modes import list_modes
 
@@ -4461,7 +4473,7 @@ async def weft_workspace_create(
     try:
         from weft.workspaces import create_workspace
         app: AppContext = ctx.request_context.lifespan_context
-        caller_uid = get_user_id()
+        caller_uid = resolve_caller_user_id()
         async with acquire(app.pool):
             ws = await create_workspace(
                 app.pool,
@@ -4488,7 +4500,7 @@ async def weft_workspace_add_member(
     try:
         from weft.workspaces import add_member
         app: AppContext = ctx.request_context.lifespan_context
-        caller_uid = get_user_id()
+        caller_uid = resolve_caller_user_id()
         async with acquire(app.pool):
             member = await add_member(
                 app.pool,
@@ -4519,7 +4531,7 @@ async def weft_workspace_remove_member(
     try:
         from weft.workspaces import remove_member
         app: AppContext = ctx.request_context.lifespan_context
-        caller_uid = get_user_id()
+        caller_uid = resolve_caller_user_id()
         async with acquire(app.pool):
             removed = await remove_member(
                 app.pool,
@@ -4545,7 +4557,7 @@ async def weft_workspace_list(ctx: Context) -> dict:
     try:
         from weft.workspaces import list_workspaces_for_user, list_members
         app: AppContext = ctx.request_context.lifespan_context
-        caller_uid = get_user_id()
+        caller_uid = resolve_caller_user_id()
         async with acquire(app.pool):
             workspaces = await list_workspaces_for_user(app.pool, caller_uid)
             out = []
@@ -5258,7 +5270,7 @@ async def weft_fsck(ctx: Context) -> dict:
         cid = set_correlation_id()
         logger.debug("weft_fsck start [%s]", cid)
         app: AppContext = ctx.request_context.lifespan_context
-        caller_uid = get_user_id()
+        caller_uid = resolve_caller_user_id()
 
         async with acquire(app.pool):
             orphans = await list_orphan_memories(app.pool, user_id=caller_uid)
