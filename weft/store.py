@@ -33,11 +33,36 @@ logger = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 
+# Memory embed-text composition version (RC2). Bump this whenever
+# ``embed_text_for_memory`` changes shape so the re-embed backfill can find rows
+# embedded under an older composition (``embed_composition_version < current``).
+# Version 0 = legacy content-only embeddings (pre-RC2). Version 1 = content + topics.
+EMBED_COMPOSITION_VERSION = 1
+
+
+def embed_text_for_memory(content: str, topic: list[str] | None) -> str:
+    """Compose the text embedded for a memory: content followed by its topic tags.
+
+    SINGLE SOURCE OF TRUTH for memory embed-text. The write path and the
+    re-embed backfill MUST produce byte-identical text for the same row, or the
+    corpus splits into two disagreeing vector representations. The SQL mirror in
+    ``weft/db/reembed.py`` (``TABLE_TEXT_EXPRESSIONS['memories']``) must match
+    this exactly: ``content || ' ' || array_to_string(COALESCE(topic,'{}'), ' ')``.
+
+    Topics are included because they are the highest-signal, human/agent-curated
+    terms a future query is most likely to use; embedding content alone diluted
+    them out of long memories' vectors (RC2 — diagnosed in weft-45029c15).
+    """
+    tags = " ".join(topic) if topic else ""
+    return f"{content} {tags}"
+
 
 async def store_memory(
     pool: asyncpg.Pool,
     create: MemoryCreate,
     embedding: list[float] | None = None,
+    *,
+    embed_composition_version: int = EMBED_COMPOSITION_VERSION,
 ) -> Memory:
     """Store a new memory. Returns the created Memory.
 
@@ -71,12 +96,14 @@ async def store_memory(
             id, type, topic, content, source, confidence,
             token_count, created_at, updated_at, accessed_at,
             access_count, project_id, agent_id, embedding, status, pinned,
-            review_after, workspace_id, user_id, write_provenance, review_status
+            review_after, workspace_id, user_id, write_provenance, review_status,
+            embed_composition_version
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
             0, $9, $10, $11::vector, 'active', $12,
-            $13, $14, nullif(current_setting('app.user_id', true), ''), $15, $16
+            $13, $14, nullif(current_setting('app.user_id', true), ''), $15, $16,
+            $17
         )
         """,
         memory_id,
@@ -95,6 +122,7 @@ async def store_memory(
         create.workspace_id,
         write_provenance,
         review_status,
+        embed_composition_version,
     )
 
     # V3 write-invalidation: flip any cached digest for this memory's topic tags
@@ -960,6 +988,11 @@ async def update_memory(
         sets.append(f"embedding = ${idx}::vector")
         params.append(embedding)
         idx += 1
+        # A new embedding is recomposed via embed_text_for_memory by callers,
+        # so stamp the current composition version (RC2).
+        sets.append(f"embed_composition_version = ${idx}")
+        params.append(EMBED_COMPOSITION_VERSION)
+        idx += 1
 
     if pinned is not None:
         sets.append(f"pinned = ${idx}")
@@ -1049,6 +1082,9 @@ async def upsert_by_topic(
                     sets.append(f"embedding = ${idx}::vector")
                     params.append(embedding)
                     idx += 1
+                    sets.append(f"embed_composition_version = ${idx}")
+                    params.append(EMBED_COMPOSITION_VERSION)
+                    idx += 1
 
                 set_clause = ", ".join(sets)
                 params.append(existing["id"])
@@ -1069,12 +1105,12 @@ async def upsert_by_topic(
                     id, type, topic, content, source, confidence,
                     token_count, created_at, updated_at, accessed_at,
                     access_count, project_id, embedding, status,
-                    pinned, review_after, user_id
+                    pinned, review_after, user_id, embed_composition_version
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $8, $8,
                     0, $9, $10::vector, 'active',
-                    false, $11, nullif(current_setting('app.user_id', true), '')
+                    false, $11, nullif(current_setting('app.user_id', true), ''), $12
                 )
                 """,
                 memory_id,
@@ -1088,6 +1124,7 @@ async def upsert_by_topic(
                 project_id,
                 embedding,
                 review_after,
+                EMBED_COMPOSITION_VERSION,
             )
 
             return Memory(

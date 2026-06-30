@@ -85,6 +85,7 @@ from weft.store import (
     add_relationship,
     count_by_vector,
     delete_memory,
+    embed_text_for_memory,
     get_recent_writes,
     get_relationships,
     get_stats,
@@ -301,7 +302,9 @@ async def weft_remember(
         embedding = None
         embedding_failed = False
         try:
-            embedding = await app.embedding.embed(content)
+            embedding = await app.embedding.embed(
+                embed_text_for_memory(content, create.topic)
+            )
         except Exception as embed_err:
             logger.warning(
                 "Embedding failed for weft_remember, storing without vector: %s",
@@ -1200,7 +1203,9 @@ async def weft_revise(
             if parsed is not None:
                 revise_kwargs["review_after"] = parsed
         app: AppContext = ctx.request_context.lifespan_context
-        embedding = await app.embedding.embed(new_content)
+        embedding = await app.embedding.embed(
+            embed_text_for_memory(new_content, _coerce_list(new_topic))
+        )
         async with acquire(app.pool):
             new, old = await revise_memory(
                 app.pool, memory_id, new_content,
@@ -1739,7 +1744,9 @@ async def weft_learn(
                     project_id=resolved_project,
                     agent_id=agent_id,
                 )
-                embedding = await app.embedding.embed(c["content"])
+                embedding = await app.embedding.embed(
+                    embed_text_for_memory(c["content"], create.topic)
+                )
                 memory = await store_memory(app.pool, create, embedding=embedding)
                 await app.cache.set_memory(memory)
                 stored.append(memory.to_dict())
@@ -1760,7 +1767,9 @@ async def weft_learn(
                     project_id=resolved_project,
                     agent_id=agent_id,
                 )
-                ms_embedding = await app.embedding.embed(summary)
+                ms_embedding = await app.embedding.embed(
+                    embed_text_for_memory(summary, milestone_create.topic)
+                )
                 milestone = await store_memory(
                     app.pool, milestone_create, embedding=ms_embedding,
                 )
@@ -1843,7 +1852,9 @@ async def weft_feedback_general(
             project_id="weft",
             agent_id=agent_id,
         )
-        embedding = await app.embedding.embed(feedback)
+        embedding = await app.embedding.embed(
+            embed_text_for_memory(feedback, create.topic)
+        )
         async with acquire(app.pool):
             memory = await store_memory(app.pool, create, embedding=embedding)
             await app.cache.set_memory(memory)
@@ -1897,7 +1908,9 @@ async def weft_handoff(
             project_id=resolved_project,
             agent_id=agent_id,
         )
-        embedding = await app.embedding.embed(summary)
+        embedding = await app.embedding.embed(
+            embed_text_for_memory(content, create.topic)
+        )
         async with acquire(app.pool):
             memory = await store_memory(app.pool, create, embedding=embedding)
             await app.cache.set_memory(memory)

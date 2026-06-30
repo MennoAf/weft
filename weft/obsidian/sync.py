@@ -11,7 +11,7 @@ import asyncpg
 
 from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemoryCreate, MemorySource, MemoryType
-from weft.store import store_memory
+from weft.store import embed_text_for_memory, store_memory
 
 from .config import (
     DEFAULT_EXCLUDED_DIRS,
@@ -208,7 +208,9 @@ async def _sync_file(
         embedding = None
         if embedding_provider:
             try:
-                embedding = await embedding_provider.embed(section_content)
+                embedding = await embedding_provider.embed(
+                    embed_text_for_memory(section_content, topics)
+                )
             except Exception as exc:
                 logger.warning("Failed to embed %s: %s", rel_path, exc)
 
@@ -251,7 +253,9 @@ async def _sync_file(
         task_embedding = None
         if embedding_provider:
             try:
-                task_embedding = await embedding_provider.embed(task_content)
+                task_embedding = await embedding_provider.embed(
+                    embed_text_for_memory(task_content, task_topics)
+                )
             except Exception as exc:
                 logger.warning("Failed to embed task: %s", exc)
 
