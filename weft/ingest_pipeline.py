@@ -502,7 +502,10 @@ async def route(
             embedding = None
             if embedding_provider:
                 try:
-                    embedding = await embedding_provider.embed(intent.content)
+                    from weft.store import embed_text_for_memory
+                    embedding = await embedding_provider.embed(
+                        embed_text_for_memory(intent.content, topics)
+                    )
                 except Exception:
                     logger.warning("route.embed_failed for intent: %s", intent.type)
 

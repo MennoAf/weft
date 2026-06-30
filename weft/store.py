@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import asyncpg
@@ -32,11 +33,36 @@ logger = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 
+# Memory embed-text composition version (RC2). Bump this whenever
+# ``embed_text_for_memory`` changes shape so the re-embed backfill can find rows
+# embedded under an older composition (``embed_composition_version < current``).
+# Version 0 = legacy content-only embeddings (pre-RC2). Version 1 = content + topics.
+EMBED_COMPOSITION_VERSION = 1
+
+
+def embed_text_for_memory(content: str, topic: list[str] | None) -> str:
+    """Compose the text embedded for a memory: content followed by its topic tags.
+
+    SINGLE SOURCE OF TRUTH for memory embed-text. The write path and the
+    re-embed backfill MUST produce byte-identical text for the same row, or the
+    corpus splits into two disagreeing vector representations. The SQL mirror in
+    ``weft/db/reembed.py`` (``TABLE_TEXT_EXPRESSIONS['memories']``) must match
+    this exactly: ``content || ' ' || array_to_string(COALESCE(topic,'{}'), ' ')``.
+
+    Topics are included because they are the highest-signal, human/agent-curated
+    terms a future query is most likely to use; embedding content alone diluted
+    them out of long memories' vectors (RC2 — diagnosed in weft-45029c15).
+    """
+    tags = " ".join(topic) if topic else ""
+    return f"{content} {tags}"
+
 
 async def store_memory(
     pool: asyncpg.Pool,
     create: MemoryCreate,
     embedding: list[float] | None = None,
+    *,
+    embed_composition_version: int = EMBED_COMPOSITION_VERSION,
 ) -> Memory:
     """Store a new memory. Returns the created Memory.
 
@@ -70,12 +96,14 @@ async def store_memory(
             id, type, topic, content, source, confidence,
             token_count, created_at, updated_at, accessed_at,
             access_count, project_id, agent_id, embedding, status, pinned,
-            review_after, workspace_id, user_id, write_provenance, review_status
+            review_after, workspace_id, user_id, write_provenance, review_status,
+            embed_composition_version
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
             0, $9, $10, $11::vector, 'active', $12,
-            $13, $14, nullif(current_setting('app.user_id', true), ''), $15, $16
+            $13, $14, nullif(current_setting('app.user_id', true), ''), $15, $16,
+            $17
         )
         """,
         memory_id,
@@ -94,6 +122,7 @@ async def store_memory(
         create.workspace_id,
         write_provenance,
         review_status,
+        embed_composition_version,
     )
 
     # V3 write-invalidation: flip any cached digest for this memory's topic tags
@@ -407,6 +436,37 @@ async def search_by_vector(
     return results
 
 
+_TSQUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def build_or_tsquery(query: str) -> str | None:
+    """Build a sanitized disjunctive tsquery string from raw query text.
+
+    Tokenizes to alphanumeric lexemes (splitting on underscores, hyphens,
+    punctuation, and whitespace), lowercases, de-duplicates preserving order,
+    and OR-joins with ``|`` for ``to_tsquery``. Returns ``None`` when no usable
+    lexeme remains, so callers short-circuit to "no keyword matches" instead of
+    emitting a query.
+
+    OR-by-design: ``plainto_tsquery`` ANDs every term, so a multi-term query
+    required one document to contain *every* term — a 7-term query matched 1 row
+    in a 2000+ corpus, leaving the keyword arm of hybrid fusion dead. Disjunctive
+    matching restores recall; ``ts_rank`` ordering preserves precision (more/rarer
+    term overlap ranks higher). Sanitizing to ``[a-z0-9]+`` is also what keeps
+    ``to_tsquery`` from raising on operator/punctuation characters in raw input —
+    never interpolate untokenized text into ``to_tsquery``.
+    """
+    seen: set[str] = set()
+    lexemes: list[str] = []
+    for token in _TSQUERY_TOKEN_RE.findall(query.lower()):
+        if token not in seen:
+            seen.add(token)
+            lexemes.append(token)
+    if not lexemes:
+        return None
+    return " | ".join(lexemes)
+
+
 async def search_by_keyword(
     pool: asyncpg.Pool,
     query: str,
@@ -426,8 +486,9 @@ async def search_by_keyword(
 ) -> list[MemoryRecall]:
     """Search memories by full-text keyword match (BM25 ranking via ts_rank).
 
-    Uses the search_tsv tsvector column with plainto_tsquery for robust
-    keyword matching including stemming and stop-word removal.
+    Uses the search_tsv tsvector column with a sanitized disjunctive
+    ``to_tsquery`` (see ``build_or_tsquery``) for OR-matching keyword recall,
+    ranked by ``ts_rank``. A query with no usable lexeme returns no results.
 
     user_id: If provided, filters to memories owned by this user OR globally-scoped
     memories (user_id = SYSTEM_GLOBAL_USER_ID sentinel). If None, returns all.
@@ -438,13 +499,20 @@ async def search_by_keyword(
     memories whose project_facets contains this project.  Mirror of the
     same parameter on search_by_vector.
     """
+    # Sanitized disjunctive tsquery. A query with no usable lexeme (empty,
+    # all-punctuation) short-circuits to no keyword matches — never an emitted
+    # (and potentially raising) to_tsquery call.
+    tsquery_str = build_or_tsquery(query)
+    if tsquery_str is None:
+        return []
+
     conditions = ["search_tsv IS NOT NULL"]
     params: list = []
     idx = 1
 
-    # $1 = tsquery
-    conditions.append(f"search_tsv @@ plainto_tsquery('english', ${idx})")
-    params.append(query)
+    # $1 = tsquery (OR-joined lexemes, passed to to_tsquery)
+    conditions.append(f"search_tsv @@ to_tsquery('english', ${idx})")
+    params.append(tsquery_str)
     idx += 1
 
     if status:
@@ -511,7 +579,7 @@ async def search_by_keyword(
 
     sql = f"""
         SELECT *,
-               ts_rank(search_tsv, plainto_tsquery('english', $1)) AS rank
+               ts_rank(search_tsv, to_tsquery('english', $1)) AS rank
         FROM memories
         {where}
         ORDER BY rank DESC
@@ -920,6 +988,11 @@ async def update_memory(
         sets.append(f"embedding = ${idx}::vector")
         params.append(embedding)
         idx += 1
+        # A new embedding is recomposed via embed_text_for_memory by callers,
+        # so stamp the current composition version (RC2).
+        sets.append(f"embed_composition_version = ${idx}")
+        params.append(EMBED_COMPOSITION_VERSION)
+        idx += 1
 
     if pinned is not None:
         sets.append(f"pinned = ${idx}")
@@ -1009,6 +1082,9 @@ async def upsert_by_topic(
                     sets.append(f"embedding = ${idx}::vector")
                     params.append(embedding)
                     idx += 1
+                    sets.append(f"embed_composition_version = ${idx}")
+                    params.append(EMBED_COMPOSITION_VERSION)
+                    idx += 1
 
                 set_clause = ", ".join(sets)
                 params.append(existing["id"])
@@ -1029,12 +1105,12 @@ async def upsert_by_topic(
                     id, type, topic, content, source, confidence,
                     token_count, created_at, updated_at, accessed_at,
                     access_count, project_id, embedding, status,
-                    pinned, review_after, user_id
+                    pinned, review_after, user_id, embed_composition_version
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $8, $8,
                     0, $9, $10::vector, 'active',
-                    false, $11, nullif(current_setting('app.user_id', true), '')
+                    false, $11, nullif(current_setting('app.user_id', true), ''), $12
                 )
                 """,
                 memory_id,
@@ -1048,6 +1124,7 @@ async def upsert_by_topic(
                 project_id,
                 embedding,
                 review_after,
+                EMBED_COMPOSITION_VERSION,
             )
 
             return Memory(
