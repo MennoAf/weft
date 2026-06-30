@@ -1362,6 +1362,19 @@ async def weft_prime(
             mode=mode,
         )
 
+        # Reconciliation-meter health (recall canary). Attached as a tier-1
+        # field so a DARK meter screams on every prime — the load-bearing
+        # surface that makes "the meter went dark" impossible to miss. Scoped
+        # to the authenticated caller explicitly (not the GUC). Best-effort:
+        # never let the meter's own health break the primer.
+        try:
+            from weft.canary import canary_health
+            _ch = await canary_health(app.pool, resolve_caller_user_id())
+            if _ch:
+                result["recall_canary"] = _ch
+        except Exception as exc:
+            logger.debug("recall_canary health skipped (non-fatal): %s", exc)
+
         # Fire-and-forget tasks run without acquire — they're system-level ops
         # that don't need user scoping.
         try:
