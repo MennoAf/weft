@@ -137,7 +137,7 @@ class TestWeftStatusTruncation:
             current_user_id.reset(tok)
 
         # Call weft_status and verify truncated surfaces
-        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_id):
             result = await weft_status(ctx, topic=tag, synthesize=False)
 
         assert "truncated" in result, "MCP response must include truncated field"
@@ -166,7 +166,7 @@ class TestWeftStatusTruncation:
         )
 
         # Call weft_status and verify truncated=false
-        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_id):
             result = await weft_status(ctx, topic=tag, synthesize=False)
 
         assert "truncated" in result, "MCP response must include truncated field"

@@ -13,6 +13,7 @@ from weft.auth import (
     current_user_id,
     extract_user_id,
     extract_user_id_from_header,
+    resolve_caller_user_id,
 )
 
 # Shared test secret
@@ -145,3 +146,36 @@ class TestContextVar:
         tok = current_user_id.set("temporary")
         current_user_id.reset(tok)
         assert current_user_id.get() is None
+
+
+class TestResolveCallerUserId:
+    """resolve_caller_user_id() precedence: authenticated caller (contextvar)
+    over installation id. This is the primitive that fixed the hosted recall
+    scope bug (weft-6b7c05a8) — handlers must scope to the caller, not the
+    server's install id."""
+
+    def test_contextvar_wins_when_set(self):
+        tok = current_user_id.set("caller-from-credential")
+        try:
+            assert resolve_caller_user_id() == "caller-from-credential"
+        finally:
+            current_user_id.reset(tok)
+
+    def test_falls_back_to_installation_id_when_unset(self):
+        assert current_user_id.get() is None
+        with patch(
+            "weft.config.user_identity.get_user_id", return_value="install-id"
+        ):
+            assert resolve_caller_user_id() == "install-id"
+
+    def test_empty_contextvar_falls_back(self):
+        # An empty string is not a valid identity — fall through, don't scope
+        # every read to "".
+        tok = current_user_id.set("")
+        try:
+            with patch(
+                "weft.config.user_identity.get_user_id", return_value="install-id"
+            ):
+                assert resolve_caller_user_id() == "install-id"
+        finally:
+            current_user_id.reset(tok)

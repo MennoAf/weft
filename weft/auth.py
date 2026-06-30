@@ -62,6 +62,29 @@ def is_agent_caller() -> bool:
     return get_caller_mode() == "agent"
 
 
+def resolve_caller_user_id() -> str:
+    """Return the user_id that owns the current request.
+
+    Precedence:
+
+    1. ``current_user_id`` contextvar — set by the HTTP middleware from the
+       authenticated credential (token-row ``user_id`` or Supabase JWT
+       ``sub``). This is the authenticated *caller*, which on a hosted /
+       multi-tenant server is the only correct scope for reads and writes.
+    2. ``get_user_id()`` — the installation's canonical id. The fallback for
+       paths that never run the middleware: local stdio/CLI usage, scripts,
+       and unauthenticated local-dev where the contextvar stays unset.
+
+    Centralized so MCP tool handlers don't re-resolve identity themselves.
+    The previous ``get_user_id()``-only default silently scoped every hosted
+    request to the *server's* installation id instead of the caller's,
+    making the caller's own corpus invisible to recall (see weft-6b7c05a8).
+    """
+    from weft.config.user_identity import get_user_id
+
+    return current_user_id.get() or get_user_id()
+
+
 def parse_caller_mode_header(header_value: str | None) -> CallerMode:
     """Normalize an ``X-Weft-Caller-Mode`` header into a known value.
 
