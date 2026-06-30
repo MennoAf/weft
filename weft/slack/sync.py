@@ -11,7 +11,7 @@ import asyncpg
 from weft.db.connection import acquire, get_db
 from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemoryCreate, MemorySource
-from weft.store import store_memory
+from weft.store import embed_text_for_memory, store_memory
 
 from .config import (
     DEFAULT_EXCLUDED_CHANNELS,
@@ -476,7 +476,9 @@ async def _store_message_memory(
     embedding = None
     if embedding_provider:
         try:
-            embedding = await embedding_provider.embed(content)
+            embedding = await embedding_provider.embed(
+                embed_text_for_memory(content, topics)
+            )
         except Exception as exc:
             logger.warning("Failed to embed message %s: %s", message.ts, exc)
 
