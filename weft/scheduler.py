@@ -988,7 +988,16 @@ async def canary_audit_loop(
                 if await _canary_audit_due(pool, default_uid, min_age_hours=min_age_hours):
                     from weft.canary import run_canary_audit
 
-                    result = await run_canary_audit(pool, embedder, user_id=default_uid)
+                    # active_probing_enabled=True: audit BOTH arms. The active
+                    # arm is an uncalibrated completeness proxy (surfaced as
+                    # such in canary_health), the reask-bootstrap arm is the
+                    # trustworthy one. Auditing active too is what gives the
+                    # meter a live signal instead of a perpetually-skipped
+                    # audit_valid=False (decision weft-0f1ecad1).
+                    result = await run_canary_audit(
+                        pool, embedder, user_id=default_uid,
+                        active_probing_enabled=True,
+                    )
                     if result.get("audit_valid"):
                         logger.info(
                             "canary_audit.cycle",

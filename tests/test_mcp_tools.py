@@ -217,8 +217,9 @@ class TestWeftRecall:
 
         ``user_id`` is passed explicitly because weft_remember (in this test
         harness) writes under the pool's app.user_id GUC ("test-user-default")
-        while weft_recall's default resolves get_user_id() to the real
-        installation UUID. The two must match for the row to be visible.
+        while weft_recall's default resolves resolve_caller_user_id() to the
+        real installation UUID (no request contextvar set in-process). The two
+        must match for the row to be visible.
         """
         from tests.conftest import DEFAULT_TEST_USER_ID
         from weft.mcp.tools import weft_recall, weft_remember
@@ -347,7 +348,7 @@ class TestWeftStatus:
         assert "id" in result, f"weft_remember failed: {result}"
 
         test_user = "test-user-default"  # conftest.py default
-        with patch("weft.mcp.tools.get_user_id", return_value=test_user):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=test_user):
             result = await weft_status(ctx, topic="status-test-topic", synthesize=False)
 
         assert "topic" in result
@@ -522,13 +523,13 @@ class TestUserIdFiltering:
     # weft_recall
     # ------------------------------------------------------------------
 
-    async def test_recall_without_user_id_defaults_to_get_user_id(self, app, monkeypatch):
-        """Calling weft_recall without user_id uses get_user_id() automatically."""
+    async def test_recall_without_user_id_defaults_to_caller(self, app, monkeypatch):
+        """Calling weft_recall without user_id uses the authenticated caller (resolve_caller_user_id) automatically."""
         from unittest.mock import AsyncMock, patch
 
         from weft.mcp.tools import weft_recall
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "patched-uid")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "patched-uid")
 
         captured = {}
 
@@ -544,13 +545,13 @@ class TestUserIdFiltering:
 
         assert captured.get("user_id") == "patched-uid"
 
-    async def test_recall_explicit_none_defaults_to_get_user_id(self, app, monkeypatch):
-        """Passing user_id=None explicitly also falls through to get_user_id()."""
+    async def test_recall_explicit_none_defaults_to_caller(self, app, monkeypatch):
+        """Passing user_id=None explicitly also falls through to resolve_caller_user_id()."""
         from unittest.mock import patch
 
         from weft.mcp.tools import weft_recall
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "patched-uid-2")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "patched-uid-2")
 
         captured = {}
 
@@ -570,7 +571,7 @@ class TestUserIdFiltering:
         """Default user_id path produces same results as explicit user_id path."""
         from weft.mcp.tools import weft_recall, weft_remember
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "user-abc")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "user-abc")
 
         ctx = _make_ctx(app)
         await weft_remember(ctx, content="Test memory for recall identity check", topic=["identity"])
@@ -586,7 +587,7 @@ class TestUserIdFiltering:
 
         from weft.mcp.tools import weft_recall
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "compose-uid")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "compose-uid")
 
         captured = {}
 
@@ -605,17 +606,76 @@ class TestUserIdFiltering:
         assert captured.get("user_id") == "explicit-uid"
         assert captured.get("sources") is not None
 
+    async def test_recall_default_scopes_to_authenticated_caller_contextvar(self, app):
+        """REGRESSION (weft-6b7c05a8): with no explicit user_id, recall scopes to
+        the authenticated caller carried on the ``current_user_id`` contextvar —
+        NOT the server's installation id.
+
+        The HTTP middleware sets this contextvar from the request credential
+        (token-row user_id / JWT sub). The hosted recall bug was that the handler
+        re-resolved get_user_id() and ignored the contextvar, scoping every call
+        to the server's install id and hiding the caller's entire corpus. This
+        test drives the real contextvar end-to-end (no resolver patching).
+        """
+        from unittest.mock import patch
+
+        from weft.auth import current_user_id
+        from weft.mcp.tools import weft_recall
+
+        captured = {}
+        original = __import__("weft.store", fromlist=["search_hybrid"]).search_hybrid
+
+        async def spy(pool, query, embedding, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original(pool, query, embedding, **kwargs)
+
+        ctx = _make_ctx(app)
+        tok = current_user_id.set("caller-from-token")
+        try:
+            with patch("weft.mcp.tools.search_hybrid", side_effect=spy):
+                await weft_recall(ctx, query="anything")
+        finally:
+            current_user_id.reset(tok)
+
+        assert captured.get("user_id") == "caller-from-token"
+
+    async def test_recall_explicit_user_id_overrides_caller_contextvar(self, app):
+        """An explicit user_id arg still wins over the caller contextvar, so
+        admin/cross-user reads stay possible. Orthogonality: the arg is the
+        override, the contextvar is the default."""
+        from unittest.mock import patch
+
+        from weft.auth import current_user_id
+        from weft.mcp.tools import weft_recall
+
+        captured = {}
+        original = __import__("weft.store", fromlist=["search_hybrid"]).search_hybrid
+
+        async def spy(pool, query, embedding, **kwargs):
+            captured["user_id"] = kwargs.get("user_id")
+            return await original(pool, query, embedding, **kwargs)
+
+        ctx = _make_ctx(app)
+        tok = current_user_id.set("caller-from-token")
+        try:
+            with patch("weft.mcp.tools.search_hybrid", side_effect=spy):
+                await weft_recall(ctx, query="anything", user_id="explicit-uid")
+        finally:
+            current_user_id.reset(tok)
+
+        assert captured.get("user_id") == "explicit-uid"
+
     # ------------------------------------------------------------------
     # weft_behavior_list
     # ------------------------------------------------------------------
 
-    async def test_behavior_list_without_user_id_defaults_to_get_user_id(self, app, monkeypatch):
-        """weft_behavior_list without user_id calls list_behaviors with get_user_id()."""
+    async def test_behavior_list_without_user_id_defaults_to_caller(self, app, monkeypatch):
+        """weft_behavior_list without user_id calls list_behaviors with the authenticated caller."""
         from unittest.mock import patch
 
         from weft.mcp.tools import weft_behavior_list
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "behaviors-uid")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "behaviors-uid")
 
         captured = {}
 
@@ -631,13 +691,13 @@ class TestUserIdFiltering:
 
         assert captured.get("user_id") == "behaviors-uid"
 
-    async def test_behavior_list_explicit_none_defaults_to_get_user_id(self, app, monkeypatch):
-        """Passing user_id=None to weft_behavior_list also falls through to get_user_id()."""
+    async def test_behavior_list_explicit_none_defaults_to_caller(self, app, monkeypatch):
+        """Passing user_id=None to weft_behavior_list also falls through to resolve_caller_user_id()."""
         from unittest.mock import patch
 
         from weft.mcp.tools import weft_behavior_list
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "behaviors-uid-2")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "behaviors-uid-2")
 
         captured = {}
 
@@ -657,13 +717,13 @@ class TestUserIdFiltering:
     # weft_entity_search
     # ------------------------------------------------------------------
 
-    async def test_entity_search_without_user_id_defaults_to_get_user_id(self, app, monkeypatch):
-        """weft_entity_search without user_id calls search_entities with get_user_id()."""
+    async def test_entity_search_without_user_id_defaults_to_caller(self, app, monkeypatch):
+        """weft_entity_search without user_id calls search_entities with the authenticated caller."""
         from unittest.mock import patch
 
         from weft.mcp.tools import weft_entity_search
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "entities-uid")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "entities-uid")
 
         captured = {}
 
@@ -679,13 +739,13 @@ class TestUserIdFiltering:
 
         assert captured.get("user_id") == "entities-uid"
 
-    async def test_entity_search_explicit_none_defaults_to_get_user_id(self, app, monkeypatch):
-        """Passing user_id=None to weft_entity_search also falls through to get_user_id()."""
+    async def test_entity_search_explicit_none_defaults_to_caller(self, app, monkeypatch):
+        """Passing user_id=None to weft_entity_search also falls through to resolve_caller_user_id()."""
         from unittest.mock import patch
 
         from weft.mcp.tools import weft_entity_search
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "entities-uid-2")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "entities-uid-2")
 
         captured = {}
 
@@ -705,7 +765,7 @@ class TestUserIdFiltering:
         """Default user_id path produces same results as explicit user_id path for entities."""
         from weft.mcp.tools import weft_entity_search
 
-        monkeypatch.setattr("weft.mcp.tools.get_user_id", lambda: "entity-id-match")
+        monkeypatch.setattr("weft.mcp.tools.resolve_caller_user_id", lambda: "entity-id-match")
 
         ctx = _make_ctx(app)
         result_default = await weft_entity_search(ctx, query="some concept", threshold=0.0)
