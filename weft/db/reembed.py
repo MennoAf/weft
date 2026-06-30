@@ -47,6 +47,10 @@ TABLE_TEXT_EXPRESSIONS: dict[str, str] = {
     # to empty string so a missing summary doesn't null out the whole
     # expression.
     "episodes": "title || ' ' || COALESCE(summary, '')",
+    # RC2: memories embed content + topics. MUST byte-match the Python helper
+    # weft.store.embed_text_for_memory(content, topic) so the generic NULL-embed
+    # re-embed path agrees with the write path and the composition backfill.
+    "memories": "content || ' ' || array_to_string(COALESCE(topic, '{}'), ' ')",
 }
 
 # Known safe table names — reject anything else.
@@ -172,6 +176,74 @@ async def reembed_table(
         extra={"table": table, "embedded": embedded, "total": total},
     )
     return embedded
+
+
+async def backfill_memory_composition(
+    pool: asyncpg.Pool,
+    provider: EmbeddingProvider,
+    *,
+    batch_size: int = 100,
+) -> int:
+    """Re-embed memories whose embedding predates the current embed-text composition.
+
+    RC2 backfill: selects rows where ``embed_composition_version < current`` and
+    re-embeds them from ``embed_text_for_memory(content, topic)`` — the SAME
+    Python helper the write path uses, so write-path/backfill parity is
+    automatic (no SQL-expression mirror to drift). Updates the embedding and
+    stamps ``embed_composition_version`` to current in one transaction per batch.
+
+    Idempotent and resumable: already-current rows are skipped, so a re-run only
+    processes whatever remains. Returns the number of rows re-embedded.
+
+    AC5 of the recall-completeness PRD: after this completes,
+    ``count(*) WHERE embed_composition_version < current`` is 0.
+    """
+    from weft.store import EMBED_COMPOSITION_VERSION, embed_text_for_memory
+
+    rows = await pool.fetch(
+        "SELECT id, content, topic FROM memories "
+        "WHERE embed_composition_version < $1 AND content IS NOT NULL",
+        EMBED_COMPOSITION_VERSION,
+    )
+    if not rows:
+        logger.info("backfill_memory_composition: nothing stale")
+        return 0
+
+    total = len(rows)
+    logger.info("backfill_memory_composition_starting", extra={"rows": total})
+    done = 0
+    for i in range(0, total, batch_size):
+        batch = rows[i : i + batch_size]
+        texts = [embed_text_for_memory(r["content"], r["topic"]) for r in batch]
+        ids = [r["id"] for r in batch]
+        try:
+            embeddings = await provider.embed_batch(texts)
+        except Exception:
+            logger.exception(
+                "backfill_memory_composition_batch_failed",
+                extra={"batch_start": i, "batch_size": len(batch)},
+            )
+            continue
+        if len(embeddings) != len(ids):
+            ids = ids[: len(embeddings)]
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for row_id, emb in zip(ids, embeddings):
+                    await conn.execute(
+                        "UPDATE memories SET embedding = $1::vector, "
+                        "embed_composition_version = $2 WHERE id = $3",
+                        emb,
+                        EMBED_COMPOSITION_VERSION,
+                        row_id,
+                    )
+        done += len(ids)
+        logger.info(
+            "backfill_memory_composition_progress",
+            extra={"progress": f"{done}/{total}"},
+        )
+
+    logger.info("backfill_memory_composition_complete", extra={"embedded": done})
+    return done
 
 
 async def auto_reembed(

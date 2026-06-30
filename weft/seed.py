@@ -12,7 +12,7 @@ from weft.auth import current_user_id
 from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemoryCreate, MemorySource, MemoryType
 from weft.schema import SYSTEM_GLOBAL_USER_ID
-from weft.store import store_memory
+from weft.store import embed_text_for_memory, store_memory
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,9 @@ async def seed_memories(
                     pinned=entry.get("pinned", False),
                     project_id=entry.get("project_id"),
                 )
-                vec = await embedding.embed(create.content)
+                vec = await embedding.embed(
+                    embed_text_for_memory(create.content, create.topic)
+                )
                 await store_memory(pool, create, embedding=vec)
                 stored += 1
             except Exception as exc:

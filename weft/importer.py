@@ -225,7 +225,7 @@ async def import_memories(
     Returns:
         ImportReport with counts and any errors
     """
-    from weft.store import search_by_vector, store_memory
+    from weft.store import embed_text_for_memory, search_by_vector, store_memory
 
     report = ImportReport()
 
@@ -247,8 +247,10 @@ async def import_memories(
                     agent_id=create.agent_id,
                 )
 
-            # Generate embedding
-            embedding = await provider.embed(create.content)
+            # Generate embedding (content + topics, RC2)
+            embedding = await provider.embed(
+                embed_text_for_memory(create.content, create.topic)
+            )
 
             # Check for near-duplicates
             dupes = await search_by_vector(
