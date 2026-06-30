@@ -164,7 +164,7 @@ class TestTier1NoSynthesis:
 
         # V2: patch synthesize_digest to verify it is never called on synthesize=False
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock
         ) as mock_synth:
@@ -194,7 +194,7 @@ class TestTier1NoSynthesis:
             mid = await _seed_memory(pool, user_id, tag, f"Memory content {i}")
             mem_ids.append(mid)
 
-        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_id):
             result = await weft_status(ctx, topic=tag, synthesize=False)
 
         memories = result["memories"]
@@ -211,7 +211,7 @@ class TestTier1NoSynthesis:
         tag = f"tag-{uuid.uuid4().hex[:8]}"
         await _seed_memory(pool, user_id, tag, "Content check memory")
 
-        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_id):
             result = await weft_status(ctx, topic=tag, synthesize=False)
 
         assert len(result["memories"]) >= 1
@@ -231,7 +231,7 @@ class TestTier1NoSynthesis:
         await _seed_memory(pool, user_id, tag)
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest"
         ) as mock_synth:
@@ -264,7 +264,7 @@ class TestTier2Synthesized:
         )
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=synth_result
         ):
@@ -301,7 +301,7 @@ class TestTier2Synthesized:
         )
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=synth_result
         ):
@@ -332,7 +332,7 @@ class TestTier2Synthesized:
         )
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=synth_result
         ):
@@ -381,7 +381,7 @@ class TestTier2CacheHit:
 
         # synthesize=True — should hit cache and skip the synthesizer
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock
         ) as mock_synth:
@@ -423,7 +423,7 @@ class TestRLSIsolation:
         await _seed_memory(pool, user_b, tag, "User B secret memory")
 
         # Query as user A
-        with patch("weft.mcp.tools.get_user_id", return_value=user_a):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_a):
             result = await weft_status(ctx, topic=tag, synthesize=False)
 
         # Must return exactly user_a's memories, not user_b's
@@ -460,7 +460,7 @@ class TestAbstention:
         )
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=abstain_result
         ):
@@ -500,7 +500,7 @@ class TestAbstention:
         )
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=abstain_result
         ):
@@ -539,7 +539,7 @@ class TestAbstention:
         )
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=abstain_result
         ):
@@ -581,7 +581,7 @@ class TestAbstention:
         )
 
         with patch(
-            "weft.mcp.tools.get_user_id", return_value=user_id
+            "weft.mcp.tools.resolve_caller_user_id", return_value=user_id
         ), patch(
             "weft.views.topic_synthesis.synthesize_digest", new_callable=AsyncMock, return_value=abstain_result
         ):
@@ -615,7 +615,7 @@ class TestRecallQueryLog:
         # Unique topic that resolves to nothing for this user.
         tag = f"empty-{uuid.uuid4().hex[:8]}"
 
-        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_id):
             result = await weft_status(ctx, topic=tag, synthesize=False)
 
         assert result["memories"] == []
@@ -638,7 +638,7 @@ class TestRecallQueryLog:
         await _seed_memory(pool, user_id, tag, "one")
         await _seed_memory(pool, user_id, tag, "two")
 
-        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_id):
             await weft_status(ctx, topic=tag, synthesize=False)
 
         rows = await _recall_query_rows(pool, "status", tag)
@@ -654,7 +654,7 @@ class TestRecallQueryLog:
         tag = f"tag-{uuid.uuid4().hex[:8]}"
         await _seed_memory(pool, user_id, tag, "content")
 
-        with patch("weft.mcp.tools.get_user_id", return_value=user_id):
+        with patch("weft.mcp.tools.resolve_caller_user_id", return_value=user_id):
             await weft_status(ctx, topic=tag, synthesize=False)
             await weft_status(ctx, topic=tag, synthesize=False)
 
