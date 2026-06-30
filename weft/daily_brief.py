@@ -59,12 +59,13 @@ SECTION_META = {
     "review_queue": ("📋", "Review Queue"),
     "handoffs": ("🔄", "Recent Handoffs"),
     "alerts": ("🔔", "Alerts Due Today"),
+    "recall_canary": ("🎯", "Recall Canary"),
 }
 
 # Group ordering renders top-to-bottom.
 SECTION_GROUPS: list[tuple[str, str, list[str]]] = [
     ("👤", "Personal", ["calendar", "checkin_trends", "birthdays"]),
-    ("💻", "Code", ["active_projects", "daily_spend", "review_queue", "handoffs", "alerts"]),
+    ("💻", "Code", ["active_projects", "daily_spend", "review_queue", "handoffs", "alerts", "recall_canary"]),
 ]
 
 
@@ -532,6 +533,38 @@ def format_slack_blocks(sections: dict[str, list[str]], generated_at: datetime) 
 # --- Main assembly ---
 
 
+async def _query_canary_health(pool: asyncpg.Pool) -> list[str]:
+    """Recall-canary (reconciliation meter) lines for the brief.
+
+    Surfaces the DARK alarm first (loud), then one miss-rate line per arm.
+    Scoped to the deployment owner via ``WEFT_DEFAULT_USER_ID`` — the same
+    identity the canary audit loop runs under.
+    """
+    import os
+
+    from weft.canary import canary_health
+
+    health = await canary_health(pool, os.environ.get("WEFT_DEFAULT_USER_ID"))
+    if not health:
+        return []
+    lines: list[str] = []
+    if health.get("dark"):
+        lines.append(health["alert"])
+    for arm_name, arm in health.get("arms", {}).items():
+        suffix = " (uncalibrated)" if arm.get("label") == "uncalibrated" else ""
+        mr = arm.get("miss_rate")
+        if mr is not None:
+            lines.append(
+                f"{arm_name}{suffix}: {mr:.1%} miss "
+                f"({arm['misses']}/{arm['checks']}) across {arm['probes']} probes"
+            )
+        else:
+            lines.append(
+                f"{arm_name}{suffix}: not yet audited, {arm['probes']} probes enrolled"
+            )
+    return lines
+
+
 async def assemble_daily_brief(
     pool: asyncpg.Pool,
     brief_config: DailyBriefConfig | None = None,
@@ -582,6 +615,7 @@ async def assemble_daily_brief(
     )
     daily_spend = await _safe(_query_daily_spend(pool, target_date), "daily_spend")
     alerts = await _safe(_query_alerts(pool, target_date), "alerts")
+    recall_canary = await _safe(_query_canary_health(pool), "recall_canary")
 
     sections: dict[str, list[str]] = {
         "calendar": calendar,
@@ -592,6 +626,7 @@ async def assemble_daily_brief(
         "review_queue": review_queue,
         "handoffs": handoffs,
         "alerts": alerts,
+        "recall_canary": recall_canary,
     }
 
     generated_at = local_now

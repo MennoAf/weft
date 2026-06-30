@@ -222,10 +222,11 @@ async def _sync_reask_bootstrap_probes(
     # pointing at the same satisfying memory with similar query text.
     rows = await get_db(pool).fetch(
         """
-        SELECT q.query_text, q.reask_satisfying_memory_id
+        SELECT q.query_text, q.reask_satisfying_memory_id, q.user_id
         FROM weft_recall_queries q
         WHERE q.is_reask_miss = TRUE
           AND q.reask_satisfying_memory_id IS NOT NULL
+          AND q.user_id IS NOT NULL
           AND NOT EXISTS (
               SELECT 1 FROM recall_canary c
               WHERE c.memory_id = q.reask_satisfying_memory_id
@@ -243,14 +244,23 @@ async def _sync_reask_bootstrap_probes(
     for row in rows:
         probe_id = f"cp-{uuid.uuid4().hex[:10]}"
         try:
+            # user_id is set EXPLICITLY from the query row, not left to the
+            # recall_canary.user_id GUC default. This path runs on the raw pool
+            # (scheduler / audit context) where ``app.user_id`` is unset, so the
+            # ``nullif(current_setting('app.user_id', true), '')`` column default
+            # resolves to NULL and trips the NOT NULL constraint — every
+            # reask-bootstrap insert failed silently before this. (The active
+            # enroll path works only because it rides weft_remember's acquire()
+            # GUC.)
             result = await get_db(pool).execute(
                 """
-                INSERT INTO recall_canary (probe_id, memory_id, probe_text, probe_type)
-                VALUES ($1, $2, $3, 'reask-bootstrap')
+                INSERT INTO recall_canary (probe_id, memory_id, user_id, probe_text, probe_type)
+                VALUES ($1, $2, $3, $4, 'reask-bootstrap')
                 ON CONFLICT DO NOTHING
                 """,
                 probe_id,
                 row["reask_satisfying_memory_id"],
+                row["user_id"],
                 row["query_text"][:PROBE_TEXT_MAX_CHARS],
             )
             # asyncpg returns "INSERT 0 1" when a row was inserted, "INSERT 0 0"
@@ -540,3 +550,126 @@ async def run_canary_audit(
         "audit_valid": True,
         "status": "ok",
     }
+
+
+# A meter that hasn't audited within this window is treated as DARK. The audit
+# runs daily (~23h min-age), so 48h means it has missed ~2 cycles — long enough
+# to be a real failure, short enough to catch it fast on the next prime.
+_CANARY_STALE_HOURS = 48.0
+
+
+async def canary_health(
+    pool: asyncpg.Pool, user_id: str | None = None
+) -> dict | None:
+    """Reconciliation-meter health summary for the primer and daily brief.
+
+    Read-only aggregate over ``recall_canary`` grouped by probe arm
+    (``active`` = uncalibrated completeness proxy; ``reask-bootstrap`` =
+    trustworthy, derived from the proven ``is_reask_miss`` signal). Per arm it
+    reports enrolled/audited probe counts and a lifetime ``miss_rate``
+    (``sum(miss_count) / sum(audit_count)`` — both bump on every hit and miss,
+    so this equals the latest run's rate when stable).
+
+    The load-bearing part is ``dark``: True when the meter has NEVER audited or
+    its last audit is older than ``_CANARY_STALE_HOURS``. When dark, ``alert``
+    carries a loud, human-readable line so a dead meter SCREAMS on the next
+    prime instead of failing silent — the exact failure mode that let the meter
+    sit unaudited for weeks. The watchman is watched by the one surface a human
+    reads every session.
+
+    ``user_id`` scopes the read EXPLICITLY (``WHERE user_id = $1``) rather than
+    relying on the ``app.user_id`` GUC — the primer and scheduler contexts do
+    not reliably set it (the same NULL-GUC gap that broke reask-bootstrap
+    enrollment). Returns None on any error — best-effort, never breaks prime.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        if user_id is not None:
+            rows = await get_db(pool).fetch(
+                """
+                SELECT probe_type,
+                       count(*)                               AS probes,
+                       count(*) FILTER (WHERE audit_count > 0) AS audited,
+                       coalesce(sum(miss_count), 0)           AS misses,
+                       coalesce(sum(audit_count), 0)          AS checks,
+                       max(last_audit_at)                     AS last_audit_at
+                FROM recall_canary
+                WHERE enabled = TRUE AND user_id = $1
+                GROUP BY probe_type
+                """,
+                user_id,
+            )
+        else:
+            # No explicit scope: lean on RLS (app.user_id GUC) for tenant
+            # boundary. Used by callers that already run inside acquire().
+            rows = await get_db(pool).fetch(
+                """
+                SELECT probe_type,
+                       count(*)                               AS probes,
+                       count(*) FILTER (WHERE audit_count > 0) AS audited,
+                       coalesce(sum(miss_count), 0)           AS misses,
+                       coalesce(sum(audit_count), 0)          AS checks,
+                       max(last_audit_at)                     AS last_audit_at
+                FROM recall_canary
+                WHERE enabled = TRUE
+                GROUP BY probe_type
+                """
+            )
+    except Exception:
+        logger.debug("canary_health: aggregate query failed", exc_info=True)
+        return None
+
+    if not rows:
+        return None
+
+    arms: dict[str, dict] = {}
+    overall_last = None
+    for r in rows:
+        checks = int(r["checks"] or 0)
+        misses = int(r["misses"] or 0)
+        last = r["last_audit_at"]
+        arm = {
+            "probes": int(r["probes"]),
+            "audited": int(r["audited"]),
+            "misses": misses,
+            "checks": checks,
+            "miss_rate": round(misses / checks, 4) if checks else None,
+            "last_audit_at": last.isoformat() if last else None,
+            "trustworthy": r["probe_type"] == "reask-bootstrap",
+        }
+        if r["probe_type"] == "active":
+            # The active arm is a real signal but its baseline was never
+            # calibrated (RI-4) — surfaced, but labelled so it is not mistaken
+            # for a trustworthy miss rate.
+            arm["label"] = "uncalibrated"
+        arms[r["probe_type"]] = arm
+        if last is not None and (overall_last is None or last > overall_last):
+            overall_last = last
+
+    now = datetime.now(timezone.utc)
+    age_hours = (
+        (now - overall_last).total_seconds() / 3600 if overall_last else None
+    )
+    dark = age_hours is None or age_hours >= _CANARY_STALE_HOURS
+    if age_hours is None:
+        dark_reason = "never audited"
+    elif dark:
+        dark_reason = f"stale — last audit {age_hours:.0f}h ago"
+    else:
+        dark_reason = None
+
+    health: dict = {
+        "arms": arms,
+        "last_audit_at": overall_last.isoformat() if overall_last else None,
+        "audit_age_hours": round(age_hours, 1) if age_hours is not None else None,
+        "dark": dark,
+        "dark_reason": dark_reason,
+    }
+    if dark:
+        health["alert"] = (
+            f"⚠️ recall canary DARK ({dark_reason}) — the reconciliation meter "
+            "is not measuring; silent recall misses are going undetected. "
+            "Check WEFT_DEFAULT_USER_ID and the canary_audit loop."
+        )
+    return health

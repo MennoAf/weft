@@ -23,9 +23,11 @@ import pytest
 from weft.canary import (
     COUNTER_CANARY_MISS,
     PROBE_TEXT_MAX_CHARS,
+    canary_health,
     enroll_canary,
     run_canary_audit,
 )
+from tests.conftest import DEFAULT_TEST_USER_ID
 from weft.counters import get_counter
 from weft.db.connection import get_db
 from weft.embeddings import get_provider
@@ -476,3 +478,135 @@ async def test_orphan_probe_disabled_on_hard_delete(pool, embedder):
     result = await run_canary_audit(pool, embedder)
     assert result["probes_checked"] == 0
     assert result["audit_valid"] is False  # 0 probes → skipped
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 regression: reask-bootstrap enrollment must set user_id explicitly
+# ---------------------------------------------------------------------------
+
+
+async def test_reask_bootstrap_enroll_populates_user_id_from_query(pool, embedder):
+    """REGRESSION: reask-bootstrap enrollment populates recall_canary.user_id
+    EXPLICITLY from the source weft_recall_queries row, not from the
+    app.user_id GUC default.
+
+    In prod the audit runs via get_db(pool) with no SET LOCAL, so the
+    ``nullif(current_setting('app.user_id', true), '')`` column default
+    resolved to NULL and every reask-bootstrap insert hit the NOT NULL
+    constraint — the trustworthy probe arm stayed permanently empty.
+
+    The source query is owned by a user DIFFERENT from the session GUC, so a
+    probe that merely inherited the GUC default would carry the wrong owner;
+    asserting the probe carries the QUERY's owner proves the value is sourced
+    explicitly.
+    """
+    owner = "reask-owner-xyz"  # deliberately != DEFAULT_TEST_USER_ID
+    content = "Canary reask owner-scoping regression memory"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["reask-owner"]),
+        embedding=emb,
+    )
+
+    # Insert the source query row owned by `owner` (transaction-local GUC so
+    # NOT NULL default + RLS WITH CHECK are satisfied for that owner).
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL app.user_id = '{owner}'")
+            await conn.execute(
+                """
+                INSERT INTO weft_recall_queries
+                    (query_id, query_text, tool_name, created_at,
+                     is_reask_miss, reask_satisfying_memory_id)
+                VALUES ($1, $2, 'recall', now() - interval '5 minutes', TRUE, $3)
+                """,
+                "qid-owner-001",
+                content[:200],
+                mem.id,
+            )
+
+    result = await run_canary_audit(pool, embedder, top_k=5)
+    assert result["bootstrap_synced"] == 1, "reask-bootstrap probe failed to enroll"
+
+    probe = await get_db(pool).fetchrow(
+        "SELECT user_id, probe_type FROM recall_canary WHERE memory_id = $1 "
+        "AND probe_type = 'reask-bootstrap'",
+        mem.id,
+    )
+    assert probe is not None
+    assert probe["user_id"] is not None, "user_id must not be NULL (the bug)"
+    assert probe["user_id"] == owner, (
+        "probe user_id must come from the source query row, not the GUC default"
+    )
+
+
+# ---------------------------------------------------------------------------
+# canary_health — the load-bearing primer/brief surface
+# ---------------------------------------------------------------------------
+
+
+async def test_canary_health_dark_when_never_audited(pool):
+    """A meter with probes but no audit is DARK with a loud alert — the
+    failure mode that let the meter sit unaudited for weeks."""
+    await enroll_canary(pool, "mem-h1", "health probe one", probe_type="active")
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    assert health is not None
+    assert health["dark"] is True
+    assert health["dark_reason"] == "never audited"
+    assert "alert" in health and "DARK" in health["alert"]
+    assert "active" in health["arms"]
+    assert health["arms"]["active"]["label"] == "uncalibrated"
+
+
+async def test_canary_health_fresh_after_audit(pool):
+    """A recently-audited meter is not dark and reports the arm miss_rate."""
+    pid = await enroll_canary(pool, "mem-h2", "health probe two", probe_type="active")
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 1, "
+        "miss_count = 0 WHERE probe_id = $1",
+        pid,
+    )
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    assert health is not None
+    assert health["dark"] is False
+    assert health["dark_reason"] is None
+    assert "alert" not in health
+    assert health["arms"]["active"]["miss_rate"] == 0.0
+    assert health["arms"]["active"]["audited"] == 1
+
+
+async def test_canary_health_dark_when_stale(pool):
+    """An audit older than the stale window flips the meter back to DARK."""
+    pid = await enroll_canary(pool, "mem-h3", "health probe three", probe_type="active")
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now() - interval '60 hours', "
+        "audit_count = 1 WHERE probe_id = $1",
+        pid,
+    )
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    assert health is not None
+    assert health["dark"] is True
+    assert health["dark_reason"].startswith("stale")
+    assert "alert" in health
+
+
+async def test_canary_health_miss_rate_aggregates(pool):
+    """miss_rate = sum(miss_count) / sum(audit_count) across the arm."""
+    p1 = await enroll_canary(pool, "mem-h4a", "probe miss", probe_type="active")
+    p2 = await enroll_canary(pool, "mem-h4b", "probe hit", probe_type="active")
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 1, "
+        "miss_count = 1 WHERE probe_id = $1",
+        p1,
+    )
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 1, "
+        "miss_count = 0 WHERE probe_id = $1",
+        p2,
+    )
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    assert health is not None
+    assert health["arms"]["active"]["miss_rate"] == 0.5
+    assert health["arms"]["active"]["misses"] == 1
+    assert health["arms"]["active"]["checks"] == 2
