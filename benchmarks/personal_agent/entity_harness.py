@@ -39,14 +39,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CandidateRun:
     query: str
-    routed_tier: str | None   # None = belief legacy (the tier we want here)
+    routed_tier: str | None    # None = belief legacy path
+    fell_back: bool            # True if the turns tier was empty → belief recovery
     recall_at_links: float
-
-    @property
-    def routed_to_belief(self) -> bool:
-        # The belief path is the one that can surface entity facts. A recall
-        # response with no explicit tier field IS the belief path.
-        return self.routed_tier in (None, "belief", "belief-view")
 
 
 @dataclass
@@ -79,12 +74,14 @@ class EntityStats:
         return max(self._recalls) if self._recalls else 0.0
 
     @property
-    def belief_routed(self) -> list[CandidateRun]:
-        return [c for c in self.candidate if c.routed_to_belief]
+    def fallbacks(self) -> list[CandidateRun]:
+        """Runs where the turns tier was empty and belief recovery kicked in."""
+        return [c for c in self.candidate if c.fell_back]
 
     @property
-    def misrouted(self) -> list[CandidateRun]:
-        return [c for c in self.candidate if not c.routed_to_belief]
+    def never_empty(self) -> bool:
+        """Never-miss: every phrasing surfaced the complete brief."""
+        return self.candidate_min == 1.0
 
     def to_dict(self) -> dict:
         return {
@@ -101,11 +98,13 @@ class EntityStats:
                 "min_recall_at_links": self.candidate_min,
                 "median_recall_at_links": self.candidate_median,
                 "max_recall_at_links": self.candidate_max,
-                "misrouted_count": len(self.misrouted),
+                "never_empty": self.never_empty,
+                "fallback_recoveries": len(self.fallbacks),
                 "per_query": [
                     {
                         "query": c.query,
                         "routed_tier": c.routed_tier or "belief",
+                        "fell_back": c.fell_back,
                         "recall_at_links": c.recall_at_links,
                     }
                     for c in self.candidate
@@ -154,16 +153,20 @@ async def run_entity_brief_paah(
         for query in get_brief_phrasings():
             resp = await weft_recall(ctx, query=query, limit=limit, tier="auto")
             routed_tier = resp.get("tier")  # None for the belief legacy path
+            fell_back = "tier_fallback" in resp  # turns tier was empty → belief
             surfaced = {r.get("id") for r in resp.get("results", []) if r.get("id")}
             recall = len(surfaced & fact_ids) / len(fact_ids) if fact_ids else 0.0
             stats.candidate.append(
-                CandidateRun(query=query, routed_tier=routed_tier, recall_at_links=recall)
+                CandidateRun(
+                    query=query, routed_tier=routed_tier,
+                    fell_back=fell_back, recall_at_links=recall,
+                )
             )
             logger.info(
-                "paah_entity CANDIDATE: query=%r routed=%s surfaced %d of %d "
-                "(recall@links=%.3f)",
-                query, routed_tier or "belief", len(surfaced & fact_ids),
-                len(fact_ids), recall,
+                "paah_entity CANDIDATE: query=%r routed=%s fell_back=%s surfaced "
+                "%d of %d (recall@links=%.3f)",
+                query, routed_tier or "belief", fell_back,
+                len(surfaced & fact_ids), len(fact_ids), recall,
             )
     finally:
         current_user_id.reset(token)

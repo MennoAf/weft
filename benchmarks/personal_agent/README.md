@@ -103,23 +103,27 @@ person, then measures "what do I need to know about X" two ways:
 | path | recall@links | note |
 | --- | --- | --- |
 | ORACLE `weft_entity_context` (edge walk) | **1.000** | complete brief, one deterministic call |
-| CANDIDATE `weft_recall` NL | **min 0.0 / median 1.0 / max 1.0** | bimodal — see finding |
+| CANDIDATE `weft_recall` NL | **min 1.0 / median 1.0 / max 1.0** | after the fix (was min 0.0) |
 
-**Finding — temporal words misroute the brief.** 2 of 5 brief phrasings returned
-**0 of 8** facts, and both are the canonical ones:
+**Finding, then a general fix (not benchmark-tuning).** The first run was bimodal:
+2 of 5 brief phrasings returned **0 of 8** facts, and both were the canonical
+ones — "what do I need to know about Zelda **before** our meeting" and "...**before**
+I meet her". "before" is a `_TURN_TIER_MARKER` (`before|after|since|until`), so
+`route_query_to_tier` sent the query to the turn tier, which has no entity facts
+→ empty. A *routing* bug, not a recall bug (every phrasing that reached belief
+surfaced 8/8).
 
-- ❌ "what do I need to know about Zelda **before** our meeting" → routed `turns`
-- ❌ "what should I remember about Zelda **before** I meet her" → routed `turns`
-- ✅ "brief me on Zelda" / "tell me everything about Zelda" / "give me the
-  background on Zelda" → routed `belief`, 8/8
-
-The word **"before"** is a `_TURN_TIER_MARKER` (`before|after|since|until`), so
-`route_query_to_tier` sends the query to the turn tier, which has no entity
-facts → empty. It's a **routing** bug, not a recall bug: when the same query
-routes to belief, recall is complete. The graph path (`weft_entity_context`) is
-always complete, so an agent building a brief should walk the entity graph — but
-a user's natural "what do I need before meeting X" silently returns nothing
-through `weft_recall`. Tracked for a fix decision.
+The fix was **not** to tighten the router regex to those phrasings (that would
+tune the system to the benchmark). It's a general never-miss safety net in
+`weft_recall`: **an empty turns-tier result falls back to belief recall**, marked
+`tier_fallback` in the response. This fixes the whole *class* of misroutes — any
+query the router mis-shapes still surfaces its answer if belief holds it — and
+leaves temporal routing that *does* have turn answers untouched (the fallback
+only fires on empty). PAAH now runs 6 phrasings across two markers (`before`,
+`since`); the 3 temporal-worded ones route to turns, recover via the fallback,
+and surface 8/8. **min recall@links: 0.0 → 1.0.** The fallback is monotonic — it
+only fires on empty and only adds results — so it cannot reduce recall on any
+existing query (incl. LongMemEval temporal). Full suite: 3238 passed.
 
 ## Layout
 

@@ -8,13 +8,14 @@ real graph write path, then measures how completely each read path answers
 
   * ORACLE (weft_entity_context) MUST be complete — recall@links == 1.0. The
     graph edge walk is the guarantee; a regression here means links are lost.
-  * CANDIDATE (weft_recall NL) is the MEASUREMENT. First run surfaced a real
-    routing bug: brief phrasings containing a temporal word ("what do I need to
-    know about X BEFORE our meeting") route to the turns tier and return NONE of
-    the entity's belief-tier facts. So the two candidate asserts separate the
-    two axes: (a) WHEN routed to belief, recall is complete; (b) the finding —
-    temporal-worded briefs misroute away from belief and miss. If a router fix
-    lands, (b) trips and must be consciously updated.
+  * CANDIDATE (weft_recall NL) is the MEASUREMENT. The first run surfaced a real
+    routing bug: brief phrasings with a temporal word ("what do I need to know
+    about X BEFORE our meeting") route to the turns tier and return NONE of the
+    entity's belief-tier facts. The fix was NOT to tune the router to those
+    phrasings but a general never-miss safety net: an empty turns result falls
+    back to belief recall. So the asserts now prove the general fix: (a) no brief
+    phrasing comes back empty; (b) the temporal-worded ones specifically recover
+    VIA the fallback (marked in the response), across more than one marker.
 """
 
 from __future__ import annotations
@@ -59,38 +60,47 @@ async def test_entity_context_returns_complete_brief(seeded_entity):
     )
 
 
-async def test_brief_recall_is_complete_when_routed_to_belief(seeded_entity):
-    """CANDIDATE (a): when a brief query routes to belief, recall is complete.
+async def test_no_brief_phrasing_comes_back_empty(seeded_entity):
+    """CANDIDATE (a) — never-miss: every brief phrasing surfaces the full brief.
 
-    Isolates recall quality from routing: every phrasing that actually reached
-    the belief tier surfaced the full brief. So the brief IS recallable — the
-    only failures are the ones the router sent elsewhere.
+    This is the general fix in action: no phrasing (belief-routed or
+    turns-misrouted-then-recovered) returns an empty hand. recall@links == 1.0
+    across the board.
     """
     _, stats = seeded_entity
-    belief_routed = stats.belief_routed
-    assert belief_routed, "no brief phrasing routed to belief — check fixtures"
-    for c in belief_routed:
-        assert c.recall_at_links == 1.0, (
-            f"belief-routed brief {c.query!r} surfaced only "
-            f"{c.recall_at_links:.0%} of the linked facts"
+    assert stats.never_empty, (
+        f"a brief phrasing returned an incomplete/empty result "
+        f"(min recall@links={stats.candidate_min:.3f}) — never-miss violated: "
+        + ", ".join(
+            f"{c.query!r}={c.recall_at_links:.2f}"
+            for c in stats.candidate if c.recall_at_links < 1.0
         )
-
-
-async def test_temporal_worded_briefs_misroute_and_miss(seeded_entity):
-    """CANDIDATE (b) — FINDING: a brief phrasing with a temporal word ("before")
-    routes off the belief tier and returns none of the entity's facts.
-
-    This pins the routing bug so a future fix (router stops hijacking entity/
-    belief briefs on bare temporal words) trips this test and forces an update.
-    """
-    _, stats = seeded_entity
-    misrouted = stats.misrouted
-    assert misrouted, (
-        "expected at least one temporal-worded brief to misroute off belief; "
-        "none did — the routing bug may be fixed, update this finding"
     )
-    for c in misrouted:
-        assert c.recall_at_links == 0.0, (
-            f"misrouted brief {c.query!r} (tier={c.routed_tier}) unexpectedly "
-            f"surfaced {c.recall_at_links:.0%} — routing behavior changed"
+
+
+async def test_temporal_worded_briefs_recover_via_fallback(seeded_entity):
+    """CANDIDATE (b): the temporal-worded briefs recover THROUGH the fallback.
+
+    Proves the general fix (empty-turns → belief), not a router tweak: the
+    phrasings that route to the turns tier come back marked tier_fallback and
+    still surface the complete brief — and across more than one temporal marker
+    ('before' and 'since'), so it isn't overfit to one word.
+    """
+    _, stats = seeded_entity
+    fallbacks = stats.fallbacks
+    assert fallbacks, (
+        "expected temporal-worded briefs to route to turns and recover via the "
+        "belief fallback; none did — routing changed, revisit this test"
+    )
+    for c in fallbacks:
+        assert c.recall_at_links == 1.0, (
+            f"fallback brief {c.query!r} recovered only {c.recall_at_links:.0%} "
+            f"of the linked facts"
         )
+    # Generality: the fallback fired for more than one distinct temporal marker.
+    markers = {m for m in ("before", "since", "after", "until")
+               for c in fallbacks if m in c.query.lower()}
+    assert len(markers) >= 2, (
+        f"fallback only exercised markers {markers} — add phrasing variety so "
+        f"the fix isn't validated against a single word"
+    )
