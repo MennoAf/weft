@@ -31,8 +31,11 @@ LongMemEval. It is the repeatable scoreboard the project has lacked since the
   — turn/both tier. This is the **Branch-A turn-tier probe** the roadmap flagged
   as never measured (`weft-c0a51a73`). See `temporal_manifest.py` /
   `temporal_harness.py`.
+- **Entity brief** ("what do I need to know about X before our meeting") —
+  beliefs+graph. Oracle = `weft_entity_context` edge walk; candidate =
+  `weft_recall`. See `entity_manifest.py` / `entity_harness.py`.
 
-Still to add (per spec `weft-b9582b8f`): entity-brief, agenda.
+Still to add (per spec `weft-b9582b8f`): agenda.
 
 ## Run
 
@@ -91,6 +94,32 @@ The "what did I last say about the Iceland trip" probe correctly surfaces
 the right one, not just any topic match. **Verdict: turn-tier ANSWERS** — the
 first repeatable number on the recall path the May roadmap left "untested at
 scale."
+
+## Entity-brief result + a routing finding (2026-07-01)
+
+Seeds a person entity (`Zelda Quackenbush`) with 8 linked facts + a distractor
+person, then measures "what do I need to know about X" two ways:
+
+| path | recall@links | note |
+| --- | --- | --- |
+| ORACLE `weft_entity_context` (edge walk) | **1.000** | complete brief, one deterministic call |
+| CANDIDATE `weft_recall` NL | **min 0.0 / median 1.0 / max 1.0** | bimodal — see finding |
+
+**Finding — temporal words misroute the brief.** 2 of 5 brief phrasings returned
+**0 of 8** facts, and both are the canonical ones:
+
+- ❌ "what do I need to know about Zelda **before** our meeting" → routed `turns`
+- ❌ "what should I remember about Zelda **before** I meet her" → routed `turns`
+- ✅ "brief me on Zelda" / "tell me everything about Zelda" / "give me the
+  background on Zelda" → routed `belief`, 8/8
+
+The word **"before"** is a `_TURN_TIER_MARKER` (`before|after|since|until`), so
+`route_query_to_tier` sends the query to the turn tier, which has no entity
+facts → empty. It's a **routing** bug, not a recall bug: when the same query
+routes to belief, recall is complete. The graph path (`weft_entity_context`) is
+always complete, so an agent building a brief should walk the entity graph — but
+a user's natural "what do I need before meeting X" silently returns nothing
+through `weft_recall`. Tracked for a fix decision.
 
 ## Layout
 

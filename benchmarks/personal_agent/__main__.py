@@ -58,9 +58,12 @@ async def main() -> int:
     from weft.db.connection import _pgvector_codec_init, register_pgvector_codec
     from weft.db.migrations import run_migrations
     from benchmarks.personal_agent.manifest import PAAH_USER_ID
-    from benchmarks.personal_agent.seed import seed_corpus, seed_turns
+    from benchmarks.personal_agent.seed import (
+        seed_corpus, seed_turns, seed_entity_brief,
+    )
     from benchmarks.personal_agent.harness import run_enumeration_paah
     from benchmarks.personal_agent.temporal_harness import run_temporal_paah
+    from benchmarks.personal_agent.entity_harness import run_entity_brief_paah
 
     logger.info("=" * 70)
     logger.info("PAAH — Personal-Agent Acceptance Harness (enumeration + temporal)")
@@ -235,6 +238,44 @@ async def main() -> int:
                 else f"GAP — anchor missed on {t_total - t_anchor_hit}/{t_total} runs",
             )
 
+            # ============ SHAPE 3: entity brief (beliefs + graph) ============
+            logger.info("")
+            logger.info("Seeding entity brief (weft_entity_create + link)...")
+            seeded_entity = await seed_entity_brief(pool)
+            entity_stats = await run_entity_brief_paah(pool, seeded_entity)
+
+            logger.info("=" * 70)
+            logger.info("PAAH ENTITY-BRIEF RESULTS (beliefs + graph)")
+            logger.info("=" * 70)
+            logger.info("Entity: %s (%d linked facts)",
+                        entity_stats.name, entity_stats.fact_count)
+            logger.info(
+                "  ORACLE weft_entity_context recall@links: %.3f (complete=%s)",
+                entity_stats.oracle_recall, entity_stats.oracle_complete,
+            )
+            logger.info(
+                "  CANDIDATE weft_recall recall@links: min=%.3f median=%.3f max=%.3f",
+                entity_stats.candidate_min, entity_stats.candidate_median,
+                entity_stats.candidate_max,
+            )
+            for c in entity_stats.candidate:
+                logger.info(
+                    "    routed=%-6s recall@links=%.3f  %s",
+                    c.routed_tier or "belief", c.recall_at_links, c.query,
+                )
+            if entity_stats.misrouted:
+                logger.info(
+                    "  FINDING: %d/%d brief phrasings MISROUTED off belief "
+                    "(temporal word → wrong tier) and returned 0 facts. The graph "
+                    "path (entity_context) is complete; NL briefs are routing-fragile.",
+                    len(entity_stats.misrouted), len(entity_stats.candidate),
+                )
+            entity_ok = (
+                seeded_entity.brief.clean
+                and entity_stats.oracle_complete
+                and all(c.recall_at_links == 1.0 for c in entity_stats.belief_routed)
+            )
+
             output_path = Path(__file__).parent / "results.json"
             output_data = {
                 "shapes": ["enumeration", "temporal"],
@@ -276,11 +317,28 @@ async def main() -> int:
                     },
                     "probes": [s.to_dict() for s in turn_stats],
                 },
+                "entity_brief": {
+                    "seed_brief_clean": seeded_entity.brief.clean,
+                    "oracle_complete": entity_stats.oracle_complete,
+                    "belief_routed_all_complete": all(
+                        c.recall_at_links == 1.0 for c in entity_stats.belief_routed
+                    ),
+                    "misrouted_phrasings": len(entity_stats.misrouted),
+                    "finding": (
+                        "temporal-worded briefs ('before our meeting') misroute "
+                        "off the belief tier and return 0 linked facts"
+                        if entity_stats.misrouted else None
+                    ),
+                    "stats": entity_stats.to_dict(),
+                },
             }
+            output_data["shapes"] = ["enumeration", "temporal", "entity_brief"]
             output_path.write_text(json.dumps(output_data, indent=2))
             logger.info("Results saved to: %s", output_path)
 
-            all_clean = seed_ok and router_all_correct and temporal_all_correct
+            all_clean = (
+                seed_ok and router_all_correct and temporal_all_correct and entity_ok
+            )
             return 0 if all_clean else 1
         finally:
             await pool.close()
