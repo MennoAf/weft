@@ -1008,21 +1008,40 @@ async def weft_recall(
                 name="weft-session-log-recall",
             )
 
-        # --- Enumeration reconciliation header (Phase 1, V7) ---
-        # Await the concurrent complete gather (if this was an enumeration ask)
-        # and surface membership members the top-k similarity path did not show.
+        # --- Enumeration answer (Phase 1, V7 → V8: unambiguous) ---
+        # For an enumeration ask ("how many plants", "list all my meds") the
+        # limit-bounded top-k `results` is NOT the answer — it is a relevance
+        # slice of the whole corpus, so its length over- or under-counts. Await
+        # the concurrent complete gather and hand the agent the answer as
+        # explicit structured fields it can KNOW rather than infer (design
+        # principle: prefer structured data over forcing the model to guess):
+        #   * response["enumeration"]["count"]   — THE count ("how many")
+        #   * response["enumeration"]["members"] — THE complete list ("list
+        #     all"), already assembled; no union of results + remainder needed
+        # When the gather is COMPLETE we also correct the top-level `count` so
+        # the most-obvious field is the right one — don't leave a misleading
+        # count next to the real answer. `results` stays the ranked top-k so
+        # relevance ordering is still available (the answer, if not in the top
+        # k, is in enumeration.members).
         if enum_task is not None:
             try:
                 resolved_tags, gather_result = await enum_task
                 if gather_result is not None and gather_result["memories"]:
                     members = gather_result["memories"]
+                    member_count = len(members)
+                    complete = gather_result["complete"]
                     shown_ids = {r.memory.id for r in results}
-                    not_shown = [m for m in members if m.id not in shown_ids]
-                    response["reconciliation"] = {
+                    extra_in_members = sum(
+                        1 for m in members if m.id not in shown_ids
+                    )
+                    response["enumeration"] = {
+                        "target": enum_target,
                         "resolved_tags": resolved_tags,
+                        "count": member_count,
+                        "complete": complete,
+                        "truncated": gather_result["truncated"],
                         "similarity_count": len(results),
-                        "membership_count": len(members),
-                        "not_shown": [
+                        "members": [
                             {
                                 "id": m.id,
                                 "type": m.type.value,
@@ -1030,18 +1049,25 @@ async def weft_recall(
                                 "topic": m.topic,
                                 "created_at": m.created_at.isoformat(),
                             }
-                            for m in not_shown
+                            for m in members
                         ],
-                        "complete": gather_result["complete"],
-                        "truncated": gather_result["truncated"],
                         "summary": (
-                            f"similarity surfaced {len(results)}; "
-                            f"membership knows {len(members)}; "
-                            f"{len(not_shown)} not shown"
+                            f"{member_count} {enum_target}: the complete set is in "
+                            f"enumeration.members; results shows the top "
+                            f"{len(results)} by relevance "
+                            f"({extra_in_members} more only in enumeration.members)"
                         ),
                     }
-            except Exception as exc:  # noqa: BLE001 - reconciliation never breaks recall
-                logger.warning("enumeration reconciliation failed: %s", exc, exc_info=True)
+                    # Make the most-obvious field correct — but only when the
+                    # gather is COMPLETE (a truncated gather must not assert an
+                    # exact count). The corpus-wide match tally is misleading as
+                    # an answer to "how many X", so drop it here.
+                    if complete:
+                        response["count"] = member_count
+                        response.pop("total_matches", None)
+                        response.pop("showing", None)
+            except Exception as exc:  # noqa: BLE001 - enumeration augmentation never breaks recall
+                logger.warning("enumeration answer assembly failed: %s", exc, exc_info=True)
 
         return response
     except _INPUT_ERRORS as e:

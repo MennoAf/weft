@@ -1,0 +1,242 @@
+{
+  "shape": "enumeration",
+  "limit": 10,
+  "seed_integrity_clean": true,
+  "enumeration_answer_correct_everywhere": true,
+  "consumption_contract_closed": true,
+  "scoreboard": {
+    "total_runs": 18,
+    "correct_via_obvious_response_count": 18,
+    "correct_via_explicit_enumeration_count": 18,
+    "correct_via_naive_len_results": 0
+  },
+  "collections": [
+    {
+      "collection": "plants",
+      "topic_tag": "plants",
+      "manifest_count": 14,
+      "limit": 10,
+      "runs": 6,
+      "enumeration_block_present_rate": 1.0,
+      "correct_count_rate": {
+        "obvious_field_response_count": 1.0,
+        "explicit_enumeration_count": 1.0,
+        "naive_len_results": 0.0
+      },
+      "recall_at_membership": {
+        "min": 1.0,
+        "median": 1.0,
+        "max": 1.0
+      },
+      "queries": [
+        {
+          "query": "how many plants do I have",
+          "enum_present": true,
+          "obvious_count": 14,
+          "enum_count": 14,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "list all my plants",
+          "enum_present": true,
+          "obvious_count": 14,
+          "enum_count": 14,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "enumerate my plants",
+          "enum_present": true,
+          "obvious_count": 14,
+          "enum_count": 14,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "what are all the plants I have",
+          "enum_present": true,
+          "obvious_count": 14,
+          "enum_count": 14,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "give me all my plants",
+          "enum_present": true,
+          "obvious_count": 14,
+          "enum_count": 14,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "show me all my plants",
+          "enum_present": true,
+          "obvious_count": 14,
+          "enum_count": 14,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        }
+      ]
+    },
+    {
+      "collection": "medications",
+      "topic_tag": "medications",
+      "manifest_count": 6,
+      "limit": 10,
+      "runs": 6,
+      "enumeration_block_present_rate": 1.0,
+      "correct_count_rate": {
+        "obvious_field_response_count": 1.0,
+        "explicit_enumeration_count": 1.0,
+        "naive_len_results": 0.0
+      },
+      "recall_at_membership": {
+        "min": 1.0,
+        "median": 1.0,
+        "max": 1.0
+      },
+      "queries": [
+        {
+          "query": "how many medications do I have",
+          "enum_present": true,
+          "obvious_count": 6,
+          "enum_count": 6,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "list all my medications",
+          "enum_present": true,
+          "obvious_count": 6,
+          "enum_count": 6,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "enumerate my medications",
+          "enum_present": true,
+          "obvious_count": 6,
+          "enum_count": 6,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "what are all the medications I have",
+          "enum_present": true,
+          "obvious_count": 6,
+          "enum_count": 6,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "give me all my medications",
+          "enum_present": true,
+          "obvious_count": 6,
+          "enum_count": 6,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "show me all my medications",
+          "enum_present": true,
+          "obvious_count": 6,
+          "enum_count": 6,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        }
+      ]
+    },
+    {
+      "collection": "projects",
+      "topic_tag": "projects",
+      "manifest_count": 9,
+      "limit": 10,
+      "runs": 6,
+      "enumeration_block_present_rate": 1.0,
+      "correct_count_rate": {
+        "obvious_field_response_count": 1.0,
+        "explicit_enumeration_count": 1.0,
+        "naive_len_results": 0.0
+      },
+      "recall_at_membership": {
+        "min": 1.0,
+        "median": 1.0,
+        "max": 1.0
+      },
+      "queries": [
+        {
+          "query": "how many projects do I have",
+          "enum_present": true,
+          "obvious_count": 9,
+          "enum_count": 9,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "list all my projects",
+          "enum_present": true,
+          "obvious_count": 9,
+          "enum_count": 9,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "enumerate my projects",
+          "enum_present": true,
+          "obvious_count": 9,
+          "enum_count": 9,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "what are all the projects I have",
+          "enum_present": true,
+          "obvious_count": 9,
+          "enum_count": 9,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "give me all my projects",
+          "enum_present": true,
+          "obvious_count": 9,
+          "enum_count": 9,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        },
+        {
+          "query": "show me all my projects",
+          "enum_present": true,
+          "obvious_count": 9,
+          "enum_count": 9,
+          "naive_results": 10,
+          "recall_at_membership": 1.0
+        }
+      ]
+    }
+  ],
+  "seed": [
+    {
+      "collection": "plants",
+      "intended": 14,
+      "stored": 14,
+      "clean": true,
+      "dedup_collisions": []
+    },
+    {
+      "collection": "medications",
+      "intended": 6,
+      "stored": 6,
+      "clean": true,
+      "dedup_collisions": []
+    },
+    {
+      "collection": "projects",
+      "intended": 9,
+      "stored": 9,
+      "clean": true,
+      "dedup_collisions": []
+    }
+  ]
+}
