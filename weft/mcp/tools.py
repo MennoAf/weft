@@ -727,13 +727,38 @@ async def weft_recall(
         name="weft-recall-query-log",
     )
 
+    # Never-miss fallback annotation. When the router sends a query to the
+    # turns tier but that tier has nothing, we recover with belief recall
+    # instead of returning an empty hand (see the turns dispatch below). This
+    # carries a transparency marker onto the belief response so a consumer can
+    # tell a fallback happened — structured over inferred.
+    tier_fallback: dict | None = None
+
     if tier == "turns":
-        return await _weft_recall_turns(
+        turns_response = await _weft_recall_turns(
             ctx,
             query=query,
             project_id=project_id,
             limit=limit,
         )
+        # Resilience over routing precision: the tier router is a single hard
+        # regex guess, and when it guesses wrong (e.g. an entity/belief query
+        # that merely contains a temporal word like "before our meeting") the
+        # turns tier answers empty and the caller gets nothing. Rather than
+        # tune the router to the exact phrasings that trip it, recover here:
+        # an empty turns result falls through to belief recall so the answer
+        # still surfaces if belief holds it. Fires ONLY on a genuinely empty
+        # turns result, so temporal queries that DO have turn answers are
+        # untouched — this protects the turn tier's purpose instead of narrowing
+        # it. Cost: a second recall pass on the (rare) empty-turns path.
+        if turns_response.get("count", 0) > 0:
+            return turns_response
+        logger.debug(
+            "weft_recall: turns tier empty for %r — falling back to belief",
+            query[:50],
+        )
+        tier = "belief"
+        tier_fallback = {"from": "turns", "reason": "empty_turns_result"}
     if tier == "both":
         return await _weft_recall_both(
             ctx,
@@ -767,13 +792,16 @@ async def weft_recall(
                     limit=limit,
                 )
             if claim_results:
-                return {
+                claim_response = {
                     "query": query,
                     "mode": mode,
                     "tier": "belief-view",
                     "count": len(claim_results),
                     "results": [r.to_recall_dict() for r in claim_results],
                 }
+                if tier_fallback:
+                    claim_response["tier_fallback"] = tier_fallback
+                return claim_response
         except (
             asyncpg.PostgresConnectionError,
             asyncpg.InterfaceError,
@@ -949,6 +977,8 @@ async def weft_recall(
                 )
 
             response: dict = {"query": query, "mode": mode, "count": len(results), "results": enriched}
+            if tier_fallback:
+                response["tier_fallback"] = tier_fallback
             if total_matches is not None and total_matches > len(results):
                 response["total_matches"] = total_matches
                 response["showing"] = f"Showing {len(results)} of {total_matches} matches"
@@ -1008,21 +1038,40 @@ async def weft_recall(
                 name="weft-session-log-recall",
             )
 
-        # --- Enumeration reconciliation header (Phase 1, V7) ---
-        # Await the concurrent complete gather (if this was an enumeration ask)
-        # and surface membership members the top-k similarity path did not show.
+        # --- Enumeration answer (Phase 1, V7 → V8: unambiguous) ---
+        # For an enumeration ask ("how many plants", "list all my meds") the
+        # limit-bounded top-k `results` is NOT the answer — it is a relevance
+        # slice of the whole corpus, so its length over- or under-counts. Await
+        # the concurrent complete gather and hand the agent the answer as
+        # explicit structured fields it can KNOW rather than infer (design
+        # principle: prefer structured data over forcing the model to guess):
+        #   * response["enumeration"]["count"]   — THE count ("how many")
+        #   * response["enumeration"]["members"] — THE complete list ("list
+        #     all"), already assembled; no union of results + remainder needed
+        # When the gather is COMPLETE we also correct the top-level `count` so
+        # the most-obvious field is the right one — don't leave a misleading
+        # count next to the real answer. `results` stays the ranked top-k so
+        # relevance ordering is still available (the answer, if not in the top
+        # k, is in enumeration.members).
         if enum_task is not None:
             try:
                 resolved_tags, gather_result = await enum_task
                 if gather_result is not None and gather_result["memories"]:
                     members = gather_result["memories"]
+                    member_count = len(members)
+                    complete = gather_result["complete"]
                     shown_ids = {r.memory.id for r in results}
-                    not_shown = [m for m in members if m.id not in shown_ids]
-                    response["reconciliation"] = {
+                    extra_in_members = sum(
+                        1 for m in members if m.id not in shown_ids
+                    )
+                    response["enumeration"] = {
+                        "target": enum_target,
                         "resolved_tags": resolved_tags,
+                        "count": member_count,
+                        "complete": complete,
+                        "truncated": gather_result["truncated"],
                         "similarity_count": len(results),
-                        "membership_count": len(members),
-                        "not_shown": [
+                        "members": [
                             {
                                 "id": m.id,
                                 "type": m.type.value,
@@ -1030,18 +1079,25 @@ async def weft_recall(
                                 "topic": m.topic,
                                 "created_at": m.created_at.isoformat(),
                             }
-                            for m in not_shown
+                            for m in members
                         ],
-                        "complete": gather_result["complete"],
-                        "truncated": gather_result["truncated"],
                         "summary": (
-                            f"similarity surfaced {len(results)}; "
-                            f"membership knows {len(members)}; "
-                            f"{len(not_shown)} not shown"
+                            f"{member_count} {enum_target}: the complete set is in "
+                            f"enumeration.members; results shows the top "
+                            f"{len(results)} by relevance "
+                            f"({extra_in_members} more only in enumeration.members)"
                         ),
                     }
-            except Exception as exc:  # noqa: BLE001 - reconciliation never breaks recall
-                logger.warning("enumeration reconciliation failed: %s", exc, exc_info=True)
+                    # Make the most-obvious field correct — but only when the
+                    # gather is COMPLETE (a truncated gather must not assert an
+                    # exact count). The corpus-wide match tally is misleading as
+                    # an answer to "how many X", so drop it here.
+                    if complete:
+                        response["count"] = member_count
+                        response.pop("total_matches", None)
+                        response.pop("showing", None)
+            except Exception as exc:  # noqa: BLE001 - enumeration augmentation never breaks recall
+                logger.warning("enumeration answer assembly failed: %s", exc, exc_info=True)
 
         return response
     except _INPUT_ERRORS as e:
