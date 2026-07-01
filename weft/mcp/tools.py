@@ -792,6 +792,29 @@ async def weft_recall(
                 exc_info=True,
             )
 
+    # --- Enumeration-intent router (Phase 1, V7) ---
+    # Detect "list all / every / how many / enumerate" and fire the deterministic
+    # complete gather CONCURRENTLY with the top-k search below. The gap between
+    # what similarity surfaces (top-k) and what membership knows (the gather) is
+    # then returned as a reconciliation header instead of silently dropping
+    # sub-cutoff members. Best-effort: gather_enumeration swallows its own errors,
+    # and the reconcile step is wrapped, so this never breaks recall.
+    enum_task: asyncio.Task | None = None
+    if tier == "belief":
+        try:
+            from weft.enumeration_router import detect_enumeration_intent, gather_enumeration
+            is_enum, enum_noun = detect_enumeration_intent(query)
+            enum_target = topic or enum_noun
+            if is_enum and enum_target:
+                app_enum: AppContext = ctx.request_context.lifespan_context
+                enum_task = asyncio.create_task(
+                    gather_enumeration(app_enum.pool, enum_target, user_id),
+                    name="weft-recall-enumeration-gather",
+                )
+        except Exception as exc:  # noqa: BLE001 - never break recall on router setup
+            logger.debug("enumeration router setup failed: %s", exc, exc_info=True)
+            enum_task = None
+
     try:
         cid = set_correlation_id()
         logger.debug("weft_recall start [%s] query=%r mode=%s", cid, query[:50], mode)
@@ -984,6 +1007,41 @@ async def weft_recall(
                 ),
                 name="weft-session-log-recall",
             )
+
+        # --- Enumeration reconciliation header (Phase 1, V7) ---
+        # Await the concurrent complete gather (if this was an enumeration ask)
+        # and surface membership members the top-k similarity path did not show.
+        if enum_task is not None:
+            try:
+                resolved_tags, gather_result = await enum_task
+                if gather_result is not None and gather_result["memories"]:
+                    members = gather_result["memories"]
+                    shown_ids = {r.memory.id for r in results}
+                    not_shown = [m for m in members if m.id not in shown_ids]
+                    response["reconciliation"] = {
+                        "resolved_tags": resolved_tags,
+                        "similarity_count": len(results),
+                        "membership_count": len(members),
+                        "not_shown": [
+                            {
+                                "id": m.id,
+                                "type": m.type.value,
+                                "content": m.content,
+                                "topic": m.topic,
+                                "created_at": m.created_at.isoformat(),
+                            }
+                            for m in not_shown
+                        ],
+                        "complete": gather_result["complete"],
+                        "truncated": gather_result["truncated"],
+                        "summary": (
+                            f"similarity surfaced {len(results)}; "
+                            f"membership knows {len(members)}; "
+                            f"{len(not_shown)} not shown"
+                        ),
+                    }
+            except Exception as exc:  # noqa: BLE001 - reconciliation never breaks recall
+                logger.warning("enumeration reconciliation failed: %s", exc, exc_info=True)
 
         return response
     except _INPUT_ERRORS as e:

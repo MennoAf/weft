@@ -208,6 +208,83 @@ class TestWeftRecall:
         elif "total_matches" in result:
             assert result["total_matches"] > result["count"]
 
+    async def test_enumeration_reconciliation_header_surfaces_unshown_members(self, ctx):
+        """V7: an enumeration query returns a reconciliation header exposing the
+        membership members that the limit-bounded top-k did not surface.
+
+        Store 12 plant memories, then ask "list all the plants" with a small
+        limit. The deterministic gather knows all 12; top-k shows at most `limit`;
+        the header must report membership_count=12 and the not-shown remainder.
+        """
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        for i in range(12):
+            await weft_remember(
+                ctx, content=f"Plant number {i}: a distinct houseplant", topic=["plants"]
+            )
+
+        result = await weft_recall(
+            ctx,
+            query="list all the plants",
+            limit=3,
+            threshold=0.0,
+            tier="belief",
+            user_id=DEFAULT_TEST_USER_ID,
+        )
+
+        assert "reconciliation" in result, "enumeration query must carry a reconciliation header"
+        recon = result["reconciliation"]
+        assert recon["membership_count"] == 12
+        assert recon["similarity_count"] == result["count"]
+        # With limit=3, at least 12-3 members are known-but-not-shown.
+        assert len(recon["not_shown"]) >= 9
+        assert recon["complete"] is True
+        # Every not-shown entry is a real plant member with usable payload.
+        for m in recon["not_shown"]:
+            assert "plants" in m["topic"]
+            assert m["id"] and m["content"]
+        assert "membership knows 12" in recon["summary"]
+
+    async def test_enumeration_reconciliation_uses_explicit_topic_arg(self, ctx):
+        """When the caller passes an explicit `topic`, it is the enumeration
+        target even if the query noun is vague — as long as intent is present.
+        """
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        for i in range(6):
+            await weft_remember(
+                ctx, content=f"Medication {i}: taken daily", topic=["meds"]
+            )
+
+        result = await weft_recall(
+            ctx,
+            query="list all of them",
+            topic="meds",
+            limit=2,
+            threshold=0.0,
+            tier="belief",
+            user_id=DEFAULT_TEST_USER_ID,
+        )
+        assert "reconciliation" in result
+        assert result["reconciliation"]["membership_count"] == 6
+
+    async def test_non_enumeration_query_has_no_reconciliation_header(self, ctx):
+        """A plain (non-enumeration) recall must NOT carry a reconciliation header."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.mcp.tools import weft_recall, weft_remember
+
+        await weft_remember(ctx, content="A note about the launch plan", topic=["launch"])
+
+        result = await weft_recall(
+            ctx,
+            query="what is the launch plan",
+            tier="belief",
+            user_id=DEFAULT_TEST_USER_ID,
+        )
+        assert "reconciliation" not in result
+
     async def test_retrieval_telemetry_bumped_for_returned_results(self, ctx, app):
         """v49 compounding-loop Step 1: returned memories get retrieval_count++ and last_retrieved_at stamped.
 
