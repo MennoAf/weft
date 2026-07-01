@@ -306,6 +306,45 @@ async def test_retrieve_belief_view_falls_back_to_turns_on_miss(
     assert any(r.memory.id == turn.id for r in recalls)
 
 
+async def test_retrieve_turns_falls_back_to_belief_on_empty(
+    pool: asyncpg.Pool,
+) -> None:
+    """Empty turns tier → never-miss fallback to belief recall.
+
+    Mirrors the same resilience added to weft_recall: a question routed to the
+    turns tier that finds nothing there recovers from the belief substrate
+    instead of returning an empty hand. Seeds a belief memory and NO turns, so
+    the turns path is empty and only the fallback can surface the answer.
+    """
+    from weft.models import MemoryCreate, MemorySource, MemoryType
+    from weft.store import store_memory
+
+    project_id = project_id_for("ret-turns-to-belief")
+    embedder = get_provider("fastembed", dimensions=768)
+    content = "My favorite hiking trail is the Skyline Ridge loop."
+    vec = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(
+            type=MemoryType.fact, content=content, topic=["hiking"],
+            source=MemorySource.conversation, confidence=0.9, project_id=project_id,
+        ),
+        embedding=vec,
+    )
+
+    recalls = await retrieve(
+        pool, embedder,
+        question="what hiking trail do I like",
+        question_type="single-session-user",
+        project_id=project_id,
+        tier="turns",  # no turns exist → fallback must recover the belief memory
+        user_id=TEST_USER,
+    )
+
+    assert len(recalls) >= 1, "empty turns tier returned nothing — fallback did not fire"
+    assert any(r.memory.id == mem.id for r in recalls)
+
+
 # ----------------------------------------------------------------------
 # 3. cleanup deletes belief_claims
 # ----------------------------------------------------------------------

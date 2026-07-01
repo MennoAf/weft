@@ -208,13 +208,16 @@ class TestWeftRecall:
         elif "total_matches" in result:
             assert result["total_matches"] > result["count"]
 
-    async def test_enumeration_reconciliation_header_surfaces_unshown_members(self, ctx):
-        """V7: an enumeration query returns a reconciliation header exposing the
-        membership members that the limit-bounded top-k did not surface.
+    async def test_enumeration_answer_gives_complete_count_and_members(self, ctx):
+        """V8: an enumeration query hands back an unambiguous answer — the exact
+        count and the COMPLETE member list — instead of forcing the agent to
+        infer from the limit-bounded top-k.
 
         Store 12 plant memories, then ask "list all the plants" with a small
-        limit. The deterministic gather knows all 12; top-k shows at most `limit`;
-        the header must report membership_count=12 and the not-shown remainder.
+        limit. The deterministic gather knows all 12; `results` shows at most
+        `limit` by relevance; the `enumeration` block must carry count=12 and
+        all 12 members, and — because the gather is complete — the most-obvious
+        top-level `count` must be corrected to 12 (not len(results)).
         """
         from tests.conftest import DEFAULT_TEST_USER_ID
         from weft.mcp.tools import weft_recall, weft_remember
@@ -233,20 +236,27 @@ class TestWeftRecall:
             user_id=DEFAULT_TEST_USER_ID,
         )
 
-        assert "reconciliation" in result, "enumeration query must carry a reconciliation header"
-        recon = result["reconciliation"]
-        assert recon["membership_count"] == 12
-        assert recon["similarity_count"] == result["count"]
-        # With limit=3, at least 12-3 members are known-but-not-shown.
-        assert len(recon["not_shown"]) >= 9
-        assert recon["complete"] is True
-        # Every not-shown entry is a real plant member with usable payload.
-        for m in recon["not_shown"]:
+        assert "enumeration" in result, "enumeration query must carry an enumeration answer"
+        enum = result["enumeration"]
+        # The unambiguous answer: exact count + complete list.
+        assert enum["count"] == 12
+        assert enum["complete"] is True
+        assert len(enum["members"]) == 12
+        # results stays the ranked top-k (relevance slice), capped at limit.
+        assert enum["similarity_count"] == len(result["results"]) <= 3
+        # The most-obvious field is corrected to the true count — an agent that
+        # reads result["count"] must not undercount to len(results).
+        assert result["count"] == 12
+        # Misleading corpus-wide tallies are dropped for a resolved enumeration.
+        assert "total_matches" not in result
+        assert "showing" not in result
+        # Every member is a real plant with usable payload.
+        for m in enum["members"]:
             assert "plants" in m["topic"]
             assert m["id"] and m["content"]
-        assert "membership knows 12" in recon["summary"]
+        assert "12 plants" in enum["summary"]
 
-    async def test_enumeration_reconciliation_uses_explicit_topic_arg(self, ctx):
+    async def test_enumeration_answer_uses_explicit_topic_arg(self, ctx):
         """When the caller passes an explicit `topic`, it is the enumeration
         target even if the query noun is vague — as long as intent is present.
         """
@@ -267,11 +277,13 @@ class TestWeftRecall:
             tier="belief",
             user_id=DEFAULT_TEST_USER_ID,
         )
-        assert "reconciliation" in result
-        assert result["reconciliation"]["membership_count"] == 6
+        assert "enumeration" in result
+        assert result["enumeration"]["count"] == 6
+        assert len(result["enumeration"]["members"]) == 6
+        assert result["count"] == 6
 
-    async def test_non_enumeration_query_has_no_reconciliation_header(self, ctx):
-        """A plain (non-enumeration) recall must NOT carry a reconciliation header."""
+    async def test_non_enumeration_query_has_no_enumeration_answer(self, ctx):
+        """A plain (non-enumeration) recall must NOT carry an enumeration block."""
         from tests.conftest import DEFAULT_TEST_USER_ID
         from weft.mcp.tools import weft_recall, weft_remember
 
@@ -283,7 +295,7 @@ class TestWeftRecall:
             tier="belief",
             user_id=DEFAULT_TEST_USER_ID,
         )
-        assert "reconciliation" not in result
+        assert "enumeration" not in result
 
     async def test_retrieval_telemetry_bumped_for_returned_results(self, ctx, app):
         """v49 compounding-loop Step 1: returned memories get retrieval_count++ and last_retrieved_at stamped.
