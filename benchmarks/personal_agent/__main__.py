@@ -58,11 +58,12 @@ async def main() -> int:
     from weft.db.connection import _pgvector_codec_init, register_pgvector_codec
     from weft.db.migrations import run_migrations
     from benchmarks.personal_agent.manifest import PAAH_USER_ID
-    from benchmarks.personal_agent.seed import seed_corpus
+    from benchmarks.personal_agent.seed import seed_corpus, seed_turns
     from benchmarks.personal_agent.harness import run_enumeration_paah
+    from benchmarks.personal_agent.temporal_harness import run_temporal_paah
 
     logger.info("=" * 70)
-    logger.info("PAAH — Personal-Agent Acceptance Harness (enumeration shape)")
+    logger.info("PAAH — Personal-Agent Acceptance Harness (enumeration + temporal)")
     logger.info("=" * 70)
 
     logger.info("Starting testcontainers (Postgres pgvector + Redis)...")
@@ -187,35 +188,100 @@ async def main() -> int:
                     "was wrong on some run; investigate."
                 )
 
+            # ============ SHAPE 2: temporal / dialogue (turn-tier) ============
+            logger.info("")
+            logger.info("Seeding temporal dialogue trace (real weft_turn_append)...")
+            seeded_turns = await seed_turns(pool)
+            logger.info(
+                "  turns intended=%d stored=%d clean=%s",
+                seeded_turns.intended, seeded_turns.stored, seeded_turns.clean,
+            )
+            logger.info("Running temporal/dialogue probes over the trace...")
+            turn_stats = await run_temporal_paah(pool, seeded_turns)
+
+            t_total = sum(len(s.runs) for s in turn_stats)
+            t_routed_ok = sum(
+                1 for s in turn_stats for r in s.runs if r.routed_correct
+            )
+            t_anchor_hit = sum(
+                1 for s in turn_stats for r in s.runs if r.anchor_present
+            )
+
+            logger.info("=" * 70)
+            logger.info("PAAH TEMPORAL/DIALOGUE RESULTS (Branch-A turn-tier probe)")
+            logger.info("=" * 70)
+            temporal_all_correct = seeded_turns.clean
+            for s in turn_stats:
+                logger.info("")
+                logger.info("Probe: %s (want tier=%s, anchor=%s)",
+                            s.key, s.expected_tier, s.anchor_key)
+                logger.info("  routed to expected tier: %.0f%%",
+                            s.routed_correct_rate * 100)
+                logger.info(
+                    "  anchor-turn present: rate=%.0f%% min=%.0f (never-miss floor)",
+                    s.anchor_present_rate * 100, s.anchor_present_min,
+                )
+                if not (s.routed_correct_rate == 1.0 and s.anchor_present_min == 1.0):
+                    temporal_all_correct = False
+            logger.info("")
+            logger.info(
+                "TEMPORAL SCOREBOARD — routed correctly: %d/%d | anchor surfaced: %d/%d",
+                t_routed_ok, t_total, t_anchor_hit, t_total,
+            )
+            logger.info(
+                "TURN-TIER (Branch-A): %s",
+                "ANSWERS — anchor surfaced on every probe/phrasing"
+                if t_anchor_hit == t_total
+                else f"GAP — anchor missed on {t_total - t_anchor_hit}/{t_total} runs",
+            )
+
             output_path = Path(__file__).parent / "results.json"
             output_data = {
-                "shape": "enumeration",
-                "limit": 10,
-                "seed_integrity_clean": seed_ok,
-                "enumeration_answer_correct_everywhere": router_all_correct,
-                "consumption_contract_closed": contract_closed,
-                "scoreboard": {
-                    "total_runs": total_runs,
-                    "correct_via_obvious_response_count": obvious_correct,
-                    "correct_via_explicit_enumeration_count": enum_correct,
-                    "correct_via_naive_len_results": naive_correct,
+                "shapes": ["enumeration", "temporal"],
+                "enumeration": {
+                    "limit": 10,
+                    "seed_integrity_clean": seed_ok,
+                    "answer_correct_everywhere": router_all_correct,
+                    "consumption_contract_closed": contract_closed,
+                    "scoreboard": {
+                        "total_runs": total_runs,
+                        "correct_via_obvious_response_count": obvious_correct,
+                        "correct_via_explicit_enumeration_count": enum_correct,
+                        "correct_via_naive_len_results": naive_correct,
+                    },
+                    "collections": [s.to_dict() for s in stats],
+                    "seed": [
+                        {
+                            "collection": sr.collection.name,
+                            "intended": sr.intended,
+                            "stored": sr.stored,
+                            "clean": sr.clean,
+                            "dedup_collisions": sr.dedup_collisions,
+                        }
+                        for sr in seed_results
+                    ],
                 },
-                "collections": [s.to_dict() for s in stats],
-                "seed": [
-                    {
-                        "collection": sr.collection.name,
-                        "intended": sr.intended,
-                        "stored": sr.stored,
-                        "clean": sr.clean,
-                        "dedup_collisions": sr.dedup_collisions,
-                    }
-                    for sr in seed_results
-                ],
+                "temporal": {
+                    "limit": turn_stats[0].limit if turn_stats else None,
+                    "seed_turns": {
+                        "intended": seeded_turns.intended,
+                        "stored": seeded_turns.stored,
+                        "clean": seeded_turns.clean,
+                    },
+                    "turn_tier_answers": temporal_all_correct,
+                    "scoreboard": {
+                        "total_runs": t_total,
+                        "routed_correct": t_routed_ok,
+                        "anchor_surfaced": t_anchor_hit,
+                    },
+                    "probes": [s.to_dict() for s in turn_stats],
+                },
             }
             output_path.write_text(json.dumps(output_data, indent=2))
             logger.info("Results saved to: %s", output_path)
 
-            return 0 if (seed_ok and router_all_correct) else 1
+            all_clean = seed_ok and router_all_correct and temporal_all_correct
+            return 0 if all_clean else 1
         finally:
             await pool.close()
     finally:

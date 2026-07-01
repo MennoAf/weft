@@ -31,6 +31,10 @@ from benchmarks.personal_agent.manifest import (
     Collection,
     get_collections,
 )
+from benchmarks.personal_agent.temporal_manifest import (
+    PAAH_TEMPORAL_PROJECT_ID,
+    get_turn_specs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,3 +130,62 @@ async def seed_corpus(pool: asyncpg.Pool) -> list[SeedResult]:
         current_user_id.reset(token)
 
     return results
+
+
+@dataclass
+class SeedTurnsResult:
+    """Outcome of seeding the temporal dialogue trace through weft_turn_append."""
+
+    episode_id: str
+    turn_ids: dict[str, str] = field(default_factory=dict)  # spec.key -> turn id
+    intended: int = 0
+
+    @property
+    def stored(self) -> int:
+        return len(set(self.turn_ids.values()))
+
+    @property
+    def clean(self) -> bool:
+        return self.stored == self.intended
+
+
+async def seed_turns(pool: asyncpg.Pool) -> SeedTurnsResult:
+    """Seed the dated dialogue trace through the REAL weft_turn_append path.
+
+    Creates one episode, then appends every TurnSpec as a 'user' turn with its
+    known occurred_at. Returns the spec.key -> turn_id map so the temporal
+    harness can assert anchor turns by id. Scoped to PAAH_TEMPORAL_PROJECT_ID
+    under PAAH_USER_ID so it never shares rows with the enumeration corpus.
+    """
+    from weft.mcp.tools import weft_episode_create, weft_turn_append
+
+    app = await build_app_context(pool)
+    ctx = make_ctx(app)
+
+    specs = get_turn_specs()
+    result = SeedTurnsResult(episode_id="", intended=len(specs))
+    token = current_user_id.set(PAAH_USER_ID)
+    try:
+        episode = await weft_episode_create(
+            ctx,
+            title="Jim Boblaw's June dialogue trace",
+            project_id=PAAH_TEMPORAL_PROJECT_ID,
+        )
+        result.episode_id = episode["id"]
+        for spec in specs:
+            turn = await weft_turn_append(
+                ctx,
+                episode_id=result.episode_id,
+                role="user",
+                content=spec.content,
+                occurred_at=spec.occurred_at,
+            )
+            result.turn_ids[spec.key] = turn["turn_id"]
+        logger.info(
+            "seed_turns: episode=%s intended=%d stored=%d clean=%s",
+            result.episode_id, result.intended, result.stored, result.clean,
+        )
+    finally:
+        current_user_id.reset(token)
+
+    return result

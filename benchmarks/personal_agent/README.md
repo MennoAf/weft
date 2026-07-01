@@ -23,10 +23,21 @@ LongMemEval. It is the repeatable scoreboard the project has lacked since the
    - recall@membership over `response["enumeration"]["members"]` (complete list)
    - `naive_results` = `len(response["results"])` — legacy ranked-slice contrast
 
+## Shapes covered
+
+- **Enumeration / counting** ("how many plants", "list all my meds") — belief
+  tier + enumeration router. See below.
+- **Temporal / dialogue** ("when did I set up X", "what did I last say about Y")
+  — turn/both tier. This is the **Branch-A turn-tier probe** the roadmap flagged
+  as never measured (`weft-c0a51a73`). See `temporal_manifest.py` /
+  `temporal_harness.py`.
+
+Still to add (per spec `weft-b9582b8f`): entity-brief, agenda.
+
 ## Run
 
 ```bash
-# Full scoreboard (writes results.json). Needs Docker (testcontainers).
+# Full scoreboard, both shapes (writes results.json). Needs Docker.
 uv run python -m benchmarks.personal_agent
 
 # Structural asserts under pytest.
@@ -61,6 +72,25 @@ Before the fix: `reconciliation.membership_count` was correct 18/18 but the
 truth wasn't the obvious field — `len(results[])` was wrong 0/18 (undercounts
 past the limit, overcounts via cross-collection pollution) and `total_matches`
 was the whole corpus. That measurement is what motivated the V8 fix.
+
+## Temporal / dialogue result (Branch-A turn-tier, 2026-07-01)
+
+Seeds one episode of **16 dated turns** through `weft_turn_append`, then asks 3
+probes × 3 phrasings = 9 runs. Each probe has one anchor turn that answers it;
+the signal is whether that anchor is surfaced (by id) under retrieval pressure
+(`temporal_anchor` returns `limit//2` = 4 turns for the `turns` tier, so the
+anchor must rank into the **top-4 of 16**).
+
+| signal | result | note |
+| --- | --- | --- |
+| routed to expected tier | **9 / 9** | temporal → `turns`, "what did I last say" → `both` |
+| anchor turn surfaced | **9 / 9** | never-miss floor = 1.0 across all phrasings |
+
+The "what did I last say about the Iceland trip" probe correctly surfaces
+`iceland_westfjords` (the *more recent* of two Iceland turns), so the anchor is
+the right one, not just any topic match. **Verdict: turn-tier ANSWERS** — the
+first repeatable number on the recall path the May roadmap left "untested at
+scale."
 
 ## Layout
 
