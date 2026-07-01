@@ -105,11 +105,20 @@ def get_distractor_entity() -> EntitySpec:
 
 
 def get_brief_phrasings() -> tuple[str, ...]:
-    """NL brief queries — none trigger the enumeration or turn-tier routers."""
+    """NL brief queries.
+
+    A mix on purpose: some are clean belief-tier phrasings, and some carry a
+    temporal word that the tier router treats as episodic ("before", "since").
+    The latter route to the turns tier — which has no entity facts — and only
+    surface the brief because of the never-miss empty-tier fallback. Two
+    different markers ("before", "since") so the fallback is shown to generalize
+    across the marker set, not just one word.
+    """
     return (
-        "what do I need to know about Zelda Quackenbush before our meeting",
+        "what do I need to know about Zelda Quackenbush before our meeting",   # before
         "brief me on Zelda Quackenbush",
         "tell me everything about Zelda Quackenbush",
-        "what should I remember about Zelda Quackenbush before I meet her",
+        "what should I remember about Zelda Quackenbush before I meet her",    # before
         "give me the background on Zelda Quackenbush",
+        "what has Zelda Quackenbush been working on since she joined",         # since
     )

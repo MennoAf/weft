@@ -727,13 +727,38 @@ async def weft_recall(
         name="weft-recall-query-log",
     )
 
+    # Never-miss fallback annotation. When the router sends a query to the
+    # turns tier but that tier has nothing, we recover with belief recall
+    # instead of returning an empty hand (see the turns dispatch below). This
+    # carries a transparency marker onto the belief response so a consumer can
+    # tell a fallback happened — structured over inferred.
+    tier_fallback: dict | None = None
+
     if tier == "turns":
-        return await _weft_recall_turns(
+        turns_response = await _weft_recall_turns(
             ctx,
             query=query,
             project_id=project_id,
             limit=limit,
         )
+        # Resilience over routing precision: the tier router is a single hard
+        # regex guess, and when it guesses wrong (e.g. an entity/belief query
+        # that merely contains a temporal word like "before our meeting") the
+        # turns tier answers empty and the caller gets nothing. Rather than
+        # tune the router to the exact phrasings that trip it, recover here:
+        # an empty turns result falls through to belief recall so the answer
+        # still surfaces if belief holds it. Fires ONLY on a genuinely empty
+        # turns result, so temporal queries that DO have turn answers are
+        # untouched — this protects the turn tier's purpose instead of narrowing
+        # it. Cost: a second recall pass on the (rare) empty-turns path.
+        if turns_response.get("count", 0) > 0:
+            return turns_response
+        logger.debug(
+            "weft_recall: turns tier empty for %r — falling back to belief",
+            query[:50],
+        )
+        tier = "belief"
+        tier_fallback = {"from": "turns", "reason": "empty_turns_result"}
     if tier == "both":
         return await _weft_recall_both(
             ctx,
@@ -767,13 +792,16 @@ async def weft_recall(
                     limit=limit,
                 )
             if claim_results:
-                return {
+                claim_response = {
                     "query": query,
                     "mode": mode,
                     "tier": "belief-view",
                     "count": len(claim_results),
                     "results": [r.to_recall_dict() for r in claim_results],
                 }
+                if tier_fallback:
+                    claim_response["tier_fallback"] = tier_fallback
+                return claim_response
         except (
             asyncpg.PostgresConnectionError,
             asyncpg.InterfaceError,
@@ -949,6 +977,8 @@ async def weft_recall(
                 )
 
             response: dict = {"query": query, "mode": mode, "count": len(results), "results": enriched}
+            if tier_fallback:
+                response["tier_fallback"] = tier_fallback
             if total_matches is not None and total_matches > len(results):
                 response["total_matches"] = total_matches
                 response["showing"] = f"Showing {len(results)} of {total_matches} matches"
