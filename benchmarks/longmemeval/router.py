@@ -265,6 +265,32 @@ async def _retrieve_turns(
     ]
 
 
+async def _retrieve_belief(
+    pool: asyncpg.Pool,
+    embedder: EmbeddingProvider,
+    *,
+    question: str,
+    project_id: str,
+    policy: RetrievalPolicy,
+) -> list[MemoryRecall]:
+    """Belief-tier hybrid recall over ``memories``, project-isolated.
+
+    Over-fetches then post-filters to the exact project_id because
+    ``search_hybrid`` treats ``project_id=None`` rows as global and lets them
+    leak alongside scoped hits.
+    """
+    query_embedding = await embedder.embed(question)
+    raw = await search_hybrid(
+        pool,
+        question,
+        query_embedding,
+        limit=policy.top_k * policy.overfetch_multiplier,
+        project_id=project_id,
+    )
+    memories = [r for r in raw if r.memory.project_id == project_id]
+    return memories[: policy.top_k]
+
+
 async def retrieve(
     pool: asyncpg.Pool,
     embedder: EmbeddingProvider,
@@ -345,21 +371,29 @@ async def retrieve(
         )
 
     if tier == "turns":
-        return await _retrieve_turns(
+        turns = await _retrieve_turns(
             pool, embedder,
             question=question,
             question_type=question_type,
             project_id=project_id,
             policy=policy,
         )
+        # Never-miss fallback — mirrors the same resilience added to
+        # weft_recall (empty turns tier → belief recall). A question the
+        # single hard-regex router shapes as a turn query, but for which the
+        # turn substrate holds nothing, still surfaces an answer if the belief
+        # substrate has one. Fires ONLY on an empty turns result, so it can
+        # never displace a real turn hit. (No-op when the haystack was ingested
+        # turns-only, since there are no belief rows to fall back to — the
+        # safety net only pays off on dual-shape ingests.)
+        if turns:
+            return turns
+        return await _retrieve_belief(
+            pool, embedder,
+            question=question, project_id=project_id, policy=policy,
+        )
 
-    query_embedding = await embedder.embed(question)
-    raw = await search_hybrid(
-        pool,
-        question,
-        query_embedding,
-        limit=policy.top_k * policy.overfetch_multiplier,
-        project_id=project_id,
+    return await _retrieve_belief(
+        pool, embedder,
+        question=question, project_id=project_id, policy=policy,
     )
-    memories = [r for r in raw if r.memory.project_id == project_id]
-    return memories[: policy.top_k]
