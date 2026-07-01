@@ -1,7 +1,8 @@
 {
   "shapes": [
     "enumeration",
-    "temporal"
+    "temporal",
+    "entity_brief"
   ],
   "enumeration": {
     "limit": 10,
@@ -367,5 +368,56 @@
         ]
       }
     ]
+  },
+  "entity_brief": {
+    "seed_brief_clean": true,
+    "oracle_complete": true,
+    "belief_routed_all_complete": true,
+    "misrouted_phrasings": 2,
+    "finding": "temporal-worded briefs ('before our meeting') misroute off the belief tier and return 0 linked facts",
+    "stats": {
+      "entity": "Zelda Quackenbush",
+      "fact_count": 8,
+      "limit": 10,
+      "oracle_entity_context": {
+        "returned": 8,
+        "recall_at_links": 1.0,
+        "complete": true
+      },
+      "candidate_weft_recall": {
+        "runs": 5,
+        "min_recall_at_links": 0.0,
+        "median_recall_at_links": 1.0,
+        "max_recall_at_links": 1.0,
+        "misrouted_count": 2,
+        "per_query": [
+          {
+            "query": "what do I need to know about Zelda Quackenbush before our meeting",
+            "routed_tier": "turns",
+            "recall_at_links": 0.0
+          },
+          {
+            "query": "brief me on Zelda Quackenbush",
+            "routed_tier": "belief",
+            "recall_at_links": 1.0
+          },
+          {
+            "query": "tell me everything about Zelda Quackenbush",
+            "routed_tier": "belief",
+            "recall_at_links": 1.0
+          },
+          {
+            "query": "what should I remember about Zelda Quackenbush before I meet her",
+            "routed_tier": "turns",
+            "recall_at_links": 0.0
+          },
+          {
+            "query": "give me the background on Zelda Quackenbush",
+            "routed_tier": "belief",
+            "recall_at_links": 1.0
+          }
+        ]
+      }
+    }
   }
 }

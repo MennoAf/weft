@@ -35,6 +35,12 @@ from benchmarks.personal_agent.temporal_manifest import (
     PAAH_TEMPORAL_PROJECT_ID,
     get_turn_specs,
 )
+from benchmarks.personal_agent.entity_manifest import (
+    PAAH_ENTITY_PROJECT_ID,
+    EntitySpec,
+    get_brief_entity,
+    get_distractor_entity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +195,87 @@ async def seed_turns(pool: asyncpg.Pool) -> SeedTurnsResult:
         current_user_id.reset(token)
 
     return result
+
+
+@dataclass
+class SeedEntityResult:
+    """Outcome of seeding one entity + its linked facts through the real path."""
+
+    spec: EntitySpec
+    entity_id: str
+    fact_ids: list[str] = field(default_factory=list)
+    dedup_collisions: list[str] = field(default_factory=list)
+
+    @property
+    def intended(self) -> int:
+        return self.spec.cardinality
+
+    @property
+    def stored(self) -> int:
+        return len(set(self.fact_ids))
+
+    @property
+    def clean(self) -> bool:
+        return self.stored == self.intended and not self.dedup_collisions
+
+
+@dataclass
+class SeedEntityBriefResult:
+    """The brief entity plus a distractor, for the entity-brief shape."""
+
+    brief: SeedEntityResult
+    distractor: SeedEntityResult
+
+
+async def _seed_one_entity(ctx, spec: EntitySpec) -> SeedEntityResult:
+    """Create an entity, remember each fact, and link it to the entity."""
+    from weft.mcp.tools import weft_entity_create
+
+    entity = await weft_entity_create(
+        ctx,
+        name=spec.name,
+        entity_type=spec.entity_type,
+        description=spec.description,
+        project_id=PAAH_ENTITY_PROJECT_ID,
+    )
+    res = SeedEntityResult(spec=spec, entity_id=entity["id"])
+    for content in spec.facts:
+        mem_id, was_dedup = await _remember_member(ctx, content, spec.name.lower())
+        if was_dedup:
+            res.dedup_collisions.append(content)
+        await _link_fact(ctx, res.entity_id, mem_id)
+        res.fact_ids.append(mem_id)
+    return res
+
+
+async def _link_fact(ctx, entity_id: str, memory_id: str) -> None:
+    from weft.mcp.tools import weft_entity_link
+
+    await weft_entity_link(ctx, entity_id=entity_id, memory_id=memory_id)
+
+
+async def seed_entity_brief(pool: asyncpg.Pool) -> SeedEntityBriefResult:
+    """Seed the brief entity + a distractor entity through the REAL graph path.
+
+    Every fact is a weft_remember memory linked to its entity via
+    weft_entity_link — the same edges an agent builds. Returns both entities'
+    ids + fact ids so the harness can measure recall@links by memory id.
+    """
+    from weft.mcp.tools import weft_remember  # noqa: F401 (ensures import path valid)
+
+    app = await build_app_context(pool)
+    ctx = make_ctx(app)
+
+    token = current_user_id.set(PAAH_USER_ID)
+    try:
+        brief = await _seed_one_entity(ctx, get_brief_entity())
+        distractor = await _seed_one_entity(ctx, get_distractor_entity())
+        logger.info(
+            "seed_entity_brief: brief=%s facts=%d/%d clean=%s | distractor facts=%d",
+            brief.spec.name, brief.stored, brief.intended, brief.clean,
+            distractor.stored,
+        )
+    finally:
+        current_user_id.reset(token)
+
+    return SeedEntityBriefResult(brief=brief, distractor=distractor)
