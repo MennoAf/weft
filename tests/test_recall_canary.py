@@ -480,6 +480,99 @@ async def test_orphan_probe_disabled_on_hard_delete(pool, embedder):
     assert result["audit_valid"] is False  # 0 probes → skipped
 
 
+async def test_audit_self_heals_probe_archived_outside_delete_memory(pool, embedder):
+    """REGRESSION (probe hygiene): the audit disables probes whose memory was
+    archived via a path that bypasses delete_memory().
+
+    revise/supersede, quarantine merge, and consolidation (decay + duplicate
+    merge) all set memories.status directly, NEVER routing through
+    delete_memory()'s probe-disable. Those orphan probes can never surface their
+    now-inactive memory, so each audit counted them as misses and inflated the
+    reconciliation miss-rate. run_canary_audit must self-heal them regardless of
+    which path archived the memory.
+    """
+    content = "Memory archived by a direct status UPDATE (revise/consolidation path)"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["hygiene-test"]),
+        embedding=emb,
+    )
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reaREDACTED")
+
+    # Archive the memory WITHOUT going through delete_memory() — this is exactly
+    # what revise.py / quarantine.py / consolidation.py do, so the probe is left
+    # enabled=TRUE (the bug).
+    await pool.execute(
+        "UPDATE memories SET status = 'archived', updated_at = now() WHERE id = $1",
+        mem.id,
+    )
+    row_before = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row_before["enabled"] is True, (
+        "Direct status UPDATE must leave the probe enabled — that is the bug the "
+        "audit self-heal exists to correct."
+    )
+
+    result = await run_canary_audit(pool, embedder)
+
+    # The audit disabled the orphan probe and did NOT count it as a miss.
+    assert result["probes_disabled"] == 1
+    assert result["probes_checked"] == 0, (
+        "An orphan probe for an archived memory must not be audited (no phantom miss)."
+    )
+    assert result["misses"] == 0
+    row_after = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", probe_id,
+    )
+    assert row_after["enabled"] is False, (
+        "run_canary_audit must soft-disable probes whose memory is no longer active."
+    )
+
+    # canary_health must now exclude the disabled probe from its aggregate.
+    health = await canary_health(pool, user_id=DEFAULT_TEST_USER_ID)
+    assert health is None or "reaREDACTED" not in health.get("arms", {}), (
+        "The disabled orphan probe must drop out of the canary_health aggregate."
+    )
+
+
+async def test_audit_keeps_active_probe_and_disables_only_orphans(pool, embedder):
+    """The self-heal must be surgical: an active-memory probe survives while a
+    sibling orphan probe (archived memory) is disabled in the same run.
+    """
+    live_content = "Live memory whose probe must keep being audited"
+    dead_content = "Archived memory whose probe must be disabled"
+    live_emb = await embedder.embed(live_content)
+    dead_emb = await embedder.embed(dead_content)
+    live = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=live_content, topic=["mixed"]),
+        embedding=live_emb,
+    )
+    dead = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=dead_content, topic=["mixed"]),
+        embedding=dead_emb,
+    )
+    live_probe = await enroll_canary(pool, live.id, live_content, probe_type="reaREDACTED")
+    await enroll_canary(pool, dead.id, dead_content, probe_type="reaREDACTED")
+    await pool.execute(
+        "UPDATE memories SET status = 'archived', updated_at = now() WHERE id = $1",
+        dead.id,
+    )
+
+    result = await run_canary_audit(pool, embedder, top_k=5)
+
+    assert result["probes_disabled"] == 1
+    assert result["probes_checked"] == 1, "Only the live-memory probe should be audited."
+    # The live probe survives enabled; the dead one is disabled.
+    live_enabled = await get_db(pool).fetchval(
+        "SELECT enabled FROM recall_canary WHERE probe_id = $1", live_probe,
+    )
+    assert live_enabled is True
+
+
 # ---------------------------------------------------------------------------
 # Bug 1 regression: reaREDACTED enrollment must set user_id explicitly
 # ---------------------------------------------------------------------------

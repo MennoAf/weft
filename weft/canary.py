@@ -372,6 +372,8 @@ async def run_canary_audit(
         * ``misses`` (int): number of probes that failed to surface their memory.
         * ``miss_rate`` (float): ``misses / probes_checked``, or 0.0 if none checked.
         * ``bootstrap_synced`` (int): new ``reaREDACTED`` probes enrolled this run.
+        * ``probes_disabled`` (int): orphan probes soft-disabled this run because
+          their referenced memory is no longer ``active`` (probe hygiene).
         * ``audit_valid`` (bool): ``True`` when the audit ran with ≥1 probe and valid
           user scoping.  ``False`` when the audit was a no-op (skipped).  A caller
           MUST check this before treating ``miss_rate=0.0`` as a healthy signal —
@@ -414,15 +416,52 @@ async def run_canary_audit(
         pool, eval_case_store_path=eval_case_store_path
     )
 
+    # --- Phase 1.5: probe hygiene — disable probes whose memory is no longer active ---
+    # Archival paths (revise/supersede, quarantine merge, consolidation decay and
+    # duplicate-merge) flip memories to status!='active' via direct UPDATEs that
+    # bypass delete_memory()'s probe-disable. Left enabled, those orphan probes can
+    # NEVER surface their (now non-active) memory — search_by_vector only returns
+    # active memories — so every audit records them as misses and inflates the
+    # reconciliation miss-rate (canary_health sums miss_count over enabled probes).
+    # Disable them here (idempotent, RLS-scoped, covers hard-deletes via NOT EXISTS)
+    # so the audit loop AND the canary_health aggregate self-heal within one cycle,
+    # regardless of which path archived the memory.
+    probes_disabled = int(
+        await get_db(pool).fetchval(
+            """
+            WITH stale AS (
+                UPDATE recall_canary c
+                SET enabled = FALSE
+                WHERE c.enabled = TRUE
+                  AND NOT EXISTS (
+                      SELECT 1 FROM memories m
+                      WHERE m.id = c.memory_id AND m.status = 'active'
+                  )
+                RETURNING 1
+            )
+            SELECT count(*) FROM stale
+            """
+        )
+        or 0
+    )
+    if probes_disabled:
+        logger.info(
+            "canary audit: disabled %d orphan probe(s) whose memory is no longer active",
+            probes_disabled,
+        )
+
     # --- Phase 2: select enabled probes (parameterized — no f-string interpolation) ---
+    # JOIN memories with status='active' as a correct-by-construction guard so a
+    # memory archived after Phase 1.5 but mid-run is never counted as a miss.
     probe_types = ["active", "reaREDACTED"] if active_probing_enabled else ["reaREDACTED"]
 
     probes = await get_db(pool).fetch(
         """
-        SELECT probe_id, memory_id, probe_text, probe_type
-        FROM recall_canary
-        WHERE enabled = TRUE AND probe_type = ANY($1::text[])
-        ORDER BY probe_id
+        SELECT c.probe_id, c.memory_id, c.probe_text, c.probe_type
+        FROM recall_canary c
+        JOIN memories m ON m.id = c.memory_id AND m.status = 'active'
+        WHERE c.enabled = TRUE AND c.probe_type = ANY($1::text[])
+        ORDER BY c.probe_id
         """,
         probe_types,
     )
@@ -441,6 +480,7 @@ async def run_canary_audit(
             "misses": 0,
             "miss_rate": 0.0,
             "bootstrap_synced": bootstrap_synced,
+            "probes_disabled": probes_disabled,
             "audit_valid": False,
             "status": "skipped",
         }
@@ -535,11 +575,12 @@ async def run_canary_audit(
     miss_rate = misses / probes_checked if probes_checked > 0 else 0.0
     logger.info(
         "canary audit complete: probes_checked=%d misses=%d miss_rate=%.3f "
-        "bootstrap_synced=%d active_probing_enabled=%s",
+        "bootstrap_synced=%d probes_disabled=%d active_probing_enabled=%s",
         probes_checked,
         misses,
         miss_rate,
         bootstrap_synced,
+        probes_disabled,
         active_probing_enabled,
     )
     return {
@@ -547,6 +588,7 @@ async def run_canary_audit(
         "misses": misses,
         "miss_rate": miss_rate,
         "bootstrap_synced": bootstrap_synced,
+        "probes_disabled": probes_disabled,
         "audit_valid": True,
         "status": "ok",
     }
