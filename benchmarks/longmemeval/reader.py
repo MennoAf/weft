@@ -141,6 +141,62 @@ def _format_memories(memories: list[MemoryRecall]) -> str:
     return "\n\n".join(lines)
 
 
+def _format_result_rows(results: list) -> str:
+    """Render a ``weft_recall`` response's ``results`` slice as numbered rows.
+
+    Mirrors ``_format_memories`` but reads the serialized dict shape the tool
+    returns (``r.to_dict()`` + ``similarity``) rather than ``MemoryRecall``
+    objects. This is the limit-bounded relevance slice — for an enumeration ask
+    it under/over-counts, which is exactly the gap ``format_recall_context``
+    closes.
+    """
+    if not results:
+        return "(no relevant memories retrieved)"
+    lines: list[str] = []
+    for i, r in enumerate(results, start=1):
+        content = r.get("content", "") if isinstance(r, dict) else getattr(r, "content", "")
+        sim = r.get("similarity") if isinstance(r, dict) else getattr(r, "similarity", None)
+        prefix = f"[{i}] (relevance={sim:.2f})" if isinstance(sim, (int, float)) else f"[{i}]"
+        lines.append(f"{prefix} {content}")
+    return "\n\n".join(lines)
+
+
+def format_recall_context(response: dict, *, use_enumeration: bool = True) -> str:
+    """Render a ``weft_recall`` response as the agent-facing context block.
+
+    A reading agent consumes THIS text, not the raw response dict — so this is
+    where the enumeration consumption contract is actually kept or broken. When
+    the response carries an ``enumeration`` answer (a complete-membership gather
+    for a "how many / list all" ask), surface the corrected COUNT and the
+    COMPLETE member list. Rendering only ``results`` — the limit-bounded
+    relevance slice — silently drops that answer: it under-counts when
+    membership exceeds the limit and over-counts via cross-collection pollution
+    when it doesn't. ``response["count"]`` is already corrected upstream, but a
+    render that ignores it hands the agent the wrong number anyway.
+
+    ``use_enumeration=False`` reproduces the legacy results-only render. It is
+    retained so the PAAH acceptance harness can prove the enumeration-aware
+    branch closes a *real* gap (the ``False`` render undercounts) rather than a
+    hypothetical one — the same find-then-close discipline the agenda shape
+    used on ``weft_daily_brief``.
+    """
+    enum = response.get("enumeration") if use_enumeration else None
+    if enum:
+        members = enum.get("members", []) or []
+        count = enum.get("count", len(members))
+        target = enum.get("target", "items")
+        shown = enum.get("similarity_count", len(response.get("results", []) or []))
+        lines = [
+            f"COUNT: {count} {target} — complete list of {count} follows; "
+            f"`results` is only the top {shown} by relevance.",
+        ]
+        for i, m in enumerate(members, start=1):
+            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+            lines.append(f"[{i}] {content}")
+        return "\n".join(lines)
+    return _format_result_rows(response.get("results", []) or [])
+
+
 @dataclass(frozen=True, slots=True)
 class ReaderResponse:
     """Result of one Reader call."""
