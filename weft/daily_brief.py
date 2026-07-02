@@ -577,6 +577,8 @@ async def _query_canary_health(pool: asyncpg.Pool) -> list[str]:
     lines: list[str] = []
     if health.get("dark"):
         lines.append(health["alert"])
+    if health.get("tripwire"):
+        lines.append(health["tripwire"])
     for arm_name, arm in health.get("arms", {}).items():
         suffix = " (uncalibrated)" if arm.get("label") == "uncalibrated" else ""
         mr = arm.get("miss_rate")
