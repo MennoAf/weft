@@ -131,6 +131,15 @@ async def main() -> int:
             naive_correct = sum(
                 1 for s in stats for r in s.runs if r.naive_results == s.manifest_count
             )
+            # Render altitude: the answer as the agent READS it, not the dict.
+            render_legacy_wrong = sum(
+                1 for s in stats for r in s.runs
+                if r.render_legacy_rows != s.manifest_count
+            )
+            render_enum_complete = sum(
+                1 for s in stats for r in s.runs
+                if r.render_enum_rows == s.manifest_count and r.render_count_shown
+            )
 
             # ---- Report --------------------------------------------------
             logger.info("=" * 70)
@@ -157,10 +166,24 @@ async def main() -> int:
                     "  recall@membership (enumeration.members): min=%.3f median=%.3f max=%.3f",
                     s.recall_min, s.recall_median, s.recall_max,
                 )
+                logger.info(
+                    "  RENDER (agent-facing) — legacy results-only render wrong: "
+                    "%.0f%% (finding) | enum-aware render complete: %.0f%% | "
+                    "count readable in header: %.0f%% | summary carries count: %.0f%%",
+                    s.render_legacy_wrong_rate * 100,
+                    s.render_close_rate * 100,
+                    s.render_count_shown_rate * 100,
+                    s.summary_shows_count_rate * 100,
+                )
                 if not (
                     s.enum_count_correct_rate == 1.0
                     and s.obvious_count_correct_rate == 1.0
                     and s.recall_min == 1.0
+                    # Loop-closer: the answer must survive rendering, not just
+                    # be correct in the response dict.
+                    and s.render_close_rate == 1.0
+                    and s.render_count_shown_rate == 1.0
+                    and s.render_legacy_wrong_rate == 1.0
                 ):
                     router_all_correct = False
 
@@ -193,6 +216,31 @@ async def main() -> int:
                 logger.info(
                     "CONSUMPTION CONTRACT: STILL OPEN — an explicit count field "
                     "was wrong on some run; investigate."
+                )
+
+            # ---- Render-altitude verdict (the loop-closer) --------------
+            render_contract_closed = (
+                render_enum_complete == total_runs
+                and render_legacy_wrong == total_runs
+            )
+            logger.info(
+                "RENDER SCOREBOARD — enum-aware render complete+readable: %d/%d | "
+                "legacy results-only render wrong: %d/%d (the gap it closes)",
+                render_enum_complete, total_runs, render_legacy_wrong, total_runs,
+            )
+            if render_contract_closed:
+                logger.info(
+                    "RENDER CONTRACT: CLOSED — the answer survives into the text "
+                    "an agent actually reads (format_recall_context surfaces the "
+                    "corrected count + complete membership on every run); the "
+                    "legacy results-only render stays wrong (%d/%d), which is "
+                    "exactly the gap the enum-aware render closes.",
+                    render_legacy_wrong, total_runs,
+                )
+            else:
+                logger.info(
+                    "RENDER CONTRACT: STILL OPEN — the enum-aware render dropped "
+                    "the answer on some run; investigate format_recall_context."
                 )
 
             # ============ SHAPE 2: temporal / dialogue (turn-tier) ============
@@ -342,11 +390,14 @@ async def main() -> int:
                     "seed_integrity_clean": seed_ok,
                     "answer_correct_everywhere": router_all_correct,
                     "consumption_contract_closed": contract_closed,
+                    "render_contract_closed": render_contract_closed,
                     "scoreboard": {
                         "total_runs": total_runs,
                         "correct_via_obvious_response_count": obvious_correct,
                         "correct_via_explicit_enumeration_count": enum_correct,
                         "correct_via_naive_len_results": naive_correct,
+                        "render_enum_complete_and_readable": render_enum_complete,
+                        "render_legacy_wrong": render_legacy_wrong,
                     },
                     "collections": [s.to_dict() for s in stats],
                     "seed": [

@@ -18,14 +18,28 @@ Post-V8 (consumption contract closed), the guarantees are:
     NOT equal the truth, so the test documents WHY the corrected fields matter.
     If a future change makes len(results) itself the complete answer, that
     contrast assert trips and forces a conscious update.
+
+RENDER ALTITUDE (loop-closer, issue weft-09ae22a3). The asserts above check the
+tool RESPONSE; an agent reads the RENDERED context, and the response being right
+≠ the render showing it. So the render-altitude tests below mirror the agenda
+shape's ORACLE + AGENT-FACING split via ``format_recall_context``:
+  * FINDING — the legacy results-only render never equals the true count.
+  * CLOSE  — the enum-aware render surfaces the complete membership AND makes
+    the corrected count readable in its header.
+  * PROSE GUARD — ``enumeration.summary`` carries the count as text.
+  * SHAPE (item 2) — ``enumeration.members`` is the ratified light projection
+    {id, type, content, topic, created_at}; nothing richer is needed to count.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from weft.auth import current_user_id
+
+from benchmarks.personal_agent.context import build_app_context, make_ctx
 from benchmarks.personal_agent.harness import run_enumeration_paah
-from benchmarks.personal_agent.manifest import get_collections
+from benchmarks.personal_agent.manifest import PAAH_USER_ID, get_collections
 from benchmarks.personal_agent.seed import seed_corpus
 
 pytestmark = pytest.mark.asyncio
@@ -106,4 +120,97 @@ async def test_naive_len_results_still_wrong_documents_why_fix_matters(seeded):
             f"{s.name}: naive len(results) matched the truth on "
             f"{s.naive_correct_rate * 100:.0f}% of runs — the ranked slice now "
             f"equals membership; the contrast this test documents has changed"
+        )
+
+
+# ── Render altitude: what the agent actually reads (loop-closer) ───────────
+
+
+async def test_legacy_render_undercounts_documents_the_gap(seeded):
+    """FINDING: the render an agent reads today (results-only) is NOT the answer.
+
+    ``format_recall_context(use_enumeration=False)`` reproduces the legacy
+    Reader render — a numbered dump of the limit-bounded ``results`` slice. Its
+    row count never equals the true membership, so an agent reading it
+    under/over-counts even though the response dict is correct. This is the same
+    consumption-contract gap the agenda shape found in weft_daily_brief, one
+    altitude down from the tool response.
+    """
+    _, stats = seeded
+    for s in stats:
+        assert s.render_legacy_wrong_rate == 1.0, (
+            f"{s.name}: the legacy results-only render matched the true count on "
+            f"{(1 - s.render_legacy_wrong_rate) * 100:.0f}% of runs — the render "
+            f"gap this documents has changed; re-verify the finding"
+        )
+
+
+async def test_enum_aware_render_surfaces_complete_membership(seeded):
+    """CLOSE: the enum-aware render carries the full membership + readable count.
+
+    ``format_recall_context(use_enumeration=True)`` is the fix: it renders the
+    complete member list (row count == manifest) and states the corrected count
+    in its header where an agent can READ it, not just parse a JSON field.
+    """
+    _, stats = seeded
+    for s in stats:
+        assert s.render_close_rate == 1.0, (
+            f"{s.name}: enum-aware render omitted members on "
+            f"{(1 - s.render_close_rate) * 100:.0f}% of runs — rendered rows "
+            f"!= manifest ({s.manifest_count}); the complete list did not "
+            f"survive rendering"
+        )
+        assert s.render_count_shown_rate == 1.0, (
+            f"{s.name}: corrected count missing from the rendered header on "
+            f"{(1 - s.render_count_shown_rate) * 100:.0f}% of runs — the agent "
+            f"cannot read the count off the render"
+        )
+
+
+async def test_summary_prose_carries_count(seeded):
+    """PROSE GUARD: enumeration.summary states the count as text.
+
+    Guards the natural-language sentence an agent skims against a regression to
+    len(results): if the summary is ever rebuilt off the slice, this trips.
+    """
+    _, stats = seeded
+    for s in stats:
+        assert s.summary_shows_count_rate == 1.0, (
+            f"{s.name}: enumeration.summary omitted the count on "
+            f"{(1 - s.summary_shows_count_rate) * 100:.0f}% of runs — the prose "
+            f"answer no longer carries the true count"
+        )
+
+
+async def test_members_projection_is_the_ratified_light_shape(pool):
+    """SHAPE (item 2 decision): members is a LIGHT projection, ratified.
+
+    ``enumeration.members`` carries exactly {id, type, content, topic,
+    created_at} — enough to count and to list. The richer ``results[]`` shape
+    (entities, similarity, relevance_score) is deliberately NOT duplicated here:
+    answering "how many / list all" needs none of it. If the projection drifts,
+    this trips and forces a conscious re-ratification rather than silent bloat.
+    """
+    await seed_corpus(pool)
+    app = await build_app_context(pool)
+    ctx = make_ctx(app)
+    token = current_user_id.set(PAAH_USER_ID)
+    try:
+        from weft.mcp.tools import weft_recall
+
+        coll = get_collections()[0]
+        query = f"how many {coll.noun} do I have"
+        resp = await weft_recall(ctx, query=query, limit=10, tier="auto")
+    finally:
+        current_user_id.reset(token)
+
+    enum = resp.get("enumeration")
+    assert enum is not None, f"enumeration block missing for {query!r}"
+    assert enum.get("members"), "enumeration.members is empty — nothing to shape-check"
+    expected_keys = {"id", "type", "content", "topic", "created_at"}
+    for m in enum["members"]:
+        assert set(m.keys()) == expected_keys, (
+            f"members projection drifted: got {sorted(m.keys())}, "
+            f"ratified {sorted(expected_keys)} — re-ratify the light shape "
+            f"(item 2) before changing it"
         )
