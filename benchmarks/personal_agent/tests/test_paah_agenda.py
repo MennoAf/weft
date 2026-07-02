@@ -94,19 +94,18 @@ async def test_keep_pushing_surfaces_first(seeded_agenda):
     )
 
 
-async def test_daily_brief_does_not_yet_surface_open_loops(seeded_agenda):
-    """AGENT-FACING finding (change-detector): the digest omits the open loops.
+async def test_daily_brief_surfaces_open_loops(seeded_agenda):
+    """AGENT-FACING: the morning digest now carries every due open loop.
 
-    assemble_daily_brief builds no trackers/open-loops section, so the morning
-    brief an agent reads surfaces < the full due set even though the oracle knows
-    all of it — the agenda consumption-contract gap. When weft_tracker_due is
-    wired into the brief (its docstring already says it should be), coverage hits
-    1.0 and THIS TEST FAILS: flip it to assert ``brief_surfaces_open_loops`` then.
+    The consumption-contract gap the agenda shape first measured (0/4) is CLOSED:
+    assemble_daily_brief has an "Open Loops" section that renders due_trackers, so
+    the brief an agent reads surfaces all of the open loops the oracle knows —
+    coverage == 1.0.
     """
     _, stats = seeded_agenda
     assert stats.brief_available, "daily brief failed to assemble at all"
-    assert not stats.brief_surfaces_open_loops, (
-        f"daily brief now surfaces {stats.brief_due_covered}/{stats.due_expected} "
-        f"open loops — the consumption-contract gap is CLOSED. Update this test to "
-        f"assert stats.brief_surfaces_open_loops and record the fix in the README."
+    assert stats.brief_surfaces_open_loops, (
+        f"daily brief surfaced only {stats.brief_due_covered}/{stats.due_expected} "
+        f"open loops (coverage={stats.brief_coverage:.2f}) — the Open Loops section "
+        f"regressed. Sections present: {stats.brief_sections}"
     )
