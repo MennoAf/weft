@@ -250,3 +250,68 @@ async def test_v53_migration_idempotent(pool):
 
     # Migration already ran via fixture. Run the raw SQL again — must not raise.
     await pool.execute(v53_sql[0])
+
+
+@pytest.mark.asyncio
+async def test_count_stale_pending_replays(pool):
+    """count_stale_pending_replays counts only pending rows past the staleness window."""
+    from weft.episodes import create_episode
+    from weft.models import EpisodeCreate
+    from weft.replay import (
+        REPLAY_QUEUE_STALENESS_DAYS,
+        count_stale_pending_replays,
+    )
+    from tests.conftest import DEFAULT_TEST_USER_ID
+
+    ep = await create_episode(pool, EpisodeCreate(title="stale-count-episode"))
+    stale_age = REPLAY_QUEUE_STALENESS_DAYS + 6  # comfortably past the window
+
+    async def _insert(rq_id, *, status, age_days):
+        await pool.execute(
+            """
+            INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, now() - ($7 || ' days')::interval)
+            """,
+            rq_id, ep.id, ["et-x"], "stale-count", status, DEFAULT_TEST_USER_ID, str(age_days),
+        )
+
+    baseline = await count_stale_pending_replays(pool)
+    await _insert(_replay_queue_id(), status="pending", age_days=stale_age)   # counts
+    await _insert(_replay_queue_id(), status="pending", age_days=1)           # fresh — no
+    await _insert(_replay_queue_id(), status="done", age_days=stale_age)      # terminal — no
+    await _insert(_replay_queue_id(), status="failed", age_days=stale_age)    # terminal — no
+
+    assert await count_stale_pending_replays(pool) == baseline + 1
+
+
+@pytest.mark.asyncio
+async def test_count_stale_pending_replays_respects_window(pool):
+    """A row just inside the window is not stale; the same row just outside is."""
+    from weft.episodes import create_episode
+    from weft.models import EpisodeCreate
+    from weft.replay import (
+        REPLAY_QUEUE_STALENESS_DAYS,
+        count_stale_pending_replays,
+    )
+    from tests.conftest import DEFAULT_TEST_USER_ID
+
+    ep = await create_episode(pool, EpisodeCreate(title="stale-window-episode"))
+    rq_id = _replay_queue_id()
+    baseline = await count_stale_pending_replays(pool)
+
+    # Inside the window (age < staleness): not counted.
+    await pool.execute(
+        """
+        INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id, created_at)
+        VALUES ($1, $2, $3, 'w', 'pending', $4, now() - ($5 || ' days')::interval)
+        """,
+        rq_id, ep.id, ["et-y"], DEFAULT_TEST_USER_ID, str(REPLAY_QUEUE_STALENESS_DAYS - 2),
+    )
+    assert await count_stale_pending_replays(pool) == baseline
+
+    # Age it past the window: now counted.
+    await pool.execute(
+        "UPDATE replay_queue SET created_at = now() - ($2 || ' days')::interval WHERE id = $1",
+        rq_id, str(REPLAY_QUEUE_STALENESS_DAYS + 2),
+    )
+    assert await count_stale_pending_replays(pool) == baseline + 1
