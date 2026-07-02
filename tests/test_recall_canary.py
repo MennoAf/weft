@@ -871,3 +871,61 @@ async def test_existing_degenerate_reask_probe_disabled(pool, embedder):
         "SELECT enabled FROM recall_canary WHERE probe_id = 'cp-poisoned01'"
     )
     assert row["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Sample-based trustworthiness + drift tripwire
+# ---------------------------------------------------------------------------
+
+
+async def test_canary_health_trustworthy_when_sample_sufficient(pool):
+    """At/above the min sample with a healthy rate: trustworthy, no 'uncalibrated',
+    no tripwire."""
+    pid = await enroll_canary(pool, "mem-trust", "trust probe", probe_type="active")
+    # 40 checks, 1 miss => 2.5% (below the 10% ceiling), sample >= 30.
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 40, "
+        "miss_count = 1 WHERE probe_id = $1",
+        pid,
+    )
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    active = health["arms"]["active"]
+    assert active["trustworthy"] is True
+    assert "label" not in active, "sufficient sample must drop the 'uncalibrated' label"
+    assert active["tripped"] is False
+    assert "tripwire" not in health
+
+
+async def test_canary_health_tripwire_fires_on_high_miss_rate(pool):
+    """A trustworthy arm whose miss_rate crosses the ceiling raises a loud tripwire."""
+    pid = await enroll_canary(pool, "mem-trip", "trip probe", probe_type="active")
+    # 40 checks, 8 misses => 20% (above the 10% ceiling), sample >= 30.
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 40, "
+        "miss_count = 8 WHERE probe_id = $1",
+        pid,
+    )
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    active = health["arms"]["active"]
+    assert active["trustworthy"] is True
+    assert active["tripped"] is True
+    assert "tripwire" in health
+    assert "20.0%" in health["tripwire"]
+    assert "active" in health["tripwire"]
+
+
+async def test_canary_health_no_trip_below_min_sample(pool):
+    """A high miss_rate on a thin sample must NOT trip — it stays uncalibrated."""
+    pid = await enroll_canary(pool, "mem-thin", "thin probe", probe_type="active")
+    # 5 checks, 5 misses => 100% rate but sample < 30: guarded.
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 5, "
+        "miss_count = 5 WHERE probe_id = $1",
+        pid,
+    )
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    active = health["arms"]["active"]
+    assert active["trustworthy"] is False
+    assert active["tripped"] is False
+    assert active.get("label") == "uncalibrated"
+    assert "tripwire" not in health
