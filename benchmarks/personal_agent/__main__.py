@@ -59,14 +59,18 @@ async def main() -> int:
     from weft.db.migrations import run_migrations
     from benchmarks.personal_agent.manifest import PAAH_USER_ID
     from benchmarks.personal_agent.seed import (
-        seed_corpus, seed_turns, seed_entity_brief,
+        seed_corpus, seed_turns, seed_entity_brief, seed_agenda,
     )
     from benchmarks.personal_agent.harness import run_enumeration_paah
     from benchmarks.personal_agent.temporal_harness import run_temporal_paah
     from benchmarks.personal_agent.entity_harness import run_entity_brief_paah
+    from benchmarks.personal_agent.agenda_harness import run_agenda_paah
 
     logger.info("=" * 70)
-    logger.info("PAAH — Personal-Agent Acceptance Harness (enumeration + temporal)")
+    logger.info(
+        "PAAH — Personal-Agent Acceptance Harness "
+        "(enumeration + temporal + entity + agenda)"
+    )
     logger.info("=" * 70)
 
     logger.info("Starting testcontainers (Postgres pgvector + Redis)...")
@@ -278,6 +282,58 @@ async def main() -> int:
                 and entity_stats.never_empty
             )
 
+            # ============ SHAPE 4: agenda (trackers / open loops) ============
+            logger.info("")
+            logger.info("Seeding agenda trackers (real tracker lifecycle path)...")
+            seeded_agenda = await seed_agenda(pool)
+            logger.info(
+                "  agenda seeded=%d due=%d excluded=%d clean=%s",
+                seeded_agenda.intended, len(seeded_agenda.due_ids),
+                len(seeded_agenda.excluded_ids), seeded_agenda.clean,
+            )
+            agenda_stats = await run_agenda_paah(pool, seeded_agenda)
+
+            logger.info("=" * 70)
+            logger.info("PAAH AGENDA RESULTS (trackers / open loops)")
+            logger.info("=" * 70)
+            logger.info(
+                "  ORACLE weft_tracker_due: recall@due=%.3f (complete=%s) "
+                "precise=%s (leaks=%d) keep-pushing-first=%s",
+                agenda_stats.oracle_recall, agenda_stats.oracle_complete,
+                agenda_stats.oracle_precise, len(agenda_stats.oracle_leaks),
+                agenda_stats.keep_pushing_first,
+            )
+            logger.info(
+                "  AGENT-FACING weft_daily_brief: open-loop coverage=%d/%d (%.0f%%) "
+                "surfaces_open_loops=%s",
+                agenda_stats.brief_due_covered, agenda_stats.due_expected,
+                agenda_stats.brief_coverage * 100,
+                agenda_stats.brief_surfaces_open_loops,
+            )
+            if not agenda_stats.brief_surfaces_open_loops:
+                logger.info(
+                    "  FINDING: the due-loop query answers correctly, but the "
+                    "agent-facing daily brief surfaces %d/%d open loops — "
+                    "weft_tracker_due's docstring points at a daily-brief "
+                    "'open loops' section that assemble_daily_brief does not build "
+                    "(sections present: %s). Consumption-contract gap, same family "
+                    "as the enumeration results[] slice.",
+                    agenda_stats.brief_due_covered, agenda_stats.due_expected,
+                    agenda_stats.brief_sections or "[]",
+                )
+            agenda_ok = (
+                seeded_agenda.clean
+                and agenda_stats.oracle_complete
+                and agenda_stats.oracle_precise
+                and agenda_stats.keep_pushing_first
+            )
+            logger.info(
+                "AGENDA SHAPE: %s",
+                "ANSWERS — due query complete, precise, keep-pushing surfaces first"
+                if agenda_ok
+                else "GAP — oracle due query is incomplete/imprecise/misordered",
+            )
+
             output_path = Path(__file__).parent / "results.json"
             output_data = {
                 "shapes": ["enumeration", "temporal"],
@@ -323,23 +379,51 @@ async def main() -> int:
                     "seed_brief_clean": seeded_entity.brief.clean,
                     "oracle_complete": entity_stats.oracle_complete,
                     "belief_routed_all_complete": all(
-                        c.recall_at_links == 1.0 for c in entity_stats.belief_routed
+                        c.recall_at_links == 1.0
+                        for c in entity_stats.candidate if not c.fell_back
                     ),
-                    "misrouted_phrasings": len(entity_stats.misrouted),
+                    "recovered_via_fallback": len(entity_stats.fallbacks),
                     "finding": (
-                        "temporal-worded briefs ('before our meeting') misroute "
-                        "off the belief tier and return 0 linked facts"
-                        if entity_stats.misrouted else None
+                        "temporal-worded briefs ('before our meeting') route off "
+                        "the belief tier to the turns tier and recover via the "
+                        "empty-tier belief fallback (never-miss); none return empty"
+                        if entity_stats.fallbacks else None
                     ),
                     "stats": entity_stats.to_dict(),
                 },
+                "agenda": {
+                    "seed_clean": seeded_agenda.clean,
+                    "due_expected": agenda_stats.due_expected,
+                    "oracle_complete": agenda_stats.oracle_complete,
+                    "oracle_precise": agenda_stats.oracle_precise,
+                    "keep_pushing_first": agenda_stats.keep_pushing_first,
+                    "agenda_answers": agenda_ok,
+                    "agent_facing_surfaces_open_loops": (
+                        agenda_stats.brief_surfaces_open_loops
+                    ),
+                    "finding": (
+                        "weft_tracker_due answers the plate correctly, but the "
+                        "agent-facing daily brief surfaces "
+                        f"{agenda_stats.brief_due_covered}/{agenda_stats.due_expected} "
+                        "open loops — assemble_daily_brief has no trackers section "
+                        "despite weft_tracker_due's docstring pointing at one"
+                        if not agenda_stats.brief_surfaces_open_loops else None
+                    ),
+                    "stats": agenda_stats.to_dict(),
+                },
             }
-            output_data["shapes"] = ["enumeration", "temporal", "entity_brief"]
+            output_data["shapes"] = [
+                "enumeration", "temporal", "entity_brief", "agenda",
+            ]
             output_path.write_text(json.dumps(output_data, indent=2))
             logger.info("Results saved to: %s", output_path)
 
             all_clean = (
-                seed_ok and router_all_correct and temporal_all_correct and entity_ok
+                seed_ok
+                and router_all_correct
+                and temporal_all_correct
+                and entity_ok
+                and agenda_ok
             )
             return 0 if all_clean else 1
         finally:
