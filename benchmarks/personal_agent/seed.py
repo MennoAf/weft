@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
@@ -40,6 +41,11 @@ from benchmarks.personal_agent.entity_manifest import (
     EntitySpec,
     get_brief_entity,
     get_distractor_entity,
+)
+from benchmarks.personal_agent.agenda_manifest import (
+    PAAH_AGENDA_PROJECT_ID,
+    AgendaSpec,
+    get_agenda_specs,
 )
 
 logger = logging.getLogger(__name__)
@@ -279,3 +285,137 @@ async def seed_entity_brief(pool: asyncpg.Pool) -> SeedEntityBriefResult:
         current_user_id.reset(token)
 
     return SeedEntityBriefResult(brief=brief, distractor=distractor)
+
+
+@dataclass
+class SeedAgendaTracker:
+    """One seeded tracker plus its manifest spec (the ground-truth fate)."""
+
+    spec: AgendaSpec
+    tracker_id: str
+    created_ok: bool = True
+    close_applied: bool = False
+    snooze_applied: bool = False
+
+
+@dataclass
+class SeedAgendaResult:
+    """Outcome of seeding the agenda trackers through the real lifecycle path."""
+
+    trackers: list[SeedAgendaTracker] = field(default_factory=list)
+    # Anchor captured at seed time so the harness reasons about the same "now".
+    seeded_at: datetime | None = None
+
+    @property
+    def intended(self) -> int:
+        return len(self.trackers)
+
+    def by_key(self, key: str) -> SeedAgendaTracker:
+        for t in self.trackers:
+            if t.spec.key == key:
+                return t
+        raise KeyError(key)
+
+    @property
+    def due_trackers(self) -> list[SeedAgendaTracker]:
+        """The open loops that must appear in the due queue (ground truth)."""
+        return [t for t in self.trackers if t.spec.expected_due]
+
+    @property
+    def due_ids(self) -> set[str]:
+        return {t.tracker_id for t in self.due_trackers}
+
+    @property
+    def excluded_ids(self) -> set[str]:
+        return {t.tracker_id for t in self.trackers if not t.spec.expected_due}
+
+    @property
+    def keep_pushing(self) -> SeedAgendaTracker:
+        """The longest-overdue due tracker — the 'thing I keep pushing' anchor.
+
+        due_trackers orders by nudge_after ASC, so this is the one that must
+        surface FIRST in the due queue.
+        """
+        return min(self.due_trackers, key=lambda t: t.spec.nudge_after_days)
+
+    @property
+    def clean(self) -> bool:
+        """Every spec created, and every close/snooze it declared was applied."""
+        if len(self.trackers) != len(get_agenda_specs()):
+            return False
+        for t in self.trackers:
+            if not (t.created_ok and t.tracker_id):
+                return False
+            if t.spec.close_as is not None and not t.close_applied:
+                return False
+            if t.spec.snooze_days is not None and not t.snooze_applied:
+                return False
+        return True
+
+
+async def seed_agenda(pool: asyncpg.Pool) -> SeedAgendaResult:
+    """Seed the agenda trackers through the REAL tracker lifecycle path.
+
+    Each tracker is created via weft_tracker_create with a nudge_after resolved
+    from its day-offset against a single ``now`` anchor; snoozed specs go through
+    weft_tracker_snooze and terminal specs through weft_tracker_close, so the
+    real state machine (state_history, snooze_until) is exercised — not a fixture
+    INSERT. Scoped to PAAH_AGENDA_PROJECT_ID under PAAH_USER_ID.
+    """
+    from weft.mcp.tools import (
+        weft_tracker_close,
+        weft_tracker_create,
+        weft_tracker_snooze,
+    )
+
+    app = await build_app_context(pool)
+    ctx = make_ctx(app)
+
+    now = datetime.now(timezone.utc)
+    result = SeedAgendaResult(seeded_at=now)
+    token = current_user_id.set(PAAH_USER_ID)
+    try:
+        for spec in get_agenda_specs():
+            nudge_after = (
+                (now + timedelta(days=spec.nudge_after_days)).isoformat()
+                if spec.nudge_after_days is not None
+                else None
+            )
+            created = await weft_tracker_create(
+                ctx,
+                kind=spec.kind,
+                title=spec.title,
+                project_id=PAAH_AGENDA_PROJECT_ID,
+                state=spec.state,
+                nudge_mode=spec.nudge_mode,
+                nudge_after=nudge_after,
+                nudge_interval=spec.nudge_interval,
+            )
+            tid = created.get("id", "")
+            seeded = SeedAgendaTracker(spec=spec, tracker_id=tid, created_ok=bool(tid))
+
+            if tid and spec.snooze_days is not None:
+                snoozed = await weft_tracker_snooze(
+                    ctx,
+                    tracker_id=tid,
+                    until=(now + timedelta(days=spec.snooze_days)).isoformat(),
+                )
+                seeded.snooze_applied = "error" not in snoozed
+
+            if tid and spec.close_as is not None:
+                closed = await weft_tracker_close(
+                    ctx, tracker_id=tid, final_state=spec.close_as,
+                )
+                seeded.close_applied = "error" not in closed
+
+            result.trackers.append(seeded)
+
+        logger.info(
+            "seed_agenda: seeded=%d due=%d excluded=%d clean=%s",
+            result.intended, len(result.due_ids), len(result.excluded_ids),
+            result.clean,
+        )
+    finally:
+        current_user_id.reset(token)
+
+    return result

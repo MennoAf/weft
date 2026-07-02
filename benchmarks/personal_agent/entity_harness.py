@@ -28,6 +28,7 @@ from weft.auth import current_user_id
 from benchmarks.personal_agent.context import build_app_context, make_ctx
 from benchmarks.personal_agent.entity_manifest import (
     ENTITY_LIMIT,
+    PAAH_ENTITY_PROJECT_ID,
     PAAH_USER_ID,
     get_brief_phrasings,
 )
@@ -151,7 +152,17 @@ async def run_entity_brief_paah(
         # misses the entity's belief-tier facts entirely. Capturing routed_tier
         # turns that into a diagnosable finding instead of a mystery zero.
         for query in get_brief_phrasings():
-            resp = await weft_recall(ctx, query=query, limit=limit, tier="auto")
+            # Scope to the entity project (matches the temporal harness). Without
+            # this the turns tier bleeds into the temporal shape's seeded turns in
+            # the shared full-runner corpus — the turns tier is then non-empty, the
+            # empty-only never-miss fallback never fires, and the temporal-worded
+            # briefs return 0 facts. Isolated pytest hides it (empty DB); the full
+            # runner does not. (The deeper single-project variant of this is a
+            # tracked product finding, not a harness bug.)
+            resp = await weft_recall(
+                ctx, query=query, limit=limit, tier="auto",
+                project_id=PAAH_ENTITY_PROJECT_ID,
+            )
             routed_tier = resp.get("tier")  # None for the belief legacy path
             fell_back = "tier_fallback" in resp  # turns tier was empty → belief
             surfaced = {r.get("id") for r in resp.get("results", []) if r.get("id")}
