@@ -10,10 +10,20 @@ Tests cover:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
-from weft.board import Action, Item, Urgency, calculate_urgency, rank_items
+from weft.board import (
+    Action,
+    Item,
+    Urgency,
+    alert_adapter,
+    calculate_urgency,
+    rank_items,
+    tracker_adapter,
+)
+from weft.models import Alert, AlertStatus, AlertType, NudgeMode, Tracker, TrackerKind, TrackerState
 
 
 # Fixtures
@@ -596,3 +606,413 @@ class TestRankItems:
 
         # Result should be sorted
         assert [r.id for r in result] == ["a", "b"]
+
+
+# Adapter tests
+
+class TestTrackerAdapter:
+    """Adapter for mapping Tracker objects to Items."""
+
+    def test_tracker_adapter_empty_list(self, now):
+        """Empty tracker list returns empty Items list."""
+        result = tracker_adapter([], now)
+        assert result == []
+
+    def test_tracker_adapter_single_tracker(self, now):
+        """Single tracker maps to single Item with all fields populated."""
+        tracker = Tracker(
+            id="tr-1234567890",
+            user_id="user-1",
+            project_id="proj-1",
+            entity_id="entity-1",
+            kind=TrackerKind.task,
+            title="Fix parser bug",
+            state=TrackerState.in_progress,
+            nudge_mode=NudgeMode.once,
+            nudge_after=now + timedelta(days=2),
+            snooze_until=None,
+            created_at=now - timedelta(days=5),
+        )
+
+        result = tracker_adapter([tracker], now)
+
+        assert len(result) == 1
+        item = result[0]
+        assert item.id == "tr-1234567890"
+        assert item.source == "tracker"
+        assert item.kind == "task"
+        assert item.title == "Fix parser bug"
+        assert item.state == "in_progress"
+        assert item.due_at == now + timedelta(days=2)
+        assert item.snoozed_until is None
+        assert item.age_days == 5.0
+        assert item.urgency == "due_soon"
+        assert item.project_id == "proj-1"
+        assert item.entity_id == "entity-1"
+        assert item.actions == []
+
+    def test_tracker_adapter_urgency_overdue(self, now):
+        """Tracker with past nudge_after maps to overdue urgency."""
+        tracker = Tracker(
+            id="tr-overdue",
+            kind=TrackerKind.task,
+            title="Overdue task",
+            state=TrackerState.in_progress,
+            nudge_after=now - timedelta(days=1),
+            created_at=now - timedelta(days=3),
+        )
+
+        result = tracker_adapter([tracker], now)
+        assert result[0].urgency == "overdue"
+        assert result[0].due_at == now - timedelta(days=1)
+
+    def test_tracker_adapter_urgency_no_date(self, now):
+        """Tracker with null nudge_after maps to no_date urgency."""
+        tracker = Tracker(
+            id="tr-no-date",
+            kind=TrackerKind.task,
+            title="No date task",
+            state=TrackerState.in_progress,
+            nudge_after=None,
+            created_at=now,
+        )
+
+        result = tracker_adapter([tracker], now)
+        assert result[0].urgency == "no_date"
+        assert result[0].due_at is None
+
+    def test_tracker_adapter_respects_snooze_until(self, now):
+        """Tracker snooze_until is preserved in Item."""
+        snooze_time = now + timedelta(hours=3)
+        tracker = Tracker(
+            id="tr-snoozed",
+            kind=TrackerKind.task,
+            title="Snoozed task",
+            state=TrackerState.in_progress,
+            nudge_after=now + timedelta(days=1),
+            snooze_until=snooze_time,
+            created_at=now - timedelta(days=1),
+        )
+
+        result = tracker_adapter([tracker], now)
+        assert result[0].snoozed_until == snooze_time
+
+    def test_tracker_adapter_age_days_calculation(self, now):
+        """age_days is correctly calculated from created_at."""
+        # Created 3.5 days ago
+        created = now - timedelta(days=3, hours=12)
+        tracker = Tracker(
+            id="tr-age",
+            kind=TrackerKind.task,
+            title="Aged task",
+            state=TrackerState.in_progress,
+            nudge_after=now,
+            created_at=created,
+        )
+
+        result = tracker_adapter([tracker], now)
+        assert abs(result[0].age_days - 3.5) < 0.01
+
+    def test_tracker_adapter_multiple_trackers(self, now):
+        """Multiple trackers map to multiple Items."""
+        trackers = [
+            Tracker(
+                id=f"tr-{i}",
+                kind=TrackerKind.task,
+                title=f"Task {i}",
+                state=TrackerState.in_progress,
+                nudge_after=now + timedelta(days=i),
+                created_at=now - timedelta(days=i),
+            )
+            for i in range(1, 4)
+        ]
+
+        result = tracker_adapter(trackers, now)
+
+        assert len(result) == 3
+        for i, item in enumerate(result, start=1):
+            assert item.id == f"tr-{i}"
+            assert item.source == "tracker"
+            assert item.title == f"Task {i}"
+
+    def test_tracker_adapter_all_tracker_kinds(self, now):
+        """All TrackerKind values map correctly."""
+        for kind in [
+            TrackerKind.outreach,
+            TrackerKind.task,
+            TrackerKind.follow_up,
+            TrackerKind.meal_plan,
+            TrackerKind.shopping_list,
+            TrackerKind.pantry,
+            TrackerKind.watch,
+            TrackerKind.list,
+        ]:
+            tracker = Tracker(
+                id=f"tr-{kind.value}",
+                kind=kind,
+                title=f"{kind.value} tracker",
+                state=TrackerState.in_progress,
+                nudge_after=now,
+                created_at=now,
+            )
+
+            result = tracker_adapter([tracker], now)
+            assert result[0].kind == kind.value
+
+    def test_tracker_adapter_all_tracker_states(self, now):
+        """All TrackerState values map correctly."""
+        for state in [
+            TrackerState.in_progress,
+            TrackerState.awaiting_reply,
+            TrackerState.blocked,
+        ]:
+            tracker = Tracker(
+                id=f"tr-{state.value}",
+                kind=TrackerKind.task,
+                title=f"Task with state {state.value}",
+                state=state,
+                nudge_after=now,
+                created_at=now,
+            )
+
+            result = tracker_adapter([tracker], now)
+            assert result[0].state == state.value
+
+
+class TestAlertAdapter:
+    """Adapter for mapping Alert objects to Items."""
+
+    def test_alert_adapter_empty_list(self, now):
+        """Empty alert list returns empty Items list."""
+        result = alert_adapter([], now)
+        assert result == []
+
+    def test_alert_adapter_single_alert(self, now):
+        """Single alert maps to single Item with all fields populated."""
+        alert = Alert(
+            id="alert-abcd1234",
+            user_id="user-1",
+            alert_type=AlertType.due_task,
+            title="Review memories",
+            body="Time to review recent memories",
+            trigger_at=now + timedelta(days=1),
+            status=AlertStatus.pending,
+            project_id="proj-1",
+            created_at=now - timedelta(days=2),
+        )
+
+        result = alert_adapter([alert], now)
+
+        assert len(result) == 1
+        item = result[0]
+        assert item.id == "alert-abcd1234"
+        assert item.source == "alert"
+        assert item.kind == "due_task"
+        assert item.title == "Review memories"
+        assert item.state == "pending"
+        assert item.due_at == now + timedelta(days=1)
+        assert item.snoozed_until is None
+        assert item.age_days == 2.0
+        assert item.urgency == "due_soon"
+        assert item.project_id == "proj-1"
+        assert item.entity_id is None
+        assert item.actions == []
+
+    def test_alert_adapter_urgency_overdue(self, now):
+        """Alert with past trigger_at maps to overdue urgency."""
+        alert = Alert(
+            id="alert-overdue",
+            alert_type=AlertType.due_task,
+            title="Overdue alert",
+            trigger_at=now - timedelta(hours=2),
+            status=AlertStatus.pending,
+            created_at=now - timedelta(days=1),
+        )
+
+        result = alert_adapter([alert], now)
+        assert result[0].urgency == "overdue"
+
+    def test_alert_adapter_urgency_pending(self, now):
+        """Alert with future trigger_at beyond horizon maps to pending."""
+        alert = Alert(
+            id="alert-pending",
+            alert_type=AlertType.due_task,
+            title="Pending alert",
+            trigger_at=now + timedelta(days=15),
+            status=AlertStatus.pending,
+            created_at=now,
+        )
+
+        result = alert_adapter([alert], now)
+        assert result[0].urgency == "pending"
+
+    def test_alert_adapter_no_snooze_or_entity(self, now):
+        """Alert never has snoozed_until or entity_id."""
+        alert = Alert(
+            id="alert-minimal",
+            alert_type=AlertType.custom,
+            title="Alert",
+            trigger_at=now + timedelta(days=1),
+            status=AlertStatus.pending,
+            created_at=now,
+        )
+
+        result = alert_adapter([alert], now)
+        assert result[0].snoozed_until is None
+        assert result[0].entity_id is None
+
+    def test_alert_adapter_age_days_calculation(self, now):
+        """age_days is correctly calculated from created_at."""
+        # Created 1.25 days ago
+        created = now - timedelta(days=1, hours=6)
+        alert = Alert(
+            id="alert-age",
+            alert_type=AlertType.custom,
+            title="Alert",
+            trigger_at=now + timedelta(days=1),
+            status=AlertStatus.pending,
+            created_at=created,
+        )
+
+        result = alert_adapter([alert], now)
+        assert abs(result[0].age_days - 1.25) < 0.01
+
+    def test_alert_adapter_multiple_alerts(self, now):
+        """Multiple alerts map to multiple Items."""
+        alerts = [
+            Alert(
+                id=f"alert-{i}",
+                alert_type=AlertType.due_task,
+                title=f"Alert {i}",
+                trigger_at=now + timedelta(days=i),
+                status=AlertStatus.pending,
+                created_at=now - timedelta(days=i),
+            )
+            for i in range(1, 4)
+        ]
+
+        result = alert_adapter(alerts, now)
+
+        assert len(result) == 3
+        for i, item in enumerate(result, start=1):
+            assert item.id == f"alert-{i}"
+            assert item.source == "alert"
+            assert item.title == f"Alert {i}"
+
+    def test_alert_adapter_all_alert_types(self, now):
+        """All AlertType values map correctly."""
+        alert_types = [
+            AlertType.due_task,
+            AlertType.stale_decision,
+            AlertType.follow_up,
+            AlertType.custom,
+            AlertType.daily_brief,
+            AlertType.check_in_low_mood,
+            AlertType.check_in_low_sleep,
+            AlertType.check_in_declining_trend,
+            AlertType.loom_stale_claim,
+            AlertType.loom_epic_ready,
+            AlertType.loom_blocked_pile_up,
+            AlertType.memory_consolidation_overdue,
+            AlertType.memory_count_threshold,
+            AlertType.memory_contradiction,
+            AlertType.board_feedback,
+        ]
+
+        for alert_type in alert_types:
+            alert = Alert(
+                id=f"alert-{alert_type.value}",
+                alert_type=alert_type,
+                title=f"Alert of type {alert_type.value}",
+                trigger_at=now + timedelta(days=1),
+                status=AlertStatus.pending,
+                created_at=now,
+            )
+
+            result = alert_adapter([alert], now)
+            assert result[0].kind == alert_type.value
+
+    def test_alert_adapter_all_alert_statuses(self, now):
+        """All AlertStatus values map correctly."""
+        for status in [AlertStatus.pending, AlertStatus.fired, AlertStatus.dismissed]:
+            alert = Alert(
+                id=f"alert-{status.value}",
+                alert_type=AlertType.custom,
+                title=f"Alert with status {status.value}",
+                trigger_at=now + timedelta(days=1),
+                status=status,
+                created_at=now,
+            )
+
+            result = alert_adapter([alert], now)
+            assert result[0].state == status.value
+
+    def test_adapter_schema_completeness_tracker(self, now):
+        """Tracker adapter produces schema-complete Item per PRD §Interfaces."""
+        tracker = Tracker(
+            id="tr-complete",
+            kind=TrackerKind.task,
+            title="Complete tracker",
+            state=TrackerState.in_progress,
+            nudge_after=now + timedelta(days=1),
+            snooze_until=None,
+            created_at=now - timedelta(days=1),
+            project_id="proj-x",
+            entity_id="ent-x",
+        )
+
+        result = tracker_adapter([tracker], now)
+        item = result[0]
+
+        # All required fields present (can be None, but field exists)
+        assert hasattr(item, "id")
+        assert item.source == "tracker"
+        assert hasattr(item, "kind")
+        assert hasattr(item, "title")
+        assert hasattr(item, "state")
+        assert hasattr(item, "due_at")
+        assert hasattr(item, "snoozed_until")  # Can be None but field exists
+        assert hasattr(item, "age_days")
+        assert hasattr(item, "urgency")
+        assert hasattr(item, "project_id")
+        assert hasattr(item, "entity_id")
+        assert hasattr(item, "actions")
+
+        # to_dict serialization works
+        d = item.to_dict()
+        assert d["id"] == "tr-complete"
+        assert d["source"] == "tracker"
+
+    def test_adapter_schema_completeness_alert(self, now):
+        """Alert adapter produces schema-complete Item per PRD §Interfaces."""
+        alert = Alert(
+            id="alert-complete",
+            alert_type=AlertType.due_task,
+            title="Complete alert",
+            trigger_at=now + timedelta(days=1),
+            status=AlertStatus.pending,
+            created_at=now - timedelta(days=1),
+            project_id="proj-y",
+        )
+
+        result = alert_adapter([alert], now)
+        item = result[0]
+
+        # All required fields present (can be None, but field exists)
+        assert hasattr(item, "id")
+        assert item.source == "alert"
+        assert hasattr(item, "kind")
+        assert hasattr(item, "title")
+        assert hasattr(item, "state")
+        assert hasattr(item, "due_at")
+        assert hasattr(item, "snoozed_until")  # None but field exists
+        assert hasattr(item, "age_days")
+        assert hasattr(item, "urgency")
+        assert hasattr(item, "project_id")
+        assert hasattr(item, "entity_id")  # None but field exists
+        assert hasattr(item, "actions")
+
+        # to_dict serialization works
+        d = item.to_dict()
+        assert d["id"] == "alert-complete"
+        assert d["source"] == "alert"
