@@ -31,7 +31,7 @@ import asyncpg
 
 from weft.db.connection import get_db
 from weft.models import EpisodeTurn, EpisodeTurnCreate, TurnRole
-from weft.replay import REPLAY_QUEUE_STATUS_PENDING
+from weft.replay import REPLAY_QUEUE_STALENESS_DAYS, REPLAY_QUEUE_STATUS_PENDING
 from weft.tokens import estimate_tokens
 
 # Retention thresholds imported from episodes to keep a single source of truth.
@@ -56,6 +56,22 @@ if TYPE_CHECKING:
     from weft.embeddings.base import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+# Single source of truth for the replay-in-flight retention guard, shared by all
+# four prune paths so they can never drift apart (they had four identical copies).
+# A turn is protected while a replay_queue row still references it AND that row is
+# BOTH pending AND fresh (created within REPLAY_QUEUE_STALENESS_DAYS). The age
+# bound is the defense-in-depth fix for weft-99cac4e5: a row orphaned in 'pending'
+# (executor never ran, unwritable user_id, poison row) stops pinning its turns
+# once stale, so graduated episodes past TTL can finally shed them. Constants are
+# module-owned (not user input), so f-string interpolation here is injection-safe.
+_REPLAY_PENDING_RETENTION_GUARD = f"""
+          AND NOT EXISTS (
+              SELECT 1 FROM replay_queue rq
+              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
+                AND rq.created_at > now() - ('{REPLAY_QUEUE_STALENESS_DAYS} days')::interval
+                AND episode_turns.id = ANY(rq.turn_ids)
+          )"""
 
 # Namespace for pg_advisory_xact_lock(int, int) — keeps episode_turns locks
 # disjoint from any other module's advisory lock space. Both args are
@@ -275,11 +291,7 @@ async def delete_turns_below_importance(
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
           )
-          AND NOT EXISTS (
-              SELECT 1 FROM replay_queue rq
-              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
-                AND episode_turns.id = ANY(rq.turn_ids)
-          )
+{_REPLAY_PENDING_RETENTION_GUARD}
         """,
         threshold,
         str(older_than_days),
@@ -317,11 +329,7 @@ async def delete_turns_for_graduated_episode(
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
           )
-          AND NOT EXISTS (
-              SELECT 1 FROM replay_queue rq
-              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
-                AND episode_turns.id = ANY(rq.turn_ids)
-          )
+{_REPLAY_PENDING_RETENTION_GUARD}
         """,
         str(older_than_days),
     )
@@ -387,11 +395,7 @@ async def delete_turns_after_graduation(
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
           )
-          AND NOT EXISTS (
-              SELECT 1 FROM replay_queue rq
-              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
-                AND episode_turns.id = ANY(rq.turn_ids)
-          )
+{_REPLAY_PENDING_RETENTION_GUARD}
         """,
         high_threshold,
         str(ttl_days_scored),
@@ -417,11 +421,7 @@ async def delete_turns_after_graduation(
               WHERE bc.status IN ('active', 'superseded')
                 AND episode_turns.id = ANY(bc.evidence_turn_ids)
           )
-          AND NOT EXISTS (
-              SELECT 1 FROM replay_queue rq
-              WHERE rq.status = '{REPLAY_QUEUE_STATUS_PENDING}'
-                AND episode_turns.id = ANY(rq.turn_ids)
-          )
+{_REPLAY_PENDING_RETENTION_GUARD}
         """,
         str(ttl_days_no_score),
     )
