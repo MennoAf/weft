@@ -49,11 +49,16 @@ from dataclasses import dataclass, replace
 import asyncpg
 
 from weft.auth import current_user_id
-from weft.counters import COUNTER_REPLAY_EXECUTOR_FAILED, increment_counter
+from weft.counters import (
+    COUNTER_REPLAY_EXECUTOR_FAILED,
+    COUNTER_REPLAY_STALE_REAPED,
+    increment_counter,
+)
 from weft.db.connection import acquire, get_db
 from weft.episode_turns import get_turns_by_ids
 from weft.replay import (
     REPLAY_DETECTOR_VERSION_PREFIX,
+    REPLAY_QUEUE_STALENESS_DAYS,
     REPLAY_QUEUE_STATUS_DONE,
     REPLAY_QUEUE_STATUS_FAILED,
     REPLAY_QUEUE_STATUS_PENDING,
@@ -112,6 +117,7 @@ class ReplayExecutorResult:
     rows_processed: int = 0
     rows_done: int = 0
     rows_failed: int = 0
+    rows_reaped: int = 0
     claims_written: int = 0
     claims_superseded: int = 0
 
@@ -152,6 +158,73 @@ async def _set_status(
                 status,
                 replay_id,
             )
+
+
+async def reap_stale_pending_replays(
+    pool: asyncpg.Pool,
+    *,
+    staleness_days: int = REPLAY_QUEUE_STALENESS_DAYS,
+    batch_size: int = 500,
+) -> int:
+    """Drive orphaned stale 'pending' replay_queue rows to terminal 'failed'.
+
+    Complements the L4 retention age-bound (weft-99cac4e5): retention STOPS
+    HONORING a 'pending' row older than ``REPLAY_QUEUE_STALENESS_DAYS`` (its
+    turns shed), but the row itself lingers 'pending' forever — inflating
+    ``count_stale_pending_replays`` and never draining the queue. A pending row
+    this old is presumed orphaned: real replays reach a terminal status in
+    minutes/hours, so 14d+ means the executor never ran, the row's user_id fails
+    the UPDATE policy, or it is a poison row. This sweep transitions them to
+    'failed' (the same terminal the executor uses for unrecoverable rows), so the
+    queue state matches what retention already assumes.
+
+    Best-effort per row: reads under the system sentinel (to see every user's
+    rows); writes per-row under the row's own user_id (the replay_queue UPDATE
+    policy does not admit the sentinel — see :func:`_set_status`). A row whose
+    write throws (unwritable user_id, poison row) is logged and SKIPPED — never
+    aborting the sweep — and is retried next pass. Returns the count reaped and
+    bumps :data:`COUNTER_REPLAY_STALE_REAPED` per reap. Idempotent: already-
+    terminal rows are never selected.
+    """
+    # Phase 1 — read stale pending rows under the sentinel (across all users).
+    token = current_user_id.set(SYSTEM_GLOBAL_USER_ID)
+    try:
+        async with acquire(pool):
+            rows = await get_db(pool).fetch(
+                """
+                SELECT id, user_id
+                FROM replay_queue
+                WHERE status = $1
+                  AND created_at <= now() - ($2 || ' days')::interval
+                ORDER BY created_at ASC
+                LIMIT $3
+                """,
+                REPLAY_QUEUE_STATUS_PENDING,
+                str(staleness_days),
+                batch_size,
+            )
+    finally:
+        current_user_id.reset(token)
+
+    # Phase 2 — per-row terminal write, isolated so one bad row can't abort it.
+    reaped = 0
+    for row in rows:
+        replay_id = row["id"]
+        user_id = row["user_id"]
+        try:
+            await _set_status(pool, replay_id, user_id, REPLAY_QUEUE_STATUS_FAILED)
+            await increment_counter(pool, COUNTER_REPLAY_STALE_REAPED)
+            reaped += 1
+        except Exception:  # noqa: BLE001 — isolate per-row; never abort the sweep
+            logger.exception(
+                "replay_executor.reap_failed: id=%s user_id=%s "
+                "(left pending, retried next pass)",
+                replay_id,
+                user_id,
+            )
+    if reaped:
+        logger.info("replay_executor.reaped_stale_pending: reaped=%d", reaped)
+    return reaped
 
 
 def _needs_escalation(claims: list[ClaimUpdate]) -> bool:
@@ -204,6 +277,10 @@ async def run_replay_executor(
     :class:`ReplayExecutorResult` summarizing the pass.
     """
     result = ReplayExecutorResult()
+
+    # Phase 0 — reap orphaned stale-pending rows to terminal 'failed' so the
+    # queue drains (and the executor doesn't re-attempt poison rows every pass).
+    result.rows_reaped = await reap_stale_pending_replays(pool)
 
     # Phase 1 — read pending rows + hydrate their turns under the system
     # sentinel (one short-lived read transaction; no LLM/write work held here).
@@ -424,6 +501,10 @@ async def run_replay_executor_batch(
     ``pending`` (never silently failed) — a later pass re-drains them.
     """
     result = ReplayExecutorResult()
+
+    # Phase 0 — reap orphaned stale-pending rows to terminal 'failed' so the
+    # queue drains (and the batch doesn't re-attempt poison rows every pass).
+    result.rows_reaped = await reap_stale_pending_replays(pool)
 
     # Phase 1 — read pending rows + hydrate their turns (system sentinel).
     work = await _read_pending_work(pool, batch_size)
