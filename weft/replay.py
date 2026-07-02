@@ -59,6 +59,19 @@ REPLAY_QUEUE_STATUS_DONE = "done"
 # 'pending' rows) cannot leak its turns forever. See loom-ebef8ec1.
 REPLAY_QUEUE_STATUS_FAILED = "failed"
 
+# Defense-in-depth retention bound (weft-99cac4e5). The executor drives rows to a
+# terminal status best-effort, but a row can stay 'pending' FOREVER through paths
+# it cannot self-heal: the executor loop never runs, the row's user_id fails the
+# UPDATE policy so every _set_status write throws, or a poison row's terminal
+# write keeps failing. Any such row would pin its turns against the L4 retention
+# guard indefinitely. So retention stops HONORING a pending row once it is older
+# than this window: real replays complete in minutes/hours, so a pending row this
+# old is presumed orphaned and its turns are allowed to shed. Chosen well below
+# the graduation TTLs (30d no-score / 90d scored) — a turn only becomes
+# delete-eligible long after this — and far above real replay latency, so a
+# legitimately in-flight replay is never aged out.
+REPLAY_QUEUE_STALENESS_DAYS = 14
+
 # Detector-version prefix marking belief_claims written by the replay loop.
 # Load-bearing cross-module PROOF convention: weft_check_health counts claims
 # with detector_version LIKE 'replay-%', so the E2.L7 replay writer MUST stamp
@@ -335,3 +348,26 @@ async def enqueue_replay_on_miss(
             )
 
     return inserted
+
+
+async def count_stale_pending_replays(
+    pool: asyncpg.Pool, *, staleness_days: int = REPLAY_QUEUE_STALENESS_DAYS
+) -> int:
+    """Count replay_queue rows stuck 'pending' past the staleness window.
+
+    A non-zero result is the visible tell that the executor is not draining rows
+    to a terminal status (loop not running, unwritable user_id, poison row). The
+    L4 retention guard already stops honoring these — their turns shed — so this
+    is an OBSERVABILITY signal, not a correctness gate: it points a human at the
+    executor. Surfaced by weft_check_health as ``replay_queue_stale_pending``.
+    Runs under the caller's RLS context (whatever ``get_db`` resolves).
+    """
+    count = await get_db(pool).fetchval(
+        f"""
+        SELECT count(*) FROM replay_queue
+        WHERE status = '{REPLAY_QUEUE_STATUS_PENDING}'
+          AND created_at <= now() - ($1 || ' days')::interval
+        """,
+        str(staleness_days),
+    )
+    return int(count or 0)
