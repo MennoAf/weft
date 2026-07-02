@@ -440,8 +440,8 @@
     "oracle_precise": true,
     "keep_pushing_first": true,
     "agenda_answers": true,
-    "agent_facing_surfaces_open_loops": false,
-    "finding": "weft_tracker_due answers the plate correctly, but the agent-facing daily brief surfaces 0/4 open loops \u2014 assemble_daily_brief has no trackers section despite weft_tracker_due's docstring pointing at one",
+    "agent_facing_surfaces_open_loops": true,
+    "finding": null,
     "stats": {
       "due_expected": 4,
       "oracle_tracker_due": {
@@ -455,12 +455,13 @@
       },
       "agent_facing_daily_brief": {
         "available": true,
-        "due_covered": 0,
-        "coverage": 0.0,
-        "surfaces_open_loops": false,
+        "due_covered": 4,
+        "coverage": 1.0,
+        "surfaces_open_loops": true,
         "sections": [
           "\ud83c\udf05 Daily Brief",
           "\ud83d\udc64 Personal",
+          "\ud83d\udccc Open Loops",
           "\ud83d\udcc5 Today's Calendar",
           "\ud83d\udca4 Check-in Trends",
           "\ud83c\udf82 Birthdays Today",

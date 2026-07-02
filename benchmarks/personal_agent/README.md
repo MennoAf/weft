@@ -139,25 +139,31 @@ is deterministic SQL (no embeddings), so a single run is authoritative — the b
 single-run rule (`weft-b015d16a`) is about the stochastic recall pipeline, which
 agenda doesn't touch.
 
-| path | signal | result | note |
-| --- | --- | --- | --- |
-| ORACLE `weft_tracker_due` | recall@due | **1.000 (4/4)** | every open loop surfaced |
-| ORACLE `weft_tracker_due` | precision | **1.000 (0 leaks)** | no snoozed/future/terminal/no-nudge leak |
-| ORACLE `weft_tracker_due` | keep-pushing first | **True** | longest-overdue loop leads (ordered `nudge_after ASC`) |
-| AGENT-FACING `weft_daily_brief` | open-loop coverage | **0 / 4** | **the finding** |
+| path | signal | first run | after fix | note |
+| --- | --- | --- | --- | --- |
+| ORACLE `weft_tracker_due` | recall@due | **1.000 (4/4)** | 1.000 | every open loop surfaced |
+| ORACLE `weft_tracker_due` | precision | **1.000 (0 leaks)** | 1.000 | no snoozed/future/terminal/no-nudge leak |
+| ORACLE `weft_tracker_due` | keep-pushing first | **True** | True | longest-overdue loop leads (`nudge_after ASC`) |
+| AGENT-FACING `weft_daily_brief` | open-loop coverage | **0 / 4** | **4 / 4** | the finding, then closed |
 
-**Finding (measured, not tuned).** The due-loop query answers the plate correctly,
-but the digest an agent actually reads each morning — `weft_daily_brief` — surfaces
-**0 of the 4** open loops. `assemble_daily_brief` builds 12 sections (calendar,
-review queue, handoffs, alerts, canary, …) but **no trackers / open-loops section**,
-even though `weft_tracker_due`'s own docstring says it is "for the daily-brief 'open
-loops' section." This is the same consumption-contract gap as enumeration (the
-reconciliation header knew the count; the `results[]` slice the agent read did not):
-the tracker layer knows your plate; the agent-facing surface doesn't show it. The
-tracker-layer guarantee is what the shape gates on; the brief gap is recorded as the
-next loop to close (wire `weft_tracker_due` into `assemble_daily_brief`), decided
-with data per `weft-b9582b8f`. `test_daily_brief_does_not_yet_surface_open_loops`
-is a change-detector that flips green→red the day the brief is wired.
+**Finding, then a general fix (not benchmark-tuning).** First run: the due-loop
+query answered the plate correctly, but the digest an agent actually reads each
+morning — `weft_daily_brief` — surfaced **0 of the 4** open loops. `assemble_daily_brief`
+built 12 sections (calendar, review queue, handoffs, alerts, canary, …) but **no
+trackers / open-loops section**, even though `weft_tracker_due`'s own docstring said
+it is "for the daily-brief 'open loops' section." Same consumption-contract gap as
+enumeration (the reconciliation header knew the count; the `results[]` slice the
+agent read did not): the tracker layer knew the plate; the agent-facing surface
+didn't show it.
+
+The fix was to **complete the intended wiring, not tune to the benchmark**: a new
+`📌 Open Loops` section in `assemble_daily_brief` (`weft/daily_brief.py`) that calls
+`due_trackers()` and renders each loop as `[kind] title (overdue Nd)`, oldest-due
+first — a general improvement every user benefits from (their plate shows up in the
+brief), the section the tool docstring already promised. **Coverage 0/4 → 4/4**; the
+28 existing `daily_brief` tests stay green. `test_daily_brief_surfaces_open_loops`
+now asserts the closed state (`brief_surfaces_open_loops`), and `results.json`'s
+agenda `finding` self-clears to `null`.
 
 **Two harness bugs the full runner exposed (isolated pytest could not):**
 - `__main__.py` referenced `entity_stats.belief_routed` / `.misrouted`, attributes
