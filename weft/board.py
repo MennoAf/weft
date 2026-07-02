@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from weft.models import Alert, Tracker
 
 
 ItemSource = Literal["tracker", "alert", "trigger", "task", "review"]
@@ -163,3 +166,99 @@ def rank_items(
         return (due_at_key, age_days_key, title_key)
 
     return sorted(items, key=sort_key)
+
+
+def tracker_adapter(trackers: list[Tracker], now: datetime | None = None) -> list[Item]:
+    """Map Tracker objects to Items for the board.
+
+    Reuses due_trackers filtering (snooze logic already applied upstream).
+    Each tracker is converted to an Item with source="tracker", using nudge_after
+    as the due_at (when the next nudge is due). Urgency computed from nudge_after.
+
+    Args:
+        trackers: list of Tracker objects from due_trackers()
+        now: current time for age_days calculation (defaults to UTC now)
+
+    Returns:
+        list of Item objects ready for bucketing
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    items: list[Item] = []
+    for tracker in trackers:
+        # Compute age_days from created_at
+        if tracker.created_at.tzinfo is None:
+            created_at = tracker.created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = tracker.created_at
+
+        age_delta = now - created_at
+        age_days = age_delta.total_seconds() / 86400.0
+
+        # Map to Item
+        item = Item(
+            id=tracker.id,
+            source="tracker",
+            kind=tracker.kind.value,
+            title=tracker.title,
+            state=tracker.state.value,
+            due_at=tracker.nudge_after,
+            snoozed_until=tracker.snooze_until,
+            age_days=age_days,
+            urgency=calculate_urgency(tracker.nudge_after, now),
+            project_id=tracker.project_id,
+            entity_id=tracker.entity_id,
+            actions=[],
+        )
+        items.append(item)
+
+    return items
+
+
+def alert_adapter(alerts: list[Alert], now: datetime | None = None) -> list[Item]:
+    """Map Alert objects to Items for the board.
+
+    Each alert is converted to an Item with source="alert", using trigger_at
+    as the due_at. Only maps pending alerts; other statuses excluded by list_alerts
+    filtering. Urgency computed from trigger_at.
+
+    Args:
+        alerts: list of Alert objects, typically filtered by status=pending
+        now: current time for age_days calculation (defaults to UTC now)
+
+    Returns:
+        list of Item objects ready for bucketing
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    items: list[Item] = []
+    for alert in alerts:
+        # Compute age_days from created_at
+        if alert.created_at.tzinfo is None:
+            created_at = alert.created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = alert.created_at
+
+        age_delta = now - created_at
+        age_days = age_delta.total_seconds() / 86400.0
+
+        # Map to Item
+        item = Item(
+            id=alert.id,
+            source="alert",
+            kind=alert.alert_type.value,
+            title=alert.title,
+            state=alert.status.value,
+            due_at=alert.trigger_at,
+            snoozed_until=None,  # Alerts do not have snooze capability
+            age_days=age_days,
+            urgency=calculate_urgency(alert.trigger_at, now),
+            project_id=alert.project_id,
+            entity_id=None,  # Alerts do not have entity association
+            actions=[],
+        )
+        items.append(item)
+
+    return items
