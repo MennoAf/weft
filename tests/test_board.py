@@ -18,12 +18,30 @@ from weft.board import (
     Action,
     Item,
     Urgency,
+    _TRIGGER_HIDE_KINDS,
     alert_adapter,
     calculate_urgency,
     rank_items,
+    review_adapter,
+    task_adapter,
     tracker_adapter,
+    trigger_adapter,
 )
-from weft.models import Alert, AlertStatus, AlertType, NudgeMode, Tracker, TrackerKind, TrackerState
+from weft.models import (
+    Alert,
+    AlertStatus,
+    AlertType,
+    Memory,
+    MemoryType,
+    NudgeMode,
+    Tracker,
+    TrackerKind,
+    TrackerState,
+    Trigger,
+    TriggerConditionType,
+    TriggerStatus,
+)
+from weft.skills import TaskEntry
 
 
 # Fixtures
@@ -1016,3 +1034,595 @@ class TestAlertAdapter:
         d = item.to_dict()
         assert d["id"] == "alert-complete"
         assert d["source"] == "alert"
+
+
+class TestTriggerAdapter:
+    """Adapter for mapping Trigger objects to Items."""
+
+    def test_trigger_adapter_empty_list(self, now):
+        """Empty trigger list returns empty Items list."""
+        result = trigger_adapter([], now)
+        assert result == []
+
+    def test_trigger_adapter_time_condition_due_at_parsed(self, now):
+        """time-condition trigger: due_at parsed from nested condition JSON."""
+        trigger_at = now + timedelta(days=2)
+        trigger = Trigger(
+            id="trg-time",
+            name="Renew library card",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": trigger_at.isoformat()},
+            action="Remind to renew",
+            status=TriggerStatus.enabled,
+            created_at=now - timedelta(days=1),
+        )
+
+        result = trigger_adapter([trigger], now)
+
+        assert len(result) == 1
+        item = result[0]
+        assert item.id == "trg-time"
+        assert item.source == "trigger"
+        assert item.kind == "time"
+        assert item.title == "Renew library card"
+        assert item.state == "enabled"
+        assert item.due_at == trigger_at
+        assert item.snoozed_until is None
+        assert item.urgency == "due_soon"
+        assert item.entity_id is None
+        assert item.actions == []
+
+    def test_trigger_adapter_threshold_condition_no_date(self, now):
+        """threshold-condition trigger: no due_at, urgency=no_date."""
+        trigger = Trigger(
+            id="trg-threshold",
+            name="High memory count",
+            condition_type=TriggerConditionType.threshold,
+            condition={"metric": "memory_count", "threshold": 1000},
+            action="Alert on threshold breach",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+        assert result[0].kind == "threshold"
+
+    def test_trigger_adapter_event_condition_no_date(self, now):
+        """event-condition trigger: no due_at, urgency=no_date."""
+        trigger = Trigger(
+            id="trg-event",
+            name="Deploy completed",
+            condition_type=TriggerConditionType.event,
+            condition={"event_name": "deploy_complete"},
+            action="Notify",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+
+    def test_trigger_adapter_absence_condition_no_date(self, now):
+        """absence-condition trigger: no due_at, urgency=no_date."""
+        trigger = Trigger(
+            id="trg-absence",
+            name="No activity logged",
+            condition_type=TriggerConditionType.absence,
+            condition={"absence_hours": 48},
+            action="Nudge",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+
+    def test_trigger_adapter_malformed_trigger_at_treated_as_no_date(self, now):
+        """Malformed trigger_at in condition JSON doesn't crash; falls back to no_date."""
+        trigger = Trigger(
+            id="trg-malformed",
+            name="Bad date",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": "not-a-valid-date"},
+            action="Remind",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert len(result) == 1
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+
+    def test_trigger_adapter_missing_trigger_at_key_treated_as_no_date(self, now):
+        """time-condition trigger with no trigger_at key in condition doesn't crash."""
+        trigger = Trigger(
+            id="trg-missing",
+            name="Odd trigger",
+            condition_type=TriggerConditionType.time,
+            condition={},
+            action="Remind",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+
+    def test_trigger_adapter_hides_canary_by_name(self, now):
+        """Trigger whose name contains 'canary' is excluded from the board."""
+        trigger = Trigger(
+            id="trg-canary",
+            name="recall_canary_health_check",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": now.isoformat()},
+            action="Audit",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result == []
+
+    def test_trigger_adapter_hides_check_in_variants_by_name(self, now):
+        """Trigger names matching check_in / check-in variants are excluded."""
+        triggers = [
+            Trigger(
+                id="trg-checkin-1",
+                name="daily_check_in_reminder",
+                condition_type=TriggerConditionType.time,
+                condition={"trigger_at": now.isoformat()},
+                action="Nudge",
+                created_at=now,
+            ),
+            Trigger(
+                id="trg-checkin-2",
+                name="Weekly Check-In",
+                condition_type=TriggerConditionType.time,
+                condition={"trigger_at": now.isoformat()},
+                action="Nudge",
+                created_at=now,
+            ),
+        ]
+
+        result = trigger_adapter(triggers, now)
+        assert result == []
+
+    def test_trigger_adapter_hide_list_case_insensitive(self, now):
+        """Hide-list matching is case-insensitive."""
+        trigger = Trigger(
+            id="trg-canary-caps",
+            name="CANARY Audit",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": now.isoformat()},
+            action="Audit",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result == []
+
+    def test_trigger_adapter_does_not_hide_non_matching_names(self, now):
+        """A trigger whose name doesn't match the hide-list is kept."""
+        trigger = Trigger(
+            id="trg-keep",
+            name="Follow up with vendor",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": now.isoformat()},
+            action="Remind",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert len(result) == 1
+        assert result[0].id == "trg-keep"
+
+    def test_trigger_hide_kinds_is_a_module_level_config_list(self):
+        """Hide-list is a config list, not buried in an if-branch."""
+        assert isinstance(_TRIGGER_HIDE_KINDS, list)
+        assert all(isinstance(k, str) for k in _TRIGGER_HIDE_KINDS)
+        assert len(_TRIGGER_HIDE_KINDS) > 0
+
+    def test_trigger_adapter_urgency_overdue(self, now):
+        """time-condition trigger in the past maps to overdue."""
+        trigger = Trigger(
+            id="trg-overdue",
+            name="Past due reminder",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": (now - timedelta(days=1)).isoformat()},
+            action="Remind",
+            created_at=now - timedelta(days=3),
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result[0].urgency == "overdue"
+
+    def test_trigger_adapter_urgency_pending(self, now):
+        """time-condition trigger far in the future maps to pending."""
+        trigger = Trigger(
+            id="trg-pending",
+            name="Future reminder",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": (now + timedelta(days=30)).isoformat()},
+            action="Remind",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result[0].urgency == "pending"
+
+    def test_trigger_adapter_project_id_preserved(self, now):
+        """Trigger's project_id carries through to the Item."""
+        trigger = Trigger(
+            id="trg-proj",
+            name="Project reminder",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": now.isoformat()},
+            action="Remind",
+            project_id="proj-z",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        assert result[0].project_id == "proj-z"
+
+    def test_trigger_adapter_multiple_triggers_mixed_visibility(self, now):
+        """Mix of hidden and visible triggers: only visible ones are mapped."""
+        triggers = [
+            Trigger(
+                id="trg-visible",
+                name="Renew passport",
+                condition_type=TriggerConditionType.time,
+                condition={"trigger_at": now.isoformat()},
+                action="Remind",
+                created_at=now,
+            ),
+            Trigger(
+                id="trg-hidden",
+                name="canary_probe_check",
+                condition_type=TriggerConditionType.time,
+                condition={"trigger_at": now.isoformat()},
+                action="Audit",
+                created_at=now,
+            ),
+        ]
+
+        result = trigger_adapter(triggers, now)
+        assert len(result) == 1
+        assert result[0].id == "trg-visible"
+
+    def test_adapter_schema_completeness_trigger(self, now):
+        """Trigger adapter produces schema-complete Item per PRD §Interfaces."""
+        trigger = Trigger(
+            id="trg-complete",
+            name="Complete trigger",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": (now + timedelta(days=1)).isoformat()},
+            action="Remind",
+            created_at=now - timedelta(days=1),
+            project_id="proj-x",
+        )
+
+        result = trigger_adapter([trigger], now)
+        item = result[0]
+
+        assert hasattr(item, "id")
+        assert item.source == "trigger"
+        assert hasattr(item, "kind")
+        assert hasattr(item, "title")
+        assert hasattr(item, "state")
+        assert hasattr(item, "due_at")
+        assert hasattr(item, "snoozed_until")
+        assert hasattr(item, "age_days")
+        assert hasattr(item, "urgency")
+        assert hasattr(item, "project_id")
+        assert hasattr(item, "entity_id")
+        assert hasattr(item, "actions")
+
+        d = item.to_dict()
+        assert d["id"] == "trg-complete"
+        assert d["source"] == "trigger"
+
+
+class TestTaskAdapter:
+    """Adapter for mapping task-memory TaskEntry objects to Items."""
+
+    def test_task_adapter_empty_list(self, now):
+        """Empty entry list returns empty Items list."""
+        result = task_adapter([], now)
+        assert result == []
+
+    def test_task_adapter_single_entry_with_due_date(self, now):
+        """Single entry with a due date maps to a fully populated Item."""
+        due_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+        entry = TaskEntry(
+            id="mem-1",
+            content="Task: Buy groceries\nDue: " + due_str,
+            topic=["tasks", f"due:{due_str}", "priority:high"],
+            due_date=due_str,
+            priority="high",
+            created_at=now - timedelta(days=3),
+        )
+
+        result = task_adapter([entry], now)
+
+        assert len(result) == 1
+        item = result[0]
+        assert item.id == "mem-1"
+        assert item.source == "task"
+        assert item.kind == "high"
+        assert item.title == entry.content
+        assert item.state is None
+        assert item.due_at == datetime.strptime(due_str, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+        assert item.snoozed_until is None
+        assert abs(item.age_days - 3.0) < 0.01
+        assert item.project_id is None
+        assert item.entity_id is None
+        assert item.actions == []
+
+    def test_task_adapter_no_due_date_maps_to_no_date(self, now):
+        """Entry without a due date maps to urgency=no_date."""
+        entry = TaskEntry(
+            id="mem-2",
+            content="Task: No deadline",
+            topic=["tasks"],
+            due_date=None,
+            priority=None,
+            created_at=now,
+        )
+
+        result = task_adapter([entry], now)
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+
+    def test_task_adapter_no_priority_defaults_kind_to_task(self, now):
+        """Entry without a priority tag defaults kind to 'task'."""
+        entry = TaskEntry(
+            id="mem-3",
+            content="Task: Unprioritized",
+            topic=["tasks"],
+            due_date=None,
+            priority=None,
+            created_at=now,
+        )
+
+        result = task_adapter([entry], now)
+        assert result[0].kind == "task"
+
+    def test_task_adapter_malformed_due_date_treated_as_no_date(self, now):
+        """A malformed due-date string doesn't crash; falls back to no_date."""
+        entry = TaskEntry(
+            id="mem-4",
+            content="Task: Weird date",
+            topic=["tasks", "due:not-a-date"],
+            due_date="not-a-date",
+            priority=None,
+            created_at=now,
+        )
+
+        result = task_adapter([entry], now)
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+
+    def test_task_adapter_urgency_overdue(self, now):
+        """Entry with past due date maps to overdue."""
+        past_str = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+        entry = TaskEntry(
+            id="mem-5",
+            content="Task: Overdue",
+            topic=["tasks", f"due:{past_str}"],
+            due_date=past_str,
+            priority=None,
+            created_at=now - timedelta(days=10),
+        )
+
+        result = task_adapter([entry], now)
+        assert result[0].urgency == "overdue"
+
+    def test_task_adapter_urgency_pending(self, now):
+        """Entry with due date beyond horizon maps to pending."""
+        future_str = (now + timedelta(days=30)).strftime("%Y-%m-%d")
+        entry = TaskEntry(
+            id="mem-6",
+            content="Task: Far future",
+            topic=["tasks", f"due:{future_str}"],
+            due_date=future_str,
+            priority=None,
+            created_at=now,
+        )
+
+        result = task_adapter([entry], now)
+        assert result[0].urgency == "pending"
+
+    def test_task_adapter_multiple_entries(self, now):
+        """Multiple entries map to multiple Items."""
+        entries = [
+            TaskEntry(
+                id=f"mem-{i}",
+                content=f"Task {i}",
+                topic=["tasks"],
+                due_date=None,
+                priority=None,
+                created_at=now - timedelta(days=i),
+            )
+            for i in range(1, 4)
+        ]
+
+        result = task_adapter(entries, now)
+        assert len(result) == 3
+        for i, item in enumerate(result, start=1):
+            assert item.id == f"mem-{i}"
+            assert item.source == "task"
+
+    def test_adapter_schema_completeness_task(self, now):
+        """Task adapter produces schema-complete Item per PRD §Interfaces."""
+        entry = TaskEntry(
+            id="mem-complete",
+            content="Complete task",
+            topic=["tasks", "priority:medium"],
+            due_date=None,
+            priority="medium",
+            created_at=now - timedelta(days=1),
+        )
+
+        result = task_adapter([entry], now)
+        item = result[0]
+
+        assert hasattr(item, "id")
+        assert item.source == "task"
+        assert hasattr(item, "kind")
+        assert hasattr(item, "title")
+        assert hasattr(item, "state")
+        assert hasattr(item, "due_at")
+        assert hasattr(item, "snoozed_until")
+        assert hasattr(item, "age_days")
+        assert hasattr(item, "urgency")
+        assert hasattr(item, "project_id")
+        assert hasattr(item, "entity_id")
+        assert hasattr(item, "actions")
+
+        d = item.to_dict()
+        assert d["id"] == "mem-complete"
+        assert d["source"] == "task"
+
+
+class TestReviewAdapter:
+    """Adapter for mapping Memory objects to review-queue Items."""
+
+    def test_review_adapter_empty_list(self, now):
+        """Empty memory list returns empty Items list."""
+        result = review_adapter([], now)
+        assert result == []
+
+    def test_review_adapter_single_memory(self, now):
+        """Single memory with review_after maps to a fully populated Item."""
+        review_at = now + timedelta(days=1)
+        memory = Memory(
+            id="weft-review1",
+            type=MemoryType.decision,
+            content="We chose X over Y for reason Z",
+            review_after=review_at,
+            created_at=now - timedelta(days=10),
+            project_id="proj-1",
+        )
+
+        result = review_adapter([memory], now)
+
+        assert len(result) == 1
+        item = result[0]
+        assert item.id == "weft-review1"
+        assert item.source == "review"
+        assert item.kind == "review"
+        assert item.title == "We chose X over Y for reason Z"
+        assert item.state is None
+        assert item.due_at == review_at
+        assert item.snoozed_until is None
+        assert abs(item.age_days - 10.0) < 0.01
+        assert item.urgency == "due_soon"
+        assert item.project_id == "proj-1"
+        assert item.entity_id is None
+        assert item.actions == []
+
+    def test_review_adapter_null_review_after_maps_to_no_date(self, now):
+        """Memory with no review_after maps to urgency=no_date."""
+        memory = Memory(
+            id="weft-review2",
+            type=MemoryType.fact,
+            content="Some fact",
+            review_after=None,
+            created_at=now,
+        )
+
+        result = review_adapter([memory], now)
+        assert result[0].due_at is None
+        assert result[0].urgency == "no_date"
+
+    def test_review_adapter_urgency_overdue(self, now):
+        """Memory with past review_after maps to overdue."""
+        memory = Memory(
+            id="weft-review3",
+            type=MemoryType.decision,
+            content="Old decision",
+            review_after=now - timedelta(days=2),
+            created_at=now - timedelta(days=30),
+        )
+
+        result = review_adapter([memory], now)
+        assert result[0].urgency == "overdue"
+
+    def test_review_adapter_urgency_pending(self, now):
+        """Memory with far-future review_after maps to pending."""
+        memory = Memory(
+            id="weft-review4",
+            type=MemoryType.fact,
+            content="Far future review",
+            review_after=now + timedelta(days=60),
+            created_at=now,
+        )
+
+        result = review_adapter([memory], now)
+        assert result[0].urgency == "pending"
+
+    def test_review_adapter_kind_always_review(self, now):
+        """kind is always the literal 'review' regardless of memory type."""
+        for mtype in [MemoryType.fact, MemoryType.decision, MemoryType.solution]:
+            memory = Memory(
+                id=f"weft-{mtype.value}",
+                type=mtype,
+                content="Some content",
+                review_after=now,
+                created_at=now,
+            )
+            result = review_adapter([memory], now)
+            assert result[0].kind == "review"
+
+    def test_review_adapter_multiple_memories(self, now):
+        """Multiple memories map to multiple Items."""
+        memories = [
+            Memory(
+                id=f"weft-mem-{i}",
+                type=MemoryType.fact,
+                content=f"Memory {i}",
+                review_after=now + timedelta(days=i),
+                created_at=now - timedelta(days=i),
+            )
+            for i in range(1, 4)
+        ]
+
+        result = review_adapter(memories, now)
+        assert len(result) == 3
+        for i, item in enumerate(result, start=1):
+            assert item.id == f"weft-mem-{i}"
+            assert item.source == "review"
+
+    def test_adapter_schema_completeness_review(self, now):
+        """Review adapter produces schema-complete Item per PRD §Interfaces."""
+        memory = Memory(
+            id="weft-review-complete",
+            type=MemoryType.decision,
+            content="Complete memory",
+            review_after=now + timedelta(days=1),
+            created_at=now - timedelta(days=1),
+            project_id="proj-y",
+        )
+
+        result = review_adapter([memory], now)
+        item = result[0]
+
+        assert hasattr(item, "id")
+        assert item.source == "review"
+        assert hasattr(item, "kind")
+        assert hasattr(item, "title")
+        assert hasattr(item, "state")
+        assert hasattr(item, "due_at")
+        assert hasattr(item, "snoozed_until")
+        assert hasattr(item, "age_days")
+        assert hasattr(item, "urgency")
+        assert hasattr(item, "project_id")
+        assert hasattr(item, "entity_id")
+        assert hasattr(item, "actions")
+
+        d = item.to_dict()
+        assert d["id"] == "weft-review-complete"
+        assert d["source"] == "review"
