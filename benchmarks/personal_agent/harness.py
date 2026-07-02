@@ -30,11 +30,30 @@ The load-bearing question: is the enumeration answer now something the agent
 KNOWS (an explicit correct field) rather than must infer? Post-V8 this harness
 is the proof the consumption contract closed — obvious_count and enum_count
 should be correct on every run, while naive_results stays wrong.
+
+RENDER ALTITUDE (the loop-closer, issue weft-09ae22a3 item 3). The asserts
+above check the tool RESPONSE. But an agent reads the RENDERED context, not the
+raw dict — and the response being right ≠ the render showing it. So for each run
+we also render the response the way a reading agent consumes it
+(``format_recall_context``) at two altitudes, mirroring the agenda shape's
+ORACLE + AGENT-FACING split:
+
+  * ``render_legacy_rows``  = rows in the results-only render (use_enumeration
+                             =False) — the FINDING: it counts the limit-bounded
+                             slice, so it never equals the truth.
+  * ``render_enum_rows``    = member rows in the enumeration-aware render — the
+                             CLOSE: the complete membership survives rendering.
+  * ``render_count_shown``  = the corrected count appears in the rendered header
+                             (the agent can READ the number, not just parse it).
+  * ``summary_shows_count`` = ``enumeration.summary`` prose carries the count
+                             (the PAAH-local prose guard against a regression to
+                             len(results) in the summary sentence).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from statistics import median
 
@@ -65,6 +84,14 @@ _PHRASINGS: tuple[str, ...] = (
 )
 
 
+_ROW_RE = re.compile(r"^\[\d+\]", re.MULTILINE)
+
+
+def _count_rows(rendered: str) -> int:
+    """Count ``[i]`` rows in an agent-facing render (members or results)."""
+    return len(_ROW_RE.findall(rendered))
+
+
 @dataclass
 class RunRecord:
     """One weft_recall invocation's agent-facing signals."""
@@ -75,6 +102,12 @@ class RunRecord:
     enum_count: int | None          # response["enumeration"]["count"]
     naive_results: int              # len(results) — legacy ranked-slice contrast
     recall_at_membership: float     # enumeration.members ∩ manifest / manifest
+
+    # --- render altitude: what the agent actually reads --------------------
+    render_legacy_rows: int         # rows in the results-only render (finding)
+    render_enum_rows: int           # member rows in the enum-aware render (close)
+    render_count_shown: bool        # the corrected count is in the rendered header
+    summary_shows_count: bool       # enumeration.summary prose carries the count
 
 
 @dataclass
@@ -120,6 +153,31 @@ class EnumStats:
     def recall_max(self) -> float:
         return max(r.recall_at_membership for r in self.runs)
 
+    # --- render altitude: what the agent actually reads -------------------
+    @property
+    def render_legacy_wrong_rate(self) -> float:
+        """FINDING: the results-only render never equals the true count."""
+        return sum(
+            r.render_legacy_rows != self.manifest_count for r in self.runs
+        ) / len(self.runs)
+
+    @property
+    def render_close_rate(self) -> float:
+        """CLOSE: the enum-aware render surfaces the COMPLETE membership."""
+        return sum(
+            r.render_enum_rows == self.manifest_count for r in self.runs
+        ) / len(self.runs)
+
+    @property
+    def render_count_shown_rate(self) -> float:
+        """CLOSE: the corrected count is READABLE in the rendered header."""
+        return sum(r.render_count_shown for r in self.runs) / len(self.runs)
+
+    @property
+    def summary_shows_count_rate(self) -> float:
+        """PROSE GUARD: enumeration.summary carries the count as text."""
+        return sum(r.summary_shows_count for r in self.runs) / len(self.runs)
+
     def to_dict(self) -> dict:
         return {
             "collection": self.name,
@@ -138,6 +196,12 @@ class EnumStats:
                 "median": self.recall_median,
                 "max": self.recall_max,
             },
+            "render_altitude": {
+                "legacy_render_wrong_rate": self.render_legacy_wrong_rate,
+                "enum_render_complete_rate": self.render_close_rate,
+                "count_readable_in_render_rate": self.render_count_shown_rate,
+                "summary_carries_count_rate": self.summary_shows_count_rate,
+            },
             "queries": [
                 {
                     "query": r.query,
@@ -146,6 +210,10 @@ class EnumStats:
                     "enum_count": r.enum_count,
                     "naive_results": r.naive_results,
                     "recall_at_membership": r.recall_at_membership,
+                    "render_legacy_rows": r.render_legacy_rows,
+                    "render_enum_rows": r.render_enum_rows,
+                    "render_count_shown": r.render_count_shown,
+                    "summary_shows_count": r.summary_shows_count,
                 }
                 for r in self.runs
             ],
@@ -155,6 +223,9 @@ class EnumStats:
 async def _run_one(ctx, query: str, manifest_ids: set[str], limit: int) -> RunRecord:
     """Call the real weft_recall and distill agent-facing signals from it."""
     from weft.mcp.tools import weft_recall
+
+    # The Reader's render is the surface a reading agent actually consumes.
+    from benchmarks.longmemeval.reader import format_recall_context
 
     response = await weft_recall(ctx, query=query, limit=limit, tier="auto")
 
@@ -175,10 +246,25 @@ async def _run_one(ctx, query: str, manifest_ids: set[str], limit: int) -> RunRe
     hit = len(member_ids & manifest_ids)
     recall = hit / len(manifest_ids) if manifest_ids else 0.0
 
+    # --- render altitude: render the response the way an agent reads it -----
+    # Legacy (results-only) render is the FINDING; enum-aware render is the
+    # CLOSE. Both operate on the SAME response, so the delta is purely the
+    # enumeration awareness — not a different input.
+    legacy_render = format_recall_context(response, use_enumeration=False)
+    enum_render = format_recall_context(response, use_enumeration=True)
+    render_legacy_rows = _count_rows(legacy_render)
+    render_enum_rows = _count_rows(enum_render)
+    header = enum_render.splitlines()[0] if enum_render else ""
+    render_count_shown = enum_present and str(enum_count) in header
+    summary_shows_count = enum_present and str(enum_count) in (enum.get("summary") or "")
+
     logger.info(
         "paah_enum: query=%r enum=%s obvious_count=%s enum_count=%s "
-        "naive_results=%d recall@membership=%.3f",
+        "naive_results=%d recall@membership=%.3f render[legacy=%d enum=%d "
+        "count_shown=%s summary=%s]",
         query, enum_present, obvious_count, enum_count, naive_results, recall,
+        render_legacy_rows, render_enum_rows, render_count_shown,
+        summary_shows_count,
     )
     return RunRecord(
         query=query,
@@ -187,6 +273,10 @@ async def _run_one(ctx, query: str, manifest_ids: set[str], limit: int) -> RunRe
         enum_count=enum_count,
         naive_results=naive_results,
         recall_at_membership=recall,
+        render_legacy_rows=render_legacy_rows,
+        render_enum_rows=render_enum_rows,
+        render_count_shown=render_count_shown,
+        summary_shows_count=summary_shows_count,
     )
 
 

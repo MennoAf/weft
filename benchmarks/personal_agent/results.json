@@ -10,11 +10,14 @@
     "seed_integrity_clean": true,
     "answer_correct_everywhere": true,
     "consumption_contract_closed": true,
+    "render_contract_closed": true,
     "scoreboard": {
       "total_runs": 18,
       "correct_via_obvious_response_count": 18,
       "correct_via_explicit_enumeration_count": 18,
-      "correct_via_naive_len_results": 0
+      "correct_via_naive_len_results": 0,
+      "render_enum_complete_and_readable": 18,
+      "render_legacy_wrong": 18
     },
     "collections": [
       {
@@ -34,6 +37,12 @@
           "median": 1.0,
           "max": 1.0
         },
+        "render_altitude": {
+          "legacy_render_wrong_rate": 1.0,
+          "enum_render_complete_rate": 1.0,
+          "count_readable_in_render_rate": 1.0,
+          "summary_carries_count_rate": 1.0
+        },
         "queries": [
           {
             "query": "how many plants do I have",
@@ -41,7 +50,11 @@
             "obvious_count": 14,
             "enum_count": 14,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 14,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "list all my plants",
@@ -49,7 +62,11 @@
             "obvious_count": 14,
             "enum_count": 14,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 14,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "enumerate my plants",
@@ -57,7 +74,11 @@
             "obvious_count": 14,
             "enum_count": 14,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 14,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "what are all the plants I have",
@@ -65,7 +86,11 @@
             "obvious_count": 14,
             "enum_count": 14,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 14,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "give me all my plants",
@@ -73,7 +98,11 @@
             "obvious_count": 14,
             "enum_count": 14,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 14,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "show me all my plants",
@@ -81,7 +110,11 @@
             "obvious_count": 14,
             "enum_count": 14,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 14,
+            "render_count_shown": true,
+            "summary_shows_count": true
           }
         ]
       },
@@ -102,6 +135,12 @@
           "median": 1.0,
           "max": 1.0
         },
+        "render_altitude": {
+          "legacy_render_wrong_rate": 1.0,
+          "enum_render_complete_rate": 1.0,
+          "count_readable_in_render_rate": 1.0,
+          "summary_carries_count_rate": 1.0
+        },
         "queries": [
           {
             "query": "how many medications do I have",
@@ -109,7 +148,11 @@
             "obvious_count": 6,
             "enum_count": 6,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 6,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "list all my medications",
@@ -117,7 +160,11 @@
             "obvious_count": 6,
             "enum_count": 6,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 6,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "enumerate my medications",
@@ -125,7 +172,11 @@
             "obvious_count": 6,
             "enum_count": 6,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 6,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "what are all the medications I have",
@@ -133,7 +184,11 @@
             "obvious_count": 6,
             "enum_count": 6,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 6,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "give me all my medications",
@@ -141,7 +196,11 @@
             "obvious_count": 6,
             "enum_count": 6,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 6,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "show me all my medications",
@@ -149,7 +208,11 @@
             "obvious_count": 6,
             "enum_count": 6,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 6,
+            "render_count_shown": true,
+            "summary_shows_count": true
           }
         ]
       },
@@ -170,6 +233,12 @@
           "median": 1.0,
           "max": 1.0
         },
+        "render_altitude": {
+          "legacy_render_wrong_rate": 1.0,
+          "enum_render_complete_rate": 1.0,
+          "count_readable_in_render_rate": 1.0,
+          "summary_carries_count_rate": 1.0
+        },
         "queries": [
           {
             "query": "how many projects do I have",
@@ -177,7 +246,11 @@
             "obvious_count": 9,
             "enum_count": 9,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 9,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "list all my projects",
@@ -185,7 +258,11 @@
             "obvious_count": 9,
             "enum_count": 9,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 9,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "enumerate my projects",
@@ -193,7 +270,11 @@
             "obvious_count": 9,
             "enum_count": 9,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 9,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "what are all the projects I have",
@@ -201,7 +282,11 @@
             "obvious_count": 9,
             "enum_count": 9,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 9,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "give me all my projects",
@@ -209,7 +294,11 @@
             "obvious_count": 9,
             "enum_count": 9,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 9,
+            "render_count_shown": true,
+            "summary_shows_count": true
           },
           {
             "query": "show me all my projects",
@@ -217,7 +306,11 @@
             "obvious_count": 9,
             "enum_count": 9,
             "naive_results": 10,
-            "recall_at_membership": 1.0
+            "recall_at_membership": 1.0,
+            "render_legacy_rows": 10,
+            "render_enum_rows": 9,
+            "render_count_shown": true,
+            "summary_shows_count": true
           }
         ]
       }
