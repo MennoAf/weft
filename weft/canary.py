@@ -675,25 +675,46 @@ async def run_canary_audit(
 # to be a real failure, short enough to catch it fast on the next prime.
 _CANARY_STALE_HOURS = 48.0
 
+# Minimum audited checks before an arm's miss_rate is trusted (and before the
+# drift tripwire can fire). Below this the sample is too small: a single early
+# miss would read as a regression. Mirrors the audit_valid ">=1 probe" discipline
+# but at a threshold where a rate is statistically meaningful.
+_CANARY_MIN_TRIP_SAMPLE = 30
+
+# Absolute miss-rate ceiling for the drift tripwire. The calibrated active-arm
+# baseline is ~2.6% (PR #31, after the review_status/provenance artifact was
+# removed). An absolute ~10% ceiling (~4x baseline) trips on real regressions —
+# it would have caught the original 14.5% artifact — without false-alarming at
+# baseline. Deliberately an ABSOLUTE ceiling, not a multiple of a stored baseline:
+# the baseline sample is small (3 misses / 115 probes), so an absolute bound is
+# more robust than overfitting a constant to it.
+_CANARY_MISS_RATE_ALERT_THRESHOLD = 0.10
+
 
 async def canary_health(
     pool: asyncpg.Pool, user_id: str | None = None
 ) -> dict | None:
     """Reconciliation-meter health summary for the primer and daily brief.
 
-    Read-only aggregate over ``recall_canary`` grouped by probe arm
-    (``active`` = uncalibrated completeness proxy; ``reaREDACTED`` =
-    trustworthy, derived from the proven ``is_reask_miss`` signal). Per arm it
+    Read-only aggregate over ``recall_canary`` grouped by probe arm. Per arm it
     reports enrolled/audited probe counts and a lifetime ``miss_rate``
     (``sum(miss_count) / sum(audit_count)`` — both bump on every hit and miss,
     so this equals the latest run's rate when stable).
 
-    The load-bearing part is ``dark``: True when the meter has NEVER audited or
-    its last audit is older than ``_CANARY_STALE_HOURS``. When dark, ``alert``
-    carries a loud, human-readable line so a dead meter SCREAMS on the next
-    prime instead of failing silent — the exact failure mode that let the meter
-    sit unaudited for weeks. The watchman is watched by the one surface a human
-    reads every session.
+    Trustworthiness is sample-based, not probe-type-based: an arm is
+    ``trustworthy`` once it has ``>= _CANARY_MIN_TRIP_SAMPLE`` audited checks
+    (below that it carries ``label='uncalibrated'``). This replaced the old
+    hardcode that trusted the reaREDACTED arm on faith — a poisoned probe had
+    made that arm 100% miss while still labelled trustworthy (PR #31). With the
+    active arm's baseline artifact removed, its ~2.6% is now a real signal.
+
+    Two loud, human-readable signals surface on the one surface a human reads
+    every session:
+    * ``dark`` / ``alert``: the meter has NEVER audited or is older than
+      ``_CANARY_STALE_HOURS`` — a dead meter SCREAMS instead of failing silent.
+    * ``tripwire``: a trustworthy arm's ``miss_rate`` crossed
+      ``_CANARY_MISS_RATE_ALERT_THRESHOLD`` — a live recall regression. Gated on
+      the min-sample so a tiny sample can't false-trip.
 
     ``user_id`` scopes the read EXPLICITLY (``WHERE user_id = $1``) rather than
     relying on the ``app.user_id`` GUC — the primer and scheduler contexts do
@@ -743,24 +764,37 @@ async def canary_health(
 
     arms: dict[str, dict] = {}
     overall_last = None
+    tripped_arms: list[tuple[str, float]] = []
     for r in rows:
         checks = int(r["checks"] or 0)
         misses = int(r["misses"] or 0)
         last = r["last_audit_at"]
+        miss_rate = round(misses / checks, 4) if checks else None
+        # Trustworthy once the sample is large enough for the rate to mean
+        # something — arm-type-agnostic. Below the threshold the arm is flagged
+        # 'uncalibrated' so a thin sample is never mistaken for a real rate.
+        trustworthy = checks >= _CANARY_MIN_TRIP_SAMPLE
+        # Drift tripwire: only a trustworthy arm whose rate crosses the absolute
+        # ceiling counts — the min-sample gate is baked into `trustworthy`.
+        tripped = (
+            trustworthy
+            and miss_rate is not None
+            and miss_rate > _CANARY_MISS_RATE_ALERT_THRESHOLD
+        )
         arm = {
             "probes": int(r["probes"]),
             "audited": int(r["audited"]),
             "misses": misses,
             "checks": checks,
-            "miss_rate": round(misses / checks, 4) if checks else None,
+            "miss_rate": miss_rate,
             "last_audit_at": last.isoformat() if last else None,
-            "trustworthy": r["probe_type"] == "reaREDACTED",
+            "trustworthy": trustworthy,
+            "tripped": tripped,
         }
-        if r["probe_type"] == "active":
-            # The active arm is a real signal but its baseline was never
-            # calibrated (RI-4) — surfaced, but labelled so it is not mistaken
-            # for a trustworthy miss rate.
+        if not trustworthy:
             arm["label"] = "uncalibrated"
+        if tripped:
+            tripped_arms.append((r["probe_type"], miss_rate))
         arms[r["probe_type"]] = arm
         if last is not None and (overall_last is None or last > overall_last):
             overall_last = last
@@ -789,5 +823,13 @@ async def canary_health(
             f"⚠️ recall canary DARK ({dark_reason}) — the reconciliation meter "
             "is not measuring; silent recall misses are going undetected. "
             "Check WEFT_DEFAULT_USER_ID and the canary_audit loop."
+        )
+    if tripped_arms:
+        worst_arm, worst_rate = max(tripped_arms, key=lambda t: t[1])
+        health["tripwire"] = (
+            f"⚠️ recall canary miss-rate {worst_rate:.1%} on the '{worst_arm}' arm "
+            f"exceeds the {_CANARY_MISS_RATE_ALERT_THRESHOLD:.0%} ceiling — recall "
+            "may be regressing (embedding drift, index corruption, or a filter "
+            "mismatch). Investigate before trusting recall."
         )
     return health
