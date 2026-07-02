@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
@@ -471,15 +472,34 @@ async def meal_plan(
 _DUE_DATE_RE = re.compile(r"^due:(\d{4}-\d{2}-\d{2})$")
 
 
-async def up_next(
-    pool: asyncpg.Pool,
-    *,
-    days: int = 7,
-    include_no_date: bool = False,
-    limit: int = 50,
-) -> dict:
-    """Find open tasks due in the next N days."""
-    # Fetch all task memories
+@dataclass
+class TaskEntry:
+    """A single task-memory row, selected and parsed.
+
+    Shared core consumed by both ``up_next()`` (below) and
+    ``weft.board.task_adapter()`` — the weft_board subsumption contract
+    requires task selection/parsing to live in exactly one place so the two
+    callers can't drift apart. Do not reimplement the 'tasks' topic query or
+    the due-date/priority topic parsing anywhere else; extend this instead.
+    """
+
+    id: str
+    content: str
+    topic: list[str]
+    due_date: str | None  # "YYYY-MM-DD" if present in topic tags, else None
+    priority: str | None
+    created_at: datetime
+
+
+async def fetch_task_entries(pool: asyncpg.Pool, limit: int) -> list[TaskEntry]:
+    """Fetch open taREDACTED and parse due-date/priority out of topic tags.
+
+    This is the shared up_next core (PRD weft-board §Source-Semantics /
+    Critical Implementation Notes): the row selection (``status = 'active'
+    AND 'tasks' = ANY(topic)``) and the ``due:YYYY-MM-DD`` / ``priority:``
+    topic-tag parsing are the single source of truth for both ``up_next()``
+    and ``weft.board.task_adapter()``.
+    """
     rows = await pool.fetch(
         """
         SELECT * FROM memories
@@ -488,16 +508,10 @@ async def up_next(
         ORDER BY created_at DESC
         LIMIT $1
         """,
-        limit * 3,  # fetch extra, we'll filter
+        limit,
     )
 
-    now = datetime.now(timezone.utc).date()
-    cutoff = now + timedelta(days=days)
-
-    tasks_due: list[dict] = []
-    tasks_overdue: list[dict] = []
-    tasks_no_date: list[dict] = []
-
+    entries: list[TaskEntry] = []
     for row in rows:
         topics = row["topic"] or []
         due_date = None
@@ -510,28 +524,63 @@ async def up_next(
             if t.startswith("priority:"):
                 priority = t.split(":", 1)[1]
 
-        entry = {
-            "id": row["id"],
-            "content": row["content"],
-            "topic": topics,
+        entries.append(
+            TaskEntry(
+                id=row["id"],
+                content=row["content"],
+                topic=topics,
+                due_date=due_date,
+                priority=priority,
+                created_at=row["created_at"],
+            )
+        )
+
+    return entries
+
+
+async def up_next(
+    pool: asyncpg.Pool,
+    *,
+    days: int = 7,
+    include_no_date: bool = False,
+    limit: int = 50,
+) -> dict:
+    """Find open tasks due in the next N days."""
+    # Fetch + parse via the shared core (also consumed by weft.board.task_adapter)
+    entries = await fetch_task_entries(pool, limit * 3)  # fetch extra, we'll filter
+
+    now = datetime.now(timezone.utc).date()
+    cutoff = now + timedelta(days=days)
+
+    tasks_due: list[dict] = []
+    tasks_overdue: list[dict] = []
+    tasks_no_date: list[dict] = []
+
+    for entry in entries:
+        due_date = entry.due_date
+
+        result_entry = {
+            "id": entry.id,
+            "content": entry.content,
+            "topic": entry.topic,
             "due": due_date,
-            "priority": priority,
-            "created_at": row["created_at"].isoformat(),
+            "priority": entry.priority,
+            "created_at": entry.created_at.isoformat(),
         }
 
         if due_date:
             try:
                 due = datetime.strptime(due_date, "%Y-%m-%d").date()
             except ValueError:
-                tasks_no_date.append(entry)
+                tasks_no_date.append(result_entry)
                 continue
 
             if due < now:
-                tasks_overdue.append(entry)
+                tasks_overdue.append(result_entry)
             elif due <= cutoff:
-                tasks_due.append(entry)
+                tasks_due.append(result_entry)
         elif include_no_date:
-            tasks_no_date.append(entry)
+            tasks_no_date.append(result_entry)
 
     # Sort by due date, then priority
     priority_order = {"highest": 0, "high": 1, "medium": 2, "low": 3, "lowest": 4}
