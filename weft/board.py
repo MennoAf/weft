@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal
 import asyncpg
 
 from weft.auth import current_user_id
-from weft.db.connection import acquire
+from weft.db.connection import _current_conn, acquire
 from weft.models import TriggerConditionType
 
 if TYPE_CHECKING:
@@ -377,6 +377,17 @@ def trigger_adapter(
                     due_at = datetime.fromisoformat(trigger_at_raw)
                 except (ValueError, TypeError):
                     due_at = None  # malformed trigger_at — treat as no_date
+                else:
+                    # TriggerCreate._validate_condition (weft/models.py) does
+                    # NOT require trigger_at to be tz-aware (unlike
+                    # AlertCreate.trigger_at), so a stored offset-less ISO
+                    # string yields a NAIVE datetime here. Normalize to UTC
+                    # now, at adapter-construction time, so every downstream
+                    # consumer (rank_items' due_at.timestamp(), to_dict's
+                    # isoformat()) sees a consistent tz-aware value instead
+                    # of naive-as-local-time behavior on non-UTC hosts.
+                    if due_at.tzinfo is None:
+                        due_at = due_at.replace(tzinfo=timezone.utc)
 
         # Map to Item
         item = Item(
@@ -596,14 +607,23 @@ async def assemble_board(
     per-source fetch runs inside `weft.db.connection.acquire(pool)`, which
     issues `SET LOCAL app.user_id` for the connection it hands out from the
     `current_user_id` contextvar (see `weft/auth.py`, `weft/topic_gather.py`
-    for the same convention). `user_id` defaults to `WEFT_DEFAULT_USER_ID`
-    (the deployment owner) — the same env-var convention `canary_audit_loop`
-    uses (`weft/scheduler.py:964`) — so a caller can still override it
-    explicitly rather than the board baking in a single-user assumption.
-    Each source acquires its OWN connection (not one shared connection)
-    because asyncpg connections cannot serve concurrent queries — sharing
-    one across the concurrent fan-out would raise "another operation is in
-    progress" under real concurrency.
+    for the same convention). `user_id` defaults to the ambient authenticated
+    caller (`current_user_id` contextvar, mirroring
+    `weft.auth.resolve_caller_user_id`'s precedence) and falls back to
+    `WEFT_DEFAULT_USER_ID` (the deployment owner) only when no caller is
+    bound — the same env-var convention `canary_audit_loop` uses
+    (`weft/scheduler.py:964`) — so a caller can still override it explicitly
+    rather than the board baking in a single-user assumption. Each source
+    acquires its OWN connection (not one shared connection) because asyncpg
+    connections cannot serve concurrent queries — sharing one across the
+    concurrent fan-out would raise "another operation is in progress" under
+    real concurrency. Because `weft.db.connection.acquire()` is idempotent
+    (it reuses an already-bound connection rather than acquiring a new one),
+    this function clears the `_current_conn` contextvar in its own context
+    right before `asyncio.gather()` so each fan-out task's copied context
+    takes the fresh-acquire branch even when assemble_board is itself
+    invoked from inside an outer `acquire()` scope (e.g. an MCP tool
+    handler).
 
     Args:
         pool: asyncpg connection pool.
@@ -611,7 +631,9 @@ async def assemble_board(
             `horizon_days` (PRD `weft_board(days=7, ...)`).
         per_source_cap: max rows read per source before truncation (V7).
         now: reference time for urgency/age computation (defaults to UTC now).
-        user_id: RLS scope override. Defaults to `WEFT_DEFAULT_USER_ID`.
+        user_id: RLS scope override. Defaults to the ambient authenticated
+            caller (`current_user_id` contextvar), falling back to
+            `WEFT_DEFAULT_USER_ID` when no caller is bound.
 
     Returns:
         dict matching PRD §Interfaces: generated_at, horizon_days, buckets
@@ -623,7 +645,14 @@ async def assemble_board(
         now = datetime.now(timezone.utc)
 
     if user_id is None:
-        user_id = os.environ.get("WEFT_DEFAULT_USER_ID")
+        # Ambient authenticated caller wins over the deployment-owner env
+        # fallback — matches every other read path's identity precedence
+        # (weft.auth.resolve_caller_user_id: contextvar first, fallback
+        # second). Jumping straight to WEFT_DEFAULT_USER_ID here would
+        # silently ignore a real caller already bound via current_user_id
+        # (e.g. an authenticated MCP tool invocation), scoping the board to
+        # the deployment owner instead of the actual requester.
+        user_id = current_user_id.get() or os.environ.get("WEFT_DEFAULT_USER_ID")
         if user_id is None:
             logger.warning(
                 "board.no_default_user — set WEFT_DEFAULT_USER_ID for the "
@@ -642,12 +671,18 @@ async def assemble_board(
         return rows
 
     async def _safe(source: ItemSource, coro) -> list[Item]:
-        """Isolation wrapper (V5) — mirrors daily_brief.py:621 `_safe`."""
+        """Isolation wrapper (V5) — mirrors daily_brief.py:621 `_safe`.
+
+        Records only the exception's class name in `warnings`, never
+        `str(exc)` — the full detail (which for asyncpg failures can
+        include schema/query internals) is already captured by
+        `logger.exception` below; the response payload should not leak it.
+        """
         try:
             return await coro
         except Exception as exc:
             logger.exception(f"board.{source}_error")
-            warnings.append({"source": source, "error": str(exc)})
+            warnings.append({"source": source, "error": type(exc).__name__})
             return []
 
     async def _tracker_items() -> list[Item]:
@@ -698,7 +733,23 @@ async def assemble_board(
     # copied context inherits it; each task's own acquire() call then
     # acquires its OWN connection (see docstring — one shared connection
     # can't serve five concurrent queries).
+    #
+    # acquire() (weft.db.connection) is IDEMPOTENT: if `_current_conn` is
+    # already set (e.g. because assemble_board is called from inside an MCP
+    # tool handler, which wraps its whole body in `async with
+    # acquire(app.pool):`), it yields the EXISTING connection instead of
+    # acquiring a new one. asyncio.gather's five tasks each get a *copy* of
+    # the current context, so all five would inherit that same connection
+    # and run `conn.fetch()` concurrently on it — asyncpg raises "another
+    # operation is in progress", which `_safe` swallows into `warnings`,
+    # silently starving the board. Force the fresh-acquire branch for the
+    # fan-out by clearing `_current_conn` in *this* context right before
+    # gathering; each task's copied context then sees no existing
+    # connection and calls `pool.acquire()` for its own. `current_user_id`
+    # is untouched by this reset, so `acquire()`'s `SET LOCAL app.user_id`
+    # still binds the correct RLS identity on every fresh connection.
     token = current_user_id.set(user_id)
+    conn_token = _current_conn.set(None)
     try:
         tracker_items, alert_items, trigger_items, task_items, review_items = (
             await asyncio.gather(
@@ -710,6 +761,7 @@ async def assemble_board(
             )
         )
     finally:
+        _current_conn.reset(conn_token)
         current_user_id.reset(token)
 
     all_items = tracker_items + alert_items + trigger_items + task_items + review_items

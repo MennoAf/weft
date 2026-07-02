@@ -1299,6 +1299,77 @@ class TestTriggerAdapter:
         assert len(result) == 1
         assert result[0].id == "trg-visible"
 
+    def test_trigger_adapter_normalizes_naive_due_at_to_utc(self, now):
+        """An offset-less trigger_at string yields a NAIVE datetime from
+        datetime.fromisoformat — TriggerCreate._validate_condition
+        (weft/models.py) does not require tz-aware, unlike
+        AlertCreate.trigger_at. trigger_adapter must normalize the parsed
+        due_at to UTC at adapter-construction time so downstream consumers
+        (rank_items' `due_at.timestamp()`, which treats naive datetimes as
+        LOCAL time, and Item.to_dict()'s isoformat()) never see a naive
+        value.
+        """
+        naive_trigger_at_str = "2026-07-03T10:00:00"  # no offset -> naive
+        trigger = Trigger(
+            id="trg-naive",
+            name="Naive due date",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": naive_trigger_at_str},
+            action="Remind",
+            created_at=now,
+        )
+
+        result = trigger_adapter([trigger], now)
+        item = result[0]
+
+        assert item.due_at is not None
+        assert item.due_at.tzinfo is not None, (
+            "due_at must be tz-aware — a naive datetime here means "
+            "rank_items' due_at.timestamp() call would treat it as local "
+            "time instead of UTC, mis-ordering it on non-UTC hosts"
+        )
+        assert item.due_at == datetime(2026, 7, 3, 10, 0, 0, tzinfo=timezone.utc)
+
+        d = item.to_dict()
+        assert d["due_at"] == "2026-07-03T10:00:00+00:00"
+
+    def test_naive_trigger_due_at_ranks_correctly_against_tz_aware_items(self, now):
+        """Mixing a naive-due_at trigger into a bucket with tz-aware items:
+        rank_items must order by the true UTC instant. Once trigger_adapter
+        normalizes the naive datetime to UTC (this fix), datetime.timestamp()
+        on the resulting tz-aware value is host-timezone-independent, so
+        ordering against other tz-aware items (alert, tracker, ...) is
+        correct regardless of the machine's local timezone.
+        """
+        earlier_alert_item = Item(
+            id="alert-earlier",
+            source="alert",
+            kind="due_task",
+            title="Earlier alert",
+            state="pending",
+            due_at=now + timedelta(hours=1),
+            snoozed_until=None,
+            age_days=1.0,
+            urgency="due_soon",
+        )
+
+        # Naive trigger_at string (no offset) representing a UTC instant
+        # LATER than the alert above.
+        later_naive_str = (now + timedelta(hours=2)).replace(tzinfo=None).isoformat()
+        trigger = Trigger(
+            id="trg-later",
+            name="Later trigger",
+            condition_type=TriggerConditionType.time,
+            condition={"trigger_at": later_naive_str},
+            action="Remind",
+            created_at=now,
+        )
+        trigger_item = trigger_adapter([trigger], now)[0]
+
+        bucket = rank_items([trigger_item, earlier_alert_item])
+
+        assert [item.id for item in bucket] == ["alert-earlier", "trg-later"]
+
     def test_adapter_schema_completeness_trigger(self, now):
         """Trigger adapter produces schema-complete Item per PRD §Interfaces."""
         trigger = Trigger(
@@ -1896,3 +1967,78 @@ class TestAssembleBoardIntegration:
 
         assert counts_before == counts_after
         assert rows_before == rows_after
+
+    async def test_assemble_board_gets_fresh_connections_when_called_inside_acquire(
+        self, pool,
+    ):
+        """assemble_board must not inherit the caller's already-bound
+        connection via `weft.db.connection.acquire()`'s idempotency.
+
+        Every MCP tool wraps its handler body in
+        `async with acquire(app.pool):`, so once `weft_board` is wired that
+        connection is already bound (via the `_current_conn` contextvar)
+        when assemble_board's `asyncio.gather` fan-out starts. Each of the
+        5 concurrent gather tasks gets a *copy* of that context; without a
+        fresh-connection guarantee, all 5 would call `acquire()`'s
+        idempotent branch and share ONE asyncpg connection, which cannot
+        serve concurrent queries — asyncpg raises "another operation is in
+        progress", `_safe` swallows it into `warnings`, and the board comes
+        back with some/all sources silently missing.
+
+        This test reproduces that exact calling convention directly (an
+        outer `acquire(pool)` scope around the assemble_board call) and
+        asserts no per-source failures occurred and items from multiple
+        sources still made it into the result.
+        """
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.alerts import create_alert
+        from weft.db.connection import acquire
+        from weft.trackers import create_tracker
+        from weft.triggers import create_trigger
+
+        now = datetime.now(timezone.utc)
+
+        await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Tracker under outer acquire",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(hours=1),
+            ),
+        )
+        await create_alert(
+            pool,
+            AlertCreate(
+                alert_type=AlertType.due_task,
+                title="Alert under outer acquire",
+                trigger_at=now + timedelta(hours=1),
+                channel=AlertChannel.log,
+            ),
+        )
+        await create_trigger(
+            pool,
+            TriggerCreate(
+                name="Trigger under outer acquire",
+                condition_type=TriggerConditionType.time,
+                condition={"trigger_at": (now + timedelta(hours=2)).isoformat()},
+                action="Remind",
+            ),
+        )
+
+        # Reproduce the MCP-tool calling convention: assemble_board invoked
+        # from INSIDE an already-open acquire() scope, so `_current_conn`
+        # is already bound when the fan-out's asyncio.gather runs.
+        async with acquire(pool):
+            result = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+
+        assert result["warnings"] == [], (
+            "fan-out sources failed under a shared inherited connection — "
+            f"got warnings: {result['warnings']}"
+        )
+
+        sources_seen = {item["source"] for item in result["items"]}
+        assert sources_seen == {"tracker", "alert", "trigger"}, (
+            f"expected all 3 seeded sources present, got: {sources_seen}"
+        )
+        assert result["counts"]["total"] == 3
