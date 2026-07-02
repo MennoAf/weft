@@ -21,10 +21,14 @@ from weft.episode_turns import append_turn
 from weft.episodes import create_episode
 from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
 from weft.views import belief_detector
+from weft.counters import COUNTER_REPLAY_STALE_REAPED, get_counter
+from weft.replay import REPLAY_QUEUE_STALENESS_DAYS
 from weft.replay_executor import (
     REPLAY_AGGREGATE_DETECTOR_VERSION,
+    reap_stale_pending_replays,
     run_replay_executor,
 )
+from tests.conftest import DEFAULT_TEST_USER_ID
 
 pytestmark = pytest.mark.asyncio
 
@@ -357,3 +361,110 @@ async def test_escalation_never_routes_to_opus():
     for module in (replay_executor, aggregate_detector):
         source = inspect.getsource(module)
         assert "claude-opus" not in source, f"opus model id found in {module.__name__}"
+
+
+# ---------------------------------------------------------------------------
+# reap_stale_pending_replays — drain orphaned stale 'pending' rows to 'failed'
+# (complements the L4 retention age-bound; loom-d8b41372)
+# ---------------------------------------------------------------------------
+
+_STALE_AGE = REPLAY_QUEUE_STALENESS_DAYS + 6  # comfortably past the window
+
+
+async def _insert_replay_row(
+    pool, *, age_days, status="pending", user_id=DEFAULT_TEST_USER_ID
+) -> str:
+    """Insert one replay_queue row at a controllable age/status/owner."""
+    ep = await create_episode(pool, EpisodeCreate(title=f"reap-{uuid.uuid4().hex[:6]}"))
+    rq_id = f"rq-{uuid.uuid4().hex[:10]}"
+    await pool.execute(
+        """
+        INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id, created_at)
+        VALUES ($1, $2, $3, 'reap-test', $4, $5, now() - ($6 || ' days')::interval)
+        """,
+        rq_id, ep.id, ["et-x"], status, user_id, str(age_days),
+    )
+    return rq_id
+
+
+async def _status_of(pool, rq_id: str) -> str:
+    return await pool.fetchval("SELECT status FROM replay_queue WHERE id = $1", rq_id)
+
+
+async def test_reap_transitions_stale_pending_to_failed(pool):
+    """A pending row past the staleness window is reaped to terminal 'failed'
+    and the reaped counter is bumped."""
+    rq_id = await _insert_replay_row(pool, age_days=_STALE_AGE)
+    before = await get_counter(pool, COUNTER_REPLAY_STALE_REAPED)
+
+    reaped = await reap_stale_pending_replays(pool)
+
+    assert reaped == 1
+    assert await _status_of(pool, rq_id) == "failed"
+    assert await get_counter(pool, COUNTER_REPLAY_STALE_REAPED) == before + 1
+
+
+async def test_reap_leaves_fresh_and_terminal_rows_untouched(pool):
+    """Fresh pending rows and already-terminal rows are never reaped."""
+    fresh = await _insert_replay_row(pool, age_days=1, status="pending")
+    done = await _insert_replay_row(pool, age_days=_STALE_AGE, status="done")
+    failed = await _insert_replay_row(pool, age_days=_STALE_AGE, status="failed")
+
+    reaped = await reap_stale_pending_replays(pool)
+
+    assert reaped == 0
+    assert await _status_of(pool, fresh) == "pending"
+    assert await _status_of(pool, done) == "done"
+    assert await _status_of(pool, failed) == "failed"
+
+
+async def test_reap_respects_the_staleness_window_boundary(pool):
+    """A row just inside the window survives; aged just outside, it's reaped."""
+    rq_id = await _insert_replay_row(
+        pool, age_days=REPLAY_QUEUE_STALENESS_DAYS - 2, status="pending"
+    )
+    assert await reap_stale_pending_replays(pool) == 0
+    assert await _status_of(pool, rq_id) == "pending"
+
+    await pool.execute(
+        "UPDATE replay_queue SET created_at = now() - ($2 || ' days')::interval WHERE id = $1",
+        rq_id, str(REPLAY_QUEUE_STALENESS_DAYS + 2),
+    )
+    assert await reap_stale_pending_replays(pool) == 1
+    assert await _status_of(pool, rq_id) == "failed"
+
+
+async def test_reap_is_best_effort_per_row(pool):
+    """A row whose terminal write throws is logged and skipped — the sweep
+    still reaps the healthy rows and never aborts."""
+    good = await _insert_replay_row(pool, age_days=_STALE_AGE)
+    poison = await _insert_replay_row(pool, age_days=_STALE_AGE)
+
+    from weft import replay_executor as rx
+
+    real_set_status = rx._set_status
+
+    async def _flaky_set_status(pool_, replay_id, user_id, status):
+        if replay_id == poison:
+            raise RuntimeError("simulated unwritable user_id / poison row")
+        return await real_set_status(pool_, replay_id, user_id, status)
+
+    with patch.object(rx, "_set_status", side_effect=_flaky_set_status):
+        reaped = await rx.reap_stale_pending_replays(pool)
+
+    assert reaped == 1, "only the healthy row is reaped; the poison row is skipped"
+    assert await _status_of(pool, good) == "failed"
+    assert await _status_of(pool, poison) == "pending", "poison row survives for a later pass"
+
+
+async def test_run_replay_executor_reaps_stale_before_draining(pool):
+    """The executor pass reaps orphaned stale rows (Phase 0) so they never reach
+    the drain — result.rows_reaped reflects it and the row is terminal."""
+    rq_id = await _insert_replay_row(pool, age_days=_STALE_AGE)
+
+    # No client needed: the row is reaped before Phase-1 hydration, so the drain
+    # finds no pending work and never calls the detector.
+    result = await run_replay_executor(pool)
+
+    assert result.rows_reaped == 1
+    assert await _status_of(pool, rq_id) == "failed"
