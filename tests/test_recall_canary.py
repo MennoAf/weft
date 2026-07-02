@@ -23,6 +23,7 @@ import pytest
 from weft.canary import (
     COUNTER_CANARY_MISS,
     PROBE_TEXT_MAX_CHARS,
+    _is_degenerate_reask_probe,
     canary_health,
     enroll_canary,
     run_canary_audit,
@@ -703,3 +704,170 @@ async def test_canary_health_miss_rate_aggregates(pool):
     assert health["arms"]["active"]["miss_rate"] == 0.5
     assert health["arms"]["active"]["misses"] == 1
     assert health["arms"]["active"]["checks"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Calibration: audit probe universe == search_by_vector default universe
+#
+# search_by_vector defaults exclude review_status!='active' and
+# write_provenance='agent'. enroll_canary probes every memory, so a probe whose
+# memory the search can never return is a GUARANTEED miss, not a recall failure.
+# The audit must skip those memories instead of counting them.
+# ---------------------------------------------------------------------------
+
+
+async def test_pending_review_probe_skipped_not_counted(pool, embedder):
+    """A pending_review memory's active probe is skipped (transient), not missed.
+
+    review_status='pending_review' is excluded from search_by_vector's default
+    candidate pool, so the memory could NEVER surface — counting it as a miss
+    inflated the reconciliation rate (10/11 real active-arm misses were this).
+    The probe must be skipped AND left enabled so it re-enters once approved.
+    """
+    content = "Quarterly OKR review cadence moved from monthly to biweekly"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["okr"]),
+        embedding=emb,
+    )
+    # Probe text == content, so it WOULD hit if the memory were searchable.
+    pid = await enroll_canary(pool, mem.id, content, probe_type="active")
+    await pool.execute(
+        "UPDATE memories SET review_status = 'pending_review' WHERE id = $1", mem.id
+    )
+
+    result = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+
+    assert result["probes_checked"] == 0, "pending_review memory must not be probed"
+    assert result["misses"] == 0
+    row = await get_db(pool).fetchrow(
+        "SELECT enabled, miss_count FROM recall_canary WHERE probe_id = $1", pid
+    )
+    assert row["enabled"] is True, "review_status is transient — do not disable the probe"
+    assert row["miss_count"] == 0
+
+
+async def test_pending_review_probe_reenters_after_approval(pool, embedder):
+    """Once a pending_review memory becomes active, its probe is audited again."""
+    content = "The migration runbook lives in docs/ops/migrations.md"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["ops"]),
+        embedding=emb,
+    )
+    await enroll_canary(pool, mem.id, content, probe_type="active")
+    await pool.execute(
+        "UPDATE memories SET review_status = 'pending_review' WHERE id = $1", mem.id
+    )
+    skipped = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+    assert skipped["probes_checked"] == 0
+
+    # Approve the memory.
+    await pool.execute(
+        "UPDATE memories SET review_status = 'active' WHERE id = $1", mem.id
+    )
+    audited = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+    assert audited["probes_checked"] == 1
+    assert audited["misses"] == 0  # probe_text == content, surfaces at rank 1
+
+
+async def test_agent_provenance_probe_skipped(pool, embedder):
+    """An agent-provenance memory's probe is skipped — search excludes it by default."""
+    content = "Agent-authored note about the nightly batch window"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["batch"]),
+        embedding=emb,
+    )
+    await enroll_canary(pool, mem.id, content, probe_type="active")
+    await pool.execute(
+        "UPDATE memories SET write_provenance = 'agent' WHERE id = $1", mem.id
+    )
+
+    result = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+    assert result["probes_checked"] == 0
+    assert result["misses"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Degenerate reaREDACTED probe guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,degenerate",
+    [
+        ("task:loom-7bedb110", True),        # colon-prefixed machine reference
+        ("id:abc", True),
+        ("loom-7bedb110", True),             # bare slug/hash id (digit + hyphen)
+        ("ticket_42", True),                 # digit + underscore
+        ("", True),                          # empty
+        ("   ", True),                       # whitespace-only
+        ("what did we decide about auth?", False),   # natural-language phrase
+        ("authentication", False),           # single real word, no id structure
+        ("the loom-7bedb110 outcome", False),        # id embedded in a phrase
+        ("PostgreSQL", False),
+    ],
+)
+def test_is_degenerate_reask_probe(text, degenerate):
+    assert _is_degenerate_reask_probe(text) is degenerate
+
+
+async def test_degenerate_reask_query_not_enrolled(pool, embedder):
+    """A machine-reference reask query is not enrolled as a bootstrap probe."""
+    content = "Per-finding tickets now lead with YAML frontmatter"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["tickets"]),
+        embedding=emb,
+    )
+    await pool.execute(
+        """
+        INSERT INTO weft_recall_queries
+            (query_id, query_text, tool_name, created_at,
+             is_reask_miss, reask_satisfying_memory_id)
+        VALUES ($1, $2, 'recall', now() - interval '5 minutes', TRUE, $3)
+        """,
+        "qid-degenerate-001",
+        "task:loom-7bedb110",  # the exact poison observed in production
+        mem.id,
+    )
+
+    result = await run_canary_audit(pool, embedder, top_k=5)
+    assert result["bootstrap_synced"] == 0
+    count = await get_db(pool).fetchval(
+        "SELECT count(*) FROM recall_canary WHERE probe_type = 'reaREDACTED'"
+    )
+    assert count == 0
+
+
+async def test_existing_degenerate_reask_probe_disabled(pool, embedder):
+    """An already-enrolled degenerate reaREDACTED probe self-heals to disabled."""
+    content = "The satisfying memory for a poisoned probe"
+    emb = await embedder.embed(content)
+    mem = await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["poison"]),
+        embedding=emb,
+    )
+    # Enrolled before the guard existed: degenerate probe_text, enabled.
+    await pool.execute(
+        """
+        INSERT INTO recall_canary (probe_id, memory_id, user_id, probe_text, probe_type)
+        VALUES ($1, $2, $3, 'task:loom-7bedb110', 'reaREDACTED')
+        """,
+        "cp-poisoned01",
+        mem.id,
+        DEFAULT_TEST_USER_ID,
+    )
+
+    await run_canary_audit(pool, embedder, top_k=5)
+
+    row = await get_db(pool).fetchrow(
+        "SELECT enabled FROM recall_canary WHERE probe_id = 'cp-poisoned01'"
+    )
+    assert row["enabled"] is False

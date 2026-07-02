@@ -67,6 +67,35 @@ PROBE_TEXT_MAX_CHARS = 512
 # results to be a hit; anything beyond is a miss.
 DEFAULT_AUDIT_TOP_K = 10
 
+
+def _is_degenerate_reask_probe(text: str | None) -> bool:
+    """Return True when ``text`` is a machine reference, not a natural-language query.
+
+    The reaREDACTED arm is the canary's *trustworthy* signal: its probes come
+    from real ``is_reask_miss`` events (a query that missed, then a satisfying
+    memory recorded), so a miss is supposed to mean a genuine recall regression.
+    But a query like ``task:loom-7bedb110`` (an internal task reference) embeds
+    into a region of vector space unrelated to the memory it "satisfied," so it can
+    NEVER retrieve that memory — a permanent, meaningless miss that poisons the arm
+    the primer surfaces as trustworthy. We refuse to enroll such probes (and disable
+    any already enrolled).
+
+    Conservative by design — only a single token (no internal whitespace) that looks
+    like an identifier is rejected; a genuine short natural-language query keeps its
+    whitespace or lacks id structure and passes through untouched.
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    if any(c.isspace() for c in t):
+        return False  # multi-word => natural-language query
+    # Single token: reject reference/id shapes ("prefix:id", "loom-7bedb110").
+    if ":" in t:
+        return True
+    if any(c.isdigit() for c in t) and ("-" in t or "_" in t):
+        return True
+    return False
+
 # ---------------------------------------------------------------------------
 # Eval-case minting (CL1 compounding loop, loom-add4d5c8)
 # ---------------------------------------------------------------------------
@@ -216,6 +245,28 @@ async def _sync_reask_bootstrap_probes(
         errors are excluded).  Callers can detect partial failure by comparing
         this against the WARNING log line that names attempted vs enrolled.
     """
+    # Hygiene: disable any already-enrolled reaREDACTED probe whose probe_text
+    # is a machine reference (enrolled before this guard existed). One-way disable
+    # is correct here — probe_text is immutable, so a degenerate probe can never
+    # become valid. Uses the same Python predicate as the enrollment filter so the
+    # two never drift.
+    existing = await get_db(pool).fetch(
+        """
+        SELECT probe_id, probe_text FROM recall_canary
+        WHERE probe_type = 'reaREDACTED' AND enabled = TRUE
+        """
+    )
+    poisoned = [r["probe_id"] for r in existing if _is_degenerate_reask_probe(r["probe_text"])]
+    if poisoned:
+        await get_db(pool).execute(
+            "UPDATE recall_canary SET enabled = FALSE WHERE probe_id = ANY($1::text[])",
+            poisoned,
+        )
+        logger.info(
+            "_sync_reask_bootstrap_probes: disabled %d degenerate reaREDACTED "
+            "probe(s) already enrolled", len(poisoned),
+        )
+
     # Find is_reask_miss rows not yet enrolled as reaREDACTED probes.
     # The NOT EXISTS subquery avoids duplicate enrollment for the same
     # (memory_id, probe_text) pair that may arise from multiple reask events
@@ -236,6 +287,19 @@ async def _sync_reask_bootstrap_probes(
         """,
         PROBE_TEXT_MAX_CHARS,
     )
+
+    # Refuse machine-reference query texts up front: they can never embed-retrieve
+    # their satisfying memory, so enrolling them manufactures a permanent miss on
+    # the trustworthy arm (see _is_degenerate_reask_probe).
+    degenerate = [r for r in rows if _is_degenerate_reask_probe(r["query_text"])]
+    if degenerate:
+        logger.info(
+            "_sync_reask_bootstrap_probes: skipped %d degenerate probe(s) "
+            "(non-natural-language query text, e.g. %r)",
+            len(degenerate),
+            (degenerate[0]["query_text"] or "")[:60],
+        )
+    rows = [r for r in rows if not _is_degenerate_reask_probe(r["query_text"])]
 
     attempted = len(rows)
     enrolled = 0
@@ -451,15 +515,27 @@ async def run_canary_audit(
         )
 
     # --- Phase 2: select enabled probes (parameterized — no f-string interpolation) ---
-    # JOIN memories with status='active' as a correct-by-construction guard so a
-    # memory archived after Phase 1.5 but mid-run is never counted as a miss.
+    # The JOIN mirrors search_by_vector's DEFAULT candidate filter EXACTLY:
+    # status='active' AND review_status='active' AND write_provenance != 'agent'.
+    # The audit resolves a miss by searching via that same default path, so a probe
+    # whose memory the search would never return (quarantined pending_review, or
+    # agent-provenance) is not a recall failure — it's the review/provenance gate
+    # working as designed. Selecting it would count a GUARANTEED miss and inflate
+    # the reconciliation rate (measured: 10 of 11 active-arm misses were
+    # pending_review memories with self-similarity ~0.9 but permanently unrankable).
+    # Unlike Phase 1.5's one-way disable (for permanently-archived memories),
+    # review_status is TRANSIENT: a pending_review memory is skipped here without
+    # disabling its probe, so it re-enters the audit automatically once approved.
     probe_types = ["active", "reaREDACTED"] if active_probing_enabled else ["reaREDACTED"]
 
     probes = await get_db(pool).fetch(
         """
         SELECT c.probe_id, c.memory_id, c.probe_text, c.probe_type
         FROM recall_canary c
-        JOIN memories m ON m.id = c.memory_id AND m.status = 'active'
+        JOIN memories m ON m.id = c.memory_id
+            AND m.status = 'active'
+            AND m.review_status = 'active'
+            AND m.write_provenance != 'agent'
         WHERE c.enabled = TRUE AND c.probe_type = ANY($1::text[])
         ORDER BY c.probe_id
         """,
