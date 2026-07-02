@@ -3611,6 +3611,10 @@ async def weft_check_health(
       while calibration_records grow is the dead tell the loop has stalled).
     - replay_queue_depth: count of pending rows in replay_queue (episodes
       awaiting belief re-extraction; rises when the replay loop falls behind).
+    - replay_queue_stale_pending: count of pending rows older than the retention
+      staleness window (REPLAY_QUEUE_STALENESS_DAYS). Non-zero means the executor
+      is not draining rows to a terminal status — those rows no longer pin their
+      turns (L4 retention sheds them), but the executor still needs attention.
     - replay_claims_30d: count of belief_claims written by the replay loop in
       the last 30 days. Returns 0 until Epic 3 wires the replay writer.
       Epic 3 MUST set detector_version to a value starting with 'replay-'
@@ -3628,6 +3632,7 @@ async def weft_check_health(
         from weft.replay import (
             REPLAY_DETECTOR_VERSION_PREFIX,
             REPLAY_QUEUE_STATUS_PENDING,
+            count_stale_pending_replays,
         )
         from weft.store import get_recent_recall_queries
 
@@ -3647,6 +3652,16 @@ async def weft_check_health(
             db = get_db(app.pool)
             replay_queue_depth: int = await db.fetchval(
                 f"SELECT count(*) FROM replay_queue WHERE status = '{REPLAY_QUEUE_STATUS_PENDING}'"
+            )
+            # PROOF metric 3b: STALE pending rows — pending longer than the
+            # retention staleness window (weft-99cac4e5). The L4 retention guard
+            # stops honoring these, so their turns can shed; a non-zero count is
+            # the visible tell that the executor is NOT draining rows to a
+            # terminal status (loop not running, unwritable user_id, poison row).
+            # replay_queue_depth can look healthy while stale rows accumulate, so
+            # this is surfaced as its own signal rather than folded into depth.
+            replay_queue_stale_pending: int = await count_stale_pending_replays(
+                app.pool
             )
             # PROOF metric 4: replay-origin belief_claims in last 30 days.
             # The replay executor (E2.L7) stamps detector_version with the
@@ -3685,6 +3700,7 @@ async def weft_check_health(
         payload["reask_rate"] = reask_rate
         payload["auto_originated_tier_changes_30d"] = auto_tier_count
         payload["replay_queue_depth"] = replay_queue_depth
+        payload["replay_queue_stale_pending"] = replay_queue_stale_pending
         payload["replay_claims_30d"] = replay_claims_30d
         payload["failure_counters"] = failure_counters
         return payload

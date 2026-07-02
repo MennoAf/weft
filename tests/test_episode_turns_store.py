@@ -699,3 +699,108 @@ async def test_replay_retention_below_importance_without_queue(pool):
     assert deleted == 1
     surviving = [t.id for t in await list_turns(pool, ep.id)]
     assert len(surviving) == 0
+
+
+# --- Stale pending replay_queue rows must NOT pin turns forever (weft-99cac4e5) ---
+#
+# A row orphaned in 'pending' (executor never ran, unwritable user_id, poison
+# row) would otherwise retain its turns FOREVER. Retention stops honoring a
+# pending row once it is older than REPLAY_QUEUE_STALENESS_DAYS, so the turns
+# shed on the next sweep.
+
+
+async def _insert_replay_row(pool, ep_id, turn_ids, *, age_days: float, status="pending"):
+    """Insert a replay_queue row whose created_at is age_days in the past."""
+    rq_id = f"rq-stale-{asyncio.current_task().get_name()}-{age_days}"
+    await pool.execute(
+        """
+        INSERT INTO replay_queue (id, episode_id, turn_ids, reason, status, user_id, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, now() - ($7 || ' days')::interval)
+        """,
+        rq_id, ep_id, turn_ids, "stale replay test", status, "test-user", str(age_days),
+    )
+    return rq_id
+
+
+async def test_stale_pending_replay_sheds_turns_after_graduation(pool):
+    """delete_turns_after_graduation deletes turns held only by a STALE pending row."""
+    ep = await _make_episode(pool)
+    t1 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="stale shed 1"),
+    )
+    t2 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.assistant, content="stale shed 2"),
+    )
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id IN ($1, $2)", t1.id, t2.id,
+    )
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+    # Pending, but enqueued 20 days ago (> 14-day staleness window): orphaned.
+    await _insert_replay_row(pool, ep.id, [t1.id, t2.id], age_days=20)
+
+    result = await delete_turns_after_graduation(
+        pool, high_threshold=0.7, ttl_days_scored=90, ttl_days_no_score=30,
+    )
+
+    assert result["scored_deleted"] == 2, "stale pending row must not pin turns"
+    assert len(await list_turns(pool, ep.id)) == 0
+
+
+async def test_fresh_pending_still_retains_but_stale_sheds_boundary(pool):
+    """A just-fresh pending row retains; the same row aged past the window sheds."""
+    ep = await _make_episode(pool)
+    t1 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="boundary turn"),
+    )
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id = $1", t1.id,
+    )
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+    # 10 days old — inside the 14-day window — still protects.
+    rq_id = await _insert_replay_row(pool, ep.id, [t1.id], age_days=10)
+    result = await delete_turns_after_graduation(
+        pool, high_threshold=0.7, ttl_days_scored=90, ttl_days_no_score=30,
+    )
+    assert result["scored_deleted"] == 0
+    assert t1.id in [t.id for t in await list_turns(pool, ep.id)]
+
+    # Age the same row past the window — now it sheds.
+    await pool.execute(
+        "UPDATE replay_queue SET created_at = now() - interval '20 days' WHERE id = $1", rq_id,
+    )
+    result2 = await delete_turns_after_graduation(
+        pool, high_threshold=0.7, ttl_days_scored=90, ttl_days_no_score=30,
+    )
+    assert result2["scored_deleted"] == 1
+    assert len(await list_turns(pool, ep.id)) == 0
+
+
+async def test_stale_pending_replay_sheds_age_only_fallback(pool):
+    """delete_turns_for_graduated_episode (age-only) sheds turns held by a stale row."""
+    ep = await _make_episode(pool)
+    t1 = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="fallback stale"),
+    )
+    await _graduate_episode_aged(pool, ep.id, days_ago=60)
+    await _insert_replay_row(pool, ep.id, [t1.id], age_days=20)
+
+    deleted = await delete_turns_for_graduated_episode(pool, older_than_days=30)
+    assert deleted == 1
+    assert len(await list_turns(pool, ep.id)) == 0
+
+
+async def test_stale_pending_replay_sheds_below_importance(pool):
+    """delete_turns_below_importance sheds a low-score turn held by a stale row."""
+    ep = await _make_episode(pool)
+    t_low = await append_turn(
+        pool, EpisodeTurnCreate(episode_id=ep.id, role=TurnRole.user, content="stale below-importance"),
+    )
+    await pool.execute(
+        "UPDATE episode_turns SET importance_score = 0.2 WHERE id = $1", t_low.id,
+    )
+    await _graduate_episode_aged(pool, ep.id, days_ago=100)
+    await _insert_replay_row(pool, ep.id, [t_low.id], age_days=20)
+
+    deleted = await delete_turns_below_importance(pool, threshold=0.7, older_than_days=30)
+    assert deleted == 1
+    assert len(await list_turns(pool, ep.id)) == 0
