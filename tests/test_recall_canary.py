@@ -49,13 +49,14 @@ def embedder():
 
 @pytest.fixture(autouse=True)
 async def clean_canary(pool):
-    """Truncate recall_canary before each test.
+    """Truncate recall_canary (+ its audit event log) before each test.
 
-    conftest.py's TRUNCATE list predates this table (v63 is new).  This
+    conftest.py's TRUNCATE list predates these tables (v63/v66 are newer).  This
     autouse fixture fills the gap until conftest is updated.  Follow-up:
-    add 'recall_canary' to the TRUNCATE list in tests/conftest.py.
+    add 'recall_canary' + 'recall_canary_audit' to the TRUNCATE list in
+    tests/conftest.py. CASCADE covers the recall_canary_audit FK.
     """
-    await pool.execute("TRUNCATE recall_canary")
+    await pool.execute("TRUNCATE recall_canary, recall_canary_audit CASCADE")
     yield
 
 
@@ -640,27 +641,63 @@ async def test_reask_bootstrap_enroll_populates_user_id_from_query(pool, embedde
 # ---------------------------------------------------------------------------
 
 
-async def test_canary_health_dark_when_never_audited(pool):
+async def _store_active_memory(pool, embedder, content, topic="health"):
+    """Store a real, searchable memory (current active universe).
+
+    canary_health JOINs the same universe search_by_vector uses (status +
+    review_status='active' + write_provenance!='agent'), so its probes must
+    reference real active memories — a bare fake memory_id no longer surfaces
+    in the aggregate.
+    """
+    emb = await embedder.embed(content)
+    return await store_memory(
+        pool,
+        MemoryCreate(type=MemoryType.fact, content=content, topic=[topic]),
+        embedding=emb,
+    )
+
+
+async def _record_audit_event(pool, probe_id, *, hit, age_days=0.0):
+    """Insert one recall_canary_audit event with a controllable age.
+
+    age_days lets a test place an outcome inside or outside the trailing
+    health window to exercise windowing.
+    """
+    await pool.execute(
+        "INSERT INTO recall_canary_audit (probe_id, user_id, hit, audited_at) "
+        "VALUES ($1, $2, $3, now() - make_interval(secs => $4))",
+        probe_id,
+        DEFAULT_TEST_USER_ID,
+        hit,
+        float(age_days) * 86400.0,
+    )
+
+
+async def test_canary_health_dark_when_never_audited(pool, embedder):
     """A meter with probes but no audit is DARK with a loud alert — the
     failure mode that let the meter sit unaudited for weeks."""
-    await enroll_canary(pool, "mem-h1", "health probe one", probe_type="active")
+    mem = await _store_active_memory(pool, embedder, "health probe one")
+    await enroll_canary(pool, mem.id, "health probe one", probe_type="active")
     health = await canary_health(pool, DEFAULT_TEST_USER_ID)
     assert health is not None
     assert health["dark"] is True
     assert health["dark_reason"] == "never audited"
     assert "alert" in health and "DARK" in health["alert"]
     assert "active" in health["arms"]
+    # No windowed events yet → thin sample → uncalibrated.
     assert health["arms"]["active"]["label"] == "uncalibrated"
+    assert health["arms"]["active"]["checks"] == 0
 
 
-async def test_canary_health_fresh_after_audit(pool):
-    """A recently-audited meter is not dark and reports the arm miss_rate."""
-    pid = await enroll_canary(pool, "mem-h2", "health probe two", probe_type="active")
+async def test_canary_health_fresh_after_audit(pool, embedder):
+    """A recently-audited meter is not dark and reports the windowed miss_rate."""
+    mem = await _store_active_memory(pool, embedder, "health probe two")
+    pid = await enroll_canary(pool, mem.id, "health probe two", probe_type="active")
+    # Liveness comes from recall_canary.last_audit_at; the rate from the log.
     await pool.execute(
-        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 1, "
-        "miss_count = 0 WHERE probe_id = $1",
-        pid,
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
     )
+    await _record_audit_event(pool, pid, hit=True)
     health = await canary_health(pool, DEFAULT_TEST_USER_ID)
     assert health is not None
     assert health["dark"] is False
@@ -668,14 +705,16 @@ async def test_canary_health_fresh_after_audit(pool):
     assert "alert" not in health
     assert health["arms"]["active"]["miss_rate"] == 0.0
     assert health["arms"]["active"]["audited"] == 1
+    assert health["arms"]["active"]["checks"] == 1
 
 
-async def test_canary_health_dark_when_stale(pool):
+async def test_canary_health_dark_when_stale(pool, embedder):
     """An audit older than the stale window flips the meter back to DARK."""
-    pid = await enroll_canary(pool, "mem-h3", "health probe three", probe_type="active")
+    mem = await _store_active_memory(pool, embedder, "health probe three")
+    pid = await enroll_canary(pool, mem.id, "health probe three", probe_type="active")
     await pool.execute(
-        "UPDATE recall_canary SET last_audit_at = now() - interval '60 hours', "
-        "audit_count = 1 WHERE probe_id = $1",
+        "UPDATE recall_canary SET last_audit_at = now() - interval '60 hours' "
+        "WHERE probe_id = $1",
         pid,
     )
     health = await canary_health(pool, DEFAULT_TEST_USER_ID)
@@ -685,25 +724,136 @@ async def test_canary_health_dark_when_stale(pool):
     assert "alert" in health
 
 
-async def test_canary_health_miss_rate_aggregates(pool):
-    """miss_rate = sum(miss_count) / sum(audit_count) across the arm."""
-    p1 = await enroll_canary(pool, "mem-h4a", "probe miss", probe_type="active")
-    p2 = await enroll_canary(pool, "mem-h4b", "probe hit", probe_type="active")
-    await pool.execute(
-        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 1, "
-        "miss_count = 1 WHERE probe_id = $1",
-        p1,
-    )
-    await pool.execute(
-        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 1, "
-        "miss_count = 0 WHERE probe_id = $1",
-        p2,
-    )
+async def test_canary_health_miss_rate_aggregates(pool, embedder):
+    """miss_rate = windowed misses / checks across the arm's event log."""
+    m1 = await _store_active_memory(pool, embedder, "probe miss content")
+    m2 = await _store_active_memory(pool, embedder, "probe hit content")
+    p1 = await enroll_canary(pool, m1.id, "probe miss content", probe_type="active")
+    p2 = await enroll_canary(pool, m2.id, "probe hit content", probe_type="active")
+    await pool.execute("UPDATE recall_canary SET last_audit_at = now()")
+    await _record_audit_event(pool, p1, hit=False)
+    await _record_audit_event(pool, p2, hit=True)
     health = await canary_health(pool, DEFAULT_TEST_USER_ID)
     assert health is not None
     assert health["arms"]["active"]["miss_rate"] == 0.5
     assert health["arms"]["active"]["misses"] == 1
     assert health["arms"]["active"]["checks"] == 2
+    assert health["arms"]["active"]["audited"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Windowed rate — the fix: stale outcomes age out; a freshly-departed universe
+# member's recent events drop via the JOIN. Together these clear the false
+# tripwire that a monotonic lifetime aggregate would keep firing forever.
+# ---------------------------------------------------------------------------
+
+
+async def test_canary_health_windowed_rate_ages_out_old_misses(pool, embedder):
+    """Old misses outside the window do NOT inflate the rate — the whole point.
+
+    A lifetime aggregate would report ~50% here (40 misses / 80 checks) and trip
+    the 10% ceiling forever. The windowed rate sees only the recent cohort.
+    """
+    mem = await _store_active_memory(pool, embedder, "aging probe content")
+    pid = await enroll_canary(pool, mem.id, "aging probe content", probe_type="active")
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
+    )
+    # 40 misses long ago (outside the 14d window) + 40 recent hits (inside it).
+    for _ in range(40):
+        await _record_audit_event(pool, pid, hit=False, age_days=20)
+        await _record_audit_event(pool, pid, hit=True, age_days=1)
+
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    arm = health["arms"]["active"]
+    assert arm["checks"] == 40, "only in-window events count"
+    assert arm["misses"] == 0
+    assert arm["miss_rate"] == 0.0
+    assert arm["trustworthy"] is True  # 40 >= 30-check sample gate
+    assert arm["tripped"] is False, "stale misses aged out — tripwire must clear"
+    assert "tripwire" not in health
+
+
+async def test_canary_health_join_excludes_departed_universe_probe(pool, embedder):
+    """A probe whose memory just left the searchable universe drops out — even
+    with recent MISS events — instead of firing the tripwire on a guaranteed miss.
+
+    This is the artifact that started it all (PR #31), enforced one level up at
+    the health surface: pending_review memories can never surface, so their
+    recent 'misses' are not recall regressions.
+    """
+    mem = await _store_active_memory(pool, embedder, "departing probe content")
+    pid = await enroll_canary(
+        pool, mem.id, "departing probe content", probe_type="active"
+    )
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
+    )
+    # Enough recent misses to trip a trustworthy arm...
+    for _ in range(35):
+        await _record_audit_event(pool, pid, hit=False, age_days=1)
+    # ...but the memory is now pending_review (outside the search universe).
+    await pool.execute(
+        "UPDATE memories SET review_status = 'pending_review' WHERE id = $1", mem.id
+    )
+
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    # Only arm was 'active' and it left the universe → nothing to report, and
+    # crucially NO tripwire fired on the guaranteed-miss events.
+    assert health is None or "active" not in health.get("arms", {})
+    if health is not None:
+        assert not health.get("tripwire")
+
+
+async def test_canary_health_windowed_tripwire_fires_on_real_regression(pool, embedder):
+    """The windowed rate still SCREAMS for a genuine, recent recall regression."""
+    mem = await _store_active_memory(pool, embedder, "regressing probe content")
+    pid = await enroll_canary(
+        pool, mem.id, "regressing probe content", probe_type="active"
+    )
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
+    )
+    # 30 recent checks, 12 recent misses → 40% in-window > 10% ceiling.
+    for i in range(30):
+        await _record_audit_event(pool, pid, hit=(i >= 12), age_days=1)
+
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    arm = health["arms"]["active"]
+    assert arm["trustworthy"] is True
+    assert arm["miss_rate"] == 0.4
+    assert arm["tripped"] is True
+    assert "tripwire" in health and "10%" in health["tripwire"]
+
+
+async def test_audit_prunes_events_past_retention(pool, embedder):
+    """run_canary_audit prunes recall_canary_audit rows older than the retention
+    horizon, keeping the windowed-rate query bounded, while writing this run's."""
+    mem = await _store_active_memory(pool, embedder, "retention probe content")
+    pid = await enroll_canary(
+        pool, mem.id, "retention probe content", probe_type="reaREDACTED"
+    )
+    # An event well past the 30d retention horizon.
+    await _record_audit_event(pool, pid, hit=True, age_days=45)
+    old_before = await get_db(pool).fetchval(
+        "SELECT count(*) FROM recall_canary_audit WHERE audited_at < now() - "
+        "interval '40 days'"
+    )
+    assert old_before == 1
+
+    await run_canary_audit(pool, embedder, top_k=5)
+
+    old_after = await get_db(pool).fetchval(
+        "SELECT count(*) FROM recall_canary_audit WHERE audited_at < now() - "
+        "interval '40 days'"
+    )
+    assert old_after == 0, "retention prune must delete rows past the horizon"
+    fresh = await get_db(pool).fetchval(
+        "SELECT count(*) FROM recall_canary_audit WHERE probe_id = $1 "
+        "AND audited_at > now() - interval '1 hour'",
+        pid,
+    )
+    assert fresh == 1, "the audit must log this run's outcome as a fresh event"
 
 
 # ---------------------------------------------------------------------------
@@ -878,16 +1028,17 @@ async def test_existing_degenerate_reask_probe_disabled(pool, embedder):
 # ---------------------------------------------------------------------------
 
 
-async def test_canary_health_trustworthy_when_sample_sufficient(pool):
-    """At/above the min sample with a healthy rate: trustworthy, no 'uncalibrated',
-    no tripwire."""
-    pid = await enroll_canary(pool, "mem-trust", "trust probe", probe_type="active")
-    # 40 checks, 1 miss => 2.5% (below the 10% ceiling), sample >= 30.
+async def test_canary_health_trustworthy_when_sample_sufficient(pool, embedder):
+    """At/above the min WINDOWED sample with a healthy rate: trustworthy, no
+    'uncalibrated', no tripwire."""
+    mem = await _store_active_memory(pool, embedder, "trust probe content")
+    pid = await enroll_canary(pool, mem.id, "trust probe content", probe_type="active")
     await pool.execute(
-        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 40, "
-        "miss_count = 1 WHERE probe_id = $1",
-        pid,
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
     )
+    # 40 in-window checks, 1 miss => 2.5% (below the 10% ceiling), sample >= 30.
+    for i in range(40):
+        await _record_audit_event(pool, pid, hit=(i != 0), age_days=1)
     health = await canary_health(pool, DEFAULT_TEST_USER_ID)
     active = health["arms"]["active"]
     assert active["trustworthy"] is True
@@ -896,15 +1047,17 @@ async def test_canary_health_trustworthy_when_sample_sufficient(pool):
     assert "tripwire" not in health
 
 
-async def test_canary_health_tripwire_fires_on_high_miss_rate(pool):
-    """A trustworthy arm whose miss_rate crosses the ceiling raises a loud tripwire."""
-    pid = await enroll_canary(pool, "mem-trip", "trip probe", probe_type="active")
-    # 40 checks, 8 misses => 20% (above the 10% ceiling), sample >= 30.
+async def test_canary_health_tripwire_fires_on_high_miss_rate(pool, embedder):
+    """A trustworthy arm whose windowed miss_rate crosses the ceiling raises a
+    loud tripwire."""
+    mem = await _store_active_memory(pool, embedder, "trip probe content")
+    pid = await enroll_canary(pool, mem.id, "trip probe content", probe_type="active")
     await pool.execute(
-        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 40, "
-        "miss_count = 8 WHERE probe_id = $1",
-        pid,
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
     )
+    # 40 in-window checks, 8 misses => 20% (above the 10% ceiling), sample >= 30.
+    for i in range(40):
+        await _record_audit_event(pool, pid, hit=(i >= 8), age_days=1)
     health = await canary_health(pool, DEFAULT_TEST_USER_ID)
     active = health["arms"]["active"]
     assert active["trustworthy"] is True
@@ -914,15 +1067,16 @@ async def test_canary_health_tripwire_fires_on_high_miss_rate(pool):
     assert "active" in health["tripwire"]
 
 
-async def test_canary_health_no_trip_below_min_sample(pool):
-    """A high miss_rate on a thin sample must NOT trip — it stays uncalibrated."""
-    pid = await enroll_canary(pool, "mem-thin", "thin probe", probe_type="active")
-    # 5 checks, 5 misses => 100% rate but sample < 30: guarded.
+async def test_canary_health_no_trip_below_min_sample(pool, embedder):
+    """A high miss_rate on a thin WINDOWED sample must NOT trip — uncalibrated."""
+    mem = await _store_active_memory(pool, embedder, "thin probe content")
+    pid = await enroll_canary(pool, mem.id, "thin probe content", probe_type="active")
     await pool.execute(
-        "UPDATE recall_canary SET last_audit_at = now(), audit_count = 5, "
-        "miss_count = 5 WHERE probe_id = $1",
-        pid,
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
     )
+    # 5 in-window checks, 5 misses => 100% rate but sample < 30: guarded.
+    for _ in range(5):
+        await _record_audit_event(pool, pid, hit=False, age_days=1)
     health = await canary_health(pool, DEFAULT_TEST_USER_ID)
     active = health["arms"]["active"]
     assert active["trustworthy"] is False

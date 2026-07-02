@@ -485,11 +485,12 @@ async def run_canary_audit(
     # duplicate-merge) flip memories to status!='active' via direct UPDATEs that
     # bypass delete_memory()'s probe-disable. Left enabled, those orphan probes can
     # NEVER surface their (now non-active) memory — search_by_vector only returns
-    # active memories — so every audit records them as misses and inflates the
-    # reconciliation miss-rate (canary_health sums miss_count over enabled probes).
-    # Disable them here (idempotent, RLS-scoped, covers hard-deletes via NOT EXISTS)
-    # so the audit loop AND the canary_health aggregate self-heal within one cycle,
-    # regardless of which path archived the memory.
+    # active memories — so every audit would record them as misses (phantom miss
+    # events) and inflate the reconciliation miss-rate. Disable them here
+    # (idempotent, RLS-scoped, covers hard-deletes via NOT EXISTS) so the audit
+    # loop stops probing them within one cycle, regardless of which path archived
+    # the memory. (canary_health also JOINs the current active universe, so a
+    # freshly-archived probe's recent events drop out of the windowed rate too.)
     probes_disabled = int(
         await get_db(pool).fetchval(
             """
@@ -530,7 +531,7 @@ async def run_canary_audit(
 
     probes = await get_db(pool).fetch(
         """
-        SELECT c.probe_id, c.memory_id, c.probe_text, c.probe_type
+        SELECT c.probe_id, c.memory_id, c.probe_text, c.probe_type, c.user_id
         FROM recall_canary c
         JOIN memories m ON m.id = c.memory_id
             AND m.status = 'active'
@@ -648,6 +649,32 @@ async def run_canary_audit(
                 probe["probe_type"],
             )
 
+        # Append this run's outcome to the windowed event log. canary_health
+        # computes its miss rate over a trailing time window of these rows, so
+        # stale outcomes age out instead of pinning the lifetime counters
+        # forever (see v66 migration). user_id is set EXPLICITLY from the probe
+        # row: the raw scheduler pool leaves app.user_id unset, so the column
+        # default would resolve to NULL and trip NOT NULL (same trap the
+        # reaREDACTED enroll hit).
+        await get_db(pool).execute(
+            """
+            INSERT INTO recall_canary_audit (probe_id, user_id, hit)
+            VALUES ($1, $2, $3)
+            """,
+            probe_id,
+            probe["user_id"],
+            not is_miss,
+        )
+
+    # --- Retention: bound the event log so the windowed query stays cheap ---
+    # Keep a buffer beyond the health window so the window is always fully
+    # covered; older rows can never affect a windowed rate, so prune them.
+    await get_db(pool).execute(
+        "DELETE FROM recall_canary_audit "
+        "WHERE audited_at < now() - make_interval(days => $1)",
+        _CANARY_AUDIT_RETENTION_DAYS,
+    )
+
     miss_rate = misses / probes_checked if probes_checked > 0 else 0.0
     logger.info(
         "canary audit complete: probes_checked=%d misses=%d miss_rate=%.3f "
@@ -690,89 +717,122 @@ _CANARY_MIN_TRIP_SAMPLE = 30
 # more robust than overfitting a constant to it.
 _CANARY_MISS_RATE_ALERT_THRESHOLD = 0.10
 
+# Trailing window (days) over which canary_health computes the miss rate from the
+# recall_canary_audit event log. A WINDOWED rate — not the lifetime counter sum —
+# so a burst of historical misses ages out once recall recovers, instead of
+# pinning the rate (and the drift tripwire) forever. 14 days ≈ 14 daily audit
+# cohorts, enough samples for the >=30-check trustworthy gate while staying recent.
+_CANARY_HEALTH_WINDOW_DAYS = 14
+
+# Retention horizon (days) for recall_canary_audit rows. Kept > the health window
+# so the trailing window is always fully covered, with a buffer of history for
+# ad-hoc diagnostics; rows older than this can never affect a windowed rate and
+# are pruned each audit run to keep the log bounded.
+_CANARY_AUDIT_RETENTION_DAYS = 30
+
 
 async def canary_health(
     pool: asyncpg.Pool, user_id: str | None = None
 ) -> dict | None:
     """Reconciliation-meter health summary for the primer and daily brief.
 
-    Read-only aggregate over ``recall_canary`` grouped by probe arm. Per arm it
-    reports enrolled/audited probe counts and a lifetime ``miss_rate``
-    (``sum(miss_count) / sum(audit_count)`` — both bump on every hit and miss,
-    so this equals the latest run's rate when stable).
+    Per probe arm it reports enrolled/audited probe counts and a **windowed**
+    ``miss_rate`` — misses / checks over the ``recall_canary_audit`` event log
+    within the trailing ``_CANARY_HEALTH_WINDOW_DAYS`` (v66). This replaced the
+    old *lifetime* aggregate (``sum(miss_count)/sum(audit_count)`` over monotonic
+    counters), which could never fall: a burst of historical misses pinned the
+    rate — and the drift tripwire — forever. Concretely, PR #31 skips (does not
+    disable) pending_review/agent-provenance probes, so their banked artifact
+    misses lingered in the lifetime sum and, once PR #32 made the arm trustworthy,
+    fired the tripwire on stale data. Windowing ages those outcomes out.
+
+    Two universe filters keep the rate honest:
+    * TIME — only events within the trailing window count, so old outcomes decay.
+    * CURRENT UNIVERSE — a JOIN to ``memories`` on the SAME default filter
+      ``search_by_vector`` uses (``status='active' AND review_status='active' AND
+      write_provenance != 'agent'``) drops probes whose memory is no longer
+      searchable, even if they have recent events. This mirrors the audit's own
+      Phase-2 selection (PR #31), one level up at the health surface.
+
+    Liveness (``dark`` / ``last_audit_at``) still comes from
+    ``recall_canary.last_audit_at`` — "did the audit RUN", independent of the
+    outcome window — so a meter with probes but no recent audit still SCREAMS.
 
     Trustworthiness is sample-based, not probe-type-based: an arm is
-    ``trustworthy`` once it has ``>= _CANARY_MIN_TRIP_SAMPLE`` audited checks
-    (below that it carries ``label='uncalibrated'``). This replaced the old
-    hardcode that trusted the reaREDACTED arm on faith — a poisoned probe had
-    made that arm 100% miss while still labelled trustworthy (PR #31). With the
-    active arm's baseline artifact removed, its ~2.6% is now a real signal.
+    ``trustworthy`` once its WINDOWED ``checks >= _CANARY_MIN_TRIP_SAMPLE``
+    (below that it carries ``label='uncalibrated'``). The drift ``tripwire``
+    fires only for a trustworthy arm whose windowed ``miss_rate`` crosses
+    ``_CANARY_MISS_RATE_ALERT_THRESHOLD`` — gated on the min-sample so a thin
+    sample can't false-trip.
 
-    Two loud, human-readable signals surface on the one surface a human reads
-    every session:
-    * ``dark`` / ``alert``: the meter has NEVER audited or is older than
-      ``_CANARY_STALE_HOURS`` — a dead meter SCREAMS instead of failing silent.
-    * ``tripwire``: a trustworthy arm's ``miss_rate`` crossed
-      ``_CANARY_MISS_RATE_ALERT_THRESHOLD`` — a live recall regression. Gated on
-      the min-sample so a tiny sample can't false-trip.
-
-    ``user_id`` scopes the read EXPLICITLY (``WHERE user_id = $1``) rather than
-    relying on the ``app.user_id`` GUC — the primer and scheduler contexts do
-    not reliably set it (the same NULL-GUC gap that broke reaREDACTED
-    enrollment). Returns None on any error — best-effort, never breaks prime.
+    ``user_id`` scopes the read EXPLICITLY rather than relying on the
+    ``app.user_id`` GUC — the primer and scheduler contexts do not reliably set
+    it (the same NULL-GUC gap that broke reaREDACTED enrollment). Returns
+    None on any error, or when no enabled probe is in the current universe —
+    best-effort, never breaks prime.
     """
     from datetime import datetime, timezone
 
+    _UNIVERSE = (
+        "m.status = 'active' AND m.review_status = 'active' "
+        "AND m.write_provenance != 'agent'"
+    )
     try:
-        if user_id is not None:
-            rows = await get_db(pool).fetch(
-                """
-                SELECT probe_type,
-                       count(*)                               AS probes,
-                       count(*) FILTER (WHERE audit_count > 0) AS audited,
-                       coalesce(sum(miss_count), 0)           AS misses,
-                       coalesce(sum(audit_count), 0)          AS checks,
-                       max(last_audit_at)                     AS last_audit_at
-                FROM recall_canary
-                WHERE enabled = TRUE AND user_id = $1
-                GROUP BY probe_type
-                """,
-                user_id,
-            )
-        else:
-            # No explicit scope: lean on RLS (app.user_id GUC) for tenant
-            # boundary. Used by callers that already run inside acquire().
-            rows = await get_db(pool).fetch(
-                """
-                SELECT probe_type,
-                       count(*)                               AS probes,
-                       count(*) FILTER (WHERE audit_count > 0) AS audited,
-                       coalesce(sum(miss_count), 0)           AS misses,
-                       coalesce(sum(audit_count), 0)          AS checks,
-                       max(last_audit_at)                     AS last_audit_at
-                FROM recall_canary
-                WHERE enabled = TRUE
-                GROUP BY probe_type
-                """
-            )
+        # Query 1 — enrolled-probe skeleton + liveness. Drives arm presence, the
+        # ``probes`` count, and dark/stale (last_audit_at = "when did we audit",
+        # universe-independent of the outcome window).
+        skeleton = await get_db(pool).fetch(
+            f"""
+            SELECT c.probe_type,
+                   count(*)             AS probes,
+                   max(c.last_audit_at) AS last_audit_at
+            FROM recall_canary c
+            JOIN memories m ON m.id = c.memory_id AND {_UNIVERSE}
+            WHERE c.enabled = TRUE
+              AND ($1::text IS NULL OR c.user_id = $1)
+            GROUP BY c.probe_type
+            """,
+            user_id,
+        )
+        # Query 2 — windowed outcomes from the event log, same universe filter.
+        window = await get_db(pool).fetch(
+            f"""
+            SELECT c.probe_type,
+                   count(a.id)                             AS checks,
+                   count(a.id) FILTER (WHERE NOT a.hit)    AS misses,
+                   count(DISTINCT a.probe_id)              AS audited
+            FROM recall_canary_audit a
+            JOIN recall_canary c ON c.probe_id = a.probe_id AND c.enabled = TRUE
+            JOIN memories m ON m.id = c.memory_id AND {_UNIVERSE}
+            WHERE a.audited_at > now() - make_interval(days => $1)
+              AND ($2::text IS NULL OR a.user_id = $2)
+            GROUP BY c.probe_type
+            """,
+            _CANARY_HEALTH_WINDOW_DAYS,
+            user_id,
+        )
     except Exception:
         logger.debug("canary_health: aggregate query failed", exc_info=True)
         return None
 
-    if not rows:
+    if not skeleton:
         return None
+
+    windowed = {r["probe_type"]: r for r in window}
 
     arms: dict[str, dict] = {}
     overall_last = None
     tripped_arms: list[tuple[str, float]] = []
-    for r in rows:
-        checks = int(r["checks"] or 0)
-        misses = int(r["misses"] or 0)
+    for r in skeleton:
+        w = windowed.get(r["probe_type"])
+        checks = int(w["checks"]) if w else 0
+        misses = int(w["misses"]) if w else 0
+        audited = int(w["audited"]) if w else 0
         last = r["last_audit_at"]
         miss_rate = round(misses / checks, 4) if checks else None
-        # Trustworthy once the sample is large enough for the rate to mean
-        # something — arm-type-agnostic. Below the threshold the arm is flagged
-        # 'uncalibrated' so a thin sample is never mistaken for a real rate.
+        # Trustworthy once the WINDOWED sample is large enough for the rate to
+        # mean something — arm-type-agnostic. Below the threshold the arm is
+        # flagged 'uncalibrated' so a thin sample is never mistaken for a rate.
         trustworthy = checks >= _CANARY_MIN_TRIP_SAMPLE
         # Drift tripwire: only a trustworthy arm whose rate crosses the absolute
         # ceiling counts — the min-sample gate is baked into `trustworthy`.
@@ -783,7 +843,7 @@ async def canary_health(
         )
         arm = {
             "probes": int(r["probes"]),
-            "audited": int(r["audited"]),
+            "audited": audited,
             "misses": misses,
             "checks": checks,
             "miss_rate": miss_rate,

@@ -34,8 +34,8 @@ def embedder():
 
 @pytest.fixture(autouse=True)
 async def clean_canary(pool):
-    """Truncate recall_canary before each test (v63 table)."""
-    await pool.execute("TRUNCATE recall_canary")
+    """Truncate recall_canary (+ its v66 audit event log) before each test."""
+    await pool.execute("TRUNCATE recall_canary, recall_canary_audit CASCADE")
     yield
 
 
