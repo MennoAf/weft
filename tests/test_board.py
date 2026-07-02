@@ -1,10 +1,13 @@
-"""Unit tests for weft.board — Item model, urgency bucketing, and ranking.
+"""Unit + integration tests for weft.board.
 
 Tests cover:
 - Item schema construction and serialization per PRD §Interfaces
 - Urgency bucketing per PRD §Validation V2 (overdue/due_soon/pending/no_date)
 - Ranking within a bucket (oldest-due-first, age_days desc, title)
 - Boundary cases at exactly now and exactly horizon cutoff
+- assemble_board() fan-out against a real testcontainers Postgres: multi-source
+  assembly + bucketing (V2), per-source isolation on failure (V5), and
+  per_source_cap truncation surfacing (V7)
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from weft.board import (
     Urgency,
     _TRIGGER_HIDE_KINDS,
     alert_adapter,
+    assemble_board,
     calculate_urgency,
     rank_items,
     review_adapter,
@@ -29,16 +33,21 @@ from weft.board import (
 )
 from weft.models import (
     Alert,
+    AlertChannel,
+    AlertCreate,
     AlertStatus,
     AlertType,
     Memory,
+    MemoryCreate,
     MemoryType,
     NudgeMode,
     Tracker,
+    TrackerCreate,
     TrackerKind,
     TrackerState,
     Trigger,
     TriggerConditionType,
+    TriggerCreate,
     TriggerStatus,
 )
 from weft.skills import TaskEntry
@@ -1626,3 +1635,264 @@ class TestReviewAdapter:
         d = item.to_dict()
         assert d["id"] == "weft-review-complete"
         assert d["source"] == "review"
+
+
+# assemble_board integration tests — real testcontainers Postgres
+
+class TestAssembleBoardIntegration:
+    """assemble_board() against a real Postgres pool (tests/conftest.py `pool`).
+
+    Proves the behavior unit tests over pure functions can't: concurrent
+    fan-out across the five real source-fetch functions, per-source
+    isolation (V5), per_source_cap truncation surfacing (V7), multi-source
+    bucketing (V2), and read-purity (V6).
+    """
+
+    async def test_assembles_and_buckets_items_from_all_five_sources(self, pool):
+        """(a) items from multiple sources assemble + bucket (V2)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.alerts import create_alert
+        from weft.store import store_memory
+        from weft.trackers import create_tracker
+        from weft.triggers import create_trigger
+
+        now = datetime.now(timezone.utc)
+
+        # Overdue tracker (nudge_after in the past)
+        await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Overdue tracker item",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(days=2),
+            ),
+        )
+
+        # Due-soon alert (trigger_at within default 7d horizon)
+        await create_alert(
+            pool,
+            AlertCreate(
+                alert_type=AlertType.due_task,
+                title="Due soon alert",
+                trigger_at=now + timedelta(days=1),
+                channel=AlertChannel.log,
+            ),
+        )
+
+        # Pending trigger (time-condition due_at beyond the default horizon)
+        far_future = (now + timedelta(days=30)).isoformat()
+        await create_trigger(
+            pool,
+            TriggerCreate(
+                name="Renew library card",
+                condition_type=TriggerConditionType.time,
+                condition={"trigger_at": far_future},
+                action="Remind to renew",
+            ),
+        )
+
+        # No-date task-memory (no due: topic tag)
+        await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.fact,
+                content="Task: No deadline yet",
+                topic=["tasks"],
+            ),
+        )
+
+        # Overdue review-queue memory (review_after in the past)
+        await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.decision,
+                content="Old decision to review",
+                review_after=now - timedelta(days=1),
+            ),
+        )
+
+        result = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+
+        assert result["warnings"] == []
+        assert result["horizon_days"] == 7
+        assert set(result["buckets"].keys()) == {
+            "overdue", "due_soon", "pending", "no_date",
+        }
+
+        sources_seen = {item["source"] for item in result["items"]}
+        assert sources_seen == {"tracker", "alert", "trigger", "task", "review"}
+
+        assert result["counts"]["total"] == 5
+        assert result["counts"]["overdue"] == 2  # tracker + review
+        assert result["counts"]["due_soon"] == 1  # alert
+        assert result["counts"]["pending"] == 1  # trigger
+        assert result["counts"]["no_date"] == 1  # task
+
+        overdue_sources = {item["source"] for item in result["buckets"]["overdue"]}
+        assert overdue_sources == {"tracker", "review"}
+        assert result["buckets"]["due_soon"][0]["source"] == "alert"
+        assert result["buckets"]["pending"][0]["source"] == "trigger"
+        assert result["buckets"]["no_date"][0]["source"] == "task"
+
+    async def test_one_source_failure_isolated_others_still_return(
+        self, pool, monkeypatch,
+    ):
+        """(b) one source raising -> warnings entry + others still returned (V5)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.alerts import create_alert
+
+        now = datetime.now(timezone.utc)
+
+        await create_alert(
+            pool,
+            AlertCreate(
+                alert_type=AlertType.due_task,
+                title="Alert survives tracker failure",
+                trigger_at=now + timedelta(hours=1),
+                channel=AlertChannel.log,
+            ),
+        )
+
+        async def _raise_due_trackers(*args, **kwargs):
+            raise RuntimeError("simulated tracker source failure")
+
+        monkeypatch.setattr("weft.trackers.due_trackers", _raise_due_trackers)
+
+        result = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+
+        tracker_warnings = [w for w in result["warnings"] if w["source"] == "tracker"]
+        assert len(tracker_warnings) == 1
+        assert "error" in tracker_warnings[0]
+
+        # The call itself did not raise, and the other source's item is intact.
+        alert_items = [i for i in result["items"] if i["source"] == "alert"]
+        assert len(alert_items) == 1
+        assert alert_items[0]["title"] == "Alert survives tracker failure"
+
+        tracker_items = [i for i in result["items"] if i["source"] == "tracker"]
+        assert tracker_items == []
+
+    async def test_per_source_cap_truncation_emits_warning(self, pool):
+        """(c) per_source_cap truncation emits a warning (V7)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.trackers import create_tracker
+
+        now = datetime.now(timezone.utc)
+        for i in range(5):
+            await create_tracker(
+                pool,
+                TrackerCreate(
+                    kind=TrackerKind.task,
+                    title=f"Tracker {i}",
+                    nudge_mode=NudgeMode.once,
+                    nudge_after=now - timedelta(hours=i),
+                ),
+            )
+
+        result = await assemble_board(
+            pool, now=now, per_source_cap=3, user_id=DEFAULT_TEST_USER_ID,
+        )
+
+        truncation_warnings = [
+            w for w in result["warnings"]
+            if w["source"] == "tracker" and w.get("truncated")
+        ]
+        assert len(truncation_warnings) == 1
+        assert truncation_warnings[0]["cap"] == 3
+
+        tracker_items = [i for i in result["items"] if i["source"] == "tracker"]
+        assert len(tracker_items) == 3
+
+    async def test_read_pure_no_source_row_mutation(self, pool):
+        """assemble_board performs no writes — source rows unchanged (V6)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.alerts import create_alert
+        from weft.store import store_memory
+        from weft.trackers import create_tracker
+        from weft.triggers import create_trigger
+
+        now = datetime.now(timezone.utc)
+
+        tracker = await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Read-purity tracker",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(hours=1),
+            ),
+        )
+        alert = await create_alert(
+            pool,
+            AlertCreate(
+                alert_type=AlertType.due_task,
+                title="Read-purity alert",
+                trigger_at=now + timedelta(hours=1),
+                channel=AlertChannel.log,
+            ),
+        )
+        trigger = await create_trigger(
+            pool,
+            TriggerCreate(
+                name="Read-purity trigger",
+                condition_type=TriggerConditionType.time,
+                condition={"trigger_at": now.isoformat()},
+                action="Remind",
+            ),
+        )
+        memory = await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.decision,
+                content="Read-purity review memory",
+                review_after=now - timedelta(hours=1),
+            ),
+        )
+
+        counts_before = {
+            "trackers": await pool.fetchval("SELECT count(*) FROM trackers"),
+            "alerts": await pool.fetchval("SELECT count(*) FROM alerts"),
+            "triggers": await pool.fetchval("SELECT count(*) FROM triggers"),
+            "memories": await pool.fetchval("SELECT count(*) FROM memories"),
+        }
+        rows_before = {
+            "tracker_state": await pool.fetchval(
+                "SELECT state FROM trackers WHERE id = $1", tracker.id,
+            ),
+            "alert_status": await pool.fetchval(
+                "SELECT status FROM alerts WHERE id = $1", alert.id,
+            ),
+            "trigger_status": await pool.fetchval(
+                "SELECT status FROM triggers WHERE id = $1", trigger.id,
+            ),
+            "memory_status": await pool.fetchval(
+                "SELECT status FROM memories WHERE id = $1", memory.id,
+            ),
+        }
+
+        await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+
+        counts_after = {
+            "trackers": await pool.fetchval("SELECT count(*) FROM trackers"),
+            "alerts": await pool.fetchval("SELECT count(*) FROM alerts"),
+            "triggers": await pool.fetchval("SELECT count(*) FROM triggers"),
+            "memories": await pool.fetchval("SELECT count(*) FROM memories"),
+        }
+        rows_after = {
+            "tracker_state": await pool.fetchval(
+                "SELECT state FROM trackers WHERE id = $1", tracker.id,
+            ),
+            "alert_status": await pool.fetchval(
+                "SELECT status FROM alerts WHERE id = $1", alert.id,
+            ),
+            "trigger_status": await pool.fetchval(
+                "SELECT status FROM triggers WHERE id = $1", trigger.id,
+            ),
+            "memory_status": await pool.fetchval(
+                "SELECT status FROM memories WHERE id = $1", memory.id,
+            ),
+        }
+
+        assert counts_before == counts_after
+        assert rows_before == rows_after
