@@ -563,6 +563,7 @@ class AlertType(str, Enum):
     memory_consolidation_overdue = "memory_consolidation_overdue"
     memory_count_threshold = "memory_count_threshold"
     memory_contradiction = "memory_contradiction"
+    board_feedback = "board_feedback"
 
 
 class AlertChannel(str, Enum):
