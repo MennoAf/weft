@@ -47,6 +47,12 @@ COUNTER_CALIBRATION_AUTO_PROMOTE_FAILED = "calibration.auto_promote.failed"
 # executor lands and increments it).
 COUNTER_REPLAY_EXECUTOR_FAILED = "replay.executor.failed"
 
+# reap_stale_pending_replays — orphaned 'pending' rows reaped to 'failed' past
+# REPLAY_QUEUE_STALENESS_DAYS. Not a failure counter (reaping is remediation, not
+# an error): a rising value tracks how many orphaned rows the sweep has drained.
+# The live backlog is the replay_queue_stale_pending gauge (count_stale_pending_replays).
+COUNTER_REPLAY_STALE_REAPED = "replay.stale.reaped"
+
 # The set surfaced by weft_check_health, in display order.
 FAILURE_COUNTERS: tuple[str, ...] = (
     COUNTER_REPLAY_ENQUEUE_FAILED,
