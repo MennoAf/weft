@@ -7,6 +7,7 @@ Each data source is queried independently — a failure in one never blocks othe
 Section layout (see SECTION_GROUPS):
 
     👤 Personal
+        📌 Open Loops           (due trackers — what's on your plate, oldest first)
         📅 Today's Calendar
         💤 Check-in Trends
         🎂 Birthdays Today (stub until entities have birth_date)
@@ -51,6 +52,7 @@ class BriefResult:
 
 # --- Section names (insertion order = display order within group) ---
 SECTION_META = {
+    "open_loops": ("📌", "Open Loops"),
     "calendar": ("📅", "Today's Calendar"),
     "checkin_trends": ("💤", "Check-in Trends"),
     "birthdays": ("🎂", "Birthdays Today"),
@@ -64,7 +66,7 @@ SECTION_META = {
 
 # Group ordering renders top-to-bottom.
 SECTION_GROUPS: list[tuple[str, str, list[str]]] = [
-    ("👤", "Personal", ["calendar", "checkin_trends", "birthdays"]),
+    ("👤", "Personal", ["open_loops", "calendar", "checkin_trends", "birthdays"]),
     ("💻", "Code", ["active_projects", "daily_spend", "review_queue", "handoffs", "alerts", "recall_canary"]),
 ]
 
@@ -423,6 +425,31 @@ async def _query_calendar_events(
     return all_day + timed
 
 
+async def _query_open_loops(pool: asyncpg.Pool, as_of: datetime) -> list[str]:
+    """Open-loop trackers whose nudge is due — "what's on your plate."
+
+    Wraps ``due_trackers`` (open state, nudge scheduled, past nudge_after, not
+    snoozed), ordered oldest-due first, so the loop you keep pushing leads.
+    This closes the gap PAAH's agenda shape measured: ``weft_tracker_due``'s
+    docstring named a daily-brief "open loops" section that did not exist.
+    """
+    try:
+        from weft.trackers import due_trackers
+
+        trackers = await due_trackers(
+            pool, now=as_of, limit=BRIEF_MAX_ITEMS_PER_SECTION,
+        )
+        items = []
+        for tr in trackers:
+            overdue_days = (as_of - tr.nudge_after).days if tr.nudge_after else 0
+            when = "due today" if overdue_days <= 0 else f"overdue {overdue_days}d"
+            items.append(f"[{tr.kind.value}] {tr.title} ({when})")
+        return items
+    except Exception:
+        logger.exception("daily_brief.open_loops_error")
+        return []
+
+
 async def _query_alerts(pool: asyncpg.Pool, as_of: datetime) -> list[str]:
     """Pending alerts due today."""
     try:
@@ -599,6 +626,7 @@ async def assemble_daily_brief(
     calendar = await _safe(
         _query_calendar_events(brief_config.calendar_id, tz, target_date), "calendar"
     )
+    open_loops = await _safe(_query_open_loops(pool, target_date), "open_loops")
     review_queue = await _safe(_query_review_queue(pool, target_date), "review_queue")
     handoffs = await _safe(_query_handoffs(pool, target_date), "handoffs")
     checkin_trends = await _safe(_query_checkin_trends(pool), "checkin_trends")
@@ -618,6 +646,7 @@ async def assemble_daily_brief(
     recall_canary = await _safe(_query_canary_health(pool), "recall_canary")
 
     sections: dict[str, list[str]] = {
+        "open_loops": open_loops,
         "calendar": calendar,
         "checkin_trends": checkin_trends,
         "birthdays": birthdays,

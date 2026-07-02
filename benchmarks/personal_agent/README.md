@@ -34,13 +34,15 @@ LongMemEval. It is the repeatable scoreboard the project has lacked since the
 - **Entity brief** ("what do I need to know about X before our meeting") —
   beliefs+graph. Oracle = `weft_entity_context` edge walk; candidate =
   `weft_recall`. See `entity_manifest.py` / `entity_harness.py`.
-
-Still to add (per spec `weft-b9582b8f`): agenda.
+- **Agenda** ("what's on my plate", "what do I keep pushing") — trackers /
+  open loops. Oracle = `weft_tracker_due` (deterministic due-loop query);
+  agent-facing surface = `weft_daily_brief`. See `agenda_manifest.py` /
+  `agenda_harness.py`. **This completes the four shapes in spec `weft-b9582b8f`.**
 
 ## Run
 
 ```bash
-# Full scoreboard, both shapes (writes results.json). Needs Docker.
+# Full scoreboard, all four shapes (writes results.json). Needs Docker.
 uv run python -m benchmarks.personal_agent
 
 # Structural asserts under pytest.
@@ -125,11 +127,66 @@ and surface 8/8. **min recall@links: 0.0 → 1.0.** The fallback is monotonic �
 only fires on empty and only adds results — so it cannot reduce recall on any
 existing query (incl. LongMemEval temporal). Full suite: 3238 passed.
 
+## Agenda result + a consumption-contract finding (2026-07-01)
+
+Seeds **10 trackers** through the real tracker lifecycle (`weft_tracker_create` +
+`weft_tracker_snooze` + `weft_tracker_close`): **4 due open loops** and **6 that
+must be excluded**, where each excluded tracker trips a *different* clause of the
+`due_trackers` predicate (future nudge, snoozed, done, abandoned, `nudge_mode=none`).
+Ground truth is derived, not hand-flagged — `AgendaSpec.expected_due` recomputes the
+exact predicate, so the manifest can't drift from the query it asserts. This shape
+is deterministic SQL (no embeddings), so a single run is authoritative — the banned
+single-run rule (`weft-b015d16a`) is about the stochastic recall pipeline, which
+agenda doesn't touch.
+
+| path | signal | first run | after fix | note |
+| --- | --- | --- | --- | --- |
+| ORACLE `weft_tracker_due` | recall@due | **1.000 (4/4)** | 1.000 | every open loop surfaced |
+| ORACLE `weft_tracker_due` | precision | **1.000 (0 leaks)** | 1.000 | no snoozed/future/terminal/no-nudge leak |
+| ORACLE `weft_tracker_due` | keep-pushing first | **True** | True | longest-overdue loop leads (`nudge_after ASC`) |
+| AGENT-FACING `weft_daily_brief` | open-loop coverage | **0 / 4** | **4 / 4** | the finding, then closed |
+
+**Finding, then a general fix (not benchmark-tuning).** First run: the due-loop
+query answered the plate correctly, but the digest an agent actually reads each
+morning — `weft_daily_brief` — surfaced **0 of the 4** open loops. `assemble_daily_brief`
+built 12 sections (calendar, review queue, handoffs, alerts, canary, …) but **no
+trackers / open-loops section**, even though `weft_tracker_due`'s own docstring said
+it is "for the daily-brief 'open loops' section." Same consumption-contract gap as
+enumeration (the reconciliation header knew the count; the `results[]` slice the
+agent read did not): the tracker layer knew the plate; the agent-facing surface
+didn't show it.
+
+The fix was to **complete the intended wiring, not tune to the benchmark**: a new
+`📌 Open Loops` section in `assemble_daily_brief` (`weft/daily_brief.py`) that calls
+`due_trackers()` and renders each loop as `[kind] title (overdue Nd)`, oldest-due
+first — a general improvement every user benefits from (their plate shows up in the
+brief), the section the tool docstring already promised. **Coverage 0/4 → 4/4**; the
+28 existing `daily_brief` tests stay green. `test_daily_brief_surfaces_open_loops`
+now asserts the closed state (`brief_surfaces_open_loops`), and `results.json`'s
+agenda `finding` self-clears to `null`.
+
+**Two harness bugs the full runner exposed (isolated pytest could not):**
+- `__main__.py` referenced `entity_stats.belief_routed` / `.misrouted`, attributes
+  removed when the entity harness was refactored for the never-miss fallback — the
+  runner crashed before writing `results.json`. Fixed to the current attributes.
+- The entity harness called `weft_recall` **without `project_id`**, so in the shared
+  full-runner corpus its brief queries saw the *temporal* shape's 16 seeded turns.
+  The turns tier was then non-empty, the empty-only never-miss fallback never fired,
+  and the temporal-worded briefs returned 0/8. Isolated pytest hid it (empty DB).
+  Fixed by scoping to `PAAH_ENTITY_PROJECT_ID` (matching the temporal harness). The
+  deeper single-project variant — a real user whose one project holds *both* turns
+  and entity beliefs would hit the same wall — is tracked as a product finding
+  (`weft-99cac4e5`'s sibling family: the fallback should recover when the turns
+  answer is present-but-irrelevant, not only when it's empty).
+
 ## Layout
 
-- `manifest.py` — ground-truth collections (the oracle).
-- `seed.py` — real-write-path seeding + cardinality verification.
+- `manifest.py` — enumeration ground-truth collections (the oracle).
+- `temporal_manifest.py` / `entity_manifest.py` / `agenda_manifest.py` — the other
+  three shapes' ground truth.
+- `seed.py` — real-write-path seeding + integrity verification for all four shapes.
 - `context.py` — in-process `AppContext` + MCP `ctx` (real fastembed provider).
-- `harness.py` — drives `weft_recall`, distills agent-facing signals.
-- `__main__.py` — testcontainers runner → `results.json`.
-- `tests/` — structural pytest asserts.
+- `harness.py` / `temporal_harness.py` / `entity_harness.py` / `agenda_harness.py`
+  — drive the real read paths, distill agent-facing signals.
+- `__main__.py` — testcontainers runner (all four shapes) → `results.json`.
+- `tests/` — structural pytest asserts (17 total).

@@ -2,7 +2,8 @@
   "shapes": [
     "enumeration",
     "temporal",
-    "entity_brief"
+    "entity_brief",
+    "agenda"
   ],
   "enumeration": {
     "limit": 10,
@@ -373,8 +374,8 @@
     "seed_brief_clean": true,
     "oracle_complete": true,
     "belief_routed_all_complete": true,
-    "misrouted_phrasings": 2,
-    "finding": "temporal-worded briefs ('before our meeting') misroute off the belief tier and return 0 linked facts",
+    "recovered_via_fallback": 3,
+    "finding": "temporal-worded briefs ('before our meeting') route off the belief tier to the turns tier and recover via the empty-tier belief fallback (never-miss); none return empty",
     "stats": {
       "entity": "Zelda Quackenbush",
       "fact_count": 8,
@@ -385,37 +386,92 @@
         "complete": true
       },
       "candidate_weft_recall": {
-        "runs": 5,
-        "min_recall_at_links": 0.0,
+        "runs": 6,
+        "min_recall_at_links": 1.0,
         "median_recall_at_links": 1.0,
         "max_recall_at_links": 1.0,
-        "misrouted_count": 2,
+        "never_empty": true,
+        "fallback_recoveries": 3,
         "per_query": [
           {
             "query": "what do I need to know about Zelda Quackenbush before our meeting",
-            "routed_tier": "turns",
-            "recall_at_links": 0.0
+            "routed_tier": "belief",
+            "fell_back": true,
+            "recall_at_links": 1.0
           },
           {
             "query": "brief me on Zelda Quackenbush",
             "routed_tier": "belief",
+            "fell_back": false,
             "recall_at_links": 1.0
           },
           {
             "query": "tell me everything about Zelda Quackenbush",
             "routed_tier": "belief",
+            "fell_back": false,
             "recall_at_links": 1.0
           },
           {
             "query": "what should I remember about Zelda Quackenbush before I meet her",
-            "routed_tier": "turns",
-            "recall_at_links": 0.0
+            "routed_tier": "belief",
+            "fell_back": true,
+            "recall_at_links": 1.0
           },
           {
             "query": "give me the background on Zelda Quackenbush",
             "routed_tier": "belief",
+            "fell_back": false,
+            "recall_at_links": 1.0
+          },
+          {
+            "query": "what has Zelda Quackenbush been working on since she joined",
+            "routed_tier": "belief",
+            "fell_back": true,
             "recall_at_links": 1.0
           }
+        ]
+      }
+    }
+  },
+  "agenda": {
+    "seed_clean": true,
+    "due_expected": 4,
+    "oracle_complete": true,
+    "oracle_precise": true,
+    "keep_pushing_first": true,
+    "agenda_answers": true,
+    "agent_facing_surfaces_open_loops": true,
+    "finding": null,
+    "stats": {
+      "due_expected": 4,
+      "oracle_tracker_due": {
+        "returned": 4,
+        "hits": 4,
+        "recall_at_due": 1.0,
+        "complete": true,
+        "precise": true,
+        "leaks": [],
+        "keep_pushing_first": true
+      },
+      "agent_facing_daily_brief": {
+        "available": true,
+        "due_covered": 4,
+        "coverage": 1.0,
+        "surfaces_open_loops": true,
+        "sections": [
+          "\ud83c\udf05 Daily Brief",
+          "\ud83d\udc64 Personal",
+          "\ud83d\udccc Open Loops",
+          "\ud83d\udcc5 Today's Calendar",
+          "\ud83d\udca4 Check-in Trends",
+          "\ud83c\udf82 Birthdays Today",
+          "\ud83d\udcbb Code",
+          "\ud83d\udd25 Top Active Projects",
+          "\ud83d\udcb0 Daily Spend",
+          "\ud83d\udccb Review Queue",
+          "\ud83d\udd04 Recent Handoffs",
+          "\ud83d\udd14 Alerts Due Today",
+          "\ud83c\udfaf Recall Canary"
         ]
       }
     }
