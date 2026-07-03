@@ -15,8 +15,9 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Literal
+from datetime import datetime, time, timedelta, timezone
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
+from zoneinfo import ZoneInfo
 
 import asyncpg
 
@@ -44,6 +45,24 @@ DEFAULT_HORIZON_DAYS = 7
 DEFAULT_PER_SOURCE_CAP = 200
 
 _URGENCY_BUCKETS: tuple[Urgency, ...] = ("overdue", "due_soon", "pending", "no_date")
+
+# All five sources, in the board's canonical fan-out order (Epic Task 5 /
+# weft_board `sources` param, PRD §Interfaces). Kept as the single ordering
+# source of truth for both the default fan-out and `sources=` filtering.
+_ALL_ITEM_SOURCES: tuple[ItemSource, ...] = (
+    "tracker", "alert", "trigger", "task", "review",
+)
+
+# Ghost-F3 fix: a task-memory `due:YYYY-MM-DD` tag has no time-of-day, so it
+# must be interpreted as a calendar date in the OWNER's timezone, not
+# midnight UTC — otherwise a task due "today" reads as already-past the
+# instant UTC crosses midnight, bucketing it `overdue` while `up_next`
+# (date-granularity comparison) still calls it `due_soon`, and the two
+# surfaces disagree for most of the actual due day. Named-zone (not a fixed
+# UTC offset) so DST (EDT/EST) is handled correctly. Single module-level
+# seam so a later per-user timezone becomes a one-line change here instead
+# of a hunt through every due-date call site.
+BOARD_TIMEZONE = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -409,6 +428,35 @@ def trigger_adapter(
     return items
 
 
+def task_due_at(due_date: str | None) -> datetime | None:
+    """Parse a task-memory `due:YYYY-MM-DD` tag into an aware `due_at`.
+
+    Ghost-F3 fix: a date-only tag carries no time-of-day, so it is
+    interpreted as END OF DAY (23:59:59) in `BOARD_TIMEZONE` — the owner's
+    calendar day, not midnight UTC. A task due "today" therefore stays
+    `due_soon` until midnight in that timezone, matching `up_next`'s
+    date-granularity rollover instead of flipping to `overdue` the instant
+    UTC crosses midnight.
+
+    This is the SINGLE due-date-parsing implementation shared by
+    `task_adapter` (below) and `weft.skills.up_next` — the weft-board
+    subsumption contract requires the two callers' bucketing to be
+    computed from one function, not two independent reimplementations,
+    so they cannot silently fork (Epic Task 5 Critical Implementation
+    Notes).
+
+    Returns None for a missing or malformed date string — callers treat
+    that as `no_date` via `calculate_urgency(None, ...)`.
+    """
+    if not due_date:
+        return None
+    try:
+        due_date_only = datetime.strptime(due_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None  # malformed due-date tag — treat as no_date
+    return datetime.combine(due_date_only, time(23, 59, 59), tzinfo=BOARD_TIMEZONE)
+
+
 def task_adapter(
     entries: list[TaskEntry],
     now: datetime | None = None,
@@ -448,15 +496,9 @@ def task_adapter(
         age_delta = now - created_at
         age_days = age_delta.total_seconds() / 86400.0
 
-        # due_at parsed from the "due:YYYY-MM-DD" topic tag, midnight UTC
-        due_at: datetime | None = None
-        if entry.due_date:
-            try:
-                due_at = datetime.strptime(entry.due_date, "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
-                )
-            except ValueError:
-                due_at = None  # malformed due-date tag — treat as no_date
+        # due_at parsed from the "due:YYYY-MM-DD" topic tag, end-of-day in
+        # BOARD_TIMEZONE (Ghost-F3 fix — see task_due_at docstring).
+        due_at = task_due_at(entry.due_date)
 
         # Map to Item
         item = Item(
@@ -566,6 +608,42 @@ async def _fetch_review_memories(
     return [_row_to_memory(r) for r in rows]
 
 
+async def _fetch_snoozed_due_trackers(
+    conn: asyncpg.Connection, *, now: datetime, limit: int,
+) -> list[Tracker]:
+    """Trackers that would be due except an active `snooze_until` is
+    suppressing them — the exact complement of what
+    `weft.trackers.due_trackers` returns. Included on the board only when
+    `include_snoozed=True` (PRD §Validation V3).
+
+    This mirrors `due_trackers`'s query (same open-state/nudge_mode/
+    nudge_after filter) with the snooze clause inverted, rather than adding
+    an `include_snoozed` parameter to `weft.trackers.due_trackers` itself —
+    that module is outside this task's anchored write scope (leaf task
+    loom-0a001c5a: weft/board.py, weft/skills.py, weft/mcp/tools.py only),
+    and keeping `due_trackers`'s own signature/behavior untouched preserves
+    the existing monkeypatch-based isolation test
+    (`test_one_source_failure_isolated_others_still_return`), which patches
+    `weft.trackers.due_trackers` directly.
+    """
+    from weft.trackers import _row_to_tracker
+
+    rows = await conn.fetch(
+        """
+        SELECT * FROM trackers
+        WHERE state IN ('in_progress', 'awaiting_reply', 'blocked')
+          AND nudge_mode <> 'none'
+          AND nudge_after IS NOT NULL
+          AND nudge_after <= $1
+          AND snooze_until IS NOT NULL AND snooze_until > $1
+        ORDER BY nudge_after ASC
+        LIMIT $2
+        """,
+        now, limit,
+    )
+    return [_row_to_tracker(r) for r in rows]
+
+
 async def assemble_board(
     pool: asyncpg.Pool,
     *,
@@ -573,6 +651,8 @@ async def assemble_board(
     per_source_cap: int = DEFAULT_PER_SOURCE_CAP,
     now: datetime | None = None,
     user_id: str | None = None,
+    include_snoozed: bool = False,
+    sources: list[str] | None = None,
 ) -> dict:
     """Fan out concurrently across the five open-item sources and assemble
     the unified board response (PRD §Behavior, §Interfaces).
@@ -625,6 +705,20 @@ async def assemble_board(
     invoked from inside an outer `acquire()` scope (e.g. an MCP tool
     handler).
 
+    Snoozing (V3): a tracker whose `snooze_until` is still in the future is
+    excluded from the board by default (`due_trackers` already filters it
+    out at the SQL level) and included only when `include_snoozed=True`. The
+    snoozed-but-otherwise-due trackers are fetched via a small supplementary
+    query local to this module (`_fetch_snoozed_due_trackers`) rather than
+    changing `weft.trackers.due_trackers`'s own filtering — this keeps
+    `due_trackers`'s existing default-path contract (and the tests that
+    monkeypatch it) untouched while still surfacing snoozed items on request.
+
+    Source selection: `sources`, when given, restricts the fan-out to that
+    subset of {"tracker", "alert", "trigger", "task", "review"} — unknown
+    values are silently ignored. Sources not selected are simply not
+    fetched (no warning); this is a scope filter, not a failure.
+
     Args:
         pool: asyncpg connection pool.
         days: due_soon horizon in days, forwarded to every adapter as
@@ -634,15 +728,22 @@ async def assemble_board(
         user_id: RLS scope override. Defaults to the ambient authenticated
             caller (`current_user_id` contextvar), falling back to
             `WEFT_DEFAULT_USER_ID` when no caller is bound.
+        include_snoozed: include trackers currently suppressed by an active
+            `snooze_until` (default False — matches PRD §Validation V3).
+        sources: restrict the fan-out to this subset of source names
+            (default None = all five sources).
 
     Returns:
         dict matching PRD §Interfaces: generated_at, horizon_days, buckets
         (per-urgency lists of Item dicts), items (flat, bucket-ordered),
         counts (per-bucket + total), warnings (per-source error/truncation
-        entries).
+        entries, plus a structured `{"source": "identity", ...}` entry when
+        no caller identity could be resolved — see below).
     """
     if now is None:
         now = datetime.now(timezone.utc)
+
+    warnings: list[dict] = []
 
     if user_id is None:
         # Ambient authenticated caller wins over the deployment-owner env
@@ -660,8 +761,21 @@ async def assemble_board(
                 "scope reads to whatever app.user_id the connection already "
                 "carries (likely none, yielding an empty board)"
             )
-
-    warnings: list[dict] = []
+            # Ratified decision (weft-64c14697): the log line alone left
+            # "misconfigured — no identity resolved" indistinguishable from
+            # "resolved fine, genuinely nothing is due" once the response
+            # left this process. Surface it structurally too so a caller
+            # (UI or agent) can tell the two apart without grepping logs.
+            warnings.append({
+                "source": "identity",
+                "error": "no_default_user",
+                "message": (
+                    "No caller identity resolved (current_user_id unset and "
+                    "WEFT_DEFAULT_USER_ID not configured) — board results "
+                    "may be scoped to no rows rather than reflecting "
+                    "genuinely empty state."
+                ),
+            })
 
     def _cap(source: ItemSource, rows: list) -> list:
         """Truncate rows to per_source_cap, recording a warning if hit (V7)."""
@@ -690,6 +804,10 @@ async def assemble_board(
 
         async with acquire(pool) as conn:
             trackers = await due_trackers(conn, now=now, limit=per_source_cap + 1)
+            if include_snoozed:
+                trackers = trackers + await _fetch_snoozed_due_trackers(
+                    conn, now=now, limit=per_source_cap + 1,
+                )
         trackers = _cap("tracker", trackers)
         return tracker_adapter(trackers, now, days)
 
@@ -729,6 +847,24 @@ async def assemble_board(
         memories = _cap("review", memories)
         return review_adapter(memories, now, days)
 
+    _SOURCE_FETCHERS: dict[ItemSource, Callable[[], Awaitable[list[Item]]]] = {
+        "tracker": _tracker_items,
+        "alert": _alert_items,
+        "trigger": _trigger_items,
+        "task": _task_items,
+        "review": _review_items,
+    }
+
+    # `sources`, when given, narrows the fan-out to that subset (order fixed
+    # by _ALL_ITEM_SOURCES regardless of the caller's list order); unknown
+    # names are silently dropped rather than erroring — a scope filter, not
+    # a validated enum.
+    selected_sources: tuple[ItemSource, ...] = (
+        _ALL_ITEM_SOURCES
+        if sources is None
+        else tuple(s for s in _ALL_ITEM_SOURCES if s in sources)
+    )
+
     # Bind identity BEFORE spawning the concurrent fan-out so each task's
     # copied context inherits it; each task's own acquire() call then
     # acquires its OWN connection (see docstring — one shared connection
@@ -751,20 +887,22 @@ async def assemble_board(
     token = current_user_id.set(user_id)
     conn_token = _current_conn.set(None)
     try:
-        tracker_items, alert_items, trigger_items, task_items, review_items = (
-            await asyncio.gather(
-                _safe("tracker", _tracker_items()),
-                _safe("alert", _alert_items()),
-                _safe("trigger", _trigger_items()),
-                _safe("task", _task_items()),
-                _safe("review", _review_items()),
+        results = await asyncio.gather(
+            *(
+                _safe(source, _SOURCE_FETCHERS[source]())
+                for source in selected_sources
             )
         )
     finally:
         _current_conn.reset(conn_token)
         current_user_id.reset(token)
 
-    all_items = tracker_items + alert_items + trigger_items + task_items + review_items
+    items_by_source: dict[ItemSource, list[Item]] = dict(zip(selected_sources, results))
+    all_items: list[Item] = [
+        item
+        for source in _ALL_ITEM_SOURCES
+        for item in items_by_source.get(source, [])
+    ]
 
     buckets: dict[Urgency, list[Item]] = {bucket: [] for bucket in _URGENCY_BUCKETS}
     for item in all_items:

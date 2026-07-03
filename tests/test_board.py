@@ -12,13 +12,14 @@ Tests cover:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
 from weft.board import (
     Action,
+    BOARD_TIMEZONE,
     Item,
     Urgency,
     _TRIGGER_HIDE_KINDS,
@@ -28,6 +29,7 @@ from weft.board import (
     rank_items,
     review_adapter,
     task_adapter,
+    task_due_at,
     tracker_adapter,
     trigger_adapter,
 )
@@ -1432,8 +1434,11 @@ class TestTaskAdapter:
         assert item.kind == "high"
         assert item.title == entry.content
         assert item.state is None
-        assert item.due_at == datetime.strptime(due_str, "%Y-%m-%d").replace(
-            tzinfo=timezone.utc
+        # Ghost-F3 fix: a date-only due tag is end-of-day in BOARD_TIMEZONE,
+        # not midnight UTC (see task_due_at).
+        expected_due_date = datetime.strptime(due_str, "%Y-%m-%d").date()
+        assert item.due_at == datetime.combine(
+            expected_due_date, time(23, 59, 59), tzinfo=BOARD_TIMEZONE
         )
         assert item.snoozed_until is None
         assert abs(item.age_days - 3.0) < 0.01
@@ -1565,6 +1570,69 @@ class TestTaskAdapter:
         d = item.to_dict()
         assert d["id"] == "mem-complete"
         assert d["source"] == "task"
+
+
+class TestTaskDueAtGhostF3:
+    """Ghost-F3 fix: a date-only `due:YYYY-MM-DD` tag is end-of-day in
+    BOARD_TIMEZONE (America/New_York), not midnight UTC — so a task due
+    "today" stays due_soon for the whole ET calendar day instead of
+    flipping to overdue the instant UTC crosses midnight (which is what
+    happened before this fix, and disagreed with up_next's date-granularity
+    rollover)."""
+
+    def test_task_due_today_et_buckets_due_soon_not_overdue(self):
+        """A task due:<today's ET calendar date> is due_soon (not overdue)
+        while `now` is still within that same ET calendar day."""
+        now = datetime(2026, 7, 2, 15, 0, 0, tzinfo=timezone.utc)  # mid-day UTC
+        today_et = now.astimezone(BOARD_TIMEZONE).date()
+        due_str = today_et.strftime("%Y-%m-%d")
+
+        entry = TaskEntry(
+            id="mem-today",
+            content="Task: Due today",
+            topic=["tasks", f"due:{due_str}"],
+            due_date=due_str,
+            priority=None,
+            created_at=now - timedelta(days=1),
+        )
+
+        result = task_adapter([entry], now)
+        assert result[0].urgency == "due_soon"
+
+    def test_task_due_yesterday_et_flips_overdue_after_et_midnight(self):
+        """The same due date rolls over to overdue once ET's midnight for
+        that calendar day has passed — matches up_next's date-granularity
+        rollover (a due date is only overdue once its whole day has
+        elapsed, not at the UTC day boundary)."""
+        due_str = "2026-07-02"
+        entry = TaskEntry(
+            id="mem-rollover",
+            content="Task: Rolls over",
+            topic=["tasks", f"due:{due_str}"],
+            due_date=due_str,
+            priority=None,
+            created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        )
+
+        just_before_et_midnight = datetime(
+            2026, 7, 2, 23, 59, 0, tzinfo=BOARD_TIMEZONE,
+        )
+        assert task_adapter([entry], just_before_et_midnight)[0].urgency == "due_soon"
+
+        just_after_et_midnight = datetime(
+            2026, 7, 3, 0, 0, 1, tzinfo=BOARD_TIMEZONE,
+        )
+        assert task_adapter([entry], just_after_et_midnight)[0].urgency == "overdue"
+
+    def test_task_due_at_parses_to_end_of_day_board_timezone(self):
+        """task_due_at parses a bare date into 23:59:59 BOARD_TIMEZONE."""
+        due_at = task_due_at("2026-07-02")
+        assert due_at == datetime(2026, 7, 2, 23, 59, 59, tzinfo=BOARD_TIMEZONE)
+
+    def test_task_due_at_none_for_missing_or_malformed(self):
+        assert task_due_at(None) is None
+        assert task_due_at("") is None
+        assert task_due_at("not-a-date") is None
 
 
 class TestReviewAdapter:
@@ -2042,3 +2110,92 @@ class TestAssembleBoardIntegration:
             f"expected all 3 seeded sources present, got: {sources_seen}"
         )
         assert result["counts"]["total"] == 3
+
+    async def test_sources_param_restricts_fan_out(self, pool):
+        """`sources=` narrows the board to the named subset — the other
+        sources are not fetched at all, not merely filtered post-hoc
+        (Ratified decision weft-64c14697 / Epic Task 5)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.alerts import create_alert
+        from weft.trackers import create_tracker
+
+        now = datetime.now(timezone.utc)
+
+        await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Tracker for sources filter",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(hours=1),
+            ),
+        )
+        await create_alert(
+            pool,
+            AlertCreate(
+                alert_type=AlertType.due_task,
+                title="Alert for sources filter",
+                trigger_at=now + timedelta(hours=1),
+                channel=AlertChannel.log,
+            ),
+        )
+
+        result = await assemble_board(
+            pool, now=now, user_id=DEFAULT_TEST_USER_ID, sources=["tracker"],
+        )
+
+        sources_seen = {item["source"] for item in result["items"]}
+        assert sources_seen == {"tracker"}
+        assert result["counts"]["total"] == 1
+        assert result["warnings"] == []
+
+    async def test_include_snoozed_surfaces_snoozed_trackers(self, pool):
+        """A tracker with a future `snooze_until` is hidden by default and
+        surfaced only when `include_snoozed=True` (PRD §Validation V3;
+        Ratified decision weft-64c14697 / Epic Task 5)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.trackers import create_tracker, snooze_tracker
+
+        now = datetime.now(timezone.utc)
+
+        tracker = await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Snoozed tracker",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(hours=1),
+            ),
+        )
+        await snooze_tracker(pool, tracker.id, now + timedelta(days=1))
+
+        default_result = await assemble_board(
+            pool, now=now, user_id=DEFAULT_TEST_USER_ID, sources=["tracker"],
+        )
+        assert default_result["counts"]["total"] == 0
+
+        snoozed_result = await assemble_board(
+            pool, now=now, user_id=DEFAULT_TEST_USER_ID, sources=["tracker"],
+            include_snoozed=True,
+        )
+        tracker_ids = {item["id"] for item in snoozed_result["items"]}
+        assert tracker.id in tracker_ids
+
+    async def test_misconfigured_identity_emits_structured_warning(
+        self, pool, monkeypatch,
+    ):
+        """No resolvable caller identity (no ambient caller, no
+        WEFT_DEFAULT_USER_ID) surfaces a structured `warnings[]` entry, not
+        just a log line — so 'misconfigured' is distinguishable from
+        'genuinely nothing is due' (Ratified decision weft-64c14697 / Epic
+        Task 5)."""
+        monkeypatch.delenv("WEFT_DEFAULT_USER_ID", raising=False)
+
+        now = datetime.now(timezone.utc)
+        result = await assemble_board(pool, now=now)  # no user_id, no ambient caller
+
+        identity_warnings = [
+            w for w in result["warnings"] if w.get("source") == "identity"
+        ]
+        assert len(identity_warnings) == 1
+        assert identity_warnings[0]["error"] == "no_default_user"
