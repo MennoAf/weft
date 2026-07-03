@@ -2320,7 +2320,12 @@ async def weft_up_next(
     """Upcoming tasks: open tasks due in the next N days from Obsidian notes.
 
     Returns overdue tasks and tasks due soon, sorted by date and priority.
-    Tasks come from Obsidian checkbox items with Tasks plugin emoji dates."""
+    Tasks come from Obsidian checkbox items with Tasks plugin emoji dates.
+
+    Thin back-compat delegate: `weft.skills.up_next` itself delegates to the
+    shared task-adapter core (`weft.board.task_due_at`/`calculate_urgency`)
+    so this tool's buckets can't fork from `weft_board`'s task source —
+    `weft_board` is the canonical open-items call."""
     try:
         app: AppContext = ctx.request_context.lifespan_context
         from weft.skills import up_next
@@ -2329,6 +2334,43 @@ async def weft_up_next(
             return await up_next(app.pool, days=days, include_no_date=include_no_date)
     except _DB_ERRORS as e:
         return _db_error_response("weft_up_next", e)
+
+
+@mcp.tool()
+async def weft_board(
+    ctx: Context,
+    days: int = 7,
+    include_snoozed: bool = False,
+    sources: list[str] | None = None,
+) -> dict:
+    """Unified open-items board — the canonical "what needs me?" call.
+
+    Fans out across all five open-item sources (trackers, alerts, triggers,
+    taREDACTED, review queue), normalizes each into one structured Item
+    schema, and buckets everything by urgency (overdue/due_soon/pending/
+    no_date). Returns `{generated_at, horizon_days, buckets, items, counts,
+    warnings}`. Every item carries self-describing `actions` naming the
+    existing Weft write tool + args to triage it (close/snooze/dismiss) —
+    this call itself never writes.
+
+    days: due_soon lookahead horizon (default 7).
+    include_snoozed: include trackers currently suppressed by an active
+        snooze (default False — snoozed trackers are hidden by default).
+    sources: restrict to a subset of {"tracker", "alert", "trigger", "task",
+        "review"} (default None = all five)."""
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        from weft.board import assemble_board
+
+        async with acquire(app.pool):
+            return await assemble_board(
+                app.pool,
+                days=days,
+                include_snoozed=include_snoozed,
+                sources=sources,
+            )
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_board", e)
 
 
 @mcp.tool()

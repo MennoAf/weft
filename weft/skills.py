@@ -545,42 +545,57 @@ async def up_next(
     include_no_date: bool = False,
     limit: int = 50,
 ) -> dict:
-    """Find open tasks due in the next N days."""
+    """Find open tasks due in the next N days.
+
+    Delegates BOTH row selection/parsing (`fetch_task_entries`, above) and
+    urgency bucketing (`weft.board.task_due_at` + `weft.board.calculate_urgency`)
+    to the shared task-adapter core, so `weft_up_next` and `weft_board`'s
+    task source compute overdue/due_soon/no_date from the exact same
+    functions and cannot silently fork (weft-board subsumption contract,
+    PRD Critical Implementation Notes / Epic Task 5). This function only
+    reshapes the resulting urgency + TaskEntry fields back into up_next's
+    historical response dict — it no longer does its own due-date math.
+
+    Imports `weft.board` lazily (inside the function body, not at module
+    import time) to avoid a module-load cycle: `weft.board` itself lazily
+    imports `fetch_task_entries` from this module inside its own
+    `_task_items()` closure.
+    """
+    from weft.board import calculate_urgency, task_due_at
+
     # Fetch + parse via the shared core (also consumed by weft.board.task_adapter)
     entries = await fetch_task_entries(pool, limit * 3)  # fetch extra, we'll filter
 
-    now = datetime.now(timezone.utc).date()
-    cutoff = now + timedelta(days=days)
+    now = datetime.now(timezone.utc)
 
     tasks_due: list[dict] = []
     tasks_overdue: list[dict] = []
     tasks_no_date: list[dict] = []
 
     for entry in entries:
-        due_date = entry.due_date
+        due_at = task_due_at(entry.due_date)
+        urgency = calculate_urgency(due_at, now, horizon_days=days)
 
         result_entry = {
             "id": entry.id,
             "content": entry.content,
             "topic": entry.topic,
-            "due": due_date,
+            "due": entry.due_date,
             "priority": entry.priority,
             "created_at": entry.created_at.isoformat(),
         }
 
-        if due_date:
-            try:
-                due = datetime.strptime(due_date, "%Y-%m-%d").date()
-            except ValueError:
+        if urgency == "overdue":
+            tasks_overdue.append(result_entry)
+        elif urgency == "due_soon":
+            tasks_due.append(result_entry)
+        elif urgency == "no_date":
+            if include_no_date:
                 tasks_no_date.append(result_entry)
-                continue
-
-            if due < now:
-                tasks_overdue.append(result_entry)
-            elif due <= cutoff:
-                tasks_due.append(result_entry)
-        elif include_no_date:
-            tasks_no_date.append(result_entry)
+        # urgency == "pending" (due beyond the `days` horizon) is
+        # intentionally dropped from all three buckets — matches
+        # up_next's pre-refactor behavior of not surfacing far-future
+        # due dates in either overdue/due_soon or no_date.
 
     # Sort by due date, then priority
     priority_order = {"highest": 0, "high": 1, "medium": 2, "low": 3, "lowest": 4}

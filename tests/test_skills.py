@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from weft.board import BOARD_TIMEZONE
 from weft.skills import meal_plan, project_status, search_all, up_next, weekly_recap
 
 
@@ -262,7 +263,13 @@ class TestMealPlan:
 class TestUpNext:
     @pytest.mark.asyncio
     async def test_finds_due_tasks(self):
-        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+        # due:-tags are interpreted as BOARD_TIMEZONE calendar dates
+        # (Ghost-F3 fix, weft.board.task_due_at) — anchor "tomorrow" to that
+        # zone's current date so this test can't straddle the UTC/ET day
+        # boundary and misclassify near midnight.
+        tomorrow = (
+            datetime.now(BOARD_TIMEZONE) + timedelta(days=1)
+        ).strftime("%Y-%m-%d")
         rows = [
             _make_row(
                 id="1",
@@ -278,7 +285,12 @@ class TestUpNext:
 
     @pytest.mark.asyncio
     async def test_finds_overdue_tasks(self):
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        # Anchor to BOARD_TIMEZONE's current date (see test_finds_due_tasks)
+        # so "yesterday" is unambiguously a full elapsed day regardless of
+        # the UTC/ET offset at the moment this test happens to run.
+        yesterday = (
+            datetime.now(BOARD_TIMEZONE) - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
         rows = [
             _make_row(
                 id="1",
@@ -324,8 +336,10 @@ class TestUpNext:
 
     @pytest.mark.asyncio
     async def test_sorts_by_date_then_priority(self):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+        # Anchor to BOARD_TIMEZONE's current date (see test_finds_due_tasks)
+        # so "today"/"tomorrow" can't straddle the UTC/ET day boundary.
+        today = datetime.now(BOARD_TIMEZONE).strftime("%Y-%m-%d")
+        tomorrow = (datetime.now(BOARD_TIMEZONE) + timedelta(days=1)).strftime("%Y-%m-%d")
         rows = [
             _make_row(
                 id="1",
