@@ -2374,6 +2374,61 @@ async def weft_board(
 
 
 @mcp.tool()
+async def weft_board_act(
+    ctx: Context,
+    tool: str,
+    args: dict,
+    item_id: str,
+    source: str,
+    kind: str,
+    urgency_at_surface: str,
+    age_days_at_surface: float,
+    verb: str,
+    snooze_duration_days: float | None = None,
+) -> dict:
+    """Fire one board triage action through an existing Weft write tool and
+    record it as L1 feedback-loop signal (`board_triage_events`) — the
+    MCP-callable analog of the future localhost overlay's `POST /act`.
+
+    `tool`/`args` name an existing write tool + its arguments exactly as an
+    item's `weft_board` action descriptor would (e.g.
+    `tool="weft_tracker_close", args={"tracker_id": "..."}`); `tool` must be
+    one of the allowlisted triage write tools or the call is rejected with
+    no write. `item_id`/`source`/`kind`/`urgency_at_surface`/
+    `age_days_at_surface` are the item's own fields AT THE TIME it was
+    surfaced by `weft_board` (pass them through from that response) —
+    `verb` names the action taken (e.g. "close", "snooze", "dismiss"), and
+    `snooze_duration_days` is only meaningful when `verb == "snooze"`.
+
+    This call never mutates state beyond the one named write tool's own
+    effect plus the triage-event append; it does not itself run the L1
+    feedback engine (see the scheduled/manual `run_feedback_pass`)."""
+    try:
+        from weft.board import act
+
+        app: AppContext = ctx.request_context.lifespan_context
+        async with acquire(app.pool):
+            return await act(
+                app.pool,
+                tool=tool,
+                args=args,
+                item_id=item_id,
+                source=source,
+                kind=kind,
+                urgency_at_surface=urgency_at_surface,
+                age_days_at_surface=age_days_at_surface,
+                verb=verb,
+                snooze_duration_days=snooze_duration_days,
+            )
+    except LookupError as e:
+        return {"error": "Not found", "detail": str(e), "tool": "weft_board_act"}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_board_act", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_board_act", e)
+
+
+@mcp.tool()
 async def weft_slack_sync(
     ctx: Context,
     channel_ids: list[str] | None = None,

@@ -12,6 +12,7 @@ row.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -928,3 +929,419 @@ async def assemble_board(
         "counts": counts,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# L1 feedback engine — SHADOW mode (weft-board-epic Task 7; PRD §Compounding
+# Loops "Triage Correction Ratchet").
+#
+# The board discards its own exhaust unless something records it: every
+# triage action fired through `act()` below is a datapoint about what
+# actually deserved attention. This section ships:
+#   1. `record_triage_event()` — the SIGNAL append (board_triage_events).
+#   2. `act()` — fires an existing Weft write tool for one triage action AND
+#      appends the triage event as a side effect (the non-HTTP analog of the
+#      PRD's `POST /act`; the future localhost overlay, weft-board-epic
+#      Task 9, is expected to front this same function rather than
+#      reimplementing the dispatch/append).
+#   3. `RULE_REGISTRY` — a data-described `{name, signal_predicate,
+#      proposed_action}` list (two rules: repeat-snooze, repeat-dismiss).
+#   4. `run_feedback_pass()` — evaluates the registry and writes proposals
+#      (board_feedback_proposals). SHADOW mode (the v1 default) writes
+#      proposals ONLY; mutation is possible only in `active` mode, and only
+#      through the single, explicitly-gated call site in this function
+#      (PRD Validation V8 / Epic Critical Implementation Note — the shadow
+#      no-write gate is a hard requirement, not a convention).
+# ---------------------------------------------------------------------------
+
+BoardFeedbackMode = Literal["off", "shadow", "active"]
+
+# Config: which mode the L1 feedback engine runs in. Shadow-first rollout is
+# the ratified default (weft-64c14697) — the engine records every proposal
+# it WOULD make without mutating anything, so the theorem ("would-have-
+# proposed" vs "what you actually did") is proven before activation.
+# Activation to `active` is a later, explicit config flip (gated on a
+# mechanical data threshold per the loop blueprint's Phasing — see PRD
+# §Compounding Loops Research Item R7), not a code change.
+_BOARD_FEEDBACK_MODE_ENV_VAR = "WEFT_BOARD_FEEDBACK_MODE"
+DEFAULT_BOARD_FEEDBACK_MODE: BoardFeedbackMode = "shadow"
+
+
+def get_board_feedback_mode() -> BoardFeedbackMode:
+    """Resolve the L1 feedback engine's operating mode.
+
+    Reads `WEFT_BOARD_FEEDBACK_MODE` (mirrors the `WEFT_*` env-var config
+    convention used elsewhere, e.g. `WEFT_DEFAULT_USER_ID`,
+    `WEFT_TURN_RERANK_DISABLE`), defaulting to `"shadow"` — never to
+    `"active"` — so an unset/misconfigured deployment never mutates state
+    from the feedback loop by accident.
+    """
+    raw = os.environ.get(_BOARD_FEEDBACK_MODE_ENV_VAR, DEFAULT_BOARD_FEEDBACK_MODE)
+    if raw not in ("off", "shadow", "active"):
+        logger.warning(
+            f"board.invalid_feedback_mode — {raw!r} is not one of "
+            f"off/shadow/active; falling back to {DEFAULT_BOARD_FEEDBACK_MODE!r}"
+        )
+        return DEFAULT_BOARD_FEEDBACK_MODE
+    return raw  # type: ignore[return-value]
+
+
+# R7 (PRD §Compounding Loops / Research Items): tuning thresholds are
+# ASSUMED, not derived from real triage volume yet. Named config constants
+# — not literals buried in a query — so they move without a schema change
+# once real data informs them.
+SNOOZE_REPEAT_THRESHOLD = 3
+DISMISS_DISTINCT_ITEM_THRESHOLD = 3
+
+
+async def record_triage_event(
+    pool: asyncpg.Pool,
+    *,
+    item_id: str,
+    source: str,
+    kind: str,
+    urgency_at_surface: str,
+    age_days_at_surface: float,
+    verb: str,
+    snooze_duration_days: float | None = None,
+) -> None:
+    """Append one row to `board_triage_events` — the L1 loop's SIGNAL.
+
+    This is the single append point for the triage-correction loop's raw
+    signal (loop blueprint: "NEEDS instrumentation — one append in the
+    action-dispatch path"). `act()` below calls this as a side effect of
+    firing a triage action; the future overlay's `POST /act`
+    (weft-board-epic Task 9) is expected to call this same function rather
+    than re-implementing the insert, so the two callers can't fork.
+    """
+    async with acquire(pool) as conn:
+        await conn.execute(
+            """
+            INSERT INTO board_triage_events
+                (item_id, source, kind, urgency_at_surface,
+                 age_days_at_surface, verb, snooze_duration_days)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            item_id, source, kind, urgency_at_surface,
+            age_days_at_surface, verb, snooze_duration_days,
+        )
+
+
+# --- /act: fire an existing write tool + record the triage event ----------
+#
+# Allowlist: exactly the existing Weft write tools the PRD names for triage
+# (§Ground Truth / §Behavior "triage without a new write path") — never
+# expanded ad hoc; the overlay's security boundary (PRD §Critical
+# Implementation Notes: "must reject any tool not on the write-tool
+# allowlist BEFORE dispatch") is this same dict. Each entry wraps the
+# store-layer function directly (not the MCP-tool-decorated function, which
+# requires an `mcp.Context`) so this module carries no MCP dependency.
+
+async def _act_tracker_close(pool: asyncpg.Pool, args: dict):
+    from weft.models import TrackerState
+    from weft.trackers import close_tracker
+
+    return await close_tracker(
+        pool, args["tracker_id"],
+        final_state=TrackerState(args.get("final_state", "done")),
+        note=args.get("note"),
+    )
+
+
+async def _act_tracker_snooze(pool: asyncpg.Pool, args: dict):
+    from weft.trackers import snooze_tracker
+
+    until = args["until"]
+    if isinstance(until, str):
+        until = datetime.fromisoformat(until)
+    return await snooze_tracker(pool, args["tracker_id"], until)
+
+
+async def _act_tracker_dismiss(pool: asyncpg.Pool, args: dict):
+    from weft.trackers import dismiss_tracker
+
+    return await dismiss_tracker(pool, args["tracker_id"])
+
+
+async def _act_tracker_update(pool: asyncpg.Pool, args: dict):
+    from weft.models import NudgeMode, TrackerState
+    from weft.trackers import update_tracker
+
+    nudge_after = args.get("nudge_after")
+    nudge_interval_seconds = args.get("nudge_interval_seconds")
+    return await update_tracker(
+        pool, args["tracker_id"],
+        title=args.get("title"),
+        state=TrackerState(args["state"]) if args.get("state") else None,
+        state_note=args.get("state_note"),
+        context=args.get("context"),
+        nudge_mode=NudgeMode(args["nudge_mode"]) if args.get("nudge_mode") else None,
+        nudge_after=(
+            datetime.fromisoformat(nudge_after) if nudge_after else None
+        ),
+        nudge_interval=(
+            timedelta(seconds=nudge_interval_seconds)
+            if nudge_interval_seconds is not None else None
+        ),
+    )
+
+
+async def _act_alert_dismiss(pool: asyncpg.Pool, args: dict):
+    from weft.alerts import dismiss_alert
+
+    return await dismiss_alert(pool, args["alert_id"])
+
+
+async def _act_trigger_delete(pool: asyncpg.Pool, args: dict):
+    from weft.triggers import delete_trigger
+
+    return await delete_trigger(pool, args["trigger_id"])
+
+
+async def _act_trigger_fire(pool: asyncpg.Pool, args: dict):
+    from weft.triggers import record_fire
+
+    return await record_fire(pool, args["trigger_id"])
+
+
+ACT_ALLOWLIST: dict[str, Callable[[asyncpg.Pool, dict], Awaitable]] = {
+    "weft_tracker_close": _act_tracker_close,
+    "weft_tracker_snooze": _act_tracker_snooze,
+    "weft_tracker_dismiss": _act_tracker_dismiss,
+    "weft_tracker_update": _act_tracker_update,
+    "weft_alert_dismiss": _act_alert_dismiss,
+    "weft_trigger_delete": _act_trigger_delete,
+    "weft_trigger_fire": _act_trigger_fire,
+}
+
+
+async def act(
+    pool: asyncpg.Pool,
+    *,
+    tool: str,
+    args: dict,
+    item_id: str,
+    source: str,
+    kind: str,
+    urgency_at_surface: str,
+    age_days_at_surface: float,
+    verb: str,
+    snooze_duration_days: float | None = None,
+) -> dict:
+    """Fire one triage action through an existing Weft write tool AND record
+    it as L1 feedback-loop signal (PRD §Compounding Loops "Triage
+    Correction Ratchet"). This is the non-HTTP analog of the PRD's
+    `POST /act`; the future localhost overlay (weft-board-epic Task 9, not
+    yet built) is expected to front this exact function with an HTTP
+    handler instead of re-implementing the dispatch or the event-append —
+    "an agent firing a weft_board action" (the loop blueprint's SIGNAL
+    description) is this call, made directly.
+
+    `tool` must be a name in `ACT_ALLOWLIST` — anything else is rejected
+    with no write and no triage-event append (mirrors the PRD's overlay
+    security boundary). The triage event is appended only after the
+    underlying write succeeds, so a failed action is never recorded as a
+    triage datapoint.
+
+    `urgency_at_surface` / `age_days_at_surface` are the item's bucket/age
+    AT THE TIME it was surfaced by `weft_board` — the caller (an agent or
+    the future overlay) already holds these from the board response; `act`
+    does not re-derive them, since re-deriving "at surface time" values at
+    act time would silently answer a different question.
+    """
+    dispatch = ACT_ALLOWLIST.get(tool)
+    if dispatch is None:
+        raise ValueError(
+            f"board.act: tool {tool!r} is not on the triage write-tool "
+            f"allowlist ({sorted(ACT_ALLOWLIST)})"
+        )
+
+    result = await dispatch(pool, args)
+
+    await record_triage_event(
+        pool,
+        item_id=item_id,
+        source=source,
+        kind=kind,
+        urgency_at_surface=urgency_at_surface,
+        age_days_at_surface=age_days_at_surface,
+        verb=verb,
+        snooze_duration_days=snooze_duration_days,
+    )
+
+    if hasattr(result, "to_dict"):
+        return result.to_dict()
+    return {"result": result}
+
+
+# --- Rule registry: {name, signal_predicate, proposed_action} -------------
+#
+# A new rule is a registry entry, not new engine code (PRD Non-Goals: no
+# plugin framework, just this data-described seam). `signal_predicate` reads
+# `board_triage_events` and returns the list of targets that currently
+# satisfy the rule; `proposed_action` maps one target to the data-described
+# change that would be applied in `active` mode.
+
+
+@dataclass
+class TriageRule:
+    """One rule registry entry: `{name, signal_predicate, proposed_action}`
+    per PRD §Interfaces / Epic Core Decisions."""
+
+    name: str
+    signal_predicate: Callable[[asyncpg.Connection], Awaitable[list[dict]]]
+    proposed_action: Callable[[dict], dict]
+
+
+async def _repeat_snooze_signal(conn: asyncpg.Connection) -> list[dict]:
+    """Targets: item_ids snoozed >= SNOOZE_REPEAT_THRESHOLD times
+    (ROBUSTNESS GAP rule — loop blueprint)."""
+    rows = await conn.fetch(
+        """
+        SELECT item_id, source, kind, count(*) AS snooze_count
+        FROM board_triage_events
+        WHERE verb = 'snooze'
+        GROUP BY item_id, source, kind
+        HAVING count(*) >= $1
+        """,
+        SNOOZE_REPEAT_THRESHOLD,
+    )
+    return [dict(r) for r in rows]
+
+
+def _repeat_snooze_action(target: dict) -> dict:
+    """Proposed change: extend that item's nudge_interval one step. The
+    exact new value is computed by the ACTIVE apply path (weft-board-epic
+    Task loom-692f59d4, R6) — this data shape is deliberately abstract
+    ("extend one step") rather than inventing a concrete new_value here."""
+    return {
+        "field": "nudge_interval",
+        "action": "extend_one_step",
+        "item_id": target["item_id"],
+        "snooze_count": target["snooze_count"],
+    }
+
+
+async def _repeat_dismiss_signal(conn: asyncpg.Connection) -> list[dict]:
+    """Targets: (source, kind) pairs dismissed across
+    >= DISMISS_DISTINCT_ITEM_THRESHOLD distinct items (FEATURE SIGNAL rule —
+    loop blueprint)."""
+    rows = await conn.fetch(
+        """
+        SELECT source, kind, count(DISTINCT item_id) AS distinct_dismissed
+        FROM board_triage_events
+        WHERE verb = 'dismiss'
+        GROUP BY source, kind
+        HAVING count(DISTINCT item_id) >= $1
+        """,
+        DISMISS_DISTINCT_ITEM_THRESHOLD,
+    )
+    return [dict(r) for r in rows]
+
+
+def _repeat_dismiss_action(target: dict) -> dict:
+    """Proposed change: add this (source, kind) pair to hidden_kinds.
+
+    Ratified decision (weft-64c14697): hidden_kinds matches by KIND/ID
+    equality, never name-substring — `kind` here is the exact `Item.kind`
+    identifier (e.g. a TriggerConditionType value, a TrackerKind value),
+    not a name fragment to substring-match against titles."""
+    return {
+        "add_to": "hidden_kinds",
+        "source": target["source"],
+        "kind": target["kind"],
+        "distinct_dismissed": target["distinct_dismissed"],
+    }
+
+
+RULE_REGISTRY: list[TriageRule] = [
+    TriageRule(
+        name="repeat-snooze",
+        signal_predicate=_repeat_snooze_signal,
+        proposed_action=_repeat_snooze_action,
+    ),
+    TriageRule(
+        name="repeat-dismiss",
+        signal_predicate=_repeat_dismiss_signal,
+        proposed_action=_repeat_dismiss_action,
+    ),
+]
+
+
+def _proposal_target_id(rule_name: str, target: dict) -> str:
+    """Opaque `target_id` for `board_feedback_proposals` — a single-item id
+    for repeat-snooze, or the `source:kind` pair for repeat-dismiss (kept
+    together rather than bare `kind`, since kind vocabularies are not
+    guaranteed unique across the five sources)."""
+    if rule_name == "repeat-snooze":
+        return target["item_id"]
+    return f"{target['source']}:{target['kind']}"
+
+
+async def _apply_proposal(pool: asyncpg.Pool, rule_name: str, proposal: dict) -> None:
+    """ACTIVE-mode apply path — INTENTIONAL NO-OP STUB in this task.
+
+    weft-board-epic Task loom-692f59d4 (L1 ACTIVE apply path) fills this
+    in: extending a tracker's nudge_interval for repeat-snooze (via
+    `weft.trackers.update_tracker`, reusing existing internals per R6), and
+    firing a `board_feedback` alert for repeat-dismiss for human review.
+    This task ships the registry + the mode gate at the single call site in
+    `run_feedback_pass` — not the mutation itself.
+    """
+    return None
+
+
+async def run_feedback_pass(
+    pool: asyncpg.Pool,
+    *,
+    mode: BoardFeedbackMode | None = None,
+) -> list[dict]:
+    """Evaluate `RULE_REGISTRY` over `board_triage_events` and record
+    proposals to `board_feedback_proposals` (PRD §Compounding Loops L1).
+
+    SHADOW NO-WRITE GATE (hard requirement, PRD Validation V8 / Epic
+    Critical Implementation Note — NOT a convention): this function's ONLY
+    mutation of tracker/alert state is the call to `_apply_proposal` below,
+    and that call is reached ONLY when `mode == "active"`. In `shadow` mode
+    (the v1 default) or `off` mode, no tracker row and no alert is ever
+    touched by this function — it writes exclusively to
+    `board_feedback_proposals`. The foot-gun this guards against (per the
+    Epic): applying `proposed_action` inline during rule evaluation instead
+    of behind the mode check.
+
+    Returns the list of proposal rows written (as dicts), for both modes.
+    """
+    if mode is None:
+        mode = get_board_feedback_mode()
+
+    if mode == "off":
+        return []
+
+    proposals: list[dict] = []
+    async with acquire(pool) as conn:
+        for rule in RULE_REGISTRY:
+            targets = await rule.signal_predicate(conn)
+            for target in targets:
+                proposed_change = rule.proposed_action(target)
+                target_id = _proposal_target_id(rule.name, target)
+
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO board_feedback_proposals
+                        (rule, target_id, proposed_change, mode)
+                    VALUES ($1, $2, $3::jsonb, $4)
+                    RETURNING id, rule, target_id, proposed_change, mode, created_at
+                    """,
+                    rule.name, target_id, json.dumps(proposed_change), mode,
+                )
+                proposal = dict(row)
+                if isinstance(proposal["proposed_change"], str):
+                    proposal["proposed_change"] = json.loads(proposal["proposed_change"])
+                proposals.append(proposal)
+
+                # SHADOW NO-WRITE GATE — see docstring. `mode == "shadow"`
+                # (and `"off"`, handled above) never reach this branch.
+                if mode == "active":
+                    await _apply_proposal(pool, rule.name, proposal)
+
+    return proposals
