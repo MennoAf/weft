@@ -74,6 +74,15 @@ SCOPED_CRUD_TABLES: tuple[str, ...] = (
     # Recall canary (v63, memory-v2 Phase 0): per-user known-answer probes;
     # full GUC-scoped CRUD + system-sentinel SELECT, same shape as topic_digests.
     "recall_canary",
+    # Recall canary audit (v66): per-probe-run outcome log for the windowed
+    # canary miss rate; same scoped-CRUD + system-sentinel SELECT shape as
+    # recall_canary.
+    "recall_canary_audit",
+    # Board triage correction loop substrate (v67): append-only triage-action
+    # log + feedback-engine proposals log; both carry the same scoped-CRUD +
+    # system-sentinel SELECT shape as recall_canary.
+    "board_triage_events",
+    "board_feedback_proposals",
 )
 
 # Tables that have a ``user_id`` column but use a service policy by design.
