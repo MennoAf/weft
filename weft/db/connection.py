@@ -15,6 +15,21 @@ from weft.config import WeftConfig
 
 logger = logging.getLogger(__name__)
 
+# Fallback used only for pools not created via create_pool (e.g. tests that
+# construct a raw asyncpg pool). Bounds acquire() so a drained pool fails fast
+# instead of blocking forever.
+_DEFAULT_ACQUIRE_TIMEOUT = 10.0
+
+# Per-pool acquire timeout, recorded at create_pool time and consumed by
+# acquire(). Keyed by id(pool) because asyncpg.Pool uses __slots__ with no
+# __dict__ or __weakref__ — it can neither carry a custom attribute nor be a
+# WeakKeyDictionary key. create_pool always writes the entry before the pool is
+# used, so a pool built here always reads its own configured value; the only
+# stale case is a raw pool whose id collides with a closed pool's, which merely
+# yields a different *bounded* timeout — never a hang. Entries are tiny
+# (int -> float); a leak here is negligible for the once-per-process pool.
+_ACQUIRE_TIMEOUTS: dict[int, float | None] = {}
+
 
 def _resolve_user_id() -> str | None:
     """Resolve the current user ID from the contextvar set by middleware."""
@@ -100,6 +115,10 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
         "max_size": config.database.pool_max_size,
         "init": _pgvector_codec_init,
     }
+    # Per-query ceiling: a stuck query is cancelled instead of hanging forever
+    # and holding its connection out of the pool.
+    if config.database.command_timeout is not None:
+        kwargs["command_timeout"] = config.database.command_timeout
     if config.database.statement_cache_size is not None:
         kwargs["statement_cache_size"] = config.database.statement_cache_size
     # Supabase pooler requires statement_cache_size=0 (no prepared statements)
@@ -113,7 +132,9 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
         kwargs["ssl"] = ctx
 
     try:
-        return await asyncpg.create_pool(dsn, **kwargs)
+        pool = await asyncpg.create_pool(dsn, **kwargs)
+        _ACQUIRE_TIMEOUTS[id(pool)] = config.database.acquire_timeout
+        return pool
     except (ConnectionRefusedError, OSError) as exc:
         # A paused Supabase project refuses connections at the socket layer,
         # which asyncpg propagates as ConnectionRefusedError / TimeoutError /
@@ -178,7 +199,9 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
             "Supabase project %s is back online — retrying connection",
             project_ref,
         )
-        return await asyncpg.create_pool(dsn, **kwargs)
+        pool = await asyncpg.create_pool(dsn, **kwargs)
+        _ACQUIRE_TIMEOUTS[id(pool)] = config.database.acquire_timeout
+        return pool
 
 
 async def set_user_context(conn: asyncpg.Connection) -> None:
@@ -233,7 +256,12 @@ async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
         yield existing
         return
 
-    async with pool.acquire() as conn:
+    # Bound the wait for a free connection: when the pool is drained, block only
+    # up to acquire_timeout, then raise asyncio.TimeoutError instead of hanging
+    # indefinitely. Falls back to a safe default for pools not built via
+    # create_pool (e.g. raw test pools).
+    acquire_timeout = _ACQUIRE_TIMEOUTS.get(id(pool), _DEFAULT_ACQUIRE_TIMEOUT)
+    async with pool.acquire(timeout=acquire_timeout) as conn:
         user_id = _resolve_user_id()
         if user_id is not None:
             # SET LOCAL requires a transaction context.

@@ -37,6 +37,8 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "database.pool_min_size": ("database", "pool_min_size"),
     "database.pool_max_size": ("database", "pool_max_size"),
     "database.statement_cache_size": ("database", "statement_cache_size"),
+    "database.command_timeout": ("database", "command_timeout"),
+    "database.acquire_timeout": ("database", "acquire_timeout"),
     "redis.url": ("redis", "url"),
     "embedding.provider": ("embedding", "provider"),
     "embedding.model": ("embedding", "model"),
@@ -72,8 +74,15 @@ class WeftEnv(str, Enum):
 class DatabaseConfig(BaseModel):
     url: str = "postgresql://weft:weft_local@localhost:5433/weft"
     pool_min_size: int = 2
-    pool_max_size: int = 10
+    pool_max_size: int = 20
     statement_cache_size: int | None = None  # Set to 0 for pgbouncer/Supabase pooler
+    # Per-query ceiling passed to asyncpg. A stuck query (lock, seq-scan, pooler
+    # latency) is cancelled instead of hanging forever and holding its connection.
+    command_timeout: float | None = 30.0
+    # Max wait for a free pooled connection in acquire(). When the pool is
+    # drained, callers fail fast with a clear error instead of blocking
+    # indefinitely — the difference between a visible error and a silent hang.
+    acquire_timeout: float | None = 10.0
 
 
 class RedisConfig(BaseModel):
@@ -634,6 +643,16 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
     # DATABASE_URL is the standard convention (Fly.io, Supabase, etc.)
     if url := os.environ.get("WEFT_DATABASE_URL") or os.environ.get("DATABASE_URL"):
         config.database.url = _encode_dsn_password(url)
+    # Pool sizing and timeouts are env-overridable so prod can be tuned without a
+    # redeploy (e.g. shrink pool_max_size below the Supabase pooler's ceiling).
+    if pool_max := os.environ.get("WEFT_DB_POOL_MAX_SIZE"):
+        config.database.pool_max_size = int(pool_max)
+    if pool_min := os.environ.get("WEFT_DB_POOL_MIN_SIZE"):
+        config.database.pool_min_size = int(pool_min)
+    if cmd_timeout := os.environ.get("WEFT_DB_COMMAND_TIMEOUT"):
+        config.database.command_timeout = float(cmd_timeout)
+    if acq_timeout := os.environ.get("WEFT_DB_ACQUIRE_TIMEOUT"):
+        config.database.acquire_timeout = float(acq_timeout)
     if "WEFT_REDIS_URL" in os.environ:
         config.redis.url = os.environ["WEFT_REDIS_URL"]
     if provider := os.environ.get("WEFT_EMBEDDING_PROVIDER"):

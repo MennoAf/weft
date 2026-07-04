@@ -8,6 +8,7 @@ executes SQL.
 from __future__ import annotations
 
 import logging
+import os
 
 import asyncpg
 
@@ -15,6 +16,15 @@ logger = logging.getLogger(__name__)
 
 # Advisory lock ID for serializing migrations across processes
 _MIGRATION_LOCK_ID = 839271  # arbitrary unique int
+
+# Migrations run on the shared pool, which carries a short request-path
+# command_timeout (~30s). DDL like an HNSW index build over a large table, and
+# the advisory-lock wait during a concurrent deploy, can legitimately exceed
+# that — so migration statements pass an explicit, generous per-call timeout
+# that OVERRIDES the pool default (asyncpg: a positive per-call timeout wins;
+# None would inherit the 30s ceiling and cancel the build mid-flight).
+# Overridable for very large tables via WEFT_MIGRATION_TIMEOUT.
+_MIGRATION_TIMEOUT = float(os.environ.get("WEFT_MIGRATION_TIMEOUT", 600.0))
 
 
 async def _get_applied_versions(pool: asyncpg.Pool) -> set[int]:
@@ -52,7 +62,11 @@ async def run_migrations(pool: asyncpg.Pool) -> list[int]:
 
     async with pool.acquire() as lock_conn:
         # Acquire session-level advisory lock (blocks until available)
-        await lock_conn.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_ID)
+        await lock_conn.execute(
+            "SELECT pg_advisory_lock($1)",
+            _MIGRATION_LOCK_ID,
+            timeout=_MIGRATION_TIMEOUT,
+        )
         try:
             existing = await _get_applied_versions(pool)
 
@@ -60,7 +74,7 @@ async def run_migrations(pool: asyncpg.Pool) -> list[int]:
                 if version in existing:
                     continue
                 async with lock_conn.transaction():
-                    await lock_conn.execute(sql)
+                    await lock_conn.execute(sql, timeout=_MIGRATION_TIMEOUT)
                 applied.append(version)
                 logger.info("Applied migration %d: %s", version, description)
 

@@ -134,6 +134,33 @@ def test_env_vars_override_toml(tmp_path: Path, monkeypatch):
     assert config.log_level == "ERROR"
 
 
+def test_db_timeout_defaults_are_bounded():
+    """Pool must ship with finite timeouts so a stalled query/drained pool
+    fails fast instead of hanging (intermittent-hang regression guard)."""
+    from weft.config import DatabaseConfig
+
+    db = DatabaseConfig()
+    assert db.command_timeout is not None and db.command_timeout > 0
+    assert db.acquire_timeout is not None and db.acquire_timeout > 0
+    # Pool must have headroom over a single prime's ~16-way section fan-out.
+    assert db.pool_max_size >= 16
+
+
+def test_db_pool_and_timeout_env_overrides(tmp_path: Path, monkeypatch):
+    """Pool sizing and timeouts are tunable in prod without a redeploy."""
+    toml_path = tmp_path / ".weft" / "config.toml"
+    toml_path.parent.mkdir(parents=True)
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    monkeypatch.setenv("WEFT_DB_POOL_MAX_SIZE", "25")
+    monkeypatch.setenv("WEFT_DB_COMMAND_TIMEOUT", "12.5")
+    monkeypatch.setenv("WEFT_DB_ACQUIRE_TIMEOUT", "7")
+
+    config = load_config()
+    assert config.database.pool_max_size == 25
+    assert config.database.command_timeout == 12.5
+    assert config.database.acquire_timeout == 7.0
+
+
 # --- CLI tests ---
 
 
