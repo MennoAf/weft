@@ -610,6 +610,38 @@ class TestActiveApplyPath:
             for i in after["items"]
         ), "approved-hidden (tracker, task) items must be omitted from the board"
 
+    async def test_board_renders_when_hide_filter_errors(self, pool, now, monkeypatch):
+        """Fail-soft (V5 parity): if the hide-filter query raises (e.g. the
+        board_feedback_proposals table is absent pre-migration), the board
+        still returns its items — unfiltered — with a hidden_kinds warning,
+        rather than one non-essential query taking down the whole board."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        import weft.board as board_module
+        from weft.trackers import create_tracker
+
+        await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Survives a broken hide filter",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(days=1),
+            ),
+        )
+
+        async def _boom(_pool):
+            raise RuntimeError("board_feedback_proposals does not exist")
+
+        monkeypatch.setattr(board_module, "_active_hidden_kinds", _boom)
+
+        board = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+        assert any(
+            i["source"] == "tracker" and i["kind"] == "task" for i in board["items"]
+        ), "board must still render its items when the hide filter errors"
+        assert any(
+            w.get("source") == "hidden_kinds" for w in board["warnings"]
+        ), "a failed hide filter must surface as a warning, not a silent drop"
+
     async def test_dismissed_trigger_kind_is_NOT_added_to_hide_set(self, pool):
         """Option 1 guard (weft-fb830f43): an active repeat-dismiss of a
         trigger's condition_type must NEVER enter the board hide-set — else

@@ -941,7 +941,17 @@ async def assemble_board(
         # Read-time hide filter (Task 8): fetched under the SAME bound identity
         # as the fan-out so it is RLS-scoped to `user_id`. Empty unless the L1
         # loop has been activated, so this is a no-op for shadow deployments.
-        hidden_kinds = await _active_hidden_kinds(pool)
+        # Fail-soft, mirroring the per-source V5 isolation: the hide filter is
+        # an ENHANCEMENT, not core to surfacing open items, so if the feedback
+        # substrate is unavailable (table absent pre-migration, transient DB
+        # error) the board still renders — unfiltered — with a warning, rather
+        # than a single non-essential query taking down the whole board.
+        try:
+            hidden_kinds = await _active_hidden_kinds(pool)
+        except Exception as exc:
+            logger.warning("board.hidden_kinds_unavailable: %s", type(exc).__name__)
+            warnings.append({"source": "hidden_kinds", "error": type(exc).__name__})
+            hidden_kinds = set()
     finally:
         _current_conn.reset(conn_token)
         current_user_id.reset(token)
