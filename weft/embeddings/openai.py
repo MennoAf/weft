@@ -12,6 +12,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "text-embedding-3-small"
 DEFAULT_DIMENSIONS = 768  # Matryoshka truncation from native 1536
 
+# The OpenAI SDK defaults to a 600s (10 min) timeout with 2 retries, so a single
+# stalled request can block an embed() call — and any DB connections its caller
+# holds — for tens of minutes. Embeddings are small, fast requests; cap them
+# aggressively so a slow API surfaces as a quick error instead of a hang. Both
+# values are overridable via WEFT_OPENAI_EMBED_TIMEOUT / _RETRIES for prod tuning.
+DEFAULT_TIMEOUT = 10.0
+DEFAULT_MAX_RETRIES = 2
+
 
 class OpenAIEmbeddingProvider:
     """OpenAI text-embedding-3-small provider with configurable output dimensions.
@@ -24,6 +32,8 @@ class OpenAIEmbeddingProvider:
         self,
         model_name: str = DEFAULT_MODEL,
         dimensions: int = DEFAULT_DIMENSIONS,
+        timeout: float | None = None,
+        max_retries: int | None = None,
     ):
         self._model_name = model_name
         self._dimensions = dimensions
@@ -33,7 +43,17 @@ class OpenAIEmbeddingProvider:
                 "OPENAI_API_KEY environment variable is required for OpenAI embeddings. "
                 "Set it in ~/.weft/.env or your environment."
             )
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+        if timeout is None:
+            timeout = float(os.environ.get("WEFT_OPENAI_EMBED_TIMEOUT", DEFAULT_TIMEOUT))
+        if max_retries is None:
+            max_retries = int(
+                os.environ.get("WEFT_OPENAI_EMBED_RETRIES", DEFAULT_MAX_RETRIES)
+            )
+        self._client = openai.AsyncOpenAI(
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
 
     @property
     def dimensions(self) -> int:

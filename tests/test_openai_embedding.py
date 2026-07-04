@@ -45,6 +45,27 @@ class TestOpenAIProviderInit:
         provider = OpenAIEmbeddingProvider(model_name="text-embedding-3-large")
         assert provider._model_name == "text-embedding-3-large"
 
+    def test_client_has_bounded_timeout(self):
+        """Client must not use the SDK's 600s default — a slow API should fail
+        fast, not hang recall/prime for minutes while holding DB connections."""
+        provider = OpenAIEmbeddingProvider()
+        assert provider._client.timeout == 10.0
+        # A hard ceiling regardless of how the SDK represents the default.
+        assert float(provider._client.timeout) <= 30.0
+
+    def test_timeout_and_retries_are_overridable(self):
+        provider = OpenAIEmbeddingProvider(timeout=3.0, max_retries=0)
+        assert provider._client.timeout == 3.0
+        assert provider._client.max_retries == 0
+
+    def test_timeout_env_override(self):
+        with patch.dict(
+            "os.environ",
+            {"OPENAI_API_KEY": "sk-test-key", "WEFT_OPENAI_EMBED_TIMEOUT": "5"},
+        ):
+            provider = OpenAIEmbeddingProvider()
+            assert provider._client.timeout == 5.0
+
 
 class TestOpenAIEmbed:
     @pytest.fixture
