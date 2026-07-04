@@ -214,6 +214,48 @@ def rank_items(
     return sorted(items, key=sort_key)
 
 
+# --- Triage action descriptors (PRD §Behavior "triage without a new write
+# path" / V1 acceptance `actions[]`): each Item carries `{verb, tool, args}`
+# naming an EXISTING Weft write tool, pre-filled for that item. The overlay (or
+# an agent) fires the named tool via POST /act, then refetches — the board
+# itself never gains a mutation path. Every `tool` here MUST be in
+# `ACT_ALLOWLIST` (board_server rejects anything else before dispatch).
+# taREDACTED and the review queue are READ-ONLY in v1 (PRD Non-Goal), so
+# they carry no actions.
+_DEFAULT_SNOOZE = timedelta(days=1)
+
+
+def _tracker_actions(tracker: Tracker, now: datetime) -> list[Action]:
+    """close / snooze / dismiss, each pre-filled with the tracker id. Snooze
+    carries a 1-day default `until` so it is fire-as-is; the UI may offer other
+    durations by recomputing `until` client-side."""
+    return [
+        Action(verb="close", tool="weft_tracker_close",
+               args={"tracker_id": tracker.id}),
+        Action(verb="snooze", tool="weft_tracker_snooze",
+               args={"tracker_id": tracker.id,
+                     "until": (now + _DEFAULT_SNOOZE).isoformat()}),
+        Action(verb="dismiss", tool="weft_tracker_dismiss",
+               args={"tracker_id": tracker.id}),
+    ]
+
+
+def _alert_actions(alert: Alert) -> list[Action]:
+    return [
+        Action(verb="dismiss", tool="weft_alert_dismiss",
+               args={"alert_id": alert.id}),
+    ]
+
+
+def _trigger_actions(trigger: Trigger) -> list[Action]:
+    """Delete is the trigger's triage verb (triggers have no dismiss state).
+    Destructive, so the UI confirms before firing."""
+    return [
+        Action(verb="delete", tool="weft_trigger_delete",
+               args={"trigger_id": trigger.id}),
+    ]
+
+
 def tracker_adapter(
     trackers: list[Tracker],
     now: datetime | None = None,
@@ -261,7 +303,7 @@ def tracker_adapter(
             urgency=calculate_urgency(tracker.nudge_after, now, horizon_days),
             project_id=tracker.project_id,
             entity_id=tracker.entity_id,
-            actions=[],
+            actions=_tracker_actions(tracker, now),
         )
         items.append(item)
 
@@ -315,7 +357,7 @@ def alert_adapter(
             urgency=calculate_urgency(alert.trigger_at, now, horizon_days),
             project_id=alert.project_id,
             entity_id=None,  # Alerts do not have entity association
-            actions=[],
+            actions=_alert_actions(alert),
         )
         items.append(item)
 
@@ -422,7 +464,7 @@ def trigger_adapter(
             urgency=calculate_urgency(due_at, now, horizon_days),
             project_id=trigger.project_id,
             entity_id=None,  # Triggers do not have entity association
-            actions=[],
+            actions=_trigger_actions(trigger),
         )
         items.append(item)
 
@@ -596,11 +638,20 @@ async def _fetch_review_memories(
     """
     from weft.store import _row_to_memory
 
+    # Exclude codebase-ingest memories (loom-40c5fa78): the ingest pipeline
+    # stamps summaries with review_after, and on a real corpus they dominate
+    # the review queue (~400 source='ingest' facts vs ~100 genuine
+    # conversation-origin items), hit the per-source cap, and bury everything a
+    # human would actually triage. Ingest summaries are system-generated, not
+    # decisions/issues the owner needs to re-verify — they don't belong on the
+    # personal triage board. They remain reviewable elsewhere; this filter is
+    # scoped to the board read only.
     rows = await conn.fetch(
         """
         SELECT * FROM memories
         WHERE status = 'active'
           AND review_after IS NOT NULL
+          AND source <> 'ingest'
         ORDER BY review_after ASC
         LIMIT $1
         """,
