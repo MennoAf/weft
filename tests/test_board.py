@@ -678,7 +678,15 @@ class TestTrackerAdapter:
         assert item.urgency == "due_soon"
         assert item.project_id == "proj-1"
         assert item.entity_id == "entity-1"
-        assert item.actions == []
+        # Triage descriptors (PRD §Behavior / V1 actions[]): close/snooze/dismiss
+        # pre-filled with the tracker id, each naming an existing write tool.
+        verbs = {a.verb: a for a in item.actions}
+        assert set(verbs) == {"close", "snooze", "dismiss"}
+        assert verbs["close"].tool == "weft_tracker_close"
+        assert verbs["close"].args["tracker_id"] == item.id
+        assert verbs["snooze"].tool == "weft_tracker_snooze"
+        assert "until" in verbs["snooze"].args
+        assert verbs["dismiss"].tool == "weft_tracker_dismiss"
 
     def test_tracker_adapter_urgency_overdue(self, now):
         """Tracker with past nudge_after maps to overdue urgency."""
@@ -845,7 +853,10 @@ class TestAlertAdapter:
         assert item.urgency == "due_soon"
         assert item.project_id == "proj-1"
         assert item.entity_id is None
-        assert item.actions == []
+        assert len(item.actions) == 1
+        assert item.actions[0].verb == "dismiss"
+        assert item.actions[0].tool == "weft_alert_dismiss"
+        assert item.actions[0].args["alert_id"] == item.id
 
     def test_alert_adapter_urgency_overdue(self, now):
         """Alert with past trigger_at maps to overdue urgency."""
@@ -1081,7 +1092,10 @@ class TestTriggerAdapter:
         assert item.snoozed_until is None
         assert item.urgency == "due_soon"
         assert item.entity_id is None
-        assert item.actions == []
+        assert len(item.actions) == 1
+        assert item.actions[0].verb == "delete"
+        assert item.actions[0].tool == "weft_trigger_delete"
+        assert item.actions[0].args["trigger_id"] == item.id
 
     def test_trigger_adapter_threshold_condition_no_date(self, now):
         """threshold-condition trigger: no due_at, urgency=no_date."""
@@ -2199,3 +2213,76 @@ class TestAssembleBoardIntegration:
         ]
         assert len(identity_warnings) == 1
         assert identity_warnings[0]["error"] == "no_default_user"
+
+    async def test_every_board_action_tool_is_allowlisted(self, pool):
+        """Security-boundary invariant: every action the board offers must name
+        a tool in ACT_ALLOWLIST — otherwise POST /act would reject an action
+        the UI legitimately rendered. Ties the descriptor producer (adapters)
+        to the dispatch allowlist so they can't drift apart."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.board import ACT_ALLOWLIST
+        from weft.alerts import create_alert
+        from weft.trackers import create_tracker
+        from weft.triggers import create_trigger
+
+        now = datetime.now(timezone.utc)
+        await create_tracker(pool, TrackerCreate(
+            kind=TrackerKind.task, title="T", nudge_mode=NudgeMode.once,
+            nudge_after=now - timedelta(days=1)))
+        await create_alert(pool, AlertCreate(
+            alert_type=AlertType.due_task, title="A",
+            trigger_at=now + timedelta(hours=1), channel=AlertChannel.log))
+        await create_trigger(pool, TriggerCreate(
+            name="Trg", condition_type=TriggerConditionType.time,
+            condition={"trigger_at": now.isoformat()}, action="x"))
+
+        board = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+        seen = 0
+        for item in board["items"]:
+            for action in item["actions"]:
+                assert action["tool"] in ACT_ALLOWLIST, (
+                    f"{item['source']} action {action['tool']} not in allowlist"
+                )
+                seen += 1
+        assert seen >= 3, "expected tracker/alert/trigger items to carry actions"
+
+    async def test_ingest_source_review_memories_excluded_from_board(self, pool):
+        """loom-40c5fa78: codebase-ingest memories (source='ingest') carry a
+        review_after but are system-generated noise, not owner triage items —
+        they must NOT surface on the board's review bucket, while a genuine
+        conversation-origin review memory still does."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.models import MemorySource
+        from weft.store import store_memory
+
+        now = datetime.now(timezone.utc)
+        await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.fact,
+                content="Summary: this file contains unit tests for the cache.",
+                source=MemorySource.ingest,
+                review_after=now - timedelta(days=30),
+            ),
+        )
+        genuine = await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.decision,
+                content="Decided to go all-in on making Weft public",
+                source=MemorySource.conversation,
+                review_after=now - timedelta(days=1),
+            ),
+        )
+
+        result = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+        review_ids = {
+            i["id"] for i in result["items"] if i["source"] == "review"
+        }
+        assert genuine.id in review_ids, "genuine conversation review item must surface"
+        review_contents = [
+            i["title"] for i in result["items"] if i["source"] == "review"
+        ]
+        assert not any("unit tests for the cache" in c for c in review_contents), (
+            "ingest-source review memories must be excluded from the board"
+        )

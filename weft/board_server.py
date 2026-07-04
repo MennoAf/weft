@@ -23,10 +23,11 @@ import logging
 import asyncpg
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from weft.board import ACT_ALLOWLIST, act, assemble_board
+from weft.board_page import BOARD_HTML
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,39 @@ _ACT_REQUIRED_FIELDS = (
 )
 
 
+async def _get_page(request: Request) -> HTMLResponse:
+    """GET / — the triage dashboard (a single self-contained static page).
+
+    Holds no business logic: it fetches `GET /board` and posts item actions to
+    `/act`, speaking only the `weft_board` contract (weft-board-epic Goal #4).
+    """
+    return HTMLResponse(BOARD_HTML)
+
+
+def _int_param(request: Request, name: str, default: int) -> int:
+    """Parse a positive-int query param, falling back on absent/garbage."""
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 async def _get_board(request: Request) -> JSONResponse:
-    """GET /board — read-only fan-out via `assemble_board` (no writes)."""
+    """GET /board — read-only fan-out via `assemble_board` (no writes).
+
+    Honors `?days=` (urgency horizon) and `?include_snoozed=` so the dashboard's
+    horizon selector and the PRD-named board params are actually wired through,
+    rather than always assembling with defaults.
+    """
     pool: asyncpg.Pool = request.app.state.pool
-    result = await assemble_board(pool)
+    days = _int_param(request, "days", 7)
+    include_snoozed = request.query_params.get("include_snoozed", "").lower() in (
+        "1", "true", "yes",
+    )
+    result = await assemble_board(pool, days=days, include_snoozed=include_snoozed)
     return JSONResponse(result)
 
 
@@ -118,6 +148,7 @@ def create_app(pool: asyncpg.Pool) -> Starlette:
     """
     app = Starlette(
         routes=[
+            Route("/", _get_page, methods=["GET"]),
             Route("/board", _get_board, methods=["GET"]),
             Route("/act", _post_act, methods=["POST"]),
         ],

@@ -87,6 +87,62 @@ class TestPostActClose:
         assert tracker.id not in after_ids
 
 
+class TestGetPage:
+    async def test_root_serves_the_dashboard_html(self, client):
+        response = await client.get("/")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        body = response.text
+        assert "<title>Weft Board</title>" in body
+        # The page must speak the board contract it renders from.
+        assert "/board" in body and "/act" in body
+
+    async def test_days_param_forwarded_to_assemble(self, client):
+        response = await client.get("/board?days=30")
+        assert response.status_code == 200
+        assert response.json()["horizon_days"] == 30
+
+
+class TestActionDescriptorRoundTrip:
+    """The whole point of `actions[]`: a descriptor the board emits must be
+    directly dispatchable through /act. Fetch the board, take an item's own
+    action, POST exactly that, and verify the item is gone — no hand-built
+    payload."""
+
+    async def test_board_supplied_close_descriptor_dispatches(
+        self, client, pool, now,
+    ):
+        from weft.trackers import create_tracker
+
+        tracker = await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Round-trip close target",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(hours=1),
+            ),
+        )
+
+        board = (await client.get("/board")).json()
+        item = next(i for i in board["items"] if i["id"] == tracker.id)
+        close = next(a for a in item["actions"] if a["verb"] == "close")
+        assert close["tool"] == "weft_tracker_close"  # board told us the tool
+
+        # Build the /act body straight from the descriptor + item — exactly
+        # what the dashboard's fireAct() does.
+        resp = await client.post("/act", json={
+            "tool": close["tool"], "args": close["args"],
+            "item_id": item["id"], "source": item["source"], "kind": item["kind"],
+            "urgency_at_surface": item["urgency"],
+            "age_days_at_surface": item["age_days"], "verb": close["verb"],
+        })
+        assert resp.status_code == 200
+
+        after = (await client.get("/board")).json()
+        assert tracker.id not in {i["id"] for i in after["items"]}
+
+
 class TestPostActRejectsDisallowedTool:
     async def test_disallowed_tool_returns_4xx_and_performs_no_write(
         self, client, pool, now,
