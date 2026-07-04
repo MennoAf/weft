@@ -645,6 +645,50 @@ async def _fetch_snoozed_due_trackers(
     return [_row_to_tracker(r) for r in rows]
 
 
+# Sources whose `Item.kind` is a real, stable taxonomy the L1 loop may hide
+# by kind (repeat-dismiss → hidden_kinds). RATIFIED Option 1 (weft-fb830f43,
+# scoping weft-64c14697 #4): `trigger` is DELIBERATELY excluded — a trigger's
+# only kind is `condition_type` (time/threshold/event/absence), which describes
+# how it fires, not whether it's system-internal, so hiding a trigger by kind
+# would hide EVERY trigger of that mechanism (the over-broad case board.py's
+# cold-start hide-list comment already warns about). Triggers stay governed by
+# the name-substring cold-start list (`_TRIGGER_HIDE_KINDS`); if one ever needs
+# hiding it is by explicit trigger id, never by condition_type.
+_HIDEABLE_KIND_SOURCES: frozenset[str] = frozenset(
+    {"tracker", "alert", "task", "review"}
+)
+
+
+async def _active_hidden_kinds(pool: asyncpg.Pool) -> set[tuple[str, str]]:
+    """The approved hide-set consumed by the board read: `(source, kind)`
+    pairs from repeat-dismiss proposals recorded in `active` mode.
+
+    Activation to `active` is itself gated on the ≥1-reviewed-batch approval
+    (Epic §Compounding Loops / activation gate), so an active-mode
+    repeat-dismiss proposal IS an approved hide — "after approval a
+    subsequent weft_board omits that kind" (Task 8 done_when). Empty by
+    default: a shadow-mode deployment writes only shadow proposals, so this
+    filter is a no-op until the loop is deliberately activated.
+
+    Per Option 1, trigger pairs are dropped here — `_HIDEABLE_KIND_SOURCES`
+    admits only sources whose kind is a real taxonomy.
+    """
+    async with acquire(pool) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT proposed_change->>'source' AS source,
+                            proposed_change->>'kind'   AS kind
+            FROM board_feedback_proposals
+            WHERE rule = 'repeat-dismiss' AND mode = 'active'
+            """
+        )
+    return {
+        (r["source"], r["kind"])
+        for r in rows
+        if r["source"] in _HIDEABLE_KIND_SOURCES and r["kind"] is not None
+    }
+
+
 async def assemble_board(
     pool: asyncpg.Pool,
     *,
@@ -894,15 +938,23 @@ async def assemble_board(
                 for source in selected_sources
             )
         )
+        # Read-time hide filter (Task 8): fetched under the SAME bound identity
+        # as the fan-out so it is RLS-scoped to `user_id`. Empty unless the L1
+        # loop has been activated, so this is a no-op for shadow deployments.
+        hidden_kinds = await _active_hidden_kinds(pool)
     finally:
         _current_conn.reset(conn_token)
         current_user_id.reset(token)
 
     items_by_source: dict[ItemSource, list[Item]] = dict(zip(selected_sources, results))
+    # Drop items whose (source, kind) is an approved hide. Triggers are never
+    # in `hidden_kinds` (Option 1 — see `_active_hidden_kinds`), so a dismissed
+    # trigger condition_type never silently hides other triggers here.
     all_items: list[Item] = [
         item
         for source in _ALL_ITEM_SOURCES
         for item in items_by_source.get(source, [])
+        if (item.source, item.kind) not in hidden_kinds
     ]
 
     buckets: dict[Urgency, list[Item]] = {bucket: [] for bucket in _URGENCY_BUCKETS}
@@ -992,6 +1044,15 @@ def get_board_feedback_mode() -> BoardFeedbackMode:
 # once real data informs them.
 SNOOZE_REPEAT_THRESHOLD = 3
 DISMISS_DISTINCT_ITEM_THRESHOLD = 3
+
+# repeat-snooze ACTIVE apply (R6): factor by which a repeatedly-snoozed
+# tracker's nudge_interval is extended one step, so `due_trackers` surfaces it
+# less often. Named constant, not a buried literal (Epic config-constant
+# discipline). `_DEFAULT_SNOOZE_STEP` is the base used only when a tracker has
+# no interval yet (e.g. a `once`-mode tracker), so an extension is still
+# strictly positive.
+SNOOZE_BACKOFF_FACTOR = 2
+_DEFAULT_SNOOZE_STEP = timedelta(days=1)
 
 
 async def record_triage_event(
@@ -1278,17 +1339,97 @@ def _proposal_target_id(rule_name: str, target: dict) -> str:
     return f"{target['source']}:{target['kind']}"
 
 
-async def _apply_proposal(pool: asyncpg.Pool, rule_name: str, proposal: dict) -> None:
-    """ACTIVE-mode apply path — INTENTIONAL NO-OP STUB in this task.
+async def _apply_repeat_snooze(pool: asyncpg.Pool, change: dict) -> None:
+    """Extend a repeatedly-snoozed tracker's `nudge_interval` one backoff step
+    and push its `nudge_after` strictly later, so `due_trackers` surfaces it
+    less often (Task 8 done_when; R6 — reuse `update_tracker`).
 
-    weft-board-epic Task loom-692f59d4 (L1 ACTIVE apply path) fills this
-    in: extending a tracker's nudge_interval for repeat-snooze (via
-    `weft.trackers.update_tracker`, reusing existing internals per R6), and
-    firing a `board_feedback` alert for repeat-dismiss for human review.
-    This task ships the registry + the mode gate at the single call site in
-    `run_feedback_pass` — not the mutation itself.
+    Only trackers carry snooze state (Item.snoozed_until), so the target is a
+    tracker id (`Item.id == tracker.id`, board.py tracker_adapter). A missing
+    tracker (deleted between the triage events and this pass) is skipped, not
+    fatal — the pass must not abort mid-registry.
     """
-    return None
+    from weft.trackers import get_tracker, update_tracker
+
+    tracker_id = change["item_id"]
+    tracker = await get_tracker(pool, tracker_id)
+    if tracker is None:
+        logger.warning(
+            "board.apply.repeat_snooze — tracker %s not found; skipping",
+            tracker_id,
+        )
+        return
+
+    old_interval = tracker.nudge_interval or _DEFAULT_SNOOZE_STEP
+    new_interval = old_interval * SNOOZE_BACKOFF_FACTOR
+    now = datetime.now(timezone.utc)
+    # Base off max(now, existing nudge_after) so the new nudge_after is
+    # strictly later than the pre-pass value even when the tracker's current
+    # nudge_after is already in the future (a prior snooze pushed it out).
+    base = max(now, tracker.nudge_after) if tracker.nudge_after else now
+    await update_tracker(
+        pool,
+        tracker_id,
+        nudge_after=base + new_interval,
+        nudge_interval=new_interval,
+    )
+
+
+async def _apply_repeat_dismiss(pool: asyncpg.Pool, change: dict) -> None:
+    """Fire ONE `board_feedback` alert for human review of a repeatedly
+    dismissed `(source, kind)` (Task 8 / §Interfaces: one generic AlertType,
+    specifics in `Alert.payload` — never a type per rule).
+
+    The alert is the review surface; the board's own read filter
+    (`_active_hidden_kinds`) is what actually omits the kind, and only for
+    real-kind sources (Option 1). `hideable` is stamped in the payload so a
+    reviewer can see that a dismissed *trigger* condition_type will NOT be
+    auto-hidden by kind — it fired the alert for visibility only.
+    """
+    from weft.alerts import create_alert
+    from weft.models import AlertChannel, AlertCreate, AlertType
+
+    source = change["source"]
+    kind = change["kind"]
+    await create_alert(
+        pool,
+        AlertCreate(
+            alert_type=AlertType.board_feedback,
+            title=f"Repeatedly dismissed board items: {source}/{kind}",
+            body=(
+                f"{change.get('distinct_dismissed', 'several')} distinct "
+                f"{source} items of kind {kind!r} were dismissed. Review "
+                "whether this kind should be hidden from the board."
+            ),
+            trigger_at=datetime.now(timezone.utc),
+            channel=AlertChannel.log,
+            payload={
+                "rule": "repeat-dismiss",
+                "source": source,
+                "kind": kind,
+                "distinct_dismissed": change.get("distinct_dismissed"),
+                # Option 1 (weft-fb830f43): triggers are not hidden by kind.
+                "hideable": source in _HIDEABLE_KIND_SOURCES,
+            },
+        ),
+    )
+
+
+async def _apply_proposal(pool: asyncpg.Pool, rule_name: str, proposal: dict) -> None:
+    """ACTIVE-mode apply path (weft-board-epic Task 8, loom-692f59d4).
+
+    Reached ONLY from `run_feedback_pass` when `mode == "active"` — the SHADOW
+    NO-WRITE GATE (PRD V8). Dispatches by rule name; an unknown rule is a
+    no-op (a new registry rule adds its own apply branch, mirroring the
+    data-described registry seam).
+    """
+    change = proposal["proposed_change"]
+    if rule_name == "repeat-snooze":
+        await _apply_repeat_snooze(pool, change)
+    elif rule_name == "repeat-dismiss":
+        await _apply_repeat_dismiss(pool, change)
+    else:
+        logger.warning("board.apply — no apply path for rule %r; skipping", rule_name)
 
 
 async def run_feedback_pass(
@@ -1324,6 +1465,29 @@ async def run_feedback_pass(
             for target in targets:
                 proposed_change = rule.proposed_action(target)
                 target_id = _proposal_target_id(rule.name, target)
+
+                # ACTIVE idempotency (Task 8): applying is a REAL, COMPOUNDING
+                # mutation — repeat-snooze extends the interval one step every
+                # pass, repeat-dismiss re-fires an alert — and the signal keeps
+                # tripping while its triggering events remain in the append-only
+                # board_triage_events. Without a guard, a scheduled/repeated
+                # active pass would double a tracker's nudge_interval without
+                # bound and spam duplicate alerts. Skip re-proposing AND
+                # re-applying when this rule already has an ACTIVE proposal for
+                # this target (uses v67 idx_board_feedback_proposals_rule_target).
+                # Shadow mode is exempt: it appends a full "would-have" history
+                # by design and mutates nothing, so repetition is harmless there.
+                if mode == "active":
+                    already_active = await conn.fetchval(
+                        """
+                        SELECT 1 FROM board_feedback_proposals
+                        WHERE rule = $1 AND target_id = $2 AND mode = 'active'
+                        LIMIT 1
+                        """,
+                        rule.name, target_id,
+                    )
+                    if already_active:
+                        continue
 
                 row = await conn.fetchrow(
                     """

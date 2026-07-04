@@ -27,6 +27,7 @@ from weft.board import (
     SNOOZE_REPEAT_THRESHOLD,
     TriageRule,
     act,
+    assemble_board,
     get_board_feedback_mode,
     record_triage_event,
     run_feedback_pass,
@@ -500,3 +501,200 @@ class TestShadowNoWriteGate:
             "if this is 0, the gate is unreachable and the test above is "
             "vacuous"
         )
+
+
+# ---------------------------------------------------------------------------
+# THE ACTIVE APPLY PATH — Task 8 (loom-692f59d4); mutation is real here
+# ---------------------------------------------------------------------------
+
+
+class TestActiveApplyPath:
+    """With `mode="active"`, the two rules actually mutate state:
+    repeat-snooze extends a tracker's nudge_interval + pushes nudge_after
+    later; repeat-dismiss fires a `board_feedback` alert; and the board read
+    omits approved-hidden `(source, kind)` pairs — but NEVER a trigger by its
+    condition_type (RATIFIED Option 1, weft-fb830f43)."""
+
+    async def _seed_dismisses(self, pool, *, source, kind, n=DISMISS_DISTINCT_ITEM_THRESHOLD):
+        for i in range(n):
+            await record_triage_event(
+                pool, item_id=f"{source}-{kind}-{i}", source=source, kind=kind,
+                urgency_at_surface="pending", age_days_at_surface=2.0, verb="dismiss",
+            )
+
+    async def test_repeat_snooze_extends_interval_and_pushes_nudge_after(self, pool, now):
+        """done_when #1: nudge_interval strictly GREATER and nudge_after
+        strictly LATER than pre-pass, so due_trackers surfaces it less."""
+        from weft.trackers import create_tracker, get_tracker
+
+        tracker = await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Repeatedly snoozed",
+                nudge_mode=NudgeMode.recur,
+                nudge_after=now - timedelta(hours=2),
+                nudge_interval=timedelta(days=1),
+            ),
+        )
+        for _ in range(SNOOZE_REPEAT_THRESHOLD):
+            await record_triage_event(
+                pool, item_id=tracker.id, source="tracker", kind="task",
+                urgency_at_surface="overdue", age_days_at_surface=5.0,
+                verb="snooze", snooze_duration_days=1.0,
+            )
+
+        before = await get_tracker(pool, tracker.id)
+        await run_feedback_pass(pool, mode="active")
+        after = await get_tracker(pool, tracker.id)
+
+        assert after.nudge_interval > before.nudge_interval, (
+            "repeat-snooze must extend the interval so the tracker nags less"
+        )
+        assert after.nudge_after > before.nudge_after, (
+            "nudge_after must move strictly later than the pre-pass value"
+        )
+
+    async def test_repeat_dismiss_fires_board_feedback_alert(self, pool):
+        """done_when #2: a repeatedly dismissed kind fires ONE board_feedback
+        alert carrying the specifics in its payload."""
+        await self._seed_dismisses(pool, source="tracker", kind="task")
+
+        alerts_before = await pool.fetchval(
+            "SELECT count(*) FROM alerts WHERE alert_type = 'board_feedback'"
+        )
+        await run_feedback_pass(pool, mode="active")
+        row = await pool.fetchrow(
+            "SELECT * FROM alerts WHERE alert_type = 'board_feedback' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+
+        assert alerts_before == 0
+        assert row is not None, "repeat-dismiss must fire a board_feedback alert"
+        payload = row["payload"]
+        if isinstance(payload, str):
+            import json as _json
+            payload = _json.loads(payload)
+        assert payload["source"] == "tracker"
+        assert payload["kind"] == "task"
+        assert payload["hideable"] is True  # tracker has a real, hideable kind
+
+    async def test_active_dismiss_then_board_omits_that_kind(self, pool, now):
+        """done_when #3: after an active-mode dismiss proposal exists, a
+        subsequent assemble_board omits items of that (source, kind)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.trackers import create_tracker
+
+        # A live, due tracker of kind=task — surfaces on the board today.
+        await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="A due task tracker",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(days=1),
+            ),
+        )
+        before = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+        assert any(
+            i["source"] == "tracker" and i["kind"] == "task"
+            for i in before["items"]
+        ), "the due tracker should be on the board before the kind is hidden"
+
+        await self._seed_dismisses(pool, source="tracker", kind="task")
+        await run_feedback_pass(pool, mode="active")
+
+        after = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+        assert not any(
+            i["source"] == "tracker" and i["kind"] == "task"
+            for i in after["items"]
+        ), "approved-hidden (tracker, task) items must be omitted from the board"
+
+    async def test_dismissed_trigger_kind_is_NOT_added_to_hide_set(self, pool):
+        """Option 1 guard (weft-fb830f43): an active repeat-dismiss of a
+        trigger's condition_type must NEVER enter the board hide-set — else
+        one dismissed time-trigger would hide EVERY time-condition trigger."""
+        from weft.board import _active_hidden_kinds
+
+        # Two active dismiss proposals: a real-kind source and a trigger.
+        await self._seed_dismisses(pool, source="tracker", kind="task")
+        await self._seed_dismisses(pool, source="trigger", kind="time")
+        await run_feedback_pass(pool, mode="active")
+
+        hidden = await _active_hidden_kinds(pool)
+        assert ("tracker", "task") in hidden
+        assert ("trigger", "time") not in hidden, (
+            "triggers must not be hidden by condition_type (Option 1)"
+        )
+
+    async def test_active_pass_is_idempotent_per_target(self, pool, now):
+        """A repeated active pass must NOT compound: the snooze interval is
+        extended once (not doubled again), and no duplicate board_feedback
+        alert fires — the signal keeps tripping (append-only events), so the
+        (rule, target) idempotency guard is what prevents runaway apply."""
+        from weft.trackers import create_tracker, get_tracker
+
+        tracker = await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Idempotency tracker",
+                nudge_mode=NudgeMode.recur,
+                nudge_after=now - timedelta(hours=2),
+                nudge_interval=timedelta(days=1),
+            ),
+        )
+        for _ in range(SNOOZE_REPEAT_THRESHOLD):
+            await record_triage_event(
+                pool, item_id=tracker.id, source="tracker", kind="task",
+                urgency_at_surface="overdue", age_days_at_surface=5.0,
+                verb="snooze", snooze_duration_days=1.0,
+            )
+        await self._seed_dismisses(pool, source="tracker", kind="task")
+
+        first = await run_feedback_pass(pool, mode="active")
+        interval_after_first = (await get_tracker(pool, tracker.id)).nudge_interval
+        alerts_after_first = await pool.fetchval(
+            "SELECT count(*) FROM alerts WHERE alert_type = 'board_feedback'"
+        )
+
+        second = await run_feedback_pass(pool, mode="active")
+        interval_after_second = (await get_tracker(pool, tracker.id)).nudge_interval
+        alerts_after_second = await pool.fetchval(
+            "SELECT count(*) FROM alerts WHERE alert_type = 'board_feedback'"
+        )
+
+        assert len(first) == 2 and len(second) == 0, (
+            "second active pass over the same still-tripping signal must be a "
+            "no-op (both targets already applied)"
+        )
+        assert interval_after_second == interval_after_first, (
+            "nudge_interval must not compound on a repeated pass"
+        )
+        assert alerts_after_second == alerts_after_first, (
+            "no duplicate board_feedback alert on a repeated pass"
+        )
+
+    async def test_shadow_dismiss_proposals_do_not_hide(self, pool, now):
+        """Only ACTIVE-mode proposals drive the read filter — a shadow
+        proposal is a would-have, not an approved hide (the activation gate)."""
+        from tests.conftest import DEFAULT_TEST_USER_ID
+        from weft.trackers import create_tracker
+
+        await create_tracker(
+            pool,
+            TrackerCreate(
+                kind=TrackerKind.task,
+                title="Still visible under shadow",
+                nudge_mode=NudgeMode.once,
+                nudge_after=now - timedelta(days=1),
+            ),
+        )
+        await self._seed_dismisses(pool, source="tracker", kind="task")
+        await run_feedback_pass(pool, mode="shadow")  # writes shadow proposals only
+
+        board = await assemble_board(pool, now=now, user_id=DEFAULT_TEST_USER_ID)
+        assert any(
+            i["source"] == "tracker" and i["kind"] == "task"
+            for i in board["items"]
+        ), "shadow-mode dismiss proposals must NOT hide anything from the board"
