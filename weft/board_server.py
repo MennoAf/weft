@@ -140,30 +140,62 @@ async def _post_act(request: Request) -> JSONResponse:
     return JSONResponse({"result": result})
 
 
-def create_app(pool: asyncpg.Pool) -> Starlette:
-    """Build the board overlay ASGI app bound to `pool`.
+_ROUTES = [
+    Route("/", _get_page, methods=["GET"]),
+    Route("/board", _get_board, methods=["GET"]),
+    Route("/act", _post_act, methods=["POST"]),
+]
 
-    Returns a plain Starlette app (no lifespan/startup wiring) so tests can
-    drive it directly over `httpx.ASGITransport` without a real socket.
+
+def create_app(pool: asyncpg.Pool) -> Starlette:
+    """Build the board overlay ASGI app bound to an already-created `pool`.
+
+    Returns a plain Starlette app (no lifespan) so tests can drive it over
+    `httpx.ASGITransport` in the same event loop that built the pool. The CLI
+    entrypoint uses `_serving_app` instead — see the loop note there.
     """
-    app = Starlette(
-        routes=[
-            Route("/", _get_page, methods=["GET"]),
-            Route("/board", _get_board, methods=["GET"]),
-            Route("/act", _post_act, methods=["POST"]),
-        ],
-    )
+    app = Starlette(routes=_ROUTES)
     app.state.pool = pool
     return app
 
 
-def run(pool: asyncpg.Pool, host: str = "127.0.0.1", port: int = 8765) -> None:
-    """Run the overlay with uvicorn — LOCALHOST ONLY.
+def _serving_app(config) -> Starlette:
+    """Build the app the CLI serves under uvicorn.
 
-    Refuses any host other than localhost/127.0.0.1/::1: this overlay has no
-    auth, so binding it to 0.0.0.0 (or any other interface) would expose an
-    unauthenticated triage-write endpoint to the network. This is a dev
-    surface for a local agent/UI, not a production deployment target.
+    The pool MUST be created inside the server's event loop: asyncpg binds
+    connections to the loop they were opened in, and `uvicorn.run()` starts a
+    fresh loop. Creating the pool beforehand (e.g. via `asyncio.run(...)`, whose
+    loop is then closed) makes every query raise InterfaceError/RuntimeError
+    against the dead loop. So the pool is opened in a Starlette lifespan, which
+    uvicorn runs in its own loop, and closed on shutdown.
+    """
+    from contextlib import asynccontextmanager
+
+    from weft.db.connection import create_pool, register_pgvector_codec
+    from weft.db.migrations import run_migrations
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette):
+        pool = await create_pool(config)
+        await run_migrations(pool)
+        await register_pgvector_codec(pool)
+        app.state.pool = pool
+        try:
+            yield
+        finally:
+            await pool.close()
+
+    return Starlette(routes=_ROUTES, lifespan=lifespan)
+
+
+def run(config, host: str = "127.0.0.1", port: int = 8765) -> None:
+    """Serve the overlay with uvicorn — LOCALHOST ONLY.
+
+    Takes a config (not a pre-built pool): the pool is opened in-loop via the
+    lifespan (see `_serving_app`). Refuses any host other than
+    localhost/127.0.0.1/::1: this overlay has no auth, so binding it to 0.0.0.0
+    (or any other interface) would expose an unauthenticated triage-write
+    endpoint to the network.
     """
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError(
@@ -172,30 +204,18 @@ def run(pool: asyncpg.Pool, host: str = "127.0.0.1", port: int = 8765) -> None:
         )
     import uvicorn
 
-    uvicorn.run(create_app(pool), host=host, port=port)
+    uvicorn.run(_serving_app(config), host=host, port=port)
 
 
 def main() -> None:
     """CLI entrypoint: `uv run python -m weft.board_server`.
 
-    Loads the deployment's normal config/pool (same path the MCP server
-    uses) and serves the overlay on 127.0.0.1 only.
+    Loads the deployment's normal config and serves the overlay on 127.0.0.1
+    only. Migrations/codec run in the lifespan, inside the serving loop.
     """
-    import asyncio
-
     from weft.config import load_config
-    from weft.db.connection import create_pool, register_pgvector_codec
-    from weft.db.migrations import run_migrations
 
-    async def _bootstrap() -> asyncpg.Pool:
-        config = load_config()
-        pool = await create_pool(config)
-        await run_migrations(pool)
-        await register_pgvector_codec(pool)
-        return pool
-
-    pool = asyncio.run(_bootstrap())
-    run(pool)
+    run(load_config())
 
 
 if __name__ == "__main__":
