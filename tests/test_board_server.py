@@ -87,6 +87,45 @@ class TestPostActClose:
         assert tracker.id not in after_ids
 
 
+class TestServingAppLifespan:
+    """The CLI serves via `_serving_app`, which opens the pool inside a
+    Starlette lifespan (uvicorn's loop) rather than pre-creating it in a
+    throwaway `asyncio.run` loop. Pre-creating bound the pool to a dead loop,
+    so every source query raised InterfaceError/RuntimeError and the board
+    rendered empty. This drives the lifespan path end-to-end."""
+
+    async def test_lifespan_opens_pool_and_board_serves(self, pg_dsn):
+        from weft.board_server import _serving_app
+        from weft.config import DatabaseConfig, WeftConfig
+
+        app = _serving_app(WeftConfig(database=DatabaseConfig(url=pg_dsn)))
+        # lifespan_context runs startup (create_pool + migrations) in THIS loop,
+        # the same loop the requests run in — the correctness the fix restores.
+        async with app.router.lifespan_context(app):
+            assert app.state.pool is not None
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+            ) as c:
+                res = await c.get("/board")
+                assert res.status_code == 200
+                body = res.json()
+                assert set(body["buckets"].keys()) == {
+                    "overdue", "due_soon", "pending", "no_date",
+                }
+                # The bug's signature was every SOURCE fan-out erroring into
+                # warnings (InterfaceError/RuntimeError from a dead loop). A
+                # healthy fan-out leaves no per-source errors. (An identity
+                # warning is fine here — no WEFT_DEFAULT_USER_ID in the test.)
+                source_errors = [
+                    w for w in body["warnings"]
+                    if w.get("source") in {
+                        "tracker", "alert", "trigger", "task", "review", "hidden_kinds",
+                    }
+                ]
+                assert source_errors == [], source_errors
+
+
 class TestGetPage:
     async def test_root_serves_the_dashboard_html(self, client):
         response = await client.get("/")
