@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Awaitable, Callable, Literal
@@ -106,6 +107,14 @@ class Item:
     project_id: str | None = None
     entity_id: str | None = None
     actions: list[Action] = field(default_factory=list)
+    # Triage-detail enrichment: enough context to decide without opening the
+    # source. `project` is the cleaned display name (project_id is kept raw);
+    # `topics` are the item's tags; `detail` is source-appropriate body text
+    # (alert body, tracker context, trigger action+condition). None/[] when the
+    # source has nothing to add.
+    project: str | None = None
+    topics: list[str] = field(default_factory=list)
+    detail: str | None = None
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict, matching PRD schema."""
@@ -123,6 +132,9 @@ class Item:
             "urgency": self.urgency,
             "project_id": self.project_id,
             "entity_id": self.entity_id,
+            "project": self.project,
+            "topics": self.topics,
+            "detail": self.detail,
             "actions": [
                 {
                     "verb": a.verb,
@@ -224,6 +236,67 @@ def rank_items(
 # they carry no actions.
 _DEFAULT_SNOOZE = timedelta(days=1)
 
+# Cap free-text detail so one verbose alert body / tracker context can't bloat
+# the board payload; the UI shows it in a scrollable panel.
+_DETAIL_MAX_CHARS = 600
+
+
+def _clean_project(project_id: str | None) -> str | None:
+    """Turn a raw project_id into a display name, or None.
+
+    project_ids on real data are mostly readable slugs but carry noise:
+    URL-encoding (`demo%20audit`), case variants (`Shuttle`/`shuttle`), the
+    `__global__` sentinel, and the occasional raw UUID. Decode + lowercase so
+    variants collapse and the badge reads cleanly; drop the global sentinel and
+    bare UUIDs (no project the owner would recognize).
+    """
+    if not project_id:
+        return None
+    from urllib.parse import unquote
+
+    p = unquote(project_id).strip().lower()
+    if not p or p == "__global__":
+        return None
+    # A bare UUID is an internal id, not a human project label.
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", p):
+        return None
+    return p
+
+
+def _clip(text: str | None) -> str | None:
+    """Trim detail text to `_DETAIL_MAX_CHARS`, adding an ellipsis if cut."""
+    if not text:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    return text if len(text) <= _DETAIL_MAX_CHARS else text[:_DETAIL_MAX_CHARS].rstrip() + "…"
+
+
+def _context_detail(context: dict | None) -> str | None:
+    """Render a tracker's context dict as readable `key: value` lines."""
+    if not context:
+        return None
+    return _clip("\n".join(f"{k}: {v}" for k, v in context.items()))
+
+
+def _trigger_detail(trigger: Trigger) -> str | None:
+    """What the trigger does + when it fires, for the detail panel."""
+    parts = [trigger.action] if trigger.action else []
+    if trigger.condition:
+        cond = ", ".join(f"{k}={v}" for k, v in trigger.condition.items())
+        parts.append(f"fires: {trigger.condition_type.value} — {cond}")
+    return _clip("\n".join(parts))
+
+
+# Task-memory control tags carried in the topic list but not meaningful as
+# user-facing topics (the due date and priority are already surfaced elsewhere).
+def _task_topics(entry_topics: list[str], priority: str | None) -> list[str]:
+    return [
+        t for t in entry_topics
+        if t != "tasks" and not t.startswith("due:") and t != priority
+    ]
+
 
 def _tracker_actions(tracker: Tracker, now: datetime) -> list[Action]:
     """close / snooze / dismiss, each pre-filled with the tracker id. Snooze
@@ -303,6 +376,8 @@ def tracker_adapter(
             urgency=calculate_urgency(tracker.nudge_after, now, horizon_days),
             project_id=tracker.project_id,
             entity_id=tracker.entity_id,
+            project=_clean_project(tracker.project_id),
+            detail=_context_detail(tracker.context),
             actions=_tracker_actions(tracker, now),
         )
         items.append(item)
@@ -357,6 +432,8 @@ def alert_adapter(
             urgency=calculate_urgency(alert.trigger_at, now, horizon_days),
             project_id=alert.project_id,
             entity_id=None,  # Alerts do not have entity association
+            project=_clean_project(alert.project_id),
+            detail=_clip(alert.body),
             actions=_alert_actions(alert),
         )
         items.append(item)
@@ -464,6 +541,8 @@ def trigger_adapter(
             urgency=calculate_urgency(due_at, now, horizon_days),
             project_id=trigger.project_id,
             entity_id=None,  # Triggers do not have entity association
+            project=_clean_project(trigger.project_id),
+            detail=_trigger_detail(trigger),
             actions=_trigger_actions(trigger),
         )
         items.append(item)
@@ -556,7 +635,8 @@ def task_adapter(
             urgency=calculate_urgency(due_at, now, horizon_days),
             project_id=None,  # TaskEntry does not carry project association
             entity_id=None,  # TaskEntry does not carry entity association
-            actions=[],
+            topics=_task_topics(entry.topic, entry.priority),
+            actions=[],  # read-only in v1 (PRD Non-Goal)
         )
         items.append(item)
 
@@ -619,7 +699,9 @@ def review_adapter(
             urgency=calculate_urgency(memory.review_after, now, horizon_days),
             project_id=memory.project_id,
             entity_id=None,  # Memories do not have entity association
-            actions=[],
+            project=_clean_project(memory.project_id),
+            topics=memory.topic,
+            actions=[],  # read-only in v1 (PRD Non-Goal)
         )
         items.append(item)
 

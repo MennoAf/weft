@@ -6,6 +6,10 @@ works offline. Served by ``board_server`` at ``GET /``. All it does is speak the
 holding no business logic beyond rendering and dispatch, so the same contract an
 agent uses backs the human UI. Kept as a Python string constant (not a static
 file) so it ships with the package and needs no asset-path/packaging wiring.
+
+Each row is compact (title, project, due) and expands on click to show the
+item's topics and detail (alert body / tracker context / trigger action, or the
+full memory content) — enough to decide without opening the source.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ BOARD_HTML = r"""<!doctype html>
     border-radius: 7px; padding: 5px 10px; cursor: pointer; }
   .btn:hover { border-color: var(--accent); color: var(--accent); }
   .btn:active { transform: translateY(1px); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #warnings { padding: 0 20px; }
   .warn { background: #fff6e6; border: 1px solid #f0d9a8; color: #8a5a00;
     border-radius: 8px; padding: 8px 12px; margin: 10px 0 0; font-size: 13px; }
@@ -50,35 +55,50 @@ BOARD_HTML = r"""<!doctype html>
   .src-group > summary::-webkit-details-marker { display: none; }
   .src-group > summary::before { content: "\25B8 "; }
   .src-group[open] > summary::before { content: "\25BE "; }
+
   .item { background: var(--card); border: 1px solid var(--line); border-left: 3px solid;
-    border-radius: 9px; padding: 10px 12px; margin: 7px 0;
-    display: flex; align-items: center; gap: 12px; }
+    border-radius: 9px; margin: 7px 0; overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; }
+  .row:hover { background: #fbfcfd; }
+  .chev { color: var(--muted); font-size: 11px; width: 12px; flex-shrink: 0; transition: transform .15s; }
+  .item.open .chev { transform: rotate(90deg); }
   .item .body { flex: 1; min-width: 0; }
-  .item .title { font-weight: 500; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; }
-  .item .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .badge { display: inline-block; background: #eef1f5; color: #4a5563;
-    border-radius: 5px; padding: 1px 6px; font-size: 11px; margin-right: 6px; }
-  .actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .item .title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item.open .title { white-space: normal; font-weight: 500; }
+  .item .sub { color: var(--muted); font-size: 12px; margin-top: 2px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+  .proj { display: inline-block; background: rgba(37,113,176,.10); color: #1f5c93;
+    border-radius: 5px; padding: 1px 7px; font-size: 11px; font-weight: 500; }
+  .proj.none { background: #f0f1f4; color: var(--muted); font-weight: 400; }
+  .kind { color: var(--muted); }
+  .actions { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
   .actions .btn { padding: 4px 9px; font-size: 13px; }
   .btn.danger:hover { border-color: var(--overdue); color: var(--overdue); }
   .ro { color: var(--muted); font-size: 12px; font-style: italic; }
-  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .snooze { display: inline-flex; align-items: center; gap: 3px; }
   .snooze .lbl { color: var(--muted); font-size: 12px; }
+
+  .detail { display: none; padding: 0 14px 13px 38px; }
+  .item.open .detail { display: block; }
+  .detail .text { background: #f8fafb; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; white-space: pre-wrap; color: #33404e;
+    max-height: 240px; overflow: auto; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 2px; }
+  .chip { background: #eef1f5; color: #4a5563; border-radius: 20px; padding: 1px 9px; font-size: 11px; }
+  .kv { color: var(--muted); font-size: 12px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
   #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     background: #1c2430; color: #fff; padding: 9px 16px; border-radius: 8px;
     font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.show { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .chev, #toast { transition: none; } }
 </style>
 </head>
 <body>
 <header>
   <h1>Weft Board</h1>
   <label class="meta">horizon
-    <select id="days">
-      <option>3</option><option selected>7</option><option>14</option><option>30</option>
-    </select> days
+    <select id="days"><option>3</option><option selected>7</option><option>14</option><option>30</option></select> days
   </label>
   <button class="btn" id="refresh">Refresh</button>
   <div class="spacer"></div>
@@ -92,161 +112,113 @@ BOARD_HTML = r"""<!doctype html>
 const BUCKETS = ["overdue", "due_soon", "pending", "no_date"];
 const LABEL = { overdue: "Overdue", due_soon: "Due soon", pending: "Pending", no_date: "No date" };
 const DAY = 86400000;
+const DESTRUCTIVE = new Set(["close", "dismiss", "delete"]);
 
-function toast(msg) {
-  const t = document.getElementById("toast");
-  t.textContent = msg; t.classList.add("show");
-  setTimeout(() => t.classList.remove("show"), 2200);
-}
-function fmtDue(iso) {
-  if (!iso) return "no due date";
-  const d = new Date(iso);
-  return "due " + d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
-    + " " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-}
-function el(tag, cls, txt) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (txt != null) e.textContent = txt;
-  return e;
-}
+function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
+function fmtDue(s){ if(!s) return "no due date"; const d=new Date(s);
+  return "due "+d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" "+d.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"}); }
+function fmtAge(days){ if(days==null) return ""; if(days>=365) return Math.floor(days/365)+"y old"; if(days>=1) return Math.floor(days)+"d old"; return "today"; }
+function el(t,c,x){ const e=document.createElement(t); if(c)e.className=c; if(x!=null)e.textContent=x; return e; }
 
-async function loadBoard() {
-  const days = document.getElementById("days").value;
-  const board = document.getElementById("board");
+async function loadBoard(){
+  const days=document.getElementById("days").value;
+  const board=document.getElementById("board");
   try {
-    const res = await fetch("/board?days=" + days);
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    const res=await fetch("/board?days="+days);
+    if(!res.ok) throw new Error("HTTP "+res.status);
     render(await res.json());
-  } catch (e) {
-    board.innerHTML = "";
-    board.appendChild(el("div", "empty", "Could not reach the board server: " + e.message));
+  } catch(e){
+    board.innerHTML=""; board.appendChild(el("div","empty","Could not reach the board server: "+e.message));
   }
 }
 
-function render(data) {
-  document.getElementById("gen").textContent =
-    "updated " + new Date(data.generated_at).toLocaleTimeString();
-  const warns = document.getElementById("warnings");
-  warns.innerHTML = "";
-  (data.warnings || []).forEach(w => {
-    const msg = w.source === "identity" ? w.message
-      : w.truncated ? (w.source + " truncated at " + w.cap + " items")
-      : (w.source + ": " + (w.error || "unavailable"));
-    warns.appendChild(el("div", "warn", "⚠ " + msg));
+function render(data){
+  document.getElementById("gen").textContent = "updated "+new Date(data.generated_at).toLocaleTimeString();
+  const warns=document.getElementById("warnings"); warns.innerHTML="";
+  (data.warnings||[]).forEach(w=>{
+    const msg = w.source==="identity" ? w.message
+      : w.truncated ? (w.source+" truncated at "+w.cap+" items")
+      : (w.source+": "+(w.error||"unavailable"));
+    warns.appendChild(el("div","warn","⚠ "+msg));
   });
-
-  const board = document.getElementById("board");
-  board.innerHTML = "";
-  if ((data.counts && data.counts.total) === 0) {
-    board.appendChild(el("div", "empty", "Nothing open. 🎉"));
-    return;
-  }
-  for (const b of BUCKETS) {
-    const items = (data.buckets && data.buckets[b]) || [];
-    if (!items.length) continue;
-    const sec = el("div", "bucket");
-    const h = el("h2");
-    const dot = el("span", "dot"); dot.style.background = "var(--" + b + ")";
-    h.appendChild(dot);
-    h.appendChild(document.createTextNode(LABEL[b] + " "));
-    h.appendChild(el("span", "count", "(" + items.length + ")"));
-    sec.appendChild(h);
-
-    // Group by source; read-only sources (no actions) collapse by default.
-    const bySource = {};
-    for (const it of items) (bySource[it.source] ||= []).push(it);
-    for (const src of Object.keys(bySource)) {
-      const group = bySource[src];
-      const readOnly = group.every(it => !(it.actions && it.actions.length));
-      const wrap = el("details", "src-group");
-      wrap.open = !readOnly;
-      const sum = el("summary", null, src + " (" + group.length + ")" + (readOnly ? " · read-only" : ""));
-      wrap.appendChild(sum);
-      for (const it of group) wrap.appendChild(renderItem(it, b));
-      sec.appendChild(wrap);
+  const board=document.getElementById("board"); board.innerHTML="";
+  if((data.counts&&data.counts.total)===0){ board.appendChild(el("div","empty","Nothing open. 🎉")); return; }
+  for(const b of BUCKETS){
+    const items=(data.buckets&&data.buckets[b])||[]; if(!items.length) continue;
+    const sec=el("div","bucket"); const h=el("h2");
+    const dot=el("span","dot"); dot.style.background="var(--"+b+")"; h.appendChild(dot);
+    h.appendChild(document.createTextNode(LABEL[b]+" ")); h.appendChild(el("span","count","("+items.length+")")); sec.appendChild(h);
+    const bySource={}; for(const it of items)(bySource[it.source]||=[]).push(it);
+    for(const src of Object.keys(bySource)){
+      const group=bySource[src]; const readOnly=group.every(it=>!(it.actions&&it.actions.length));
+      const wrap=el("details","src-group"); wrap.open=!readOnly;
+      wrap.appendChild(el("summary",null,src+" ("+group.length+")"+(readOnly?" · read-only":"")));
+      for(const it of group) wrap.appendChild(renderItem(it,b)); sec.appendChild(wrap);
     }
     board.appendChild(sec);
   }
 }
 
-function renderItem(it, bucket) {
-  const row = el("div", "item");
-  row.style.borderLeftColor = "var(--" + bucket + ")";
-  const body = el("div", "body");
-  body.appendChild(el("div", "title", it.title || "(untitled)"));
-  const sub = el("div", "sub");
-  sub.appendChild(el("span", "badge", it.source + "/" + it.kind));
+function renderItem(it,bucket){
+  const item=el("div","item"); item.style.borderLeftColor="var(--"+bucket+")";
+  const row=el("div","row");
+  row.appendChild(el("span","chev","▸"));
+  const body=el("div","body"); body.appendChild(el("div","title",it.title||"(untitled)"));
+  const sub=el("div","sub");
+  sub.appendChild(it.project ? el("span","proj",it.project) : el("span","proj none","no project"));
+  sub.appendChild(el("span","kind",it.source+" · "+it.kind));
   sub.appendChild(document.createTextNode(fmtDue(it.due_at)));
-  if (it.state) sub.appendChild(document.createTextNode(" · " + it.state));
-  body.appendChild(sub);
-  row.appendChild(body);
+  if(it.state) sub.appendChild(document.createTextNode(" · "+it.state));
+  body.appendChild(sub); row.appendChild(body);
 
-  const acts = el("div", "actions");
-  if (!it.actions || !it.actions.length) {
-    acts.appendChild(el("span", "ro", "read-only"));
-  } else {
-    for (const a of it.actions) {
-      if (a.verb === "snooze") acts.appendChild(snoozeControl(it, a));
-      else acts.appendChild(actionButton(it, a));
-    }
-  }
+  const acts=el("div","actions");
+  if(!it.actions||!it.actions.length){ acts.appendChild(el("span","ro","read-only")); }
+  else for(const a of it.actions){ a.verb==="snooze" ? acts.appendChild(snoozeControl(it,a)) : acts.appendChild(actionButton(it,a)); }
   row.appendChild(acts);
-  return row;
+
+  const detail=el("div","detail");
+  if(it.topics&&it.topics.length){ const chips=el("div","chips"); it.topics.forEach(t=>chips.appendChild(el("span","chip",t))); detail.appendChild(chips); }
+  if(it.detail) detail.appendChild(el("div","text",it.detail));
+  detail.appendChild(el("div","kv","project: "+(it.project||"—")+"   ·   "+fmtAge(it.age_days)+"   ·   id "+it.id));
+
+  row.onclick=(e)=>{ if(e.target.closest(".actions")) return; item.classList.toggle("open"); };
+  item.appendChild(row); item.appendChild(detail);
+  return item;
 }
 
-const DESTRUCTIVE = new Set(["close", "dismiss", "delete"]);
-
-function actionButton(it, a) {
-  const b = el("button", "btn" + (DESTRUCTIVE.has(a.verb) ? " danger" : ""), a.verb);
-  b.onclick = () => {
-    if (DESTRUCTIVE.has(a.verb) &&
-        !confirm(a.verb + " this " + it.source + "?\n\n" + (it.title || ""))) return;
-    fireAct(it, a, a.args);
+function actionButton(it,a){
+  const b=el("button","btn"+(DESTRUCTIVE.has(a.verb)?" danger":""),a.verb);
+  b.onclick=()=>{
+    if(DESTRUCTIVE.has(a.verb) && !confirm(a.verb+" this "+it.source+"?\n\n"+(it.title||""))) return;
+    fireAct(it,a,a.args);
   };
   return b;
 }
-
-function snoozeControl(it, a) {
-  const wrap = el("span", "snooze");
-  wrap.appendChild(el("span", "lbl", "snooze"));
-  for (const [lbl, days] of [["1d", 1], ["3d", 3], ["1w", 7]]) {
-    const b = el("button", "btn", lbl);
-    b.onclick = () => {
-      const until = new Date(Date.now() + days * DAY).toISOString();
-      fireAct(it, a, Object.assign({}, a.args, { until }), days);
-    };
+function snoozeControl(it,a){
+  const wrap=el("span","snooze"); wrap.appendChild(el("span","lbl","snooze"));
+  for(const [lbl,days] of [["1d",1],["3d",3],["1w",7]]){
+    const b=el("button","btn",lbl);
+    b.onclick=()=>{ const until=new Date(Date.now()+days*DAY).toISOString();
+      fireAct(it,a,Object.assign({},a.args,{until}),days); };
     wrap.appendChild(b);
   }
   return wrap;
 }
 
-async function fireAct(it, action, args, snoozeDays) {
-  const payload = {
-    tool: action.tool, args,
-    item_id: it.id, source: it.source, kind: it.kind,
-    urgency_at_surface: it.urgency, age_days_at_surface: it.age_days,
-    verb: action.verb,
-  };
-  if (snoozeDays != null) payload.snooze_duration_days = snoozeDays;
+async function fireAct(it,action,args,snoozeDays){
+  const payload={ tool:action.tool, args, item_id:it.id, source:it.source, kind:it.kind,
+    urgency_at_surface:it.urgency, age_days_at_surface:it.age_days, verb:action.verb };
+  if(snoozeDays!=null) payload.snooze_duration_days=snoozeDays;
   try {
-    const res = await fetch("/act", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || ("HTTP " + res.status));
-    }
-    toast(action.verb + " ✓");
+    const res=await fetch("/act",{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+    if(!res.ok){ const err=await res.json().catch(()=>({})); throw new Error(err.error||("HTTP "+res.status)); }
+    toast(action.verb+" ✓");
     await loadBoard();  // refetch — the board reflects the write
-  } catch (e) {
-    toast("Failed: " + e.message);
-  }
+  } catch(e){ toast("Failed: "+e.message); }
 }
 
-document.getElementById("refresh").onclick = loadBoard;
-document.getElementById("days").onchange = loadBoard;
+document.getElementById("refresh").onclick=loadBoard;
+document.getElementById("days").onchange=loadBoard;
 loadBoard();
 </script>
 </body>
