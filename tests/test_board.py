@@ -2214,6 +2214,57 @@ class TestAssembleBoardIntegration:
         assert len(identity_warnings) == 1
         assert identity_warnings[0]["error"] == "no_default_user"
 
+    def test_clean_project_normalizes_and_drops_noise(self):
+        from weft.board import _clean_project
+        assert _clean_project("weft") == "weft"
+        assert _clean_project("AIO_cleanroom") == "aio_cleanroom"   # case collapses
+        assert _clean_project("demo%20audit") == "demo audit"        # url-decoded
+        assert _clean_project(None) is None
+        assert _clean_project("__global__") is None                  # sentinel dropped
+        assert _clean_project("49d60a99-5a5f-4f02-a545-18f8a9bb51d5") is None  # bare uuid
+
+    def test_alert_detail_carries_body(self, now):
+        alert = Alert(
+            id="al-1", alert_type=AlertType.due_task, title="Short title",
+            body="The key question is whether the modules were speculative.",
+            trigger_at=now + timedelta(hours=1), status=AlertStatus.pending,
+            created_at=now,
+        )
+        item = alert_adapter([alert], now)[0]
+        assert item.detail == "The key question is whether the modules were speculative."
+
+    def test_detail_is_clipped(self, now):
+        from weft.board import _DETAIL_MAX_CHARS
+        alert = Alert(
+            id="al-2", alert_type=AlertType.due_task, title="t", body="x" * 5000,
+            trigger_at=now + timedelta(hours=1), status=AlertStatus.pending, created_at=now,
+        )
+        item = alert_adapter([alert], now)[0]
+        assert len(item.detail) <= _DETAIL_MAX_CHARS + 1  # +1 for the ellipsis
+        assert item.detail.endswith("…")
+
+    def test_review_item_carries_topics_and_clean_project(self, now):
+        mem = Memory(
+            id="m-1", type=MemoryType.decision, content="We chose X over Y",
+            topic=["architecture", "caching"], project_id="Muttr",
+            review_after=now - timedelta(days=1), created_at=now - timedelta(days=2),
+        )
+        item = review_adapter([mem], now)[0]
+        assert item.topics == ["architecture", "caching"]
+        assert item.project == "muttr"
+
+    def test_trigger_detail_has_action_and_condition(self, now):
+        from weft.board import trigger_adapter
+        trg = Trigger(
+            id="tg-1", name="Backup check", condition_type=TriggerConditionType.time,
+            condition={"trigger_at": now.isoformat()}, action="Run backup verification",
+            status=TriggerStatus.enabled, project_id="weft",
+        )
+        item = trigger_adapter([trg], now)[0]
+        assert "Run backup verification" in item.detail
+        assert "fires:" in item.detail
+        assert item.project == "weft"
+
     async def test_every_board_action_tool_is_allowlisted(self, pool):
         """Security-boundary invariant: every action the board offers must name
         a tool in ACT_ALLOWLIST — otherwise POST /act would reject an action
