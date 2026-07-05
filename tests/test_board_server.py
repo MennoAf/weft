@@ -182,6 +182,76 @@ class TestActionDescriptorRoundTrip:
         assert tracker.id not in {i["id"] for i in after["items"]}
 
 
+class TestActBindsOwnerIdentity:
+    """/act writes must bind an owner identity. board_server has no auth
+    middleware, so without it the triage-event INSERT (user_id NOT NULL DEFAULT
+    the app.user_id GUC) and the RLS-scoped tables fail → 500. The `pool`
+    fixture masks this by SET app.user_id on every connection, so this test
+    uses a raw create_pool() pool (no such setup) to actually reproduce it."""
+
+    async def test_close_via_overlay_succeeds_with_no_middleware(self, pg_dsn, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from weft.auth import current_user_id
+        from weft.board_server import create_app
+        from weft.config import DatabaseConfig, WeftConfig
+        from weft.db.connection import acquire, create_pool
+        from weft.trackers import create_tracker
+
+        OWNER = "board-owner-test-1"
+        monkeypatch.setenv("WEFT_DEFAULT_USER_ID", OWNER)
+        now = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+        pool = await create_pool(WeftConfig(database=DatabaseConfig(url=pg_dsn)))
+        try:
+            # Create the tracker AS the owner (scoped write), matching how the
+            # overlay will act — otherwise the row wouldn't be RLS-visible to it.
+            tok = current_user_id.set(OWNER)
+            try:
+                async with acquire(pool):
+                    tracker = await create_tracker(
+                        pool,
+                        TrackerCreate(
+                            kind=TrackerKind.task, title="Buy diapers at wegmans",
+                            nudge_mode=NudgeMode.once, nudge_after=now - timedelta(days=1),
+                        ),
+                    )
+            finally:
+                current_user_id.reset(tok)
+
+            app = create_app(pool)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver",
+            ) as c:
+                board = (await c.get("/board")).json()
+                item = next(i for i in board["items"] if i["id"] == tracker.id)
+                close = next(a for a in item["actions"] if a["verb"] == "close")
+
+                resp = await c.post("/act", json={
+                    "tool": close["tool"], "args": close["args"],
+                    "item_id": item["id"], "source": item["source"], "kind": item["kind"],
+                    "urgency_at_surface": item["urgency"],
+                    "age_days_at_surface": item["age_days"], "verb": close["verb"],
+                })
+                # Was 500 (NULL user_id / RLS) before the identity binding.
+                assert resp.status_code == 200, resp.text
+
+                after = (await c.get("/board")).json()
+                assert tracker.id not in {i["id"] for i in after["items"]}
+
+            # The triage event was recorded under the owner (NOT NULL satisfied).
+            async with acquire(pool):
+                n = await pool.fetchval(
+                    "SELECT count(*) FROM board_triage_events "
+                    "WHERE item_id = $1 AND user_id = $2",
+                    tracker.id, OWNER,
+                )
+            assert n == 1
+        finally:
+            await pool.close()
+
+
 class TestPostActRejectsDisallowedTool:
     async def test_disallowed_tool_returns_4xx_and_performs_no_write(
         self, client, pool, now,

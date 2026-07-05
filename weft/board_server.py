@@ -19,6 +19,8 @@ is the security boundary, checked before dispatch).
 from __future__ import annotations
 
 import logging
+import os
+from contextlib import asynccontextmanager
 
 import asyncpg
 from starlette.applications import Starlette
@@ -26,10 +28,51 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
+from weft.auth import current_user_id
 from weft.board import ACT_ALLOWLIST, act, assemble_board
 from weft.board_page import BOARD_HTML
+from weft.db.connection import acquire
 
 logger = logging.getLogger(__name__)
+
+
+def _owner_user_id() -> str | None:
+    """Resolve the single owner this localhost overlay acts as.
+
+    Unlike the MCP server, the overlay has no auth middleware to bind a caller
+    identity — but triage writes NEED one: `board_triage_events.user_id` is
+    `NOT NULL DEFAULT` the `app.user_id` GUC, and the tracker/alert tables are
+    RLS-scoped. Without an identity every write fails (NULL user_id / RLS). The
+    overlay is single-user by design, so bind the deployment owner:
+    `WEFT_DEFAULT_USER_ID` if set, else this installation's canonical id.
+    """
+    uid = os.environ.get("WEFT_DEFAULT_USER_ID")
+    if uid:
+        return uid
+    try:
+        from weft.config.user_identity import get_user_id
+
+        return get_user_id()
+    except Exception:  # noqa: BLE001 - identity is best-effort here
+        return None
+
+
+@asynccontextmanager
+async def _as_owner(pool: asyncpg.Pool):
+    """Bind the owner identity and open an RLS-scoped connection for a write.
+
+    Sets `current_user_id` (so `acquire()` issues `SET LOCAL app.user_id`) and
+    holds one scoped connection, which every nested `get_db(pool)` /
+    `acquire(pool)` inside `act()` reuses — mirroring how the MCP tool handlers
+    wrap their bodies. This is what lets the tracker UPDATE and the
+    `board_triage_events` INSERT both see a non-empty `app.user_id`.
+    """
+    token = current_user_id.set(_owner_user_id())
+    try:
+        async with acquire(pool):
+            yield
+    finally:
+        current_user_id.reset(token)
 
 # Fields `act()` requires besides `tool` (PRD §Interfaces `POST /act` body).
 _ACT_REQUIRED_FIELDS = (
@@ -70,7 +113,16 @@ async def _get_board(request: Request) -> JSONResponse:
     include_snoozed = request.query_params.get("include_snoozed", "").lower() in (
         "1", "true", "yes",
     )
-    result = await assemble_board(pool, days=days, include_snoozed=include_snoozed)
+    # Bind the owner identity so the board is RLS-scoped to the owner (and the
+    # "no identity resolved" warning doesn't fire), rather than relying on the
+    # connection role's RLS behavior.
+    token = current_user_id.set(_owner_user_id())
+    try:
+        result = await assemble_board(
+            pool, days=days, include_snoozed=include_snoozed,
+        )
+    finally:
+        current_user_id.reset(token)
     return JSONResponse(result)
 
 
@@ -117,18 +169,22 @@ async def _post_act(request: Request) -> JSONResponse:
         )
 
     try:
-        result = await act(
-            pool,
-            tool=tool,
-            args=payload["args"],
-            item_id=payload["item_id"],
-            source=payload["source"],
-            kind=payload["kind"],
-            urgency_at_surface=payload["urgency_at_surface"],
-            age_days_at_surface=payload["age_days_at_surface"],
-            verb=payload["verb"],
-            snooze_duration_days=payload.get("snooze_duration_days"),
-        )
+        # Bind the owner identity + a scoped connection so the write tool AND
+        # record_triage_event both run with app.user_id set (else the triage
+        # event's NOT NULL user_id / the tables' RLS fail → 500).
+        async with _as_owner(pool):
+            result = await act(
+                pool,
+                tool=tool,
+                args=payload["args"],
+                item_id=payload["item_id"],
+                source=payload["source"],
+                kind=payload["kind"],
+                urgency_at_surface=payload["urgency_at_surface"],
+                age_days_at_surface=payload["age_days_at_surface"],
+                verb=payload["verb"],
+                snooze_duration_days=payload.get("snooze_duration_days"),
+            )
     except ValueError as exc:
         # act() also enforces the allowlist internally (belt-and-suspenders)
         # and raises ValueError for other bad-arg cases — surface as a 4xx,
