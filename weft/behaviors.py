@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 
 
+def _vector_literal(embedding: list[float]) -> str:
+    """Serialize a Python vector for codec-independent pgvector casts."""
+    return "[" + ",".join(str(value) for value in embedding) + "]"
+
+
 async def store_behavior(
     pool: asyncpg.Pool,
     create: BehaviorCreate,
@@ -225,11 +230,11 @@ async def match_behaviors(
     params: list = []
     idx = 1
 
-    params.append(embedding)
+    params.append(_vector_literal(embedding))
     idx += 1  # $1 = embedding
 
     # Similarity threshold
-    conditions.append(f"1 - (embedding <=> $1::vector) >= ${idx}")
+    conditions.append(f"1 - (embedding <=> $1::text::vector) >= ${idx}")
     params.append(threshold)
     idx += 1
 
@@ -258,10 +263,10 @@ async def match_behaviors(
 
     query = f"""
         SELECT *,
-               1 - (embedding <=> $1::vector) AS similarity
+               1 - (embedding <=> $1::text::vector) AS similarity
         FROM behaviors
         {where}
-        ORDER BY embedding <=> $1::vector
+        ORDER BY embedding <=> $1::text::vector
         LIMIT ${idx}
     """
     params.append(limit)
