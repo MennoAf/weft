@@ -147,6 +147,7 @@ async def test_focus_with_handoff(pool):
         topic=["session-handoff"],
         source=MemorySource.conversation,
         confidence=1.0,
+        project_id="test-proj",
     )
     emb = await embedding_fn(handoff.content)
     await store_memory(pool, handoff, embedding=emb)
@@ -165,11 +166,40 @@ async def test_focus_with_handoff(pool):
         pool,
         intent="caching improvements",
         embedding_fn=embedding_fn,
+        project_id="test-proj",
         exclude_memory_ids=[],
     )
 
     assert result.last_session_summary is not None
     assert "caching" in result.last_session_summary.lower() or "handoff" in result.last_session_summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_focus_ignores_global_handoff_for_project_context(pool):
+    """Project focus must not use NULL handoffs as last-session context."""
+    embedding_fn = _make_embedding_fn()
+
+    handoff = MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Work from another repo",
+        topic=["session-handoff"],
+        source=MemorySource.conversation,
+        confidence=1.0,
+        project_id=None,
+    )
+    await store_memory(
+        pool, handoff, embedding=await embedding_fn(handoff.content),
+    )
+
+    result = await build_focus(
+        pool,
+        intent="local work",
+        embedding_fn=embedding_fn,
+        project_id="test-proj",
+        exclude_memory_ids=[],
+    )
+
+    assert result.last_session_summary is None
 
 
 @pytest.mark.asyncio
@@ -258,6 +288,7 @@ async def test_focus_changes_since_populated(pool):
         topic=["session-handoff"],
         source=MemorySource.conversation,
         confidence=1.0,
+        project_id="test-proj",
     )
     emb = await embedding_fn(handoff.content)
     await store_memory(pool, handoff, embedding=emb)
@@ -266,6 +297,7 @@ async def test_focus_changes_since_populated(pool):
         pool,
         intent="CI pipeline",
         embedding_fn=embedding_fn,
+        project_id="test-proj",
         exclude_memory_ids=[],
     )
 

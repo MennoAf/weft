@@ -465,6 +465,23 @@ class TestWeftPrime:
         assert "total_tokens" in result
         assert "budget_tokens" in result
 
+    async def test_unresolved_project_warns_and_skips_global_handoff(self, ctx, pool):
+        from weft.mcp.tools import weft_prime
+        from weft.models import MemoryCreate, MemoryType
+        from weft.store import store_memory
+
+        await store_memory(pool, MemoryCreate(
+            type=MemoryType.handoff,
+            content="## Session Handoff\n\n**Summary:** Another repo",
+            topic=["session-handoff"],
+            project_id=None,
+        ))
+
+        result = await weft_prime(ctx)
+
+        assert result["handoff"] == []
+        assert result["project_resolution"]["resolved"] is False
+
     async def test_with_project_id(self, ctx):
         from weft.mcp.tools import weft_prime, weft_remember
 
@@ -484,6 +501,32 @@ class TestWeftPrime:
 
         result = await weft_prime(ctx, budget_tokens=500)
         assert result["budget_tokens"] == 500
+
+
+# ---------------------------------------------------------------------------
+# weft_handoff
+# ---------------------------------------------------------------------------
+
+
+class TestWeftHandoff:
+    async def test_requires_resolved_project(self, ctx):
+        from weft.mcp.tools import weft_handoff
+
+        result = await weft_handoff(ctx, summary="Did work")
+
+        assert result["error"] == "Invalid input"
+        assert result["tool"] == "weft_handoff"
+        assert "project_id required" in result["detail"]
+
+    async def test_stores_with_explicit_project(self, ctx):
+        from weft.mcp.tools import weft_handoff
+
+        result = await weft_handoff(
+            ctx, summary="Did project work", project_id="testproj",
+        )
+
+        assert result["stored"] is True
+        assert result["project_id"] == "testproj"
 
 
 # ---------------------------------------------------------------------------

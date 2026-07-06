@@ -1475,6 +1475,15 @@ async def weft_prime(
             disclosure=disclosure,
             mode=mode,
         )
+        if resolved_project is None:
+            result["project_resolution"] = {
+                "resolved": False,
+                "warning": (
+                    "No project_id resolved from MCP client roots. "
+                    "Project handoff continuity is skipped; pass project_id "
+                    "explicitly for repo-scoped prime."
+                ),
+            }
 
         # Reconciliation-meter health (recall canary). Attached as a tier-1
         # field so a DARK meter screams on every prime — the load-bearing
@@ -2017,6 +2026,15 @@ async def weft_handoff(
     try:
         app: AppContext = ctx.request_context.lifespan_context
         resolved_project = await _resolve_project_id(ctx, project_id)
+        if resolved_project is None:
+            return _input_error_response(
+                "weft_handoff",
+                ValueError(
+                    "project_id required for handoff continuity — pass "
+                    "project_id explicitly or run from a client that exposes "
+                    "project roots"
+                ),
+            )
 
         # Build structured content
         parts = [f"## Session Handoff\n\n**Summary:** {summary}"]

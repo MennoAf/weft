@@ -35,15 +35,20 @@ async def fetch_handoff_section(ctx: PrimerContext) -> SectionFetch:
     topic="session-handoff" only when typed returns empty. seen_ids
     filtering is deferred to pack.
     """
+    if ctx.project_id is None:
+        return SectionFetch(skipped=True, skip_reason="no project_id")
+
     raw = await list_memories(
         ctx.pool, memory_type=MemoryType.handoff, status=MemoryStatus.active,
-        limit=5, **ctx.scope,
+        project_id=ctx.project_id, agent_id=ctx.agent_id, exact_scope=True,
+        limit=5,
     )
     used_fallback = False
     if not raw:
         raw = await list_memories(
             ctx.pool, topic="session-handoff", status=MemoryStatus.active,
-            limit=5, **ctx.scope,
+            project_id=ctx.project_id, agent_id=ctx.agent_id, exact_scope=True,
+            limit=5,
         )
         used_fallback = bool(raw)
     return SectionFetch(payload={"raw": raw, "used_fallback": used_fallback})
@@ -51,6 +56,13 @@ async def fetch_handoff_section(ctx: PrimerContext) -> SectionFetch:
 
 def pack_handoff_section(ctx: PrimerContext, fetched: SectionFetch) -> SectionResult:
     """Pack the most recent handoff against the budget (sequential, mutates ctx)."""
+    if fetched.skipped:
+        ctx.section_tokens["handoff"] = 0
+        return SectionResult(
+            items=[], tokens_used=0, skipped=True,
+            skip_reason=fetched.skip_reason,
+        )
+
     payload = fetched.payload or {"raw": [], "used_fallback": False}
     raw = payload["raw"]
     candidates = [m for m in raw if m.id not in ctx.seen_ids]
