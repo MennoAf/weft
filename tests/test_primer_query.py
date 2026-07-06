@@ -110,10 +110,21 @@ async def test_rules_not_biased_by_query(pool, provider):
 
 async def test_handoff_not_biased_by_query(pool, provider):
     """Handoff is always the most recent, regardless of query."""
-    await _store(pool, provider, "Worked on frontend refactoring today", MemoryType.handoff)
+    await _store(
+        pool,
+        provider,
+        "Worked on frontend refactoring today",
+        MemoryType.handoff,
+        project_id="test-proj",
+    )
 
     query_vec = await provider.embed("backend API design")
-    result = await build_primer(pool, query_vec=query_vec, disclosure="full")
+    result = await build_primer(
+        pool,
+        project_id="test-proj",
+        query_vec=query_vec,
+        disclosure="full",
+    )
 
     assert len(result["handoff"]) == 1
     assert "frontend" in result["handoff"][0]["content"]

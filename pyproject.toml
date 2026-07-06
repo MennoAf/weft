@@ -49,7 +49,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["weft"]
+packages = ["weft", "capability_registry"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -156,6 +156,56 @@ architecture contract was written. The Loom task referenced older paths
 (`weft/topics.py`, `weft/recall.py`, `weft/mcp_tools.py`); the current code uses
 `weft/topic_resolution.py`, `weft/topic_gather.py`, and `weft/mcp/tools.py`.
 
+## API Verification Results
+
+The live API verification confirms the Phase 1 primitive audit and corrects the
+stale task-path assumptions from the original decomposition.
+
+### Write Primitive
+
+The current store write primitive is `weft.store.store_memory(pool, create,
+embedding=None, *, embed_composition_version=EMBED_COMPOSITION_VERSION) ->
+Memory`. It accepts a `MemoryCreate` object with `type`, `content`, `topic`,
+`source`, `confidence`, `project_id`, `agent_id`, `workspace_id`, `pinned`,
+`review_after`, and `project_facets`.
+
+The returned `Memory` includes `id`, `type`, `topic`, `content`, `source`,
+`confidence`, token/timestamp/access fields, `project_id`, `agent_id`,
+`workspace_id`, lifecycle/status fields, `write_provenance`, `review_status`,
+and `project_facets`. No `external_key`, `artifact_index`, or capability-native
+identity field exists.
+
+The MCP write surface is `weft_remember`, registered in `weft/mcp/tools.py`.
+It builds a `MemoryCreate`, embeds `content + topics`, performs its normal
+deduplication flow for unpinned memories, and calls `store_memory`.
+
+### Topic Lookup
+
+Exact topic membership is supported with the established `$tag = ANY(topic)`
+predicate. `weft_status(topic=...)` resolves a requested topic through
+`resolve_topic()` and then calls `gather_topic_memories()`, which performs an
+unbounded active-memory gather for the resolved tags. For lower-level code,
+`list_memories(topic=...)` provides a capped single-topic filter that can be
+combined with in-Python filtering for repo/file/symbol identity.
+
+### MCP Tool Registration
+
+MCP tools are registered with the plain `@mcp.tool()` decorator on async
+functions in `weft/mcp/tools.py`. Tool handlers are thin coordinators around
+ordinary Python modules and return JSON-serializable dictionaries.
+
+### Affected Tasks
+
+- `capability_registry/ingest.py` should call `store_memory(MemoryCreate)` for
+  direct writes, not a non-existent `write_memory()` helper.
+- `capability_registry/upsert.py` should not use `upsert_by_topic()` as the
+  artifact identity primitive because that helper matches exact whole topic
+  arrays. Capability classification can evolve, so upsert must gather by
+  `file:<relative-path>` plus `repo:<slug>` and optional `symbol:<name>`, then
+  compare `FILE_HASH`.
+- A future `weft_capability_lookup` MCP tool should use `@mcp.tool()` and keep
+  query expansion, parsing, and formatting in testable non-MCP modules.
+
 ### write_memory() Contract
 
 No function named `write_memory()` exists in the current store layer. The
