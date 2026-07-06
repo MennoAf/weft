@@ -153,25 +153,27 @@ async def build_focus(
     # --- Step 1: Get last session context (handoff memory) ---
     handoff_content: str | None = None
     handoff_at = None
-    try:
-        handoffs = await list_memories(
-            pool,
-            memory_type=MemoryType.handoff,
-            status=MemoryStatus.active,
-            project_id=project_id,
-            limit=1,
-        )
-        if handoffs:
-            handoff = handoffs[0]
-            handoff_at = handoff.created_at
-            handoff_content = handoff.content
-            # Truncate for summary display
-            summary_text, _ = truncate_to_token_budget(
-                handoff_content, summary_budget,
+    if project_id is not None:
+        try:
+            handoffs = await list_memories(
+                pool,
+                memory_type=MemoryType.handoff,
+                status=MemoryStatus.active,
+                project_id=project_id,
+                exact_scope=True,
+                limit=1,
             )
-            result.last_session_summary = summary_text
-    except Exception as exc:
-        logger.warning("Failed to retrieve handoff for focus: %s", exc)
+            if handoffs:
+                handoff = handoffs[0]
+                handoff_at = handoff.created_at
+                handoff_content = handoff.content
+                # Truncate for summary display
+                summary_text, _ = truncate_to_token_budget(
+                    handoff_content, summary_budget,
+                )
+                result.last_session_summary = summary_text
+        except Exception as exc:
+            logger.warning("Failed to retrieve handoff for focus: %s", exc)
 
     # --- Step 2: Build compound query and search ---
     # Weight intent higher by repeating it; append session context for breadth
@@ -261,16 +263,19 @@ async def build_focus(
     if changes_since is not None:
         result.changes_since = changes_since
     else:
-        try:
-            handoff_ts = await get_last_handoff_timestamp(pool, project_id=project_id)
-            if handoff_ts is not None:
-                changes = await get_memory_changes_since(
-                    pool, since=handoff_ts, project_id=project_id,
+        if project_id is not None:
+            try:
+                handoff_ts = await get_last_handoff_timestamp(
+                    pool, project_id=project_id,
                 )
-                changes["recent_commits"] = result.git_changes
-                result.changes_since = changes
-        except Exception as exc:
-            logger.warning("Focus changes_since failed: %s", exc)
+                if handoff_ts is not None:
+                    changes = await get_memory_changes_since(
+                        pool, since=handoff_ts, project_id=project_id,
+                    )
+                    changes["recent_commits"] = result.git_changes
+                    result.changes_since = changes
+            except Exception as exc:
+                logger.warning("Focus changes_since failed: %s", exc)
 
     # --- Compute total tokens ---
     result.total_tokens = estimate_tokens(result.format())

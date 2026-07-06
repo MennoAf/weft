@@ -40,6 +40,10 @@ Call `weft_handoff` with structured context:
 - **next_steps** — recommended next actions with reasoning
 - **open_questions** — unresolved decisions or things to investigate
 
+Pass the explicit repo project id when the repo instructions name one
+(for example, `project_id="weft"`). If Weft cannot resolve a project id,
+do not create a global handoff; report the error and ask for the project id.
+
 The next session's `weft_prime` surfaces the most recent handoff in tier-1 — it's the load-bearing bridge between sessions.
 
 ## Output

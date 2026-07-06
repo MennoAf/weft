@@ -72,18 +72,18 @@ Mid-session intent shift. Loads tier-2 sections (behaviors, decisions, recent_wo
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `intent` | `str` | *required* | What you're now doing — drives section ranking |
-| `project_id` | `str` | `null` | Scope to project (auto-detected from CWD if omitted) |
+| `project_id` | `str` | `null` | Scope to project. Pass explicitly when client roots are unavailable. |
 | `budget_tokens` | `int` | `2400` | Token budget for the assembled context |
 
 ## Lifecycle
 
 ### `weft_prime`
 
-Session primer: assemble structured context for session startup. Returns prioritized sections within a token budget.
+Session primer: assemble structured context for session startup. Returns prioritized sections within a token budget. Handoff continuity is project-specific: if no project can be resolved, the handoff section is skipped and the response includes a project-resolution warning.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `project_id` | `str` | `null` | Scope to project (auto-detected from working directory if omitted) |
+| `project_id` | `str` | `null` | Scope to project. Pass explicitly when client roots are unavailable. |
 | `agent_id` | `str` | `null` | Scope to agent |
 | `budget_tokens` | `int` | `2400` | Token budget for the assembled context |
 | `query` | `str` | `null` | Optional intent string to bias which items are surfaced |
@@ -94,7 +94,7 @@ Returns `{ grounding, rules, behaviors, handoff, recent_work, issues, decisions,
 
 ### `weft_handoff`
 
-Session handoff: capture context for the next session before clearing. The next `weft_prime` call surfaces the most recent handoff prominently for continuity.
+Session handoff: capture context for the next session before clearing. The next `weft_prime` call surfaces the most recent handoff prominently for continuity. Handoffs require a resolved project id; Weft rejects unresolved handoff writes instead of creating global handoffs.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -102,7 +102,7 @@ Session handoff: capture context for the next session before clearing. The next 
 | `in_progress` | `str` | `null` | What's partially done or needs follow-up |
 | `next_steps` | `str` | `null` | Recommended next actions and why |
 | `open_questions` | `str` | `null` | Unresolved decisions or things to investigate |
-| `project_id` | `str` | `null` | Scope to a project (auto-detected if omitted) |
+| `project_id` | `str` | `null` | Scope to a project. Required if client roots cannot resolve it. |
 | `agent_id` | `str` | `null` | Originating agent identifier |
 
 ### `weft_revise`

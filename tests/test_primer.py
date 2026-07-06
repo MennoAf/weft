@@ -220,6 +220,7 @@ async def test_primer_surfaces_most_recent_handoff(pool):
         content="## Session Handoff\n\n**Summary:** Fixed caching bugs",
         topic=["session-handoff"],
         confidence=1.0,
+        project_id="test-proj",
     ))
     await asyncio.sleep(0.01)
     await store_memory(pool, MemoryCreate(
@@ -227,9 +228,12 @@ async def test_primer_surfaces_most_recent_handoff(pool):
         content="## Session Handoff\n\n**Summary:** Shipped project detection",
         topic=["session-handoff"],
         confidence=1.0,
+        project_id="test-proj",
     ))
 
-    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1500, disclosure="full",
+    )
 
     assert len(result["handoff"]) == 1
     assert "project detection" in result["handoff"][0]["content"]
@@ -243,9 +247,12 @@ async def test_primer_handoff_fallback_by_topic(pool):
         content="## Session Handoff\n\n**Summary:** Mistyped handoff from old server",
         topic=["session-handoff"],
         confidence=1.0,
+        project_id="test-proj",
     ))
 
-    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1500, disclosure="full",
+    )
 
     assert len(result["handoff"]) == 1
     assert "Mistyped handoff" in result["handoff"][0]["content"]
@@ -258,6 +265,7 @@ async def test_primer_handoff_typed_takes_priority_over_fallback(pool):
         content="## Session Handoff\n\n**Summary:** Old mistyped one",
         topic=["session-handoff"],
         confidence=1.0,
+        project_id="test-proj",
     ))
     await asyncio.sleep(0.01)
     await store_memory(pool, MemoryCreate(
@@ -265,9 +273,12 @@ async def test_primer_handoff_typed_takes_priority_over_fallback(pool):
         content="## Session Handoff\n\n**Summary:** Properly typed one",
         topic=["session-handoff"],
         confidence=1.0,
+        project_id="test-proj",
     ))
 
-    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1500, disclosure="full",
+    )
 
     assert len(result["handoff"]) == 1
     assert "Properly typed one" in result["handoff"][0]["content"]
@@ -570,9 +581,12 @@ async def test_primer_handoff_has_age_hours(pool):
         content="## Session Handoff\n\n**Summary:** Just finished some work",
         topic=["session-handoff"],
         confidence=1.0,
+        project_id="test-proj",
     ))
 
-    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1500, disclosure="full",
+    )
 
     assert len(result["handoff"]) == 1
     assert "age_hours" in result["handoff"][0]
@@ -678,6 +692,36 @@ async def test_handoff_prefers_project_scoped_over_global(pool):
     result = await build_primer(pool, project_id="my-proj", budget_tokens=1500, disclosure="full")
     assert len(result["handoff"]) == 1
     assert "Project-specific work" in result["handoff"][0]["content"]
+
+
+async def test_project_primer_ignores_global_handoff(pool):
+    """Project-scoped prime must not use NULL handoffs as continuity."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Global notes from another repo",
+        topic=["session-handoff"], confidence=1.0, project_id=None,
+    ))
+
+    result = await build_primer(
+        pool, project_id="proj-x", budget_tokens=1500, disclosure="full",
+    )
+
+    assert result["handoff"] == []
+    assert "handoff" in result["hints"]
+
+
+async def test_unscoped_primer_skips_handoff_continuity(pool):
+    """No resolved project means no handoff bridge, not brain-wide latest."""
+    await store_memory(pool, MemoryCreate(
+        type=MemoryType.handoff,
+        content="## Session Handoff\n\n**Summary:** Global notes from another repo",
+        topic=["session-handoff"], confidence=1.0, project_id=None,
+    ))
+
+    result = await build_primer(pool, budget_tokens=1500, disclosure="full")
+
+    assert result["handoff"] == []
+    assert "handoff" in result["hints"]
 
 
 async def test_handoff_prune_does_not_archive_global(pool):
@@ -1193,7 +1237,7 @@ async def test_primer_no_hints_when_all_populated(pool):
     await store_memory(pool, MemoryCreate(
         type=MemoryType.handoff,
         content="## Session Handoff\n\n**Summary:** Some work",
-        topic=["session-handoff"], confidence=1.0,
+        topic=["session-handoff"], confidence=1.0, project_id="test-proj",
     ))
     await store_memory(pool, MemoryCreate(
         type=MemoryType.milestone, content="Did a thing",
@@ -1206,7 +1250,9 @@ async def test_primer_no_hints_when_all_populated(pool):
         type=MemoryType.decision, content="A choice", confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1800, disclosure="full",
+    )
 
     assert result["hints"] == {}
 
@@ -1243,9 +1289,12 @@ async def test_primer_onboarding_absent_with_handoff(pool):
         content="## Session Handoff\n\n**Summary:** First session done",
         topic=["session-handoff"],
         confidence=1.0,
+        project_id="test-proj",
     ))
 
-    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1800, disclosure="full",
+    )
 
     assert result["onboarding"] is None
 
@@ -1307,7 +1356,7 @@ async def test_primer_established_agent_has_neither(pool):
     await store_memory(pool, MemoryCreate(
         type=MemoryType.handoff,
         content="## Session Handoff\n\n**Summary:** Returning agent",
-        topic=["session-handoff"], confidence=1.0,
+        topic=["session-handoff"], confidence=1.0, project_id="test-proj",
     ))
     await store_memory(pool, MemoryCreate(
         type=MemoryType.milestone, content="Did work",
@@ -1320,7 +1369,9 @@ async def test_primer_established_agent_has_neither(pool):
         type=MemoryType.decision, content="A choice", confidence=0.9,
     ))
 
-    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1800, disclosure="full",
+    )
 
     assert result["onboarding"] is None
     assert result["hints"] == {}
@@ -1343,10 +1394,12 @@ async def test_primer_loom_hint_absent_for_established_agent(pool):
     await store_memory(pool, MemoryCreate(
         type=MemoryType.handoff,
         content="## Session Handoff\n\n**Summary:** Returning",
-        topic=["session-handoff"], confidence=1.0,
+        topic=["session-handoff"], confidence=1.0, project_id="test-proj",
     ))
 
-    result = await build_primer(pool, budget_tokens=1800, disclosure="full")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=1800, disclosure="full",
+    )
 
     assert "loom" not in result["hints"]
 
@@ -1374,7 +1427,7 @@ async def _populate_all_sections(pool):
     await store_memory(pool, MemoryCreate(
         type=MemoryType.handoff,
         content="## Session Handoff\n\n**Summary:** Did some work",
-        topic=["session-handoff"], confidence=1.0,
+        topic=["session-handoff"], confidence=1.0, project_id="test-proj",
     ))
     await store_memory(pool, MemoryCreate(
         type=MemoryType.milestone, content="Shipped feature X",
@@ -1398,7 +1451,10 @@ async def test_primer_progressive_defers_tier2(pool):
     """Progressive mode returns deferred placeholders for tier-2 sections."""
     await _populate_all_sections(pool)
 
-    result = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=2400,
+        disclosure="progressive",
+    )
 
     assert result["disclosure"] == "progressive"
 
@@ -1451,7 +1507,10 @@ async def test_primer_progressive_mode_default(pool):
 
 async def test_primer_progressive_empty_sections(pool):
     """Progressive mode with no data returns zero counts."""
-    result = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=2400,
+        disclosure="progressive",
+    )
 
     assert result["disclosure"] == "progressive"
     assert result["decisions"]["count"] == 0
@@ -1465,7 +1524,10 @@ async def test_primer_progressive_tier1_always_included(pool):
     """Tier-1 sections are never deferred even in progressive mode."""
     await _populate_all_sections(pool)
 
-    result = await build_primer(pool, budget_tokens=2400, disclosure="progressive")
+    result = await build_primer(
+        pool, project_id="test-proj", budget_tokens=2400,
+        disclosure="progressive",
+    )
 
     # Rules are always full list
     assert isinstance(result["rules"], list)

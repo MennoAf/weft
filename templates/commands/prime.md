@@ -9,7 +9,14 @@ Run at the start of every session before doing other work.
 
 ## Step 1: Load context
 
-Call `weft_prime(disclosure="progressive")`. The response contains:
+Call `weft_prime(disclosure="progressive", project_id="<project-id>")`
+when the repo instructions name a Weft project id (for example,
+`AGENTS.md` or `CLAUDE.md` says `project_id="weft"`). If no explicit
+project id is available, call `weft_prime(disclosure="progressive")` and
+report any project-resolution warning instead of treating an unscoped prime
+as project continuity.
+
+The response contains:
 
 - `rules` — pinned facts about this project
 - `handoff` — the most recent session handoff (the bridge from the prior session)
