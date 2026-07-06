@@ -1,0 +1,28 @@
+# Capability Registry example configuration.
+# Copy this file and edit it for your local repositories.
+
+# dry_run=true prints proposed entries without writing to Weft.
+dry_run = true
+
+# Optional Weft project id to write capability memories into.
+# Leave empty to use the caller/default project.
+weft_project_id = ""
+
+[[repos]]
+# slug: unique lowercase identifier for this source repository.
+slug = "muttr"
+
+# root: filesystem path to the repo root. Absolute and relative paths are both
+# allowed; the indexer resolves relative paths when it scans.
+root = "/path/to/muttr"
+
+# include_globs: Python files to scan within this repo.
+include_globs = ["**/*.py"]
+
+# exclude_dirs: directory names ignored anywhere in the repo tree.
+exclude_dirs = [".git", "__pycache__", ".venv"]
+
+# manual_capability_slugs: map repo-relative files to capability tags when
+# scanner inference is not enough, such as scripts without docstrings.
+[repos.manual_capability_slugs]
+"crawl/escalation.py" = ["bot-block-hardening", "crawler-escalation"]
