@@ -149,6 +149,165 @@ compatible with existing Weft lifecycle behavior. If future usage shows that
 plain memories cannot support safe upserts, add schema only after documenting the
 specific failure mode.
 
+## Primitive Audit (Phase 1)
+
+This audit was performed against the current codebase after the initial
+architecture contract was written. The Loom task referenced older paths
+(`weft/topics.py`, `weft/recall.py`, `weft/mcp_tools.py`); the current code uses
+`weft/topic_resolution.py`, `weft/topic_gather.py`, and `weft/mcp/tools.py`.
+
+### write_memory() Contract
+
+No function named `write_memory()` exists in the current store layer. The
+canonical low-level write primitive is:
+
+```python
+async def store_memory(
+    pool: asyncpg.Pool,
+    create: MemoryCreate,
+    embedding: list[float] | None = None,
+    *,
+    embed_composition_version: int = EMBED_COMPOSITION_VERSION,
+) -> Memory
+```
+
+`MemoryCreate` includes `type`, `content`, `topic: list[str]`,
+`source`, `confidence`, `project_id`, `agent_id`, `workspace_id`, `pinned`,
+`review_after`, and `project_facets`. `store_memory()` inserts a new row and
+returns a full `Memory` object with `id`, `topic`, `content`, timestamps, scope
+fields, status, and lifecycle fields. It is not an idempotent write: repeated
+calls with identical content and topics create distinct memories unless the
+caller performs a dedup/upsert step first.
+
+The MCP write surface is `weft_remember(content, type='fact', topic=None,
+source='conversation', confidence=0.7, project_id=None, agent_id=None,
+workspace_id=None, check_contradictions=True, pinned=False,
+review_after=None, project_facets=None)`. It builds a `MemoryCreate`, embeds
+`content + topics`, runs pre-insert dedup for unpinned memories, then calls
+`store_memory()`.
+
+There is also a store helper:
+
+```python
+async def upsert_by_topic(
+    pool: asyncpg.Pool,
+    *,
+    topic: list[str],
+    project_id: str | None,
+    content: str,
+    memory_type: MemoryType,
+    source: MemorySource,
+    confidence: float,
+    review_after: datetime | None = None,
+    embedding: list[float] | None = None,
+) -> Memory
+```
+
+`upsert_by_topic()` matches active memories by exact whole topic array plus
+`project_id`, using `topic @> $1 AND topic <@ $1`. That is useful for records
+whose complete topic set is stable, but it is too strict for capability re-index
+when capability slugs can be added or changed while `file:<path>` and
+`symbol:<name>` remain the artifact identity.
+
+### Topic Storage & Lookup
+
+Topics are stored as plain strings in the `memories.topic TEXT[]` column.
+`Memory.topic` and `MemoryCreate.topic` are both `list[str]`. The original
+memories migration created a GIN index on `topic`, and migration 56 reinforces
+the topic-digest path with `idx_memories_topic_gin ON memories USING GIN
+(topic)`.
+
+The exact topic membership predicate is already used throughout the store:
+`$tag = ANY(topic)`. `list_memories()`, vector search, keyword/hybrid paths, and
+topic gather all use this idiom. No topic count cap or reserved capability
+prefix was found. Existing conventions include ordinary freeform tags plus
+structured prefixes such as `entity:<name>` and task tags such as
+`task:<loom-id>`.
+
+The topic-first MCP read path is `weft_status(topic, synthesize=False,
+budget_tokens=2000)`. It resolves the requested topic through
+`resolve_topic()` and then calls `gather_topic_memories()`. Tier 1 returns the
+complete active memory set for the resolved tags, with full memory content,
+topic arrays, ids, types, and created timestamps. It is unbounded for primary
+topic membership and sets `complete=True`; `truncated=True` only applies to the
+secondary entity-linked expansion when that path hits its own cap.
+
+`resolve_topic()` first checks the `topic_resolution_aliases` table for a
+confirmed alias, then falls back to naive normalization. For explicit capability
+lookups, callers should pass exact deterministic tags such as
+`capability:bot-block-hardening`, `repo:muttr`, `file:crawl/escalation.py`, or
+`symbol:LazyEscalationPolicy`; these are already lowercase or case-stable and
+do not need alias learning to work.
+
+### External Key / Artifact Index
+
+No `external_key` field and no `artifact_index` table were found in the codebase
+or migrations. The `memories` table primary key is the generated Weft memory
+`id`; artifact identity must therefore be represented in topics and content for
+the MVP.
+
+For stale detection, the MVP will use:
+
+- `file:<relative-path>` plus optional `symbol:<name>` topics as artifact
+  identity.
+- `FILE_HASH:` in memory content as the source snapshot.
+- review workflow records when a file is missing, a hash changes, or a
+  previously written memory lacks a parseable `FILE_HASH`.
+
+### Stale Detection Capability
+
+Plain memories are sufficient for first-pass stale detection. The scanner can
+compute SHA-256 hashes and write them into `FILE_HASH:`. A re-indexer can gather
+candidate memories by exact `file:<relative-path>` topic, optionally narrow by
+`symbol:<name>`, parse `FILE_HASH:` from content, and compare it to the current
+file hash.
+
+The only caveat is upsert identity. `upsert_by_topic()` should not be used as
+the sole capability upsert mechanism unless the complete topic set is treated as
+immutable. Capability classification is expected to evolve, so ingestion should
+perform a file/symbol lookup first, then decide whether to skip, write a new
+memory, or surface a review item. That matches the non-destructive upsert
+strategy above and avoids silently overwriting historical capability records.
+
+### Existing MCP Tools
+
+The current MCP tool module is `weft/mcp/tools.py`. Relevant tools for the
+Capability Registry are:
+
+- `weft_remember`: write a new memory with arbitrary topic strings.
+- `weft_recall`: semantic/keyword/hybrid recall with optional single-topic
+  filtering, limited by the caller's `limit`.
+- `weft_status`: exact topic-oriented status; returns complete active memories
+  for resolved tags and is the best current primitive for capability lookup.
+- `weft_revise`: revise an existing memory by id, including optional content,
+  type, topic, confidence, project, and review date changes.
+- `weft_forget`: archive or delete memories by id.
+- `weft_pin`: pin memories by id.
+- `weft_learn` and `weft_extract`: higher-level memory extraction/write flows.
+- `weft_prime`, `weft_focus`, `weft_context`, `weft_search_all`,
+  `weft_project_status`, `weft_projects`, and recap/brief tools: read/context
+  surfaces that should not be the registry write path.
+
+Other tools in the same module cover relationships, consolidation, feedback,
+boards, Slack, behaviors, episodes, entities, modes, alerts, check-ins,
+autonomy, costs, calibration, degradation, triggers, workspaces, trackers,
+lists, tokens, turns, and fsck. None of those provide capability-specific
+artifact identity.
+
+### Conclusion
+
+Plain memories plus deterministic topics are sufficient for the Capability
+Registry MVP. The MVP should use these topic conventions:
+
+- `capability:<slug>`
+- `repo:<slug>`
+- `file:<relative-path>`
+- `symbol:<name>`
+
+No schema addition is required yet. Add a dedicated `external_key` column or
+artifact index only if file/symbol topic lookup plus `FILE_HASH:` review records
+prove insufficient for stable re-indexing.
+
 ## Isolation from Prime
 
 Capability memories are inventory, not session context. Normal `weft_prime`
