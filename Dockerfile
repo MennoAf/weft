@@ -21,6 +21,7 @@ RUN uv sync --no-dev --frozen
 
 # Copy source code and rebuild with source included
 COPY weft/ weft/
+COPY capability_registry/ capability_registry/
 RUN find /app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null; uv sync --no-dev --frozen
 
 # Make everything accessible to appuser
