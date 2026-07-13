@@ -689,6 +689,16 @@ async def test_canary_health_dark_when_never_audited(pool, embedder):
     assert health["arms"]["active"]["checks"] == 0
 
 
+async def test_canary_health_is_explicit_when_no_probes_are_enrolled(pool):
+    """An empty meter must be visible as dark, not disappear as None."""
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+
+    assert health["status"] == "no_probes"
+    assert health["dark"] is True
+    assert health["dark_reason"] == "no active probes"
+    assert "DARK" in health["alert"]
+
+
 async def test_canary_health_fresh_after_audit(pool, embedder):
     """A recently-audited meter is not dark and reports the windowed miss_rate."""
     mem = await _store_active_memory(pool, embedder, "health probe two")

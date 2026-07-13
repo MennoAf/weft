@@ -1230,6 +1230,7 @@ async def log_recall_query(
     *,
     tool_name: str,
     query_text: str,
+    user_id: str | None = None,
     project_id: str | None = None,
     tier: str | None = None,
     mode: str | None = None,
@@ -1244,6 +1245,11 @@ async def log_recall_query(
     query log. Embeddings are NOT stored here; metric (c) re-embeds the
     text at analysis time so model choice is deferred.
 
+    ``user_id`` should be passed by request handlers because this function is
+    commonly scheduled as a fire-and-forget task after the request-scoped
+    connection context has exited. When omitted, the database GUC remains the
+    compatibility fallback for direct callers and tests.
+
     Errors are caught and logged but never raised: this is observation
     telemetry on the hot recall path, and a logging failure must never
     break a user-facing query. Callers should treat this as fire-and-forget.
@@ -1254,12 +1260,17 @@ async def log_recall_query(
         await get_db(pool).execute(
             """
             INSERT INTO weft_recall_queries
-                (query_id, project_id, tool_name, query_text,
+                (query_id, project_id, user_id, tool_name, query_text,
                  tier, mode, retrieval_mode, result_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES (
+                $1, $2,
+                COALESCE($3, nullif(current_setting('app.user_id', true), '')),
+                $4, $5, $6, $7, $8, $9
+            )
             """,
             query_id,
             project_id,
+            user_id,
             tool_name,
             query_text,
             tier,

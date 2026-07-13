@@ -57,7 +57,7 @@ curl https://weft-mcp.fly.dev/healthz
 |---------------------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | — | Supabase Postgres connection string |
 | `WEFT_API_KEY` | Yes (prod, bootstrap) | — | Auto-bootstraps one supervisor token row on first authenticated request. Use it to mint real per-client tokens via `weft tokens issue`, then stop sharing it. Coexists with OAuth and bearer-token paths. |
-| `WEFT_DEFAULT_USER_ID` | No | — | Single-tenant fallback `user_id` for hosted deployments without OAuth. Most installs do not need this. |
+| `WEFT_DEFAULT_USER_ID` | No | — | Single-tenant fallback `user_id` for hosted deployments without OAuth. Required to run the background recall-canary audit. |
 | `WEFT_OAUTH_ENABLED` | No | `0` | Publish RFC 9728 protected-resource metadata + serve consent page. See OAuth section below. |
 | `WEFT_ENV` | No | `production` | `local` or `production` |
 | `WEFT_TRANSPORT` | No | `streamable-http` | `stdio`, `sse`, or `streamable-http` |

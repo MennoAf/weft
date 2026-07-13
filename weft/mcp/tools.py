@@ -721,6 +721,7 @@ async def weft_recall(
             app_for_log.pool,
             tool_name="recall",
             query_text=query,
+            user_id=user_id,
             project_id=project_id,
             tier=tier,
             mode=mode,
@@ -1668,13 +1669,10 @@ async def weft_status(
         # weft_status, the same way weft_recall logs its calls. result_count
         # carries was_empty: 0 means the topic resolved to nothing.
         #
-        # log_recall_query relies on the app.user_id GUC default to fill the
-        # NOT-NULL user_id column, and acquire() issues SET LOCAL app.user_id
-        # from the current_user_id contextvar AT ENTRY — so the contextvar must
-        # be set BEFORE entering acquire(), not inside it. (In prod the auth
-        # middleware has already set it; setting it here also covers callers
-        # that haven't, e.g. tests.) log_recall_query swallows its own DB errors
-        # and must never break the user path.
+        # Pass the owner explicitly because log_recall_query may run after the
+        # request-scoped connection context has exited. The GUC remains a
+        # compatibility fallback for direct callers. log_recall_query swallows
+        # its own DB errors and must never break the user path.
         tok = current_user_id.set(user_id)
         try:
             async with acquire(app.pool):
@@ -1682,6 +1680,7 @@ async def weft_status(
                     app.pool,
                     tool_name="status",
                     query_text=topic,
+                    user_id=user_id,
                     result_count=memory_count,
                 )
         finally:
@@ -2228,11 +2227,13 @@ async def weft_search_all(
         # the calls/week + repeat-query metrics. Logged before the actual
         # search runs so a search failure still leaves a row.
         if query:
+            caller_uid = resolve_caller_user_id()
             asyncio.create_task(
                 log_recall_query(
                     app.pool,
                     tool_name="search_all",
                     query_text=query,
+                    user_id=caller_uid,
                     project_id=None,
                     retrieval_mode=retrieval_mode,
                 ),
@@ -3762,9 +3763,12 @@ async def weft_check_health(
       replay.executor.failed). A rising count while the corresponding success
       metric stays flat is the tell that a log-and-continue path is broken.
     - tool_usage: daily-aggregated MCP tool invocations over the last 30 days;
-      this is the evidence used before removing or internalizing a tool."""
+      this is the evidence used before removing or internalizing a tool.
+    - recall_canary: reconciliation-meter health, including dark status,
+      probe arms, and whether the background audit scheduler is configured."""
     try:
         from weft.calibration import count_auto_originated_tier_changes
+        from weft.canary import canary_health
         from weft.counters import FAILURE_COUNTERS, get_counters
         from weft.db.connection import get_db
         from weft.health_check import run_all_evaluators, summary_to_dict
@@ -3836,6 +3840,9 @@ async def weft_check_health(
             # broken" tell. replay.executor.failed reads 0 until E2.L7 lands.
             failure_counters = await get_counters(app.pool, FAILURE_COUNTERS)
             tool_usage = await get_tool_usage_summary(app.pool, days=30)
+            canary_status = await canary_health(
+                app.pool, resolve_caller_user_id()
+            )
 
         payload = summary_to_dict(result)
         payload["reask_rate"] = reask_rate
@@ -3845,6 +3852,25 @@ async def weft_check_health(
         payload["replay_claims_30d"] = replay_claims_30d
         payload["failure_counters"] = failure_counters
         payload["tool_usage"] = tool_usage
+        if canary_status is None:
+            canary_status = {
+                "status": "unavailable",
+                "dark": True,
+                "dark_reason": "health query failed",
+                "alert": (
+                    "⚠️ recall canary health unavailable — the reconciliation "
+                    "meter could not be inspected."
+                ),
+            }
+        canary_status["scheduler_configured"] = bool(
+            os.environ.get("WEFT_DEFAULT_USER_ID")
+        )
+        if not canary_status["scheduler_configured"]:
+            canary_status["scheduler_warning"] = (
+                "WEFT_DEFAULT_USER_ID is not configured; the background canary "
+                "audit loop is disabled."
+            )
+        payload["recall_canary"] = canary_status
         return payload
     except _DB_ERRORS as e:
         return _db_error_response("weft_check_health", e)

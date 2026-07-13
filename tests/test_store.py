@@ -284,6 +284,24 @@ async def test_log_recall_query_full_metadata(pool):
     assert row["result_count"] == 7
 
 
+async def test_log_recall_query_accepts_explicit_user_id(pool):
+    """Fire-and-forget callers can persist ownership without a request GUC."""
+    owner = "explicit-recall-owner"
+
+    await log_recall_query(
+        pool,
+        tool_name="recall",
+        query_text="explicit owner query",
+        user_id=owner,
+    )
+
+    row = await pool.fetchrow(
+        "SELECT user_id FROM weft_recall_queries WHERE query_text = $1",
+        "explicit owner query",
+    )
+    assert row["user_id"] == owner
+
+
 async def test_log_recall_query_rejects_unknown_tool_name(pool):
     """tool_name CHECK constraint guards the metric-aggregation contract.
 
