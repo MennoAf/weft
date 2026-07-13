@@ -13,10 +13,22 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import sys
 from pathlib import Path
 
 MODULES = ("weft.store", "weft.mcp.tools")
 OUT_PATH = Path(__file__).parent / "baseline_signatures.json"
+
+# When this file is executed directly, Python puts ``tests/`` ahead of the
+# repository root on sys.path.  That makes the local ``tests/mcp`` directory
+# shadow the installed MCP package while importing ``weft.mcp.tools``.
+REPO_ROOT = OUT_PATH.parent.parent.resolve()
+while str(REPO_ROOT) in sys.path:
+    sys.path.remove(str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
+TESTS_DIR = OUT_PATH.parent.resolve()
+while str(TESTS_DIR) in sys.path:
+    sys.path.remove(str(TESTS_DIR))
 
 
 def _public_funcs(module_name: str) -> dict[str, dict]:

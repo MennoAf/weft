@@ -4,6 +4,17 @@ Full reference for every tool the Weft MCP server exposes. For a tour rather tha
 
 The signatures here are stable: changes are additive-only (the test suite enforces this via `tests/test_additive_guard.py`).
 
+## Tool lifecycle and usage
+
+Weft records daily aggregate invocation counts for every MCP tool without
+retaining request arguments. The trailing 30-day summary is included in
+`weft_check_health` under `tool_usage`; use it before removing or
+internalizing a tool.
+
+`weft_up_next` is deprecated but remains available as a compatibility alias.
+Use `weft_board` for the canonical unified open-items view. It will remain
+functional while usage is measured.
+
 ## Memory primitives
 
 ### `weft_remember`

@@ -92,6 +92,54 @@
         }
       ]
     },
+    "weft_alert_suppress": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "alert_type"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "dedup_key"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "hours"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "reason"
+        }
+      ]
+    },
+    "weft_alert_unsuppress": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "alert_type"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "dedup_key"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
     "weft_autonomy_calibrate": {
       "parameters": [
         {
@@ -349,6 +397,84 @@
         }
       ]
     },
+    "weft_board": {
+      "parameters": [
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "days"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "include_snoozed"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "sources"
+        }
+      ]
+    },
+    "weft_board_act": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tool"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "args"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "item_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "source"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "kind"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "urgency_at_surface"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "age_days_at_surface"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "verb"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "snooze_duration_days"
+        }
+      ]
+    },
     "weft_budget_check": {
       "parameters": [
         {
@@ -452,6 +578,25 @@
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "since_days"
+        }
+      ]
+    },
+    "weft_capability_lookup": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "query"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "limit"
         }
       ]
     },
@@ -1180,6 +1325,15 @@
         }
       ]
     },
+    "weft_fsck": {
+      "parameters": [
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
     "weft_handoff": {
       "parameters": [
         {
@@ -1284,6 +1438,78 @@
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "min_confidence"
+        }
+      ]
+    },
+    "weft_list_append": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "text"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "checked"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "link"
+        }
+      ]
+    },
+    "weft_list_check": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "index"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "checked"
+        }
+      ]
+    },
+    "weft_list_remove": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "index"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
         }
       ]
     },
@@ -1475,6 +1701,39 @@
         }
       ]
     },
+    "weft_projects": {
+      "parameters": [
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
+    "weft_quarantine_review": {
+      "parameters": [
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "action"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "memory_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "limit"
+        }
+      ]
+    },
     "weft_recall": {
       "parameters": [
         {
@@ -1536,6 +1795,11 @@
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "user_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tier"
         }
       ]
     },
@@ -1613,6 +1877,11 @@
         {
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "workspace_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
           "name": "check_contradictions"
         },
         {
@@ -1624,6 +1893,11 @@
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "review_after"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "project_facets"
         }
       ]
     },
@@ -1663,6 +1937,11 @@
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "new_project_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "new_pinned"
         },
         {
           "has_default": true,
@@ -1797,6 +2076,305 @@
         }
       ]
     },
+    "weft_token_issue": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "user_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "caller_mode"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "label"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "expires_in"
+        }
+      ]
+    },
+    "weft_token_list": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "user_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "include_revoked"
+        }
+      ]
+    },
+    "weft_token_revoke": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "token_hash"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
+    "weft_tracker_close": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "final_state"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "note"
+        }
+      ]
+    },
+    "weft_tracker_create": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "kind"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "title"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "project_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "entity_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "state"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nudge_mode"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nudge_after"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nudge_interval"
+        }
+      ]
+    },
+    "weft_tracker_dismiss": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
+    "weft_tracker_due": {
+      "parameters": [
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "limit"
+        }
+      ]
+    },
+    "weft_tracker_get": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
+    "weft_tracker_list": {
+      "parameters": [
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "kind"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "state"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "open_only"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "project_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "entity_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context_filter"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "since"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "limit"
+        }
+      ]
+    },
+    "weft_tracker_snooze": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "until"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
+    "weft_tracker_update": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracker_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "title"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "state"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "state_note"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "context"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nudge_mode"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nudge_after"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "nudge_interval"
+        }
+      ]
+    },
     "weft_trigger_create": {
       "parameters": [
         {
@@ -1922,6 +2500,40 @@
         }
       ]
     },
+    "weft_turn_append": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "episode_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "role"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "content"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "occurred_at"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_id"
+        }
+      ]
+    },
     "weft_up_next": {
       "parameters": [
         {
@@ -1959,6 +2571,82 @@
           "name": "project_id"
         }
       ]
+    },
+    "weft_workspace_add_member": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "workspace_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "user_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "role"
+        }
+      ]
+    },
+    "weft_workspace_create": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "description"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "metadata"
+        }
+      ]
+    },
+    "weft_workspace_list": {
+      "parameters": [
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
+    },
+    "weft_workspace_remove_member": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "workspace_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "user_id"
+        },
+        {
+          "has_default": true,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ctx"
+        }
+      ]
     }
   },
   "weft.store": {
@@ -1983,6 +2671,48 @@
           "has_default": false,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "relation"
+        }
+      ]
+    },
+    "apply_reask_feedback": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "pool"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "missed_query_id"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "satisfying_memory_id"
+        }
+      ]
+    },
+    "build_or_tsquery": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "query"
+        }
+      ]
+    },
+    "bump_retrieval_telemetry": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "pool"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "memory_ids"
         }
       ]
     },
@@ -2032,6 +2762,16 @@
           "has_default": true,
           "kind": "KEYWORD_ONLY",
           "name": "sources"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_agent_provenance"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_pending_review"
         }
       ]
     },
@@ -2051,6 +2791,34 @@
           "has_default": true,
           "kind": "KEYWORD_ONLY",
           "name": "hard"
+        }
+      ]
+    },
+    "embed_text_for_memory": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "content"
+        },
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "topic"
+        }
+      ]
+    },
+    "get_distinct_reask_user_ids": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "pool"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "window_minutes"
         }
       ]
     },
@@ -2112,6 +2880,35 @@
           "has_default": false,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "key"
+        }
+      ]
+    },
+    "get_recent_recall_queries": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "pool"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "window_minutes"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "limit"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "user_id"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "scope_to_user"
         }
       ]
     },
@@ -2212,12 +3009,66 @@
         {
           "has_default": true,
           "kind": "KEYWORD_ONLY",
+          "name": "include_agent_provenance"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_pending_review"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
           "name": "limit"
         },
         {
           "has_default": true,
           "kind": "KEYWORD_ONLY",
           "name": "offset"
+        }
+      ]
+    },
+    "log_recall_query": {
+      "parameters": [
+        {
+          "has_default": false,
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "pool"
+        },
+        {
+          "has_default": false,
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_name"
+        },
+        {
+          "has_default": false,
+          "kind": "KEYWORD_ONLY",
+          "name": "query_text"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "project_id"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "tier"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "mode"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "retrieval_mode"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "result_count"
         }
       ]
     },
@@ -2325,6 +3176,21 @@
           "has_default": true,
           "kind": "KEYWORD_ONLY",
           "name": "sources"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_agent_provenance"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_pending_review"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "facet_boost_project_id"
         }
       ]
     },
@@ -2389,6 +3255,21 @@
           "has_default": true,
           "kind": "KEYWORD_ONLY",
           "name": "sources"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_agent_provenance"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_pending_review"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "facet_boost_project_id"
         }
       ]
     },
@@ -2438,6 +3319,16 @@
           "has_default": true,
           "kind": "KEYWORD_ONLY",
           "name": "sources"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_agent_provenance"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_pending_review"
         }
       ]
     },
@@ -2517,6 +3408,21 @@
           "has_default": true,
           "kind": "KEYWORD_ONLY",
           "name": "sources"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_agent_provenance"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "include_pending_review"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "facet_boost_project_id"
         }
       ]
     },
@@ -2555,6 +3461,11 @@
           "has_default": true,
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "embedding"
+        },
+        {
+          "has_default": true,
+          "kind": "KEYWORD_ONLY",
+          "name": "embed_composition_version"
         }
       ]
     },

@@ -19,6 +19,7 @@ from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
 from weft.fsck import list_orphan_memories
 from weft.mcp.server import AppContext, mcp
+from weft.tool_usage import get_tool_usage_summary
 from weft.behaviors import (
     delete_behavior,
     list_behaviors as list_behaviors_store,
@@ -2348,13 +2349,15 @@ async def weft_meal_plan(
         return _db_error_response("weft_meal_plan", e)
 
 
-@mcp.tool()
+@mcp.tool(tags={"deprecated"})
 async def weft_up_next(
     ctx: Context,
     days: int = 7,
     include_no_date: bool = False,
 ) -> dict:
-    """Upcoming tasks: open tasks due in the next N days from Obsidian notes.
+    """Deprecated compatibility alias for :func:`weft_board`.
+
+    Upcoming tasks: open tasks due in the next N days from Obsidian notes.
 
     Returns overdue tasks and tasks due soon, sorted by date and priority.
     Tasks come from Obsidian checkbox items with Tasks plugin emoji dates.
@@ -2364,6 +2367,7 @@ async def weft_up_next(
     so this tool's buckets can't fork from `weft_board`'s task source —
     `weft_board` is the canonical open-items call."""
     try:
+        logger.warning("Deprecated MCP tool called: weft_up_next; use weft_board")
         app: AppContext = ctx.request_context.lifespan_context
         from weft.skills import up_next
 
@@ -3756,7 +3760,9 @@ async def weft_check_health(
     - failure_counters: aggregate counts for silently-swallowed failure sites
       (replay.enqueue.failed, calibration.auto_promote.failed,
       replay.executor.failed). A rising count while the corresponding success
-      metric stays flat is the tell that a log-and-continue path is broken."""
+      metric stays flat is the tell that a log-and-continue path is broken.
+    - tool_usage: daily-aggregated MCP tool invocations over the last 30 days;
+      this is the evidence used before removing or internalizing a tool."""
     try:
         from weft.calibration import count_auto_originated_tier_changes
         from weft.counters import FAILURE_COUNTERS, get_counters
@@ -3829,6 +3835,7 @@ async def weft_check_health(
             # replay_queue_depth stays pinned at 0 is the "enqueue is silently
             # broken" tell. replay.executor.failed reads 0 until E2.L7 lands.
             failure_counters = await get_counters(app.pool, FAILURE_COUNTERS)
+            tool_usage = await get_tool_usage_summary(app.pool, days=30)
 
         payload = summary_to_dict(result)
         payload["reask_rate"] = reask_rate
@@ -3837,6 +3844,7 @@ async def weft_check_health(
         payload["replay_queue_stale_pending"] = replay_queue_stale_pending
         payload["replay_claims_30d"] = replay_claims_30d
         payload["failure_counters"] = failure_counters
+        payload["tool_usage"] = tool_usage
         return payload
     except _DB_ERRORS as e:
         return _db_error_response("weft_check_health", e)
