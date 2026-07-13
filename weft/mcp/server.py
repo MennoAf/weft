@@ -34,6 +34,7 @@ from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.oauth_consent import handle_consent
 from weft.mcp.oauth_metadata import handle_authorization_server_metadata
 from weft.mcp.slack_commands import handle_slash_checkin
+from weft.mcp.tool_usage import ToolUsageMiddleware
 from weft.cost_enforcement import cost_enforcement_loop
 from weft.scheduler import (
     canary_audit_loop,
@@ -631,6 +632,7 @@ user_identity_middleware = Middleware(
 )
 
 mcp = FastMCP("weft", lifespan=lifespan)
+mcp.add_middleware(ToolUsageMiddleware(_middleware_pool_getter))
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
