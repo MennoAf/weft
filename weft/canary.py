@@ -35,8 +35,10 @@ in the table during collection but are excluded from the audit (and thus the
 - A probe whose probe_text naturally retrieves its memory is NOT flagged
 
 ### Scheduler note:
-The daily audit is a callable entrypoint (``run_canary_audit``).  No live scheduler
-is wired up — a cron job or a Loom-scheduled worker calls this function.
+The daily audit is wired into the MCP server lifespan through
+``weft.scheduler.canary_audit_loop``. The loop requires
+``WEFT_DEFAULT_USER_ID`` so it can scope background work without HTTP
+middleware; without that deployment variable it logs a warning and exits.
 """
 
 from __future__ import annotations
@@ -768,8 +770,9 @@ async def canary_health(
     ``user_id`` scopes the read EXPLICITLY rather than relying on the
     ``app.user_id`` GUC — the primer and scheduler contexts do not reliably set
     it (the same NULL-GUC gap that broke reaREDACTED enrollment). Returns
-    None on any error, or when no enabled probe is in the current universe —
-    best-effort, never breaks prime.
+    an explicit dark ``no_probes`` status when no enabled probe is in the
+    current universe, and None only on query error — best-effort, never breaks
+    prime.
     """
     from datetime import datetime, timezone
 
@@ -816,7 +819,18 @@ async def canary_health(
         return None
 
     if not skeleton:
-        return None
+        return {
+            "status": "no_probes",
+            "arms": {},
+            "last_audit_at": None,
+            "audit_age_hours": None,
+            "dark": True,
+            "dark_reason": "no active probes",
+            "alert": (
+                "⚠️ recall canary DARK (no active probes) — the reconciliation "
+                "meter has nothing enrolled to measure."
+            ),
+        }
 
     windowed = {r["probe_type"]: r for r in window}
 

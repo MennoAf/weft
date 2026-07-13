@@ -135,6 +135,37 @@ class TestProofMetricsIntegration:
     """DB-backed tests: seed data and assert both metrics are plausible."""
 
     @pytest.mark.asyncio
+    async def test_check_health_surfaces_recall_canary_status(
+        self, pool, monkeypatch
+    ):
+        """The operational health surface must expose canary wiring state."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from weft.auth import current_user_id
+        from weft.health_check import HealthSummary
+        from weft.mcp import tools
+
+        monkeypatch.setenv("WEFT_DEFAULT_USER_ID", "scheduler-owner")
+        token = current_user_id.set("health-caller")
+        try:
+            ctx = MagicMock()
+            ctx.request_context.lifespan_context = SimpleNamespace(pool=pool)
+            summary = HealthSummary(findings=[], errors=[], evaluated_at=datetime.now(timezone.utc))
+            monkeypatch.setattr(
+                "weft.health_check.run_all_evaluators",
+                AsyncMock(return_value=summary),
+            )
+
+            payload = await tools.weft_check_health(ctx)
+        finally:
+            current_user_id.reset(token)
+
+        assert payload["recall_canary"]["status"] == "no_probes"
+        assert payload["recall_canary"]["dark"] is True
+        assert payload["recall_canary"]["scheduler_configured"] is True
+
+    @pytest.mark.asyncio
     async def test_reask_rate_is_float_in_valid_range(self, pool):
         """get_recent_recall_queries + compute_reask_rate returns a float in [0, 1]."""
         from weft.reask import compute_reask_rate
