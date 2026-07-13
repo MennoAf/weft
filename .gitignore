@@ -9,6 +9,8 @@ build/
 
 # Personal/local config
 .mcp.json
+.mcp.json.pre-token.bak
+.codex/
 .loom/
 .claude/
 
