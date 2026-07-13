@@ -13,6 +13,7 @@ from typing import Literal
 import asyncpg
 from fastmcp import Context
 
+from capability_registry.lookup import format_lookup_results, lookup_capabilities
 from weft.auth import resolve_caller_user_id
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
@@ -1824,6 +1825,24 @@ async def weft_status(
     except _DB_ERRORS as e:
         logger.warning("Database unavailable in weft_status: %s", e)
         return {"degraded": True, "error": "Database unavailable", "topic": topic}
+
+
+@mcp.tool()
+async def weft_capability_lookup(ctx: Context, query: str, limit: int = 10) -> str:
+    """Search the Weft capability registry for known implementations, scripts,
+    or reuse precedents. query can be natural language ("bot blocked crawler")
+    or an explicit topic tag ("capability:bot-block-hardening"). Returns repo,
+    file, symbol, and reuse notes for matching entries.
+    """
+    app: AppContext = ctx.request_context.lifespan_context
+    project_id = await _resolve_project_id(ctx, None)
+    results = await lookup_capabilities(query, app.pool, project_id, limit)
+    if not results:
+        return (
+            f"No capability entries found for query: {query}. "
+            "Try indexing repos with capability_registry/ingest.py first."
+        )
+    return format_lookup_results(results)
 
 
 @mcp.tool()
