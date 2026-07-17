@@ -36,9 +36,9 @@ in the table during collection but are excluded from the audit (and thus the
 
 ### Scheduler note:
 The daily audit is wired into the MCP server lifespan through
-``weft.scheduler.canary_audit_loop``. The loop requires
-``WEFT_DEFAULT_USER_ID`` so it can scope background work without HTTP
-middleware; without that deployment variable it logs a warning and exits.
+``weft.scheduler.canary_audit_loop``. The loop enumerates owners with canary
+work and invokes this module once per owner with explicit predicates; it does
+not depend on request middleware or ``WEFT_DEFAULT_USER_ID`` for isolation.
 """
 
 from __future__ import annotations
@@ -224,6 +224,7 @@ async def enroll_canary(
 async def _sync_reask_bootstrap_probes(
     pool: asyncpg.Pool,
     *,
+    user_id: str,
     eval_case_store_path: "Any" = None,
 ) -> int:
     """Auto-enroll new is_reask_miss events as high-confidence ``reaREDACTED`` probes.
@@ -232,11 +233,9 @@ async def _sync_reask_bootstrap_probes(
     ``reask_satisfying_memory_id`` was recorded, then inserts a new
     ``recall_canary`` probe for each one that isn't already enrolled.
 
-    Scoping: operates under the current GUC ``app.user_id`` — both the SELECT
-    (via RLS on ``weft_recall_queries``) and the INSERT (via RLS + DEFAULT on
-    ``recall_canary``) are automatically scoped to the current user.  The
-    scheduler's per-user fan-out (``get_distinct_reask_user_ids``) ensures this
-    is called once per user per audit cycle.
+    Scoping is explicit on every read and write. Background jobs run through a
+    service role that may bypass RLS, so the GUC is defense-in-depth rather than
+    the tenant boundary. The scheduler calls this once per user per audit cycle.
 
     ``ON CONFLICT DO NOTHING`` handles expected PK collisions (e.g. rare probe_id
     hash collision) silently.  Any other exception is an UNEXPECTED error and is
@@ -256,13 +255,17 @@ async def _sync_reask_bootstrap_probes(
         """
         SELECT probe_id, probe_text FROM recall_canary
         WHERE probe_type = 'reaREDACTED' AND enabled = TRUE
-        """
+          AND user_id = $1
+        """,
+        user_id,
     )
     poisoned = [r["probe_id"] for r in existing if _is_degenerate_reask_probe(r["probe_text"])]
     if poisoned:
         await get_db(pool).execute(
-            "UPDATE recall_canary SET enabled = FALSE WHERE probe_id = ANY($1::text[])",
+            "UPDATE recall_canary SET enabled = FALSE "
+            "WHERE probe_id = ANY($1::text[]) AND user_id = $2",
             poisoned,
+            user_id,
         )
         logger.info(
             "_sync_reask_bootstrap_probes: disabled %d degenerate reaREDACTED "
@@ -279,15 +282,17 @@ async def _sync_reask_bootstrap_probes(
         FROM weft_recall_queries q
         WHERE q.is_reask_miss = TRUE
           AND q.reask_satisfying_memory_id IS NOT NULL
-          AND q.user_id IS NOT NULL
+          AND q.user_id = $2
           AND NOT EXISTS (
               SELECT 1 FROM recall_canary c
               WHERE c.memory_id = q.reask_satisfying_memory_id
                 AND c.probe_type = 'reaREDACTED'
                 AND c.probe_text = left(q.query_text, $1)
+                AND c.user_id = q.user_id
           )
         """,
         PROBE_TEXT_MAX_CHARS,
+        user_id,
     )
 
     # Refuse machine-reference query texts up front: they can never embed-retrieve
@@ -381,11 +386,38 @@ async def _sync_reask_bootstrap_probes(
 # ---------------------------------------------------------------------------
 
 
+async def list_canary_user_ids(pool: asyncpg.Pool) -> list[str]:
+    """List owners with enabled probes or eligible re-ask bootstrap rows.
+
+    This is the scheduler's only cross-user canary query. Every returned owner
+    is subsequently processed by :func:`run_canary_audit` with explicit tenant
+    predicates, so an RLS-bypassing service role cannot mix probe universes.
+    """
+    rows = await get_db(pool).fetch(
+        """
+        SELECT user_id
+        FROM (
+            SELECT user_id
+            FROM recall_canary
+            WHERE enabled = TRUE AND user_id IS NOT NULL
+            UNION
+            SELECT user_id
+            FROM weft_recall_queries
+            WHERE is_reask_miss = TRUE
+              AND reask_satisfying_memory_id IS NOT NULL
+              AND user_id IS NOT NULL
+        ) owners
+        ORDER BY user_id
+        """
+    )
+    return [str(row["user_id"]) for row in rows]
+
+
 async def run_canary_audit(
     pool: asyncpg.Pool,
     embedder: Any,
     *,
-    user_id: str | None = None,
+    user_id: str,
     top_k: int = DEFAULT_AUDIT_TOP_K,
     active_probing_enabled: bool = False,
     eval_case_store_path: Any = _EVAL_CASE_SENTINEL,
@@ -414,10 +446,9 @@ async def run_canary_audit(
         pool: asyncpg connection pool.
         embedder: An ``EmbeddingProvider`` (e.g. ``FastEmbedProvider``).
             Must implement ``async embed(text: str) -> list[float]``.
-        user_id: If supplied, passed to ``search_by_vector`` to scope memory
-            retrieval to this user's memories.  ``None`` lets RLS handle scoping
-            (correct when the pool's ``setup`` callback has already set
-            ``app.user_id``).
+        user_id: Required owner scope for probe selection, maintenance, writes,
+            and vector retrieval. Never inferred from RLS because production
+            background roles may bypass it.
         top_k: Number of top results to retrieve per probe.  A probe's
             ``memory_id`` must appear within these results to be a hit.
         active_probing_enabled: RI-4 gate.  ``False`` (default) runs only
@@ -454,32 +485,10 @@ async def run_canary_audit(
     if eval_case_store_path is _EVAL_CASE_SENTINEL:
         eval_case_store_path = _default_eval_case_store_path()
 
-    # --- Guard: user scoping must be established ---
-    # Without a user_id argument AND without the app.user_id GUC the audit
-    # would silently run against an empty (or system-only) probe set, producing
-    # a miss_rate=0.0 that looks healthy but measured nothing meaningful.
-    if user_id is None:
-        guc_uid = await get_db(pool).fetchval(
-            "SELECT nullif(current_setting('app.user_id', true), '')"
-        )
-        if guc_uid is None:
-            logger.warning(
-                "canary audit: no user scoping in effect — user_id not passed and "
-                "app.user_id GUC is empty. Returning audit_valid=False (skipped)."
-            )
-            return {
-                "probes_checked": 0,
-                "misses": 0,
-                "miss_rate": 0.0,
-                "bootstrap_synced": 0,
-                "audit_valid": False,
-                "status": "skipped",
-            }
-
     # --- Phase 1: bootstrap from is_reask_miss events ---
     # eval_case_store_path is threaded in so reask misses also mint eval cases.
     bootstrap_synced = await _sync_reask_bootstrap_probes(
-        pool, eval_case_store_path=eval_case_store_path
+        pool, user_id=user_id, eval_case_store_path=eval_case_store_path
     )
 
     # --- Phase 1.5: probe hygiene — disable probes whose memory is no longer active ---
@@ -500,6 +509,7 @@ async def run_canary_audit(
                 UPDATE recall_canary c
                 SET enabled = FALSE
                 WHERE c.enabled = TRUE
+                  AND c.user_id = $1
                   AND NOT EXISTS (
                       SELECT 1 FROM memories m
                       WHERE m.id = c.memory_id AND m.status = 'active'
@@ -507,7 +517,8 @@ async def run_canary_audit(
                 RETURNING 1
             )
             SELECT count(*) FROM stale
-            """
+            """,
+            user_id,
         )
         or 0
     )
@@ -539,10 +550,13 @@ async def run_canary_audit(
             AND m.status = 'active'
             AND m.review_status = 'active'
             AND m.write_provenance != 'agent'
-        WHERE c.enabled = TRUE AND c.probe_type = ANY($1::text[])
+        WHERE c.enabled = TRUE
+          AND c.probe_type = ANY($1::text[])
+          AND c.user_id = $2
         ORDER BY c.probe_id
         """,
         probe_types,
+        user_id,
     )
 
     # --- Guard: 0 enabled probes → audit_valid=False ---
@@ -592,6 +606,7 @@ async def run_canary_audit(
                 limit=top_k,
                 threshold=0.0,
                 user_id=user_id,
+                include_agent_provenance=False,
             )
         except Exception as exc:
             logger.warning(
@@ -613,9 +628,10 @@ async def run_canary_audit(
                 SET miss_count   = miss_count + 1,
                     audit_count  = audit_count + 1,
                     last_audit_at = now()
-                WHERE probe_id = $1
+                WHERE probe_id = $1 AND user_id = $2
                 """,
                 probe_id,
+                user_id,
             )
             # Best-effort counter: never raises (counters.py contract).
             await increment_counter(pool, COUNTER_CANARY_MISS)
@@ -640,9 +656,10 @@ async def run_canary_audit(
                 UPDATE recall_canary
                 SET audit_count  = audit_count + 1,
                     last_audit_at = now()
-                WHERE probe_id = $1
+                WHERE probe_id = $1 AND user_id = $2
                 """,
                 probe_id,
+                user_id,
             )
             logger.debug(
                 "canary hit: probe_id=%s memory_id=%s probe_type=%s",
@@ -673,8 +690,10 @@ async def run_canary_audit(
     # covered; older rows can never affect a windowed rate, so prune them.
     await get_db(pool).execute(
         "DELETE FROM recall_canary_audit "
-        "WHERE audited_at < now() - make_interval(days => $1)",
+        "WHERE audited_at < now() - make_interval(days => $1) "
+        "AND user_id = $2",
         _CANARY_AUDIT_RETENTION_DAYS,
+        user_id,
     )
 
     miss_rate = misses / probes_checked if probes_checked > 0 else 0.0
@@ -734,7 +753,7 @@ _CANARY_AUDIT_RETENTION_DAYS = 30
 
 
 async def canary_health(
-    pool: asyncpg.Pool, user_id: str | None = None
+    pool: asyncpg.Pool, user_id: str
 ) -> dict | None:
     """Reconciliation-meter health summary for the primer and daily brief.
 
@@ -792,7 +811,7 @@ async def canary_health(
             FROM recall_canary c
             JOIN memories m ON m.id = c.memory_id AND {_UNIVERSE}
             WHERE c.enabled = TRUE
-              AND ($1::text IS NULL OR c.user_id = $1)
+              AND c.user_id = $1
             GROUP BY c.probe_type
             """,
             user_id,
@@ -808,7 +827,7 @@ async def canary_health(
             JOIN recall_canary c ON c.probe_id = a.probe_id AND c.enabled = TRUE
             JOIN memories m ON m.id = c.memory_id AND {_UNIVERSE}
             WHERE a.audited_at > now() - make_interval(days => $1)
-              AND ($2::text IS NULL OR a.user_id = $2)
+              AND a.user_id = $2
             GROUP BY c.probe_type
             """,
             _CANARY_HEALTH_WINDOW_DAYS,
@@ -896,7 +915,7 @@ async def canary_health(
         health["alert"] = (
             f"⚠️ recall canary DARK ({dark_reason}) — the reconciliation meter "
             "is not measuring; silent recall misses are going undetected. "
-            "Check WEFT_DEFAULT_USER_ID and the canary_audit loop."
+            "Check the per-user canary_audit loop and scheduler state."
         )
     if tripped_arms:
         worst_arm, worst_rate = max(tripped_arms, key=lambda t: t[1])

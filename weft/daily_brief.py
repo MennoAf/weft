@@ -475,7 +475,7 @@ async def _query_alerts(pool: asyncpg.Pool, as_of: datetime) -> list[str]:
 def format_markdown(sections: dict[str, list[str]], generated_at: datetime) -> str:
     """Format sections dict as readable markdown, grouped Personal vs Code."""
     lines = [
-        f"## 🌅 Daily Brief",
+        "## 🌅 Daily Brief",
         f"_{generated_at.strftime('%A, %B %d %Y at %H:%M %Z')}_",
         "",
     ]
@@ -571,7 +571,13 @@ async def _query_canary_health(pool: asyncpg.Pool) -> list[str]:
 
     from weft.canary import canary_health
 
-    health = await canary_health(pool, os.environ.get("WEFT_DEFAULT_USER_ID"))
+    owner_user_id = os.environ.get("WEFT_DEFAULT_USER_ID")
+    if not owner_user_id:
+        return [
+            "⚠️ Recall canary brief unavailable — WEFT_DEFAULT_USER_ID is not "
+            "configured for the owner-scoped daily brief."
+        ]
+    health = await canary_health(pool, owner_user_id)
     if not health:
         return []
     lines: list[str] = []

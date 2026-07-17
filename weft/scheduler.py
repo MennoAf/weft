@@ -947,75 +947,26 @@ async def canary_audit_loop(
     stays at its ``False`` default until the active-probe miss baseline is
     calibrated (RI-4).
 
-    Background scheduler tasks carry no HTTP middleware, so there is no
-    request-scoped ``app.user_id`` GUC and ``get_db(pool)`` returns the raw
-    pool. ``run_canary_audit``'s own guard therefore *skips* (audit_valid=False)
-    unless an explicit ``user_id`` is supplied. We bind it from
-    ``WEFT_DEFAULT_USER_ID`` — the deployment owner, same pattern as
-    ``slack_sync_loop`` / ``discord_bot_loop`` — and pass it through so probe
-    selection and vector search both scope to that user.
-
-    NOTE (single-user scope): ``run_canary_audit`` selects enabled probes via
-    RLS rather than an explicit ``user_id`` predicate, so a true multi-user
-    deployment would need per-user fan-out here (cf. ``reask_feedback_loop``'s
-    ``get_distinct_reask_user_ids``). Correct for the current single-owner
-    deployment; revisit before multi-tenant.
+    Background tasks use a service role that may bypass RLS. Each poll therefore
+    enumerates canary owners once, checks cadence per owner, and runs every audit
+    with explicit tenant predicates. Owners are processed sequentially to avoid
+    an embedding burst as the deployment grows.
     """
-    default_uid = os.environ.get("WEFT_DEFAULT_USER_ID")
-    if not default_uid:
-        logger.warning(
-            "canary_audit.no_default_user — set WEFT_DEFAULT_USER_ID to the "
-            "deployment owner's UUID; canary audit loop disabled"
-        )
-        return
-
-    # Bind identity for any nested write path that routes through acquire().
-    from weft.auth import current_user_id
-
-    current_user_id.set(default_uid)
-
     logger.info(
         "canary_audit.started",
         extra={
             "interval": interval,
             "min_age_hours": min_age_hours,
-            "user_id": default_uid,
+            "mode": "per_user",
         },
     )
     try:
         while True:
             try:
-                if await _canary_audit_due(pool, default_uid, min_age_hours=min_age_hours):
-                    from weft.canary import run_canary_audit
-
-                    # active_probing_enabled=True: audit BOTH arms. The active
-                    # arm is an uncalibrated completeness proxy (surfaced as
-                    # such in canary_health), the reaREDACTED arm is the
-                    # trustworthy one. Auditing active too is what gives the
-                    # meter a live signal instead of a perpetually-skipped
-                    # audit_valid=False (decision weft-0f1ecad1).
-                    result = await run_canary_audit(
-                        pool, embedder, user_id=default_uid,
-                        active_probing_enabled=True,
-                    )
-                    if result.get("audit_valid"):
-                        logger.info(
-                            "canary_audit.cycle",
-                            extra={
-                                "probes_checked": result.get("probes_checked"),
-                                "misses": result.get("misses"),
-                                "miss_rate": result.get("miss_rate"),
-                                "bootstrap_synced": result.get("bootstrap_synced"),
-                            },
-                        )
-                    else:
-                        logger.info(
-                            "canary_audit.skipped",
-                            extra={
-                                "status": result.get("status"),
-                                "bootstrap_synced": result.get("bootstrap_synced"),
-                            },
-                        )
+                summary = await _run_canary_audit_pass(
+                    pool, embedder, min_age_hours=min_age_hours
+                )
+                logger.info("canary_audit.pass", extra=summary)
             except Exception:
                 logger.exception("canary_audit.loop_error")
 
@@ -1023,6 +974,59 @@ async def canary_audit_loop(
     except asyncio.CancelledError:
         logger.info("canary_audit.stopped")
         raise
+
+
+async def _run_canary_audit_pass(
+    pool: asyncpg.Pool,
+    embedder,
+    *,
+    min_age_hours: float = _CANARY_AUDIT_MIN_AGE_HOURS,
+) -> dict[str, int]:
+    """Run one sequential, explicitly scoped pass across canary owners."""
+    from weft.canary import list_canary_user_ids, run_canary_audit
+
+    user_ids = await list_canary_user_ids(pool)
+    summary = {
+        "owners_considered": len(user_ids),
+        "owners_audited": 0,
+        "probes_checked": 0,
+        "misses": 0,
+    }
+    for user_id in user_ids:
+        if not await _canary_audit_due(
+            pool, user_id, min_age_hours=min_age_hours
+        ):
+            continue
+        result = await run_canary_audit(
+            pool,
+            embedder,
+            user_id=user_id,
+            active_probing_enabled=True,
+        )
+        if not result.get("audit_valid"):
+            logger.info(
+                "canary_audit.skipped",
+                extra={
+                    "user_id": user_id,
+                    "status": result.get("status"),
+                    "bootstrap_synced": result.get("bootstrap_synced"),
+                },
+            )
+            continue
+        summary["owners_audited"] += 1
+        summary["probes_checked"] += int(result.get("probes_checked", 0))
+        summary["misses"] += int(result.get("misses", 0))
+        logger.info(
+            "canary_audit.cycle",
+            extra={
+                "user_id": user_id,
+                "probes_checked": result.get("probes_checked"),
+                "misses": result.get("misses"),
+                "miss_rate": result.get("miss_rate"),
+                "bootstrap_synced": result.get("bootstrap_synced"),
+            },
+        )
+    return summary
 
 
 async def _post_brief_to_slack(channel: str, brief_result) -> None:
