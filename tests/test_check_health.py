@@ -150,7 +150,12 @@ class TestProofMetricsIntegration:
         token = current_user_id.set("health-caller")
         try:
             ctx = MagicMock()
-            ctx.request_context.lifespan_context = SimpleNamespace(pool=pool)
+            canary_task = MagicMock()
+            canary_task.done.return_value = False
+            ctx.request_context.lifespan_context = SimpleNamespace(
+                pool=pool,
+                _canary_audit_task=canary_task,
+            )
             summary = HealthSummary(findings=[], errors=[], evaluated_at=datetime.now(timezone.utc))
             monkeypatch.setattr(
                 "weft.health_check.run_all_evaluators",
@@ -164,6 +169,8 @@ class TestProofMetricsIntegration:
         assert payload["recall_canary"]["status"] == "no_probes"
         assert payload["recall_canary"]["dark"] is True
         assert payload["recall_canary"]["scheduler_configured"] is True
+        assert payload["recall_canary"]["scheduler_running"] is True
+        assert payload["recall_canary"]["scheduler_mode"] == "per_user"
 
     @pytest.mark.asyncio
     async def test_reask_rate_is_float_in_valid_range(self, pool):
@@ -409,9 +416,7 @@ class TestCheckHealthReplayMetrics:
         assert "replay_claims_30d" in payload, (
             f"'replay_claims_30d' missing from health payload. Keys: {list(payload.keys())}"
         )
-        assert "reask_rate" in payload, (
-            f"'reask_rate' missing from health payload."
-        )
+        assert "reask_rate" in payload, "'reask_rate' missing from health payload."
         # Empty DB: all three zero
         assert payload["replay_queue_depth"] == 0
         assert payload["replay_claims_30d"] == 0

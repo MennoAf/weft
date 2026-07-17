@@ -88,9 +88,7 @@ from weft.store import (
     count_by_vector,
     delete_memory,
     embed_text_for_memory,
-    get_recent_writes,
     get_relationships,
-    get_stats,
     list_memories,
     record_feedback,
     remove_relationship,
@@ -3765,7 +3763,7 @@ async def weft_check_health(
     - tool_usage: daily-aggregated MCP tool invocations over the last 30 days;
       this is the evidence used before removing or internalizing a tool.
     - recall_canary: reconciliation-meter health, including dark status,
-      probe arms, and whether the background audit scheduler is configured."""
+      probe arms, and whether the per-owner background audit task is running."""
     try:
         from weft.calibration import count_auto_originated_tier_changes
         from weft.canary import canary_health
@@ -3862,13 +3860,15 @@ async def weft_check_health(
                     "meter could not be inspected."
                 ),
             }
-        canary_status["scheduler_configured"] = bool(
-            os.environ.get("WEFT_DEFAULT_USER_ID")
+        canary_task = getattr(app, "_canary_audit_task", None)
+        canary_status["scheduler_configured"] = canary_task is not None
+        canary_status["scheduler_running"] = bool(
+            canary_task is not None and not canary_task.done()
         )
-        if not canary_status["scheduler_configured"]:
+        canary_status["scheduler_mode"] = "per_user"
+        if not canary_status["scheduler_running"]:
             canary_status["scheduler_warning"] = (
-                "WEFT_DEFAULT_USER_ID is not configured; the background canary "
-                "audit loop is disabled."
+                "The background canary audit task is not running."
             )
         payload["recall_canary"] = canary_status
         return payload

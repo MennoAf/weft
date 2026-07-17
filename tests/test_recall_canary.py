@@ -157,7 +157,9 @@ async def test_canary_audit_nondegeneracy(pool, embedder):
     )
 
     # Run audit with top_k=1 (only the single most-similar result is returned).
-    result = await run_canary_audit(pool, embedder, top_k=1)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=1
+    )
 
     # --- Done-when assertions ---
 
@@ -221,7 +223,9 @@ async def test_active_probes_excluded_by_default(pool, embedder):
     await enroll_canary(pool, mem.id, "completely unrelated text", probe_type="active")
 
     # Default audit: active_probing_enabled=False.
-    result = await run_canary_audit(pool, embedder)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID
+    )
 
     # No reask-bootstrap probes exist, so no probes are checked.
     assert result["probes_checked"] == 0
@@ -253,7 +257,13 @@ async def test_active_probes_included_when_flag_set(pool, embedder):
     await enroll_canary(pool, cat_mem.id, cat_content, probe_type="active")
     await enroll_canary(pool, physics_mem.id, cat_content, probe_type="active")
 
-    result = await run_canary_audit(pool, embedder, top_k=1, active_probing_enabled=True)
+    result = await run_canary_audit(
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=1,
+        active_probing_enabled=True,
+    )
 
     assert result["probes_checked"] == 2
     assert result["misses"] == 1
@@ -294,7 +304,9 @@ async def test_reask_bootstrap_sync_enrolls_from_is_reask_miss(pool, embedder):
         mem.id,
     )
 
-    result = await run_canary_audit(pool, embedder, top_k=5)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
+    )
 
     # The sync should have enrolled one new reask-bootstrap probe.
     assert result["bootstrap_synced"] == 1
@@ -336,8 +348,12 @@ async def test_reask_bootstrap_sync_idempotent(pool, embedder):
         mem.id,
     )
 
-    result1 = await run_canary_audit(pool, embedder)
-    result2 = await run_canary_audit(pool, embedder)
+    result1 = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID
+    )
+    result2 = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID
+    )
 
     # Second audit should sync 0 new probes (already enrolled).
     assert result1["bootstrap_synced"] == 1
@@ -365,7 +381,9 @@ async def test_zero_probe_audit_signals_invalid(pool, embedder):
     that a scheduler would silently treat as all-green.
     """
     # No probes enrolled — the audit has nothing to check.
-    result = await run_canary_audit(pool, embedder)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID
+    )
 
     assert result["probes_checked"] == 0
     assert result["misses"] == 0
@@ -391,7 +409,9 @@ async def test_real_all_pass_audit_is_valid(pool, embedder):
     )
     await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
 
-    result = await run_canary_audit(pool, embedder, top_k=5)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
+    )
 
     assert result["probes_checked"] == 1
     assert result["misses"] == 0
@@ -441,7 +461,9 @@ async def test_orphan_probe_disabled_on_soft_delete(pool, embedder):
     )
 
     # Disabled probe must be excluded from the next audit.
-    result = await run_canary_audit(pool, embedder)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID
+    )
     assert result["probes_checked"] == 0, (
         "The orphan probe for an archived memory must not appear in run_canary_audit."
     )
@@ -477,7 +499,9 @@ async def test_orphan_probe_disabled_on_hard_delete(pool, embedder):
     )
 
     # Audit must exclude the disabled probe.
-    result = await run_canary_audit(pool, embedder)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID
+    )
     assert result["probes_checked"] == 0
     assert result["audit_valid"] is False  # 0 probes → skipped
 
@@ -517,7 +541,9 @@ async def test_audit_self_heals_probe_archived_outside_delete_memory(pool, embed
         "audit self-heal exists to correct."
     )
 
-    result = await run_canary_audit(pool, embedder)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID
+    )
 
     # The audit disabled the orphan probe and did NOT count it as a miss.
     assert result["probes_disabled"] == 1
@@ -564,7 +590,9 @@ async def test_audit_keeps_active_probe_and_disables_only_orphans(pool, embedder
         dead.id,
     )
 
-    result = await run_canary_audit(pool, embedder, top_k=5)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
+    )
 
     assert result["probes_disabled"] == 1
     assert result["probes_checked"] == 1, "Only the live-memory probe should be audited."
@@ -621,7 +649,9 @@ async def test_reask_bootstrap_enroll_populates_user_id_from_query(pool, embedde
                 mem.id,
             )
 
-    result = await run_canary_audit(pool, embedder, top_k=5)
+    result = await run_canary_audit(
+        pool, embedder, user_id=owner, top_k=5
+    )
     assert result["bootstrap_synced"] == 1, "reask-bootstrap probe failed to enroll"
 
     probe = await get_db(pool).fetchrow(
@@ -851,7 +881,9 @@ async def test_audit_prunes_events_past_retention(pool, embedder):
     )
     assert old_before == 1
 
-    await run_canary_audit(pool, embedder, top_k=5)
+    await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
+    )
 
     old_after = await get_db(pool).fetchval(
         "SELECT count(*) FROM recall_canary_audit WHERE audited_at < now() - "
@@ -864,6 +896,73 @@ async def test_audit_prunes_events_past_retention(pool, embedder):
         pid,
     )
     assert fresh == 1, "the audit must log this run's outcome as a fresh event"
+
+
+async def test_audit_does_not_mutate_another_owner(pool, embedder):
+    """Every maintenance and audit phase stays inside the explicit owner scope."""
+    owner_b = "canary-owner-b"
+    mem = await _store_active_memory(pool, embedder, "owner A live probe")
+    await enroll_canary(
+        pool, mem.id, "owner A live probe", probe_type="reask-bootstrap"
+    )
+    await pool.execute(
+        """
+        INSERT INTO recall_canary
+            (probe_id, memory_id, user_id, probe_text, probe_type,
+             audit_count, miss_count, last_audit_at)
+        VALUES
+            ('owner-b-orphan', 'missing-owner-b-memory', $1,
+             'task:owner-b-machine-id', 'reask-bootstrap', 1, 1,
+             now() - interval '45 days')
+        """,
+        owner_b,
+    )
+    await pool.execute(
+        """
+        INSERT INTO recall_canary_audit
+            (probe_id, user_id, audited_at, hit)
+        VALUES ('owner-b-orphan', $1, now() - interval '45 days', FALSE)
+        """,
+        owner_b,
+    )
+    await pool.execute(
+        """
+        INSERT INTO weft_recall_queries
+            (query_id, query_text, tool_name, created_at, user_id,
+             is_reask_miss, reask_satisfying_memory_id)
+        VALUES
+            ('owner-b-reask', 'Owner B natural-language bootstrap query',
+             'recall', now() - interval '5 minutes', $1, TRUE,
+             'missing-owner-b-memory')
+        """,
+        owner_b,
+    )
+
+    result = await run_canary_audit(
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=5,
+    )
+
+    assert result["probes_checked"] == 1
+    owner_b_rows = await pool.fetch(
+        "SELECT probe_id, enabled, audit_count, miss_count FROM recall_canary "
+        "WHERE user_id = $1 ORDER BY probe_id",
+        owner_b,
+    )
+    assert [dict(row) for row in owner_b_rows] == [
+        {
+            "probe_id": "owner-b-orphan",
+            "enabled": True,
+            "audit_count": 1,
+            "miss_count": 1,
+        }
+    ]
+    assert await pool.fetchval(
+        "SELECT count(*) FROM recall_canary_audit WHERE user_id = $1",
+        owner_b,
+    ) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +996,13 @@ async def test_pending_review_probe_skipped_not_counted(pool, embedder):
         "UPDATE memories SET review_status = 'pending_review' WHERE id = $1", mem.id
     )
 
-    result = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+    result = await run_canary_audit(
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=5,
+        active_probing_enabled=True,
+    )
 
     assert result["probes_checked"] == 0, "pending_review memory must not be probed"
     assert result["misses"] == 0
@@ -921,14 +1026,26 @@ async def test_pending_review_probe_reenters_after_approval(pool, embedder):
     await pool.execute(
         "UPDATE memories SET review_status = 'pending_review' WHERE id = $1", mem.id
     )
-    skipped = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+    skipped = await run_canary_audit(
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=5,
+        active_probing_enabled=True,
+    )
     assert skipped["probes_checked"] == 0
 
     # Approve the memory.
     await pool.execute(
         "UPDATE memories SET review_status = 'active' WHERE id = $1", mem.id
     )
-    audited = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+    audited = await run_canary_audit(
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=5,
+        active_probing_enabled=True,
+    )
     assert audited["probes_checked"] == 1
     assert audited["misses"] == 0  # probe_text == content, surfaces at rank 1
 
@@ -947,7 +1064,13 @@ async def test_agent_provenance_probe_skipped(pool, embedder):
         "UPDATE memories SET write_provenance = 'agent' WHERE id = $1", mem.id
     )
 
-    result = await run_canary_audit(pool, embedder, top_k=5, active_probing_enabled=True)
+    result = await run_canary_audit(
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=5,
+        active_probing_enabled=True,
+    )
     assert result["probes_checked"] == 0
     assert result["misses"] == 0
 
@@ -997,7 +1120,9 @@ async def test_degenerate_reask_query_not_enrolled(pool, embedder):
         mem.id,
     )
 
-    result = await run_canary_audit(pool, embedder, top_k=5)
+    result = await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
+    )
     assert result["bootstrap_synced"] == 0
     count = await get_db(pool).fetchval(
         "SELECT count(*) FROM recall_canary WHERE probe_type = 'reask-bootstrap'"
@@ -1025,7 +1150,9 @@ async def test_existing_degenerate_reask_probe_disabled(pool, embedder):
         DEFAULT_TEST_USER_ID,
     )
 
-    await run_canary_audit(pool, embedder, top_k=5)
+    await run_canary_audit(
+        pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
+    )
 
     row = await get_db(pool).fetchrow(
         "SELECT enabled FROM recall_canary WHERE probe_id = 'cp-poisoned01'"

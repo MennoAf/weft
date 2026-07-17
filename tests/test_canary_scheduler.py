@@ -4,11 +4,11 @@ Covers the wiring between the always-on background loop and
 ``weft.canary.run_canary_audit``:
 
   * ``_canary_audit_due`` — the restart-safe "is a daily audit due?" gate.
-  * ``canary_audit_loop`` — disabled without ``WEFT_DEFAULT_USER_ID``; runs
-    an audit (incrementing per-probe ``audit_count``) when enabled.
+  * ``canary_audit_loop`` — discovers owners and runs explicitly scoped audits
+    without relying on ``WEFT_DEFAULT_USER_ID``.
 
-The loop must pass an explicit ``user_id`` because background tasks carry no
-HTTP middleware, so ``run_canary_audit``'s guard would otherwise skip.
+The loop must pass an explicit ``user_id`` because its service connection may
+bypass RLS and must never mix owners' probe and retrieval universes.
 """
 
 from __future__ import annotations
@@ -18,11 +18,16 @@ import asyncio
 import pytest
 
 from tests.conftest import DEFAULT_TEST_USER_ID
+from weft.auth import current_user_id
 from weft.canary import enroll_canary
-from weft.db.connection import get_db
+from weft.db.connection import acquire, get_db
 from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemoryType
-from weft.scheduler import _canary_audit_due, canary_audit_loop
+from weft.scheduler import (
+    _canary_audit_due,
+    _run_canary_audit_pass,
+    canary_audit_loop,
+)
 from weft.store import store_memory
 
 
@@ -84,14 +89,65 @@ async def test_due_again_after_min_age(pool):
 # ---------------------------------------------------------------------------
 
 
-async def test_loop_disabled_without_default_user(pool, embedder, monkeypatch):
-    """Without WEFT_DEFAULT_USER_ID the loop returns immediately (no infinite loop).
-
-    If this regressed to an infinite loop, the test would hang — so the await
-    completing IS the assertion. asyncio.wait_for guards against a hang.
-    """
+async def test_loop_runs_without_default_user(pool, embedder, monkeypatch):
+    """Per-user fan-out no longer depends on WEFT_DEFAULT_USER_ID."""
     monkeypatch.delenv("WEFT_DEFAULT_USER_ID", raising=False)
-    await asyncio.wait_for(canary_audit_loop(pool, embedder), timeout=5)
+    task = asyncio.create_task(canary_audit_loop(pool, embedder, interval=3600))
+    try:
+        await asyncio.sleep(0.1)
+        assert not task.done(), "scheduler unexpectedly stopped without owner env"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def _store_probe_for_user(pool, embedder, user_id: str, content: str) -> str:
+    """Create one self-retrieving active probe under an explicit owner."""
+    token = current_user_id.set(user_id)
+    try:
+        async with acquire(pool):
+            embedding = await embedder.embed(content)
+            memory = await store_memory(
+                pool,
+                MemoryCreate(type=MemoryType.fact, content=content, topic=[user_id]),
+                embedding=embedding,
+            )
+            return await enroll_canary(
+                pool, memory.id, content, probe_type="active"
+            )
+    finally:
+        current_user_id.reset(token)
+
+
+async def test_pass_fans_out_without_cross_owner_misses(pool, embedder):
+    """REGRESSION: a BYPASSRLS scheduler must search each probe in its owner corpus."""
+    owner_a = "canary-owner-a"
+    owner_b = "canary-owner-b"
+    probe_a = await _store_probe_for_user(
+        pool, embedder, owner_a, "Owner A remembers the amber lighthouse"
+    )
+    probe_b = await _store_probe_for_user(
+        pool, embedder, owner_b, "Owner B remembers the cobalt observatory"
+    )
+
+    summary = await _run_canary_audit_pass(pool, embedder, min_age_hours=0)
+
+    assert summary == {
+        "owners_considered": 2,
+        "owners_audited": 2,
+        "probes_checked": 2,
+        "misses": 0,
+    }
+    rows = await pool.fetch(
+        "SELECT probe_id, audit_count, miss_count FROM recall_canary "
+        "WHERE probe_id = ANY($1::text[]) ORDER BY probe_id",
+        [probe_a, probe_b],
+    )
+    assert [(row["audit_count"], row["miss_count"]) for row in rows] == [
+        (1, 0),
+        (1, 0),
+    ]
 
 
 async def test_loop_runs_audit_when_due(pool, embedder, monkeypatch):

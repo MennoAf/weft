@@ -869,9 +869,9 @@ async def assemble_board(
     caller (`current_user_id` contextvar, mirroring
     `weft.auth.resolve_caller_user_id`'s precedence) and falls back to
     `WEFT_DEFAULT_USER_ID` (the deployment owner) only when no caller is
-    bound — the same env-var convention `canary_audit_loop` uses
-    (`weft/scheduler.py:964`) — so a caller can still override it explicitly
-    rather than the board baking in a single-user assumption. Each source
+    bound — the same owner-scoped fallback used by deployment integrations —
+    so a caller can still override it explicitly rather than the board baking
+    in a single-user assumption. Each source
     acquires its OWN connection (not one shared connection) because asyncpg
     connections cannot serve concurrent queries — sharing one across the
     concurrent fan-out would raise "another operation is in progress" under

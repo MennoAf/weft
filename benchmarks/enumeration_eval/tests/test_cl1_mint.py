@@ -48,6 +48,7 @@ def store_path(tmp_path) -> Path:
 # Semantically distant memories used across multiple tests.
 CAT_CONTENT = "The orange cat sleeps in warm sunbeams by the window"
 PHYSICS_CONTENT = "Quantum entanglement and particle physics experiments"
+DEFAULT_TEST_USER_ID = "test-user-default"
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +90,11 @@ async def test_one_miss_mints_one_eval_case(pool, embedder, store_path):
     assert len(load_minted_cases(store_path)) == 0, "Pre-condition: store is empty"
 
     result = await run_canary_audit(
-        pool, embedder, top_k=1, eval_case_store_path=store_path
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=1,
+        eval_case_store_path=store_path,
     )
 
     assert result["misses"] == 1, (
@@ -139,7 +144,13 @@ async def test_harness_exercises_minted_case(pool, embedder, store_path):
     await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reask-bootstrap")
 
     # Force the miss → mint the eval case.
-    await run_canary_audit(pool, embedder, top_k=1, eval_case_store_path=store_path)
+    await run_canary_audit(
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=1,
+        eval_case_store_path=store_path,
+    )
     assert len(load_minted_cases(store_path)) == 1, "Pre-condition: exactly 1 minted case"
 
     # Exercise the minted cases via the harness.
@@ -200,7 +211,11 @@ async def test_dead_tell_miss_must_grow_eval_case_count(pool, embedder, store_pa
     initial_count = len(load_minted_cases(store_path))
 
     result = await run_canary_audit(
-        pool, embedder, top_k=1, eval_case_store_path=store_path
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=1,
+        eval_case_store_path=store_path,
     )
 
     misses = result["misses"]
@@ -251,14 +266,22 @@ async def test_mint_is_idempotent(pool, embedder, store_path):
 
     # First audit: 1 miss → 1 case minted.
     result1 = await run_canary_audit(
-        pool, embedder, top_k=1, eval_case_store_path=store_path
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=1,
+        eval_case_store_path=store_path,
     )
     assert result1["misses"] == 1
     assert len(load_minted_cases(store_path)) == 1
 
     # Second audit: same probe misses again → still exactly 1 case (no duplicate).
     result2 = await run_canary_audit(
-        pool, embedder, top_k=1, eval_case_store_path=store_path
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=1,
+        eval_case_store_path=store_path,
     )
     assert result2["misses"] == 1
     cases = load_minted_cases(store_path)
@@ -305,7 +328,11 @@ async def test_reask_miss_mints_eval_case(pool, embedder, store_path):
     assert len(load_minted_cases(store_path)) == 0
 
     result = await run_canary_audit(
-        pool, embedder, top_k=5, eval_case_store_path=store_path
+        pool,
+        embedder,
+        user_id=DEFAULT_TEST_USER_ID,
+        top_k=5,
+        eval_case_store_path=store_path,
     )
 
     assert result["bootstrap_synced"] == 1, (
