@@ -585,6 +585,48 @@ class TestCoerceList:
 
 
 # ---------------------------------------------------------------------------
+# _detect_project_id — reverse-RPC timeout (regression: prime hang)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectProjectId:
+    """A client that never answers roots/list must not hang the server.
+
+    Regression for the 2026-07-16 prime hang: ``ctx.list_roots()`` is a reverse
+    JSON-RPC to the client. HTTP/SSE clients may never reply, so the call must be
+    bounded by a timeout that degrades to None instead of awaiting forever.
+    """
+
+    async def test_returns_none_when_client_never_answers(self):
+        import asyncio
+
+        from weft.mcp.tools import _detect_project_id
+
+        async def _never_returns():
+            await asyncio.Event().wait()  # blocks forever, like a silent client
+
+        ctx = MagicMock()
+        ctx.list_roots = _never_returns
+
+        # Without the timeout this awaits forever; wait_for is the test's own
+        # backstop so a regression fails loudly instead of hanging the suite.
+        result = await asyncio.wait_for(_detect_project_id(ctx), timeout=5.0)
+        assert result is None
+
+    async def test_resolves_project_from_roots(self):
+        from unittest.mock import AsyncMock
+
+        from weft.mcp.tools import _detect_project_id
+
+        root = MagicMock()
+        root.uri = "file:///Users/jason/Projects/Weft"
+        ctx = MagicMock()
+        ctx.list_roots = AsyncMock(return_value=[root])
+
+        assert await _detect_project_id(ctx) == "weft"
+
+
+# ---------------------------------------------------------------------------
 # DB unavailability fallback
 # ---------------------------------------------------------------------------
 
