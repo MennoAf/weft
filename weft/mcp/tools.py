@@ -152,14 +152,22 @@ def _parse_review_after(value: str | None) -> datetime | None:
 
 
 async def _detect_project_id(ctx: Context) -> str | None:
-    """Auto-detect project_id from MCP client roots.
+    """Auto-detect project_id by asking the MCP client for its workspace roots.
+
+    This is NOT a local filesystem lookup: ``ctx.list_roots()`` sends a reverse
+    JSON-RPC ``roots/list`` request back to the connected client and awaits the
+    reply. Clients on HTTP/SSE transports (or any client that doesn't advertise
+    the ``roots`` capability) may never answer, so the call is bounded by an
+    explicit timeout. On timeout — or any other failure — we return None, which
+    callers treat as "roots unavailable" and fall back to an explicit/env project.
 
     Uses the directory name of the first root URI as the project identifier.
     E.g. file:///Users/jason/Projects/Weft → "weft"
-    Returns None if roots are unavailable or empty.
+    Returns None if roots are unavailable, empty, or the client doesn't respond.
     """
     try:
-        roots = await ctx.list_roots()
+        async with asyncio.timeout(2.0):
+            roots = await ctx.list_roots()
         if roots:
             uri = str(roots[0].uri)
             # file:///path/to/ProjectName → "projectname"
