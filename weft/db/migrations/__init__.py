@@ -19,6 +19,9 @@ from weft.db.migrations._runner import (
     _MIGRATION_LOCK_ID,
     _get_applied_versions,
     run_migrations,
+    verify_migration_ledger,
+    verify_migrations,
+    verify_runtime_invariants,
 )
 
 
@@ -50,6 +53,9 @@ MIGRATIONS: list[tuple[int, str, str]] = _discover()
 __all__ = [
     "MIGRATIONS",
     "run_migrations",
+    "verify_migration_ledger",
+    "verify_migrations",
+    "verify_runtime_invariants",
     "_MIGRATION_LOCK_ID",
     "_get_applied_versions",
 ]

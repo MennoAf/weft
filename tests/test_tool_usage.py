@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -115,6 +115,81 @@ async def test_middleware_skips_recording_before_lifespan():
 
     assert await middleware.on_call_tool(context, call_next) == "ok"
     assert called is False
+
+
+async def test_verify_migration_mode_never_mutates_or_recreates_pool():
+    from weft.config import MigrationMode, WeftConfig
+    from weft.mcp.server import _prepare_database_schema
+
+    pool = SimpleNamespace(close=AsyncMock(), is_closing=lambda: False)
+    config = WeftConfig(migration_mode=MigrationMode.verify)
+    with patch(
+        "weft.mcp.server.verify_migrations", new_callable=AsyncMock
+    ) as verify_migrations, patch(
+        "weft.mcp.server.verify_vector_dimensions", new_callable=AsyncMock
+    ) as verify_dimensions, patch(
+        "weft.mcp.server.run_migrations", new_callable=AsyncMock
+    ) as apply, patch(
+        "weft.mcp.server.ensure_vector_dimensions", new_callable=AsyncMock
+    ) as mutate_dimensions, patch(
+        "weft.mcp.server.create_pool", new_callable=AsyncMock
+    ) as recreate:
+        result_pool, migrated = await _prepare_database_schema(pool, config)
+
+    assert result_pool is pool
+    assert migrated == []
+    verify_migrations.assert_awaited_once_with(pool)
+    verify_dimensions.assert_awaited_once_with(pool, config.embedding.dimensions)
+    apply.assert_not_awaited()
+    mutate_dimensions.assert_not_awaited()
+    recreate.assert_not_awaited()
+    pool.close.assert_not_awaited()
+
+
+async def test_verify_migration_failure_closes_initial_pool():
+    from weft.config import MigrationMode, WeftConfig
+    from weft.mcp.server import _prepare_database_schema
+
+    pool = SimpleNamespace(close=AsyncMock(), is_closing=lambda: False)
+    config = WeftConfig(migration_mode=MigrationMode.verify)
+    with patch(
+        "weft.mcp.server.verify_migrations",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("schema behind"),
+    ), pytest.raises(RuntimeError, match="schema behind"):
+        await _prepare_database_schema(pool, config)
+
+    pool.close.assert_awaited_once()
+
+
+async def test_apply_migration_mode_recreates_pool_after_migration():
+    from weft.config import MigrationMode, WeftConfig
+    from weft.mcp.server import _prepare_database_schema
+
+    pool = SimpleNamespace(close=AsyncMock(), is_closing=lambda: False)
+    replacement = SimpleNamespace(close=AsyncMock(), is_closing=lambda: False)
+    config = WeftConfig(migration_mode=MigrationMode.apply)
+    with patch(
+        "weft.mcp.server.run_migrations", new_callable=AsyncMock
+    ) as apply, patch(
+        "weft.mcp.server._connect_with_retry", new_callable=AsyncMock,
+        return_value=replacement,
+    ) as reconnect, patch(
+        "weft.mcp.server.ensure_vector_dimensions",
+        new_callable=AsyncMock,
+        return_value=["memories"],
+    ) as dimensions, patch(
+        "weft.mcp.server.verify_migrations", new_callable=AsyncMock
+    ) as verify:
+        result_pool, migrated = await _prepare_database_schema(pool, config)
+
+    assert result_pool is replacement
+    assert migrated == ["memories"]
+    apply.assert_awaited_once_with(pool)
+    pool.close.assert_awaited_once()
+    reconnect.assert_awaited_once()
+    dimensions.assert_awaited_once_with(replacement, config.embedding.dimensions)
+    verify.assert_not_awaited()
 
 
 async def test_failed_background_task_does_not_abort_sibling_cleanup(caplog):

@@ -36,6 +36,12 @@ Use separate roles:
 | migration/owner role | migrations, ownership, backups/admin | May own tables; credentials unavailable to ordinary MCP requests |
 | application role | Fly MCP connection pool | `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`; must not own user-scoped tables |
 
+The owner role applies migrations out of band. Fly must set
+`WEFT_MIGRATION_MODE=verify`, which performs only a read-only exact comparison
+against `public.schema_migrations` and fails startup if owner-managed migrations
+are pending. Do not grant DDL or ownership to the application role to make a
+deploy pass.
+
 For the current policy design, `FORCE ROW LEVEL SECURITY` is not required when the application role is not the table owner. If production connects as the owner, ordinary RLS is bypassable and the release gate fails unless FORCE RLS is deliberately enabled and verified. A service/admin role that intentionally bypasses RLS must be isolated from request paths and documented separately.
 
 Local production-equivalent assertions live in `tests/test_rls_pentest.py` and `tests/test_rls_invariants.py`:

@@ -25,10 +25,10 @@ from weft.auth import (
     parse_caller_mode_header,
 )
 from weft.cache import Cache, NullCache
-from weft.config import WeftConfig, load_config
+from weft.config import MigrationMode, WeftConfig, load_config
 from weft.db.connection import create_pool
-from weft.db.migrations import run_migrations
-from weft.db.schema import ensure_vector_dimensions
+from weft.db.migrations import run_migrations, verify_migrations
+from weft.db.schema import ensure_vector_dimensions, verify_vector_dimensions
 from weft.embeddings import get_provider
 from weft.embeddings.base import EmbeddingProvider
 from weft.mcp.oauth_consent import handle_consent
@@ -375,6 +375,37 @@ async def _cancel_background_tasks(
             )
 
 
+async def _prepare_database_schema(
+    pool: asyncpg.Pool,
+    config: WeftConfig,
+) -> tuple[asyncpg.Pool, list[str]]:
+    """Apply owner migrations or verify a restricted runtime schema."""
+    owned_pool = pool
+    try:
+        if config.migration_mode is MigrationMode.verify:
+            await verify_migrations(pool)
+            await verify_vector_dimensions(pool, config.embedding.dimensions)
+            logger.info("Database schema verification passed (migration_mode=verify)")
+            return pool, []
+
+        await run_migrations(pool)
+        # Recreate pool so ALL connections get the pgvector codec via init callback.
+        # The first pool's connections may predate installation of vector.
+        await pool.close()
+        replacement = await _connect_with_retry(
+            lambda: create_pool(config), "Postgres"
+        )
+        owned_pool = replacement
+        migrated_tables = await ensure_vector_dimensions(
+            replacement, config.embedding.dimensions
+        )
+        return replacement, migrated_tables
+    except BaseException:
+        if not owned_pool.is_closing():
+            await owned_pool.close()
+        raise
+
+
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     """Initialize database, Redis, and embedding provider."""
@@ -401,16 +432,7 @@ async def lifespan(server: FastMCP):
         lambda: create_pool(config),
         "Postgres",
     )
-    await run_migrations(pool)
-    # Recreate pool so ALL connections get the pgvector codec via init
-    # callback. The first pool's connections were created before migrations
-    # installed the vector extension, so their codec registration silently
-    # failed.
-    await pool.close()
-    pool = await _connect_with_retry(
-        lambda: create_pool(config),
-        "Postgres",
-    )
+    pool, migrated_tables = await _prepare_database_schema(pool, config)
 
     # Phase 2.5 L3: bootstrap a credential row for the legacy
     # WEFT_API_KEY env var so existing clients keep working when L4
@@ -422,9 +444,6 @@ async def lifespan(server: FastMCP):
         api_key=config.api_key,
         default_user_id=os.environ.get("WEFT_DEFAULT_USER_ID") or None,
     )
-
-    # Self-heal vector dimensions if config changed since last run
-    migrated_tables = await ensure_vector_dimensions(pool, config.embedding.dimensions)
 
     # Export fallback snapshot
     await _write_fallback_snapshot(pool)

@@ -11,11 +11,50 @@
 # Create the Fly.io app
 fly launch --no-deploy
 
-# Provision/migrate with the Supabase owner credential out of band, then set
-# Fly's runtime DSN to a distinct non-owner application login:
-#   LOGIN NOSUPERUSER NOBYPASSRLS
-# Never use the `postgres` owner credential as Fly's DATABASE_URL.
+# 1. Apply migrations out of band with the Supabase owner credential.
+DATABASE_URL="postgresql://OWNER:OWNER_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres" \
+  WEFT_MIGRATION_MODE=apply uv run python - <<'PY'
+import asyncio
+from weft.config import load_config
+from weft.db.connection import create_pool
+from weft.db.migrations import run_migrations
+
+async def main():
+    pool = await create_pool(load_config())
+    try:
+        await run_migrations(pool)
+    finally:
+        await pool.close()
+
+asyncio.run(main())
+PY
+
+# 2. As the owner, provision/update the restricted runtime role. Replace
+#    APP_PASSWORD through a secret-safe SQL client; never commit it.
+#
+# CREATE ROLE weft_app LOGIN PASSWORD 'APP_PASSWORD'
+#   NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+# ALTER ROLE weft_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+# REVOKE CREATE ON SCHEMA public FROM weft_app;
+# GRANT CONNECT ON DATABASE postgres TO weft_app;
+# GRANT USAGE ON SCHEMA public TO weft_app;
+# GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO weft_app;
+# REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.schema_migrations FROM weft_app;
+# GRANT SELECT ON public.schema_migrations TO weft_app;
+# GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO weft_app;
+# ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+#   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO weft_app;
+# ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+#   GRANT USAGE, SELECT ON SEQUENCES TO weft_app;
+#
+# Verify there is no role membership and no public table is owned by weft_app
+# before rotating Fly. After every owner migration, re-run current-object grants
+# and the schema_migrations DML revoke. When the actual migration owner is not
+# `postgres`, configure ALTER DEFAULT PRIVILEGES for that owner instead.
+
+# 3. Set Fly's runtime DSN to the non-owner login and pin verify mode.
 fly secrets set DATABASE_URL="postgresql://weft_app:APP_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
+fly secrets set WEFT_MIGRATION_MODE="verify"
 fly secrets set WEFT_API_KEY="your-bootstrap-secret"
 ```
 
@@ -41,10 +80,14 @@ fly deploy                          # production (weft-mcp)
 fly deploy -c fly.staging.toml      # staging (weft-mcp-staging, OAuth on)
 ```
 
-Migrations run automatically on startup before the server accepts
-traffic. `fly.staging.toml` is a separate Fly config with
-`WEFT_OAUTH_ENABLED=1` pinned in the env block; see "Bringing up a
-new environment" below for OAuth setup.
+Fly must run with `WEFT_MIGRATION_MODE=verify`: startup performs a read-only
+comparison of `public.schema_migrations` against the code migration set and
+fails loudly if the owner migration step was skipped. Local/owner workflows
+default to `apply` for backward compatibility. The runtime role must never be
+granted table ownership or DDL solely to make startup pass.
+
+`fly.staging.toml` is a separate Fly config with `WEFT_OAUTH_ENABLED=1` pinned
+in the env block; see "Bringing up a new environment" below for OAuth setup.
 
 ## Verify
 
@@ -59,7 +102,8 @@ curl https://weft-mcp.fly.dev/healthz
 
 | Environment Variable | Required | Default | Description |
 |---------------------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | — | Supabase Postgres connection string |
+| `DATABASE_URL` | Yes | — | Supabase Postgres connection string; Fly must use the restricted non-owner application role. |
+| `WEFT_MIGRATION_MODE` | Yes on hosted runtime | `apply` | `apply` executes pending DDL with the owner role; `verify` performs a read-only exact version check and is required for Fly. |
 | `WEFT_API_KEY` | Yes (prod, bootstrap) | — | Auto-bootstraps one supervisor token row on first authenticated request. Use it to mint real per-client tokens via `weft tokens issue`, then stop sharing it. Coexists with OAuth and bearer-token paths. |
 | `WEFT_DEFAULT_USER_ID` | No | — | Single-tenant fallback `user_id` for hosted deployments without OAuth and owner-scoped integrations. The background recall-canary audit discovers owners independently. |
 | `WEFT_OAUTH_ENABLED` | No | `0` | Publish RFC 9728 protected-resource metadata + serve consent page. See OAuth section below. |

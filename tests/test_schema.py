@@ -14,6 +14,7 @@ from weft.db.schema import (
     discover_vector_dimensions,
     ensure_vector_dimensions,
     get_dimension_status,
+    verify_vector_dimensions,
     validate_dimensions,
 )
 
@@ -286,8 +287,35 @@ class TestAutoMigrateDimensions:
 
 
 # ---------------------------------------------------------------------------
-# ensure_vector_dimensions (pool-level orchestrator)
+# verify/ensure vector dimensions (pool-level orchestrators)
 # ---------------------------------------------------------------------------
+
+
+class TestVerifyVectorDimensions:
+    @pytest.mark.asyncio
+    async def test_matching_dimensions_pass_read_only(self, pool):
+        assert await verify_vector_dimensions(pool, 768) is None
+
+    @pytest.mark.asyncio
+    async def test_partial_vector_substrate_fails(self, pool, monkeypatch):
+        async def partial(_conn):
+            return {"memories": 768}
+
+        monkeypatch.setattr("weft.db.schema.discover_vector_dimensions", partial)
+        with pytest.raises(RuntimeError, match="missing vector tables/columns"):
+            await verify_vector_dimensions(pool, 768)
+
+    @pytest.mark.asyncio
+    async def test_mismatch_fails_without_mutation(self, schema_pool):
+        async with schema_pool.acquire() as conn:
+            before = await discover_vector_dimensions(conn)
+
+        with pytest.raises(RuntimeError, match="Vector dimension verification failed"):
+            await verify_vector_dimensions(schema_pool, 1536)
+
+        async with schema_pool.acquire() as conn:
+            after = await discover_vector_dimensions(conn)
+        assert after == before
 
 
 class TestEnsureVectorDimensions:
