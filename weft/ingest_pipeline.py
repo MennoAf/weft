@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from anthropic import AsyncAnthropic
+
+if TYPE_CHECKING:
+    import asyncpg
 
 from weft.date_parser import parse_dates
 from weft.db.connection import acquire
@@ -176,6 +180,37 @@ def _should_skip(text: str, metadata: dict[str, Any]) -> bool:
 # --- Classifier ---
 
 
+def _strip_json_fences(raw: str) -> str:
+    """Strip markdown fences without changing the enclosed payload."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    return raw
+
+
+def _salvage_partial_intent_array(raw: str) -> list[Any] | None:
+    """Recover only complete top-level values from a truncated JSON array."""
+    start = raw.find("[")
+    if start == -1:
+        return None
+    decoder = json.JSONDecoder()
+    idx = start + 1
+    recovered: list[Any] = []
+    while idx < len(raw):
+        while idx < len(raw) and raw[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= len(raw) or raw[idx] == "]":
+            break
+        try:
+            value, end = decoder.raw_decode(raw, idx)
+        except json.JSONDecodeError:
+            break
+        recovered.append(value)
+        idx = end
+    return recovered or None
+
+
 async def classify(
     text: str,
     *,
@@ -184,8 +219,10 @@ async def classify(
 ) -> list[Intent]:
     """Classify text into structured intents via LLM.
 
-    Returns a list of Intent objects. On any error, falls back to a single
-    general_note intent. Returns [] for empty/bot/very-short text.
+    Returns a list of Intent objects. Complete items may be salvaged from a
+    truncated JSON array; unrecoverable model/transport failures abstain with
+    ``[]``. Raw input is never fabricated into a successful-looking intent.
+    Returns [] for empty/bot/very-short text.
     """
     if metadata is None:
         metadata = {}
@@ -206,47 +243,112 @@ async def classify(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": normalized}],
         )
-        raw_json = response.content[0].text.strip()
+        content = getattr(response, "content", None)
+        if not content:
+            logger.warning("classify.abstained reason=empty_content")
+            return []
+        text = getattr(content[0], "text", None)
+        if not isinstance(text, str) or not text.strip():
+            logger.warning("classify.abstained reason=empty_content")
+            return []
+        raw_json = _strip_json_fences(text)
         logger.debug("classify.response: %s", raw_json)
 
-        # Strip markdown code fences. Despite "Return ONLY valid JSON. No
-        # markdown" in the system prompt, Claude wraps responses in
-        # ```json ... ``` for long conversational inputs (multi-turn
-        # dialogues). Without this strip, json.loads sees the leading
-        # backticks and throws JSONDecodeError, falling back to a
-        # single conf=0.0 general_note — losing all extracted intents.
-        if raw_json.startswith("```"):
-            raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json)
-            raw_json = re.sub(r"\s*```$", "", raw_json).strip()
+        stop_reason = getattr(response, "stop_reason", None)
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            if stop_reason != "max_tokens":
+                logger.warning(
+                    "classify.abstained reason=malformed_json error=%s",
+                    exc,
+                )
+                return []
+            parsed = _salvage_partial_intent_array(raw_json)
+            if parsed is None:
+                logger.warning(
+                    "classify.abstained reason=max_tokens error=%s",
+                    exc,
+                )
+                return []
+            logger.warning(
+                "classify.salvaged reason=max_tokens recovered=%d",
+                len(parsed),
+            )
 
-        # Parse JSON — handle both array and single object
-        parsed = json.loads(raw_json)
+        if stop_reason == "max_tokens" and not isinstance(parsed, list):
+            logger.warning("classify.abstained reason=max_tokens_unbounded_shape")
+            return []
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):
-            raise ValueError(f"Expected list, got {type(parsed)}")
+            logger.warning(
+                "classify.abstained reason=unexpected_shape type=%s",
+                type(parsed).__name__,
+            )
+            return []
 
         intents: list[Intent] = []
-        for item in parsed:
+        for index, item in enumerate(parsed):
             if not isinstance(item, dict):
+                logger.warning("classify.item_rejected index=%d reason=not_object", index)
                 continue
 
-            # Extract entities
+            content = item.get("content")
+            if not isinstance(content, str) or not content.strip():
+                logger.warning(
+                    "classify.item_rejected index=%d reason=invalid_content",
+                    index,
+                )
+                continue
+            content = content.strip()
+
+            raw_confidence = item.get("confidence", 0.7)
+            if isinstance(raw_confidence, bool):
+                logger.warning(
+                    "classify.item_rejected index=%d reason=invalid_confidence",
+                    index,
+                )
+                continue
+            try:
+                confidence = float(raw_confidence)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "classify.item_rejected index=%d reason=invalid_confidence",
+                    index,
+                )
+                continue
+            if not math.isfinite(confidence):
+                logger.warning(
+                    "classify.item_rejected index=%d reason=nonfinite_confidence",
+                    index,
+                )
+                continue
+
+            raw_entities = item.get("entities", [])
+            raw_dates = item.get("dates", [])
+            if not isinstance(raw_entities, list) or not isinstance(raw_dates, list):
+                logger.warning(
+                    "classify.item_rejected index=%d reason=invalid_collection_shape",
+                    index,
+                )
+                continue
+
             entities = []
-            for e in item.get("entities", []):
-                if isinstance(e, dict) and e.get("name"):
+            for entity in raw_entities:
+                if not isinstance(entity, dict):
+                    continue
+                name = entity.get("name")
+                if isinstance(name, str) and name.strip():
                     entities.append(EntityRef(
-                        name=e["name"],
-                        entity_type=e.get("entity_type", "concept"),
+                        name=name.strip(),
+                        entity_type=entity.get("entity_type", "concept"),
                     ))
 
-            # Extract and resolve dates
-            date_strings = item.get("dates", [])
             resolved_dates: list[datetime] = []
-            for ds in date_strings:
-                if isinstance(ds, str) and ds.strip():
-                    parsed_dates = parse_dates(ds, tz_name=tz_name)
-                    resolved_dates.extend(parsed_dates)
+            for date_string in raw_dates:
+                if isinstance(date_string, str) and date_string.strip():
+                    resolved_dates.extend(parse_dates(date_string, tz_name=tz_name))
 
             intent_type = item.get("type", "general_note")
             if intent_type not in INTENT_TYPES:
@@ -255,8 +357,8 @@ async def classify(
 
             intents.append(Intent(
                 type=intent_type,
-                content=item.get("content", normalized),
-                confidence=float(item.get("confidence", 0.7)),
+                content=content,
+                confidence=confidence,
                 entities=entities,
                 dates=resolved_dates,
                 raw_text=normalized,
@@ -264,18 +366,9 @@ async def classify(
 
         return intents
 
-    except json.JSONDecodeError as e:
-        logger.warning("classify.json_error: %s", e)
     except Exception:
-        logger.exception("classify.error")
-
-    # Fallback: return as general_note
-    return [Intent(
-        type="general_note",
-        content=normalized,
-        confidence=0.0,
-        raw_text=normalized,
-    )]
+        logger.exception("classify.abstained reason=classifier_error")
+        return []
 
 
 # --- Intent-to-MemoryType mapping ---

@@ -101,6 +101,61 @@ class TestDecayScoreRecent:
         assert score > 0.7, f"Expected high score for recent memory, got {score}"
 
 
+class TestDecayScoreMatrix:
+    @pytest.mark.parametrize(
+        ("confidence", "age_days", "access_count", "expected"),
+        [
+            (0.7, 0, 0, 0.71),
+            (0.7, 365, 0, 0.2101),
+            (0.29, 120, 0, 0.11825),
+            (0.29, 180, 0, 0.1),
+            (0.29, 180, 1, 0.1405),
+            (0.1, 90, 0, 0.1),
+            (0.1, 180, 1, 0.1),
+            (0.1, 365, 5, 0.1478),
+        ],
+    )
+    def test_decay_confidence_age_access_matrix(
+        self, confidence, age_days, access_count, expected,
+    ):
+        now = datetime(2026, 7, 18, tzinfo=timezone.utc)
+        mem = _make_memory(
+            confidence=confidence,
+            access_count=access_count,
+            accessed_at=now - timedelta(days=age_days),
+        )
+        assert compute_decay_score(mem, now=now) == pytest.approx(expected, abs=5e-4)
+
+    def test_decay_custom_config(self):
+        now = datetime(2026, 7, 18, tzinfo=timezone.utc)
+        mem = _make_memory(
+            confidence=0.1,
+            access_count=0,
+            accessed_at=now - timedelta(days=10),
+        )
+        config = DecayConfig(half_life_days=10, floor_score=0.25)
+        assert compute_decay_score(mem, now=now, config=config) == pytest.approx(0.28)
+
+    @pytest.mark.parametrize("memory_type", sorted(IMMORTAL_TYPES, key=lambda t: t.value))
+    def test_decay_protects_all_immortal_types(self, memory_type):
+        now = datetime(2026, 7, 18, tzinfo=timezone.utc)
+        mem = _make_memory(
+            memory_type=memory_type,
+            confidence=0.1,
+            accessed_at=now - timedelta(days=365),
+        )
+        assert compute_decay_score(mem, now=now) == 1.0
+
+    def test_decay_protects_pinned(self):
+        now = datetime(2026, 7, 18, tzinfo=timezone.utc)
+        mem = _make_memory(
+            confidence=0.1,
+            accessed_at=now - timedelta(days=365),
+        )
+        mem.pinned = True
+        assert compute_decay_score(mem, now=now) == 1.0
+
+
 class TestDecayScoreOld:
     """Old, unaccessed memories should get a low score."""
 
@@ -148,14 +203,43 @@ class TestRunDecay:
             mem.id,
         )
 
-        # Run decay
+        # Default operation is review-only: the candidate is visible but the
+        # durable status cannot transition automatically.
         decayed = await run_decay(pool)
         assert mem.id in decayed
+        fetched = await get_memory(pool, mem.id)
+        assert fetched is not None
+        assert fetched.status == MemoryStatus.active
 
-        # Verify the memory has decayed status in DB
+        # Destructive transition requires the explicit operator gate.
+        applied = await run_decay(pool, apply=True)
+        assert mem.id in applied
         fetched = await get_memory(pool, mem.id)
         assert fetched is not None
         assert fetched.status == MemoryStatus.decayed
+
+    async def test_automatic_decay_cannot_transition_status(self, pool):
+        mem = await store_memory(
+            pool,
+            MemoryCreate(
+                type=MemoryType.fact,
+                content="Review-only lifecycle candidate",
+                confidence=0.1,
+            ),
+        )
+        old_dt = datetime.now(timezone.utc) - timedelta(days=365)
+        await pool.execute(
+            "UPDATE memories SET accessed_at = $1 WHERE id = $2",
+            old_dt,
+            mem.id,
+        )
+
+        report = await consolidate(pool)
+
+        assert mem.id in report.decayed
+        fetched = await get_memory(pool, mem.id)
+        assert fetched is not None
+        assert fetched.status == MemoryStatus.active
 
     async def test_run_decay_preserves_preferences(self, pool):
         """Even old preferences should survive decay."""

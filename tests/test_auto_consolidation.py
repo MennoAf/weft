@@ -209,8 +209,8 @@ async def test_advisory_lock_prevents_concurrent_consolidate(pool):
 # --- E2E: consolidation affects actual memory state ---
 
 
-async def test_consolidation_decays_stale_low_confidence_memories(pool):
-    """E2E: consolidation archives stale, low-confidence memories."""
+async def test_consolidation_reports_stale_low_confidence_candidates(pool):
+    """E2E: automatic consolidation reports candidates without mutation."""
     # Create a low-confidence memory and backdate its access time
     mem = await store_memory(pool, MemoryCreate(
         type=MemoryType.fact,
@@ -229,9 +229,9 @@ async def test_consolidation_decays_stale_low_confidence_memories(pool):
     report = await consolidate(pool)
     assert mem.id in report.decayed
 
-    # Verify the memory is now decayed
+    # Review-only lifecycle: scheduled consolidation cannot mutate status.
     row = await pool.fetchrow("SELECT status FROM memories WHERE id = $1", mem.id)
-    assert row["status"] == "decayed"
+    assert row["status"] == "active"
 
 
 async def test_consolidation_includes_access_log_pruning(pool):

@@ -228,6 +228,7 @@ class AppContext:
     # construction cost on every episode write.
     episode_embedding: EmbeddingProvider | None = None
     _keepalive_task: asyncio.Task | None = field(default=None, repr=False)
+    _tool_usage_heartbeat_task: asyncio.Task | None = field(default=None, repr=False)
     _fallback_task: asyncio.Task | None = field(default=None, repr=False)
     _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
 
@@ -288,6 +289,16 @@ async def _pool_keepalive(ctx: AppContext) -> None:
                 logger.debug("Old pool close failed: %s", e, exc_info=True)
 
 
+async def _tool_usage_heartbeat_loop(ctx: AppContext) -> None:
+    """Mark recorder coverage throughout quiet, continuously running days."""
+    while True:
+        await asyncio.sleep(6 * 60 * 60)
+        try:
+            await tool_usage_middleware.heartbeat(ctx.pool)
+        except (OSError, asyncpg.PostgresError, RuntimeError) as exc:
+            logger.warning("tool usage recorder heartbeat failed: %s", exc)
+
+
 async def _redis_keepalive(ctx: AppContext) -> None:
     """Periodically ping Redis; recreate the client if the connection is stale."""
     while True:
@@ -345,6 +356,23 @@ def _validate_outbound_connector_env() -> None:
             f"WEFT_OUTBOUND_CONNECTOR must be one of {sorted(_VALID_OUTBOUND_CONNECTORS - {''})} or unset "
             f"(got: {raw!r})"
         )
+
+
+async def _cancel_background_tasks(
+    tasks: tuple[asyncio.Task, ...],
+) -> None:
+    """Cancel and observe every lifespan task without short-circuiting cleanup."""
+    for task in tasks:
+        task.cancel()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(
+            result, asyncio.CancelledError
+        ):
+            logger.warning(
+                "background task failed before shutdown cleanup",
+                exc_info=(type(result), result, result.__traceback__),
+            )
 
 
 @asynccontextmanager
@@ -491,8 +519,18 @@ async def lifespan(server: FastMCP):
     )
     _app_ctx_ref.ctx = ctx
 
+    try:
+        await tool_usage_middleware.heartbeat(pool)
+    except (OSError, asyncpg.PostgresError, RuntimeError) as exc:
+        # Telemetry cannot block startup, but missing coverage is visible in
+        # logs and will prevent later zero-use/deprecation classification.
+        logger.warning("tool usage recorder heartbeat failed: %s", exc)
+
     # Start background tasks
     ctx._keepalive_task = asyncio.create_task(_pool_keepalive(ctx))
+    ctx._tool_usage_heartbeat_task = asyncio.create_task(
+        _tool_usage_heartbeat_loop(ctx)
+    )
     _redis_task = asyncio.create_task(_redis_keepalive(ctx)) if r else None
     ctx._fallback_task = asyncio.create_task(_refresh_fallback(ctx))
     ctx._scheduler_task = asyncio.create_task(
@@ -566,16 +604,44 @@ async def lifespan(server: FastMCP):
         yield ctx
     finally:
         _app_ctx_ref.ctx = None
-        for task in (ctx._keepalive_task, _redis_task, ctx._fallback_task, ctx._scheduler_task, ctx._slack_sync_task, ctx._daily_brief_task, ctx._discord_bot_task, ctx._loom_awareness_task, ctx._memory_hygiene_task, ctx._trigger_eval_task, ctx._reask_feedback_task, ctx._canary_audit_task, ctx._quarantine_review_task, ctx._cost_enforcement_task):
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        await pool.close()
-        if r is not None:
-            await r.aclose()
+        tasks = tuple(
+            task
+            for task in (
+                ctx._keepalive_task,
+                ctx._tool_usage_heartbeat_task,
+                _redis_task,
+                ctx._fallback_task,
+                ctx._scheduler_task,
+                ctx._slack_sync_task,
+                ctx._daily_brief_task,
+                ctx._discord_bot_task,
+                ctx._loom_awareness_task,
+                ctx._memory_hygiene_task,
+                ctx._trigger_eval_task,
+                ctx._reask_feedback_task,
+                ctx._canary_audit_task,
+                ctx._quarantine_review_task,
+                ctx._cost_enforcement_task,
+            )
+            if task is not None
+        )
+        await _cancel_background_tasks(tasks)
+
+        # Keepalive may replace the original pool. AppContext is the live owner;
+        # drain telemetry and close that current pool rather than a stale local.
+        # Resource closure remains guaranteed even if drain or pool close fails.
+        try:
+            drain_report = await tool_usage_middleware.drain(ctx.pool)
+            if not drain_report["shutdown_drained"]:
+                logger.warning(
+                    "tool usage telemetry did not drain cleanly: %s", drain_report
+                )
+        finally:
+            try:
+                await ctx.pool.close()
+            finally:
+                if r is not None:
+                    await r.aclose()
 
 
 class _AppCtxRef:
@@ -631,8 +697,9 @@ user_identity_middleware = Middleware(
     auth_required=_auth_required,
 )
 
+tool_usage_middleware = ToolUsageMiddleware(_middleware_pool_getter)
 mcp = FastMCP("weft", lifespan=lifespan)
-mcp.add_middleware(ToolUsageMiddleware(_middleware_pool_getter))
+mcp.add_middleware(tool_usage_middleware)
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

@@ -28,6 +28,7 @@ Read the pair:
 | 200 | 401 | Server up, **credential rejected** | [Scenario B](#scenario-b-401-unauthorized) |
 | fail | — | **Server down / unreachable** | [Scenario A](#scenario-a-healthz-fails) |
 | 200 | 200 but writes vanish | Token is **agent-mode**, writes quarantined | [Scenario D](#scenario-d-writes-succeed-but-dont-come-back) |
+| 200 | 200; one tool hangs while others return | Tool-specific unbounded await or reverse RPC | [Scenario E](#scenario-e-one-tool-hangs-while-others-return) |
 
 Known-good baseline (measured 2026-07-16): `/healthz` → 200, `/mcp` with real token → 200, bad token → 401, no token → 401, `GET /` → 404 (expected — there is no root route), `GET /health` → 404 (**the path is `/healthz`, not `/health`** — easy 10 minutes to lose).
 
@@ -177,6 +178,20 @@ Every token binds a trust tier at issuance:
 - **`agent`** — autonomous containers. Writes that Layer 3 flags as instruction-shaped land in `review_status='pending_review'` and stay **invisible to recall** until approved.
 
 Confirm by checking `write_provenance` on a returned memory (`supervisor` is what you want), then `weft_quarantine_review` to approve stuck writes, or reissue with `--mode supervisor`. Note supervisor tokens can *downgrade* per-request via `X-Weft-Caller-Mode: agent`; agent tokens can never escalate.
+
+## Scenario E: one tool hangs while others return
+
+If `/healthz`, initialization, and another Weft tool return promptly while one tool hangs, the server, bearer, and database are not globally down. Suspect a tool-specific await—especially a server-to-client reverse RPC—before investigating corpus size or rotating credentials.
+
+For tools with optional `project_id`, repeat the same call with an explicit project:
+
+```text
+weft_prime(project_id="weft", disclosure="minimal")
+```
+
+If the explicit-project call returns while the omitted-project call hangs, project auto-detection is implicated. `_detect_project_id` asks the MCP client to answer `roots/list`; it is a reverse JSON-RPC request, not a local filesystem lookup. Since the July 16 incident this call is bounded to two seconds and should fall back visibly rather than hang. A recurrence after that fix is a release-blocking transport regression: capture the client capabilities, transport type, disclosure mode, elapsed time, and redacted server logs, then run the Streamable HTTP transport harness described in [`validation-findings-2026-07.md`](validation-findings-2026-07.md).
+
+Do not rotate credentials when another authenticated tool works. Do not infer a slow database from one asymmetric tool until its pre-database awaits have been excluded.
 
 ## Where credentials live
 

@@ -150,12 +150,18 @@ async def run_decay(
     *,
     config: DecayConfig | None = None,
     dry_run: bool = False,
+    apply: bool = False,
     now: datetime | None = None,
 ) -> list[str]:
-    """Archive memories with decay scores below the floor.
+    """Preview memories whose decay scores reach the configured floor.
 
-    Returns list of archived memory IDs.
+    Automatic decay is review-only: qualifying IDs are reported but status is
+    unchanged unless an operator-controlled caller explicitly passes
+    ``apply=True``. ``dry_run=True`` always suppresses mutation and cannot be
+    combined with ``apply=True``.
     """
+    if dry_run and apply:
+        raise ValueError("dry_run=True cannot be combined with apply=True")
     cfg = config or DecayConfig()
     now = now or datetime.now(timezone.utc)
     archived: list[str] = []
@@ -167,10 +173,12 @@ async def run_decay(
             continue
         score = compute_decay_score(mem, now=now, config=cfg)
         if score <= cfg.floor_score and mem.confidence < cfg.min_confidence:
-            if not dry_run:
+            if apply and not dry_run:
                 await update_memory(pool, mem.id, status=MemoryStatus.decayed)
+                logger.info("Operator-applied decay to memory %s (score=%.3f)", mem.id, score)
+            else:
+                logger.debug("Decay review candidate %s (score=%.3f)", mem.id, score)
             archived.append(mem.id)
-            logger.debug("Decayed memory %s (score=%.3f)", mem.id, score)
 
     return archived
 
@@ -557,7 +565,15 @@ async def consolidate(
 
         try:
             try:
-                report.decayed = await run_decay(pool, config=cfg.decay, dry_run=dry_run)
+                # Review-only lifecycle policy: scheduled/manual consolidation reports
+                # candidates but never mutates memory status. A separate,
+                # operator-controlled path must call run_decay(..., apply=True).
+                report.decayed = await run_decay(
+                    pool,
+                    config=cfg.decay,
+                    dry_run=dry_run,
+                    apply=False,
+                )
             except Exception as e:
                 report.errors.append(f"Decay failed: {e}")
                 logger.exception("Decay subsystem failed")
