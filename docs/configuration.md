@@ -41,9 +41,9 @@ embedding.batch_size            Batch size for bulk embedding
 retrieval.default_top_k         Default result count
 retrieval.similarity_threshold  Minimum similarity for results
 retrieval.context_budget_tokens Default token budget
-decay.enabled                   Enable automatic decay
-decay.half_life_days            Days until confidence halves
-decay.floor_score               Minimum score after decay
+decay.enabled                   Legacy configuration field; automatic destructive decay is disabled
+decay.half_life_days            Review-score recency half-life in days
+decay.floor_score               Minimum review score used to propose candidates
 ```
 
 ## Embedding providers

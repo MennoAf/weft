@@ -143,15 +143,15 @@ async def test_decay_archives_stale_preserves_immortals(pool, provider):
     # Run full consolidation
     report = await consolidate(pool)
 
-    # Stale fact should be decayed
+    # Stale fact should be reported as a review candidate.
     assert stale_fact.id in report.decayed
 
     # Preference and user_model should NOT be decayed
     assert old_pref.id not in report.decayed
     assert old_um.id not in report.decayed
 
-    # Verify in DB
-    assert (await get_memory(pool, stale_fact.id)).status == MemoryStatus.decayed
+    # Automatic consolidation is review-only and cannot change status.
+    assert (await get_memory(pool, stale_fact.id)).status == MemoryStatus.active
     assert (await get_memory(pool, old_pref.id)).status == MemoryStatus.active
     assert (await get_memory(pool, old_um.id)).status == MemoryStatus.active
 
@@ -361,6 +361,7 @@ async def test_consolidation_dry_run_no_side_effects(pool, provider):
     report2 = await consolidate(pool)
     assert stale.id in report2.decayed
 
-    # Now it should be decayed
+    # Non-dry-run consolidation is also review-only; an operator-controlled
+    # apply path is required for destructive status transitions.
     fetched2 = await get_memory(pool, stale.id)
-    assert fetched2.status == MemoryStatus.decayed
+    assert fetched2.status == MemoryStatus.active

@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-16
 **Trigger:** `weft_prime` hung at session start (>60s, never returned, twice — once at `disclosure="full"`, once at `"progressive"`).
-**Status:** Root cause **confirmed by reproduction**. Not yet fixed. No code changed in this session.
+**Original incident status:** Root cause **confirmed by reproduction**. No code changed during the incident session.
+**Current status (2026-07-18):** **Fixed in repository, deployment transport verification pending.** `weft/mcp/tools.py::_detect_project_id` now bounds the reverse `roots/list` RPC with `asyncio.timeout(2.0)` and has a unit regression. A production-like Streamable HTTP registered-tool harness is still required before declaring the deployed transport gate complete. See [`validation-findings-2026-07.md`](validation-findings-2026-07.md).
 
 ---
 

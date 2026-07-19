@@ -173,6 +173,41 @@ class TestProofMetricsIntegration:
         assert payload["recall_canary"]["scheduler_mode"] == "per_user"
 
     @pytest.mark.asyncio
+    async def test_agent_health_redacts_detailed_tool_usage(self, pool, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from weft.auth import current_caller_mode, current_user_id
+        from weft.health_check import HealthSummary
+        from weft.mcp import tools
+        from weft.tool_usage import record_tool_usage
+
+        await record_tool_usage(pool, "weft_token_issue")
+        user_token = current_user_id.set("health-caller")
+        mode_token = current_caller_mode.set("agent")
+        try:
+            ctx = MagicMock()
+            ctx.request_context.lifespan_context = SimpleNamespace(
+                pool=pool,
+                _canary_audit_task=None,
+            )
+            summary = HealthSummary(
+                findings=[], errors=[], evaluated_at=datetime.now(timezone.utc),
+            )
+            monkeypatch.setattr(
+                "weft.health_check.run_all_evaluators",
+                AsyncMock(return_value=summary),
+            )
+            payload = await tools.weft_check_health(ctx)
+        finally:
+            current_caller_mode.reset(mode_token)
+            current_user_id.reset(user_token)
+
+        assert payload["tool_usage"]["detail"].endswith("supervisor-only.")
+        assert "tools" not in payload["tool_usage"]
+        assert "total_calls" not in payload["tool_usage"]
+
+    @pytest.mark.asyncio
     async def test_reask_rate_is_float_in_valid_range(self, pool):
         """get_recent_recall_queries + compute_reask_rate returns a float in [0, 1]."""
         from weft.reask import compute_reask_rate

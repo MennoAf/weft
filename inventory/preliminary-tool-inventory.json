@@ -1,0 +1,2459 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-18T18:41:48.466910+00:00",
+  "status": "preliminary",
+  "warning": "Zero means not observed. No deprecation recommendation is valid until telemetry reports 30 valid coverage days.",
+  "tools": [
+    {
+      "mcp_name": "weft_alert_create",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_alert_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_alert_dismiss",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_alert_tools.py",
+        "tests/test_board.py",
+        "tests/test_board_triage_loop.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_alert_list",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_alert_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_alert_suppress",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_alert_unsuppress",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_autonomy_calibrate",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_autonomy_tools.py",
+        "tests/test_calibration.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_autonomy_check",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_autonomy_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_autonomy_list",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/primer.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_autonomy_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_autonomy_set",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_autonomy_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_behavior_add",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/behaviors.py",
+        "weft/primer.py",
+        "weft/primer_sections/onboarding.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_behaviors_store.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/tools.md",
+        "docs/wiring-your-agent.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_behavior_delete",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_behavior_list",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_mcp_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_behavior_match",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_board",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py",
+        "weft/board_page.py",
+        "weft/board_server.py",
+        "weft/db/migrations/v67_board_triage_events.py",
+        "weft/skills.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_board.py",
+        "tests/test_tool_usage.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [
+        "weft/db/migrations/v67_board_triage_events.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_board_act",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board_server.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_budget_check",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_cost_tracking.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_calibrate",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/db/migrations/v62_calibration_record_origin.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [
+        "weft/db/migrations/v62_calibration_record_origin.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_calibration_history",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_calibration_summary",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/primer.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_capability_lookup",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_capability_mcp_tool.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_check_health",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/counters.py",
+        "weft/replay.py",
+        "weft/store.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_check_health.py",
+        "tests/test_health_check.py",
+        "tests/test_replay.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_check_in",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_check_ins.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_check_in_history",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_check_ins.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_consolidate",
+      "lifecycle": "admin-or-recovery",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/memory_hygiene_alerts.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/decisions/2026-07-review-only-decay.md",
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_context",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/data/seeds.yaml",
+        "weft/primer.py",
+        "weft/primer_sections/onboarding.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_cross_project.py",
+        "tests/test_phase2_e2e.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_cost_record",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_cost_tracking.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_cost_summary",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/primer.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_cost_tracking.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_daily_brief",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "benchmarks/longmemeval/reader.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/__main__.py",
+        "benchmarks/personal_agent/agenda_harness.py",
+        "benchmarks/personal_agent/tests/test_paah_agenda.py",
+        "benchmarks/personal_agent/tests/test_paah_enumeration.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_degradation_check",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_degradation_list",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/primer.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_degradation_set",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_entity_context",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_truncation_propagation.py",
+        "benchmarks/longmemeval/router.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/__main__.py",
+        "benchmarks/personal_agent/entity_harness.py",
+        "benchmarks/personal_agent/entity_manifest.py",
+        "benchmarks/personal_agent/tests/test_paah_entity.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_entity_create",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "benchmarks/personal_agent/__main__.py",
+        "benchmarks/personal_agent/seed.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_entity_link",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "benchmarks/personal_agent/seed.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_entity_search",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_mcp_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_episode_add",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_episode_context",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_episode_create",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "benchmarks/personal_agent/continuity_seed.py",
+        "benchmarks/personal_agent/seed.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_episode_graduate",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_episode_timeline",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_extract",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_feedback",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/data/seeds.yaml",
+        "weft/primer.py",
+        "weft/primer_sections/onboarding.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_feedback.py",
+        "tests/test_primer.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_feedback_general",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_focus",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/focus.py",
+        "weft/primer.py",
+        "weft/primer_sections/disclosure.py",
+        "weft/primer_sections/recent_memories.py",
+        "weft/session_tracking.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_focus.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/internal/PRIMER_REFACTOR.md",
+        "docs/memory-v2-council-synthesis.md",
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_forget",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_board_server.py",
+        "tests/test_board_triage_loop.py",
+        "tests/test_mcp_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_fsck",
+      "lifecycle": "admin-or-recovery",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_fsck.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/memory-v2-council-synthesis.md",
+        "docs/memory-v2-redesign.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_handoff",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/data/seeds.yaml",
+        "weft/primer.py",
+        "weft/primer_sections/onboarding.py",
+        "weft/session_tracking.py",
+        "weft/skills.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_mcp_tools.py",
+        "tests/test_primer.py",
+        "benchmarks/wick_eval/dataset.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/claude-code-hooks/README.md",
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/internal/BRANDON.md",
+        "docs/tools.md",
+        "docs/wiring-your-agent.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_ingest",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_learn",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/data/seeds.yaml",
+        "weft/primer.py",
+        "weft/primer_sections/onboarding.py",
+        "weft/session_tracking.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_primer.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/internal/BRANDON.md",
+        "docs/tools.md",
+        "docs/wiring-your-agent.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_list_append",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trackers.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_list_check",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trackers.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_list_remove",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trackers.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_meal_plan",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_mode_delete",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_mode_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_mode_list",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_mode_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_mode_set",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_mode_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_pin",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_pinned.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_prime",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/.claude/settings.local.json",
+        "weft/data/seeds.yaml",
+        "weft/focus.py",
+        "weft/skills.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_auto_consolidation.py",
+        "tests/test_mcp_tools.py",
+        "tests/test_phase4_e2e.py",
+        "tests/test_prime_streamable_http.py",
+        "tests/test_primer_query.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/claude-code-hooks/README.md",
+        "docs/connection-recovery.md",
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/internal/BRANDON.md",
+        "docs/internal/KNOWN_GOOD_CONFIG.md",
+        "docs/internal/ROUTE_1_MERGE_CHECKLIST.md",
+        "docs/production-release-gates.md",
+        "docs/tools.md",
+        "docs/validation-findings-2026-07.md",
+        "docs/wiring-your-agent.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_project_status",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_projects",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_quarantine_review",
+      "lifecycle": "admin-or-recovery",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/db/migrations/v39_provenance_review_status.py",
+        "weft/store.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/connection-recovery.md",
+        "docs/user-identity.md",
+        "docs/wick-handoff.md"
+      ],
+      "migrations_or_tables": [
+        "weft/db/migrations/v39_provenance_review_status.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_recall",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/canary.py",
+        "weft/data/seeds.yaml",
+        "weft/db/migrations/v50_recall_queries_log.py",
+        "weft/db/migrations/v52_reask_miss_signal.py",
+        "weft/db/migrations/v59_recall_queries_status_tool.py",
+        "weft/db/migrations/v63_recall_canary.py",
+        "weft/enumeration_router.py",
+        "weft/primer.py",
+        "weft/primer_sections/onboarding.py",
+        "weft/reask.py",
+        "weft/scheduler.py",
+        "weft/store.py",
+        "weft/turn_recall.py",
+        "weft/views/belief_query.py"
+      ],
+      "hooks_or_scheduler_references": [
+        "weft/scheduler.py"
+      ],
+      "tests": [
+        "tests/acceptance/test_facet_recall.py",
+        "tests/baseline_signatures.json",
+        "tests/baselines.md",
+        "tests/conftest.py",
+        "tests/mcp/test_weft_status.py",
+        "tests/test_agent_readiness.py",
+        "tests/test_bare_except_audit.py",
+        "tests/test_cost_tracking.py",
+        "tests/test_mcp_tools.py",
+        "tests/test_migration_v46_turn_access_log.py",
+        "tests/test_primer.py",
+        "tests/test_reask.py",
+        "tests/test_recall_both.py",
+        "tests/test_recall_canary.py",
+        "tests/test_recall_turns_hierarchical.py",
+        "tests/test_replay.py",
+        "tests/test_rls_invariants.py",
+        "tests/test_store.py",
+        "tests/test_turn_recall.py",
+        "tests/test_workspace_tools.py",
+        "tests/views/test_recall_belief_view.py",
+        "benchmarks/enumeration_eval/README.md",
+        "benchmarks/enumeration_eval/__main__.py",
+        "benchmarks/enumeration_eval/fixtures.py",
+        "benchmarks/enumeration_eval/harness.py",
+        "benchmarks/enumeration_eval/tests/test_cl1_mint.py",
+        "benchmarks/enumeration_eval/tests/test_smoke.py",
+        "benchmarks/longmemeval/reader.py",
+        "benchmarks/longmemeval/results/phase2_hierarchical_diagnosis_2026_05_22.md",
+        "benchmarks/longmemeval/results/phase2_hierarchical_postmortem_2026_05_16.md",
+        "benchmarks/longmemeval/router.py",
+        "benchmarks/longmemeval/tests/test_belief_view_integration.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/__init__.py",
+        "benchmarks/personal_agent/__main__.py",
+        "benchmarks/personal_agent/context.py",
+        "benchmarks/personal_agent/continuity_harness.py",
+        "benchmarks/personal_agent/entity_harness.py",
+        "benchmarks/personal_agent/entity_manifest.py",
+        "benchmarks/personal_agent/harness.py",
+        "benchmarks/personal_agent/manifest.py",
+        "benchmarks/personal_agent/results.json",
+        "benchmarks/personal_agent/temporal_harness.py",
+        "benchmarks/personal_agent/tests/test_paah_continuity.py",
+        "benchmarks/personal_agent/tests/test_paah_entity.py",
+        "benchmarks/personal_agent/tests/test_paah_enumeration.py",
+        "benchmarks/personal_agent/tests/test_paah_temporal.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/architecture/belief_view.md",
+        "docs/connection-recovery.md",
+        "docs/disaster-recovery.md",
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/internal/ROUTE_1_MERGE_CHECKLIST.md",
+        "docs/memory-v2-council-synthesis.md",
+        "docs/memory-v2-redesign.md",
+        "docs/retrieval-and-scope.md",
+        "docs/tools.md",
+        "docs/wiring-your-agent.md"
+      ],
+      "migrations_or_tables": [
+        "weft/db/migrations/v50_recall_queries_log.py",
+        "weft/db/migrations/v52_reask_miss_signal.py",
+        "weft/db/migrations/v59_recall_queries_status_tool.py",
+        "weft/db/migrations/v63_recall_canary.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_relate",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_phase3_e2e.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_remember",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/canary.py",
+        "weft/consolidation.py",
+        "weft/data/seeds.yaml",
+        "weft/db/migrations/v63_recall_canary.py",
+        "weft/episode_turns.py",
+        "weft/extract.py",
+        "weft/memory_hygiene_alerts.py",
+        "weft/primer.py",
+        "weft/primer_sections/onboarding.py",
+        "weft/quarantine.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/acceptance/test_facet_recall.py",
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_bare_except_audit.py",
+        "tests/test_behaviors_store.py",
+        "tests/test_extract.py",
+        "tests/test_facet_case_normalization.py",
+        "tests/test_facet_merge_candidate_review.py",
+        "tests/test_mcp_tools.py",
+        "tests/test_phase4_e2e.py",
+        "tests/test_primer.py",
+        "tests/test_recall_canary.py",
+        "tests/test_smoke.py",
+        "tests/test_truncation_propagation.py",
+        "tests/test_turn_append_tool.py",
+        "tests/test_workspace_tools.py",
+        "benchmarks/enumeration_eval/fixtures.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/__init__.py",
+        "benchmarks/personal_agent/__main__.py",
+        "benchmarks/personal_agent/context.py",
+        "benchmarks/personal_agent/manifest.py",
+        "benchmarks/personal_agent/seed.py",
+        "benchmarks/personal_agent/tests/test_paah_enumeration.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/architecture/belief_view.md",
+        "docs/connection-recovery.md",
+        "docs/disaster-recovery.md",
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/internal/BRANDON.md",
+        "docs/internal/V2_BACKLOG.md",
+        "docs/memory-v2-council-synthesis.md",
+        "docs/memory-v2-redesign.md",
+        "docs/tools.md",
+        "docs/wiring-your-agent.md"
+      ],
+      "migrations_or_tables": [
+        "weft/db/migrations/v63_recall_canary.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_revise",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_agent_readiness.py",
+        "tests/test_revise.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_search_all",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/db/migrations/v50_recall_queries_log.py",
+        "weft/db/migrations/v59_recall_queries_status_tool.py",
+        "weft/reask.py",
+        "weft/store.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_mcp_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/benchmarks.md",
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [
+        "weft/db/migrations/v50_recall_queries_log.py",
+        "weft/db/migrations/v59_recall_queries_status_tool.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_slack_ingest",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_slack_sync",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_status",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/db/migrations/v59_recall_queries_status_tool.py",
+        "weft/db/migrations/v60_lowercase_entity_tags.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/acceptance/test_topic_digest_acceptance.py",
+        "tests/baseline_signatures.json",
+        "tests/mcp/test_weft_status.py",
+        "tests/test_agent_readiness.py",
+        "tests/test_mcp_tools.py",
+        "tests/test_truncation_propagation.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/disaster-recovery.md",
+        "docs/findings-2026-07-16-prime-hang.md",
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [
+        "weft/db/migrations/v59_recall_queries_status_tool.py",
+        "weft/db/migrations/v60_lowercase_entity_tags.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_token_issue",
+      "lifecycle": "admin-or-recovery",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_token_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/connection-recovery.md",
+        "docs/user-identity.md",
+        "docs/wick-handoff.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_token_list",
+      "lifecycle": "admin-or-recovery",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_token_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/connection-recovery.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_token_revoke",
+      "lifecycle": "admin-or-recovery",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_token_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/connection-recovery.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_close",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_board.py",
+        "tests/test_board_server.py",
+        "tests/test_board_triage_loop.py",
+        "tests/test_trackers.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/seed.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_create",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trackers.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/seed.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_dismiss",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_board.py",
+        "tests/test_board_triage_loop.py",
+        "tests/test_trackers.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_due",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/daily_brief.py",
+        "weft/db/migrations/v38_trackers_table.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trackers.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/__main__.py",
+        "benchmarks/personal_agent/agenda_harness.py",
+        "benchmarks/personal_agent/agenda_manifest.py",
+        "benchmarks/personal_agent/tests/test_paah_agenda.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [
+        "weft/db/migrations/v38_trackers_table.py"
+      ],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_get",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trackers.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_list",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trackers.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_snooze",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_board.py",
+        "tests/test_board_triage_loop.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/seed.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_tracker_update",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_board_triage_loop.py",
+        "tests/test_trackers.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_trigger_create",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trigger_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_trigger_delete",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_board.py",
+        "tests/test_board_triage_loop.py",
+        "tests/test_trigger_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_trigger_due",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trigger_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_trigger_fire",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py",
+        "weft/scheduler.py"
+      ],
+      "hooks_or_scheduler_references": [
+        "weft/scheduler.py"
+      ],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_board_triage_loop.py",
+        "tests/test_trigger_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_trigger_list",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/primer.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_trigger_tools.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_turn_append",
+      "lifecycle": "supporting-or-experimental",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/episode_turns.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/baselines.md",
+        "tests/test_turn_append_tool.py",
+        "benchmarks/personal_agent/README.md",
+        "benchmarks/personal_agent/__main__.py",
+        "benchmarks/personal_agent/continuity_seed.py",
+        "benchmarks/personal_agent/seed.py",
+        "benchmarks/personal_agent/tests/test_paah_temporal.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_up_next",
+      "lifecycle": "deprecated-observe",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [
+        "weft/board.py",
+        "weft/obsidian/sync.py",
+        "weft/skills.py"
+      ],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_tool_usage.py"
+      ],
+      "docs_or_public_contracts": [
+        "docs/tools.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_weekly_recap",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json"
+      ],
+      "docs_or_public_contracts": [
+        "docs/findings-2026-07-16-prime-hang.md"
+      ],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_workspace_add_member",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_workspace_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_workspace_create",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_workspace_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_workspace_list",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_workspace_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_workspace_remove_member",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/baseline_signatures.json",
+        "tests/test_workspace_tools.py"
+      ],
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    }
+  ]
+}

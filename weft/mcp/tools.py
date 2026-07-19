@@ -1379,7 +1379,7 @@ async def weft_relate(
 
 @mcp.tool()
 async def weft_consolidate(ctx: Context, dry_run: bool = False) -> dict:
-    """Run consolidation: decay stale memories, merge duplicates, flag contradictions."""
+    """Run maintenance; stale-memory scoring reports review candidates only."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_consolidate start [%s] dry_run=%s", cid, dry_run)
@@ -3857,7 +3857,18 @@ async def weft_check_health(
         payload["replay_queue_stale_pending"] = replay_queue_stale_pending
         payload["replay_claims_30d"] = replay_claims_30d
         payload["failure_counters"] = failure_counters
-        payload["tool_usage"] = tool_usage
+        from weft.auth import is_agent_caller
+        if is_agent_caller():
+            coverage = tool_usage["coverage"]
+            payload["tool_usage"] = {
+                "status": (
+                    "complete" if coverage["complete"] else "coverage-incomplete"
+                ),
+                "deprecation_eligible": tool_usage["deprecation_eligible"],
+                "detail": "Detailed deployment telemetry is supervisor-only.",
+            }
+        else:
+            payload["tool_usage"] = tool_usage
         if canary_status is None:
             canary_status = {
                 "status": "unavailable",

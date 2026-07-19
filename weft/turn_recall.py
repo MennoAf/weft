@@ -57,6 +57,7 @@ _TURN_TIER_MARKERS: tuple[re.Pattern, ...] = (
     re.compile(r"\blast (?:time|week|month|year|tuesday|wednesday|thursday|friday|saturday|sunday|monday)\b"),
     re.compile(r"\b(?:earlier|later) (?:than|that)\b"),
     re.compile(r"\bwhat (?:day|date|time)\b"),
+    re.compile(r"\bwhat (?:was|is) the chronology\b"),
 )
 
 
@@ -92,6 +93,9 @@ _BOTH_TIER_MARKERS: tuple[re.Pattern, ...] = (
     ),
     # Remind-me prompts — factual answer grounded in prior dialogue.
     re.compile(r"\bremind me (?:about|of|what|when)\b"),
+    # Decision rationale is often omitted from concise handoffs/beliefs; retrieve
+    # the quoted dialogue evidence rather than fabricating a reason.
+    re.compile(r"\bwhy did (?:we|i) (?:reject|choose|pick|decide|change)\b"),
 )
 
 
@@ -132,6 +136,12 @@ def route_query_to_tier(query: str) -> Tier:
 # Patterns that imply two named anchors. Capture groups carry the anchor
 # strings so the caller can run a sub-query per anchor.
 _ANCHOR_PATTERNS: tuple[re.Pattern, ...] = (
+    # Three-stage chronology must be checked before the two-stage ``from``
+    # pattern or the middle event is swallowed into the first anchor.
+    re.compile(
+        r"\bfrom\s+(.+?)\s+through\s+(.+?)\s+to\s+(.+?)(?:[?.,]|$)",
+        re.IGNORECASE,
+    ),
     # "between X and Y", "from X to Y"
     re.compile(r"\bbetween\s+(.+?)\s+and\s+(.+?)(?:[?.,]|$)", re.IGNORECASE),
     re.compile(r"\bfrom\s+(.+?)\s+to\s+(.+?)(?:[?.,]|$)", re.IGNORECASE),

@@ -2,7 +2,7 @@
 
 > Shared persistent brain for you and your agents.
 
-Weft is the persistent brain you share with your agents. Conversations, decisions, recipes, plans — anything you'd write down so you and your agents can find it later. Queryable via semantic search (pgvector), structured types with distinct lifecycles, confidence + decay, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity.
+Weft is the persistent brain you share with your agents. Conversations, decisions, recipes, plans — anything you'd write down so you and your agents can find it later. Queryable via semantic search (pgvector), structured memory types, confidence metadata, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity. Lifecycle scoring is review-only: consolidation can propose stale candidates, but it does not automatically hide or delete memories.
 
 Part of the trilogy: **Loom** (orchestration) → **Warp** (builder agent) → **Weft** (memory).
 
@@ -12,7 +12,7 @@ Default agent memory is a flat file the agent grep-reads at session start. That 
 
 - One agent can't read another agent's memories
 - No retrieval beyond grep — semantic similarity, time-aware ranking, and provenance all live in the agent's head
-- No decay, no confidence, no way to distinguish a load-bearing convention from a one-off observation
+- No structured confidence, provenance, pinning, or review lifecycle to distinguish a load-bearing convention from a one-off observation
 - No cross-session continuity beyond the user re-pasting context
 
 Weft treats memory as a first-class data system. Multiple agents (Claude Code, custom MCP clients, Claude API apps, Warp, etc.) read and write the same brain. A handoff at session end shows up in the next session's prime — same agent, different agent, different machine, doesn't matter.

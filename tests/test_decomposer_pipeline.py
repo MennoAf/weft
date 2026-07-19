@@ -283,11 +283,12 @@ class TestClassify:
         assert result[0].entities == []
 
     @pytest.mark.asyncio
-    async def test_malformed_json_falls_back_to_general_note(self):
-        """When LLM returns invalid JSON, classify falls back to general_note."""
+    async def test_malformed_json_abstains_without_raw_fallback(self):
+        """Invalid JSON must not become a persistable raw-input note."""
         text_block = MagicMock()
         text_block.text = "not valid json {{"
         response = MagicMock()
+        response.stop_reason = "end_turn"
         response.content = [text_block]
 
         mock_client = AsyncMock()
@@ -296,13 +297,11 @@ class TestClassify:
         with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
             result = await classify("some valid input text here")
 
-        assert len(result) == 1
-        assert result[0].type == "general_note"
-        assert result[0].confidence == 0.0
+        assert result == []
 
     @pytest.mark.asyncio
-    async def test_llm_exception_falls_back_to_general_note(self):
-        """When the LLM call raises, classify falls back to general_note."""
+    async def test_llm_exception_abstains_without_raw_fallback(self):
+        """Transport failures abstain rather than fabricating durable state."""
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(
             side_effect=RuntimeError("API timeout")
@@ -311,9 +310,7 @@ class TestClassify:
         with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
             result = await classify("some valid input text here")
 
-        assert len(result) == 1
-        assert result[0].type == "general_note"
-        assert result[0].confidence == 0.0
+        assert result == []
 
     @pytest.mark.asyncio
     async def test_single_object_response_wrapped_in_list(self):
@@ -752,7 +749,8 @@ class TestProcess:
         pool = AsyncMock()
         item = IngestItem(text="hi", source="slack")
 
-        with patch("weft.ingest_pipeline.classify", new_callable=AsyncMock) as mock_classify:
+        with patch("weft.ingest_pipeline.classify", new_callable=AsyncMock) as mock_classify, \
+             patch("weft.ingest_pipeline.route", new_callable=AsyncMock) as mock_route:
             mock_classify.return_value = []
 
             result = await process(item, pool)
@@ -760,6 +758,7 @@ class TestProcess:
         assert result.memories_created == 0
         assert result.alerts_created == 0
         assert result.errors == []
+        mock_route.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_multi_intent_processing(self):
