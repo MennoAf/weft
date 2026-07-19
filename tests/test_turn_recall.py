@@ -10,7 +10,7 @@ Three layers:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -198,6 +198,17 @@ class TestExtractAnchors:
     def test_from_x_to_y(self):
         anchors = extract_anchors("from January to March, what shipped?")
         assert anchors == ["January", "March"]
+
+    def test_three_stage_chronology_preserves_middle_anchor(self):
+        anchors = extract_anchors(
+            "What was the chronology from the first attempt through "
+            "rejecting red to the final blue decision?"
+        )
+        assert anchors == [
+            "the first attempt",
+            "rejecting red",
+            "the final blue decision",
+        ]
 
     def test_after_x_but_before_y(self):
         anchors = extract_anchors(

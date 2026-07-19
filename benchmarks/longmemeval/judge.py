@@ -174,73 +174,173 @@ class TypeMetrics:
         return self.n_correct / self.n if self.n else 0.0
 
 
-def summarize_results(
-    *,
-    result_path: Path,
-    ref_path: Path,
-) -> dict:
-    """Build a per-question-type metrics summary from a labelled result file.
-
-    The upstream ``print_qa_metrics.py`` prints to stdout and is hardcoded
-    to gpt-4o-2024-08-06. We re-implement a tiny version here that:
-      * works for any judge model
-      * returns structured JSON instead of stdout-only
-      * preserves the per-type accuracy breakdown that we actually care
-        about for tracking improvements over time
-    """
-    qid2type: dict[str, str] = {}
-    with ref_path.open(encoding="utf-8") as f:
-        for entry in json.load(f):
-            qid2type[entry["question_id"]] = entry["question_type"]
-
-    by_type: dict[str, list[bool]] = defaultdict(list)
-    with result_path.open(encoding="utf-8") as f:
-        for line in f:
+def _load_jsonl(path: Path, *, artifact: str) -> list[dict]:
+    """Load a JSONL artifact, rejecting non-object rows."""
+    rows: list[dict] = []
+    with path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            entry = json.loads(line)
-            qid = entry["question_id"]
-            qtype = qid2type.get(qid, "unknown")
-            label = entry.get("autoeval_label", {}).get("label")
-            by_type[qtype].append(bool(label))
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"{artifact} row {line_number} must be a JSON object"
+                )
+            rows.append(row)
+    return rows
 
-    metrics = []
-    total_n = 0
+
+def _index_unique(
+    rows: list[dict],
+    *,
+    artifact: str,
+    allowed_ids: set[str] | None = None,
+) -> dict[str, dict]:
+    """Index rows by question_id and enforce artifact-boundary integrity."""
+    indexed: dict[str, dict] = {}
+    for row_number, row in enumerate(rows, start=1):
+        qid = row.get("question_id")
+        if not isinstance(qid, str) or not qid:
+            raise ValueError(
+                f"{artifact} row {row_number} has missing/invalid question_id"
+            )
+        if qid in indexed:
+            raise ValueError(f"duplicate {artifact} question_id: {qid}")
+        if allowed_ids is not None and qid not in allowed_ids:
+            raise ValueError(f"unknown {artifact} question_id: {qid}")
+        indexed[qid] = row
+    return indexed
+
+
+def _result_label(row: dict, *, qid: str) -> bool:
+    """Read current nested or legacy boolean judge labels strictly."""
+    raw_label = row.get("autoeval_label")
+    if isinstance(raw_label, dict):
+        raw_label = raw_label.get("label")
+    if not isinstance(raw_label, bool):
+        raise ValueError(f"missing/malformed autoeval label for question_id: {qid}")
+    return raw_label
+
+
+def summarize_pipeline(
+    *,
+    ref_path: Path,
+    hyp_path: Path,
+    result_path: Path,
+) -> dict:
+    """Summarize the complete reference → hypothesis → judge pipeline.
+
+    The reference population is always the denominator. Missing hypotheses and
+    missing judge results therefore count as incorrect, while remaining visible
+    as distinct pipeline failures. Duplicate IDs and IDs absent from the
+    preceding artifact boundary fail loudly rather than corrupting metrics.
+    """
+    with ref_path.open(encoding="utf-8") as f:
+        ref_rows = json.load(f)
+    if not isinstance(ref_rows, list):
+        raise ValueError("reference artifact must be a JSON array")
+
+    refs = _index_unique(ref_rows, artifact="reference")
+    hypotheses = _index_unique(
+        _load_jsonl(hyp_path, artifact="hypothesis"),
+        artifact="hypothesis",
+        allowed_ids=set(refs),
+    )
+    results = _index_unique(
+        _load_jsonl(result_path, artifact="result"),
+        artifact="result",
+        allowed_ids=set(hypotheses),
+    )
+    labels = {qid: _result_label(row, qid=qid) for qid, row in results.items()}
+
+    expected_by_type: dict[str, list[str]] = defaultdict(list)
+    for qid, row in refs.items():
+        qtype = row.get("question_type")
+        if not isinstance(qtype, str) or not qtype:
+            raise ValueError(f"reference question {qid} has invalid question_type")
+        expected_by_type[qtype].append(qid)
+
+    metrics: list[dict] = []
+    raw_type_accuracies: list[float] = []
     total_correct = 0
-    for qtype in sorted(by_type):
-        labels = by_type[qtype]
-        m = TypeMetrics(
-            question_type=qtype,
-            n=len(labels),
-            n_correct=sum(1 for x in labels if x),
-        )
+    for qtype in sorted(expected_by_type):
+        qids = expected_by_type[qtype]
+        correct = sum(1 for qid in qids if labels.get(qid) is True)
+        produced_hypotheses = sum(1 for qid in qids if qid in hypotheses)
+        produced_results = sum(1 for qid in qids if qid in results)
+        m = TypeMetrics(qtype, len(qids), correct)
+        raw_type_accuracies.append(m.accuracy)
+        total_correct += correct
         metrics.append(
             {
-                "question_type": m.question_type,
+                "question_type": qtype,
                 "n": m.n,
-                "n_correct": m.n_correct,
+                "n_correct": correct,
                 "accuracy": round(m.accuracy, 4),
+                "hypotheses_produced": produced_hypotheses,
+                "judge_results_produced": produced_results,
+                "missing_hypotheses": m.n - produced_hypotheses,
+                "hypotheses_without_judge_results": (
+                    produced_hypotheses - produced_results
+                ),
             }
         )
-        total_n += m.n
-        total_correct += m.n_correct
 
-    overall_acc = total_correct / total_n if total_n else 0.0
-    # Task-averaged accuracy treats each type equally — the headline metric
-    # the LongMemEval paper reports.
-    task_avg = (
-        sum(m["accuracy"] for m in metrics) / len(metrics) if metrics else 0.0
-    )
+    expected = len(refs)
+    missing_hypotheses = expected - len(hypotheses)
+    missing_results = len(hypotheses) - len(results)
     return {
-        "result_file": str(result_path),
-        "ref_file": str(ref_path),
-        "overall_accuracy": round(overall_acc, 4),
-        "task_averaged_accuracy": round(task_avg, 4),
-        "n_total": total_n,
+        # Metrics may be published. Keep host usernames/mount layouts out of
+        # the artifact while preserving stable sidecar identity.
+        "result_file": result_path.name,
+        "hypothesis_file": hyp_path.name,
+        "ref_file": ref_path.name,
+        "paths_redacted": True,
+        "overall_accuracy": round(total_correct / expected, 4) if expected else 0.0,
+        "task_averaged_accuracy": (
+            round(sum(raw_type_accuracies) / len(raw_type_accuracies), 4)
+            if raw_type_accuracies else 0.0
+        ),
+        "n_total": expected,
         "n_correct_total": total_correct,
+        "expected_questions": expected,
+        "hypotheses_produced": len(hypotheses),
+        "judge_results_produced": len(results),
+        "missing_hypotheses": missing_hypotheses,
+        "hypotheses_without_judge_results": missing_results,
+        "complete": missing_hypotheses == 0 and missing_results == 0,
+        "boundary_validation": {
+            "duplicate_reference_ids": 0,
+            "duplicate_hypothesis_ids": 0,
+            "duplicate_result_ids": 0,
+            "unknown_hypothesis_ids": 0,
+            "unknown_result_ids": 0,
+        },
         "by_type": metrics,
     }
+
+
+def summarize_results(*, result_path: Path, ref_path: Path) -> dict:
+    """Compatibility wrapper for legacy two-artifact callers.
+
+    This cannot distinguish a missing hypothesis from a missing judge result,
+    so it treats every labelled result as a produced hypothesis. New callers
+    must use :func:`summarize_pipeline`.
+    """
+    result_rows = _load_jsonl(result_path, artifact="result")
+    compatibility_hyp_path = result_path.with_suffix(result_path.suffix + ".hyp.tmp")
+    try:
+        with compatibility_hyp_path.open("w", encoding="utf-8") as f:
+            for row in result_rows:
+                f.write(json.dumps({"question_id": row.get("question_id")}) + "\n")
+        return summarize_pipeline(
+            ref_path=ref_path,
+            hyp_path=compatibility_hyp_path,
+            result_path=result_path,
+        )
+    finally:
+        compatibility_hyp_path.unlink(missing_ok=True)
 
 
 # ----------------------------------------------------------------------
@@ -297,7 +397,11 @@ def run_judge(
         logger.info("running upstream judge: %s", " ".join(cmd))
         subprocess.run(cmd, cwd=str(root), check=True)
 
-    metrics = summarize_results(result_path=result_path, ref_path=ref)
+    metrics = summarize_pipeline(
+        ref_path=ref,
+        hyp_path=hyp_path,
+        result_path=result_path,
+    )
     metrics_path = hyp_path.with_suffix(hyp_path.suffix + ".metrics.json")
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     logger.info("wrote metrics summary: %s", metrics_path)

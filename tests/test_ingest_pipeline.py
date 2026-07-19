@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -357,20 +357,19 @@ class TestClassify:
         assert result[0].type == "general_note"
 
     @pytest.mark.asyncio
-    async def test_llm_error_falls_back_to_general_note(self):
+    async def test_classifier_transport_error_abstains(self):
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(side_effect=Exception("API down"))
 
         with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
             result = await classify("some important text here")
 
-        assert len(result) == 1
-        assert result[0].type == "general_note"
-        assert result[0].confidence == 0.0
+        assert result == []
 
     @pytest.mark.asyncio
-    async def test_malformed_json_falls_back(self):
+    async def test_classifier_malformed_json_does_not_fabricate(self):
         mock_response = MagicMock()
+        mock_response.stop_reason = "end_turn"
         mock_response.content = [MagicMock(text="{not valid json!!!")]
 
         mock_client = AsyncMock()
@@ -379,8 +378,117 @@ class TestClassify:
         with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
             result = await classify("something worth remembering here")
 
-        assert len(result) == 1
-        assert result[0].type == "general_note"
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_classifier_malformed_end_turn_does_not_salvage_prefix(self):
+        mock_response = MagicMock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = [MagicMock(text=(
+            '[{"type":"decision","content":"Use Postgres",'
+            '"confidence":0.9,"entities":[],"dates":[]} GARBAGE'
+        ))]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify("we decided to use Postgres")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_item",
+        [
+            {},
+            {"type": "decision", "content": None},
+            {"type": "decision", "content": "   "},
+            {"type": "decision", "content": "Use Postgres", "confidence": "nan"},
+            {"type": "decision", "content": "Use Postgres", "entities": None},
+            {"type": "decision", "content": "Use Postgres", "dates": None},
+        ],
+    )
+    async def test_classifier_rejects_invalid_items_without_raw_fallback(
+        self, invalid_item,
+    ):
+        mock_response = _mock_llm_response([invalid_item])
+        mock_response.stop_reason = "end_turn"
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        raw = "the entire raw input must never become a fallback memory"
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify(raw)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_classifier_bad_item_does_not_discard_valid_sibling(self):
+        mock_response = _mock_llm_response([
+            {"type": "decision", "content": None},
+            {
+                "type": "decision",
+                "content": "Use Postgres",
+                "confidence": 0.9,
+                "entities": [],
+                "dates": [],
+            },
+        ])
+        mock_response.stop_reason = "end_turn"
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify("we decided to use Postgres")
+
+        assert [(intent.type, intent.content) for intent in result] == [
+            ("decision", "Use Postgres"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_classifier_max_tokens_abstains_without_complete_item(self):
+        mock_response = MagicMock()
+        mock_response.stop_reason = "max_tokens"
+        mock_response.content = [MagicMock(text='[{"type": "decision",')]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify("we decided something important")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_classifier_salvages_complete_partial_items(self):
+        mock_response = MagicMock()
+        mock_response.stop_reason = "max_tokens"
+        mock_response.content = [MagicMock(text=(
+            '[{"type":"decision","content":"Use Postgres",'
+            '"confidence":0.9,"entities":[],"dates":[]},'
+            '{"type":"follow_up","content":"unfinished"'
+        ))]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify("We decided to use Postgres and follow up later")
+
+        assert [(item.type, item.content) for item in result] == [
+            ("decision", "Use Postgres"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_classifier_empty_content_abstains(self):
+        mock_response = MagicMock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = []
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+            result = await classify("something worth remembering here")
+
+        assert result == []
 
     @pytest.mark.asyncio
     async def test_markdown_fenced_json_is_parsed(self):

@@ -31,9 +31,13 @@ Honest extraction (LLM-derived beliefs) and raw fallback (full-turn ingest) have
 
 ### LongMemEval-M
 
+**Publication status: unresolved.** Historical M runs exist, but their summaries were generated from labelled-result rows rather than the complete reference population. Missing hypotheses and missing judge results could disappear from the denominator. Those artifacts must be rescored through the reference → hypothesis → result contract before any M headline is published.
+
 | Configuration | recall@10 | Answer correctness | Notes |
 |---------------|-----------|--------------------|----|
-| `--mode turns --tier turns` baseline | *running* | *running* | P0.2 baseline, captured 2026-05-07 |
+| `--mode turns --tier turns` historical runs | retained in raw artifacts | **not publication-ready** | Results vary materially across May runs; ingestion completion, retrieval, reader accuracy, and infrastructure failures must be reported separately. |
+
+The repaired scorer uses the reference question set as the denominator. A question with no produced hypothesis or no judge label remains incorrect and is reported under its distinct pipeline-failure category. Duplicate or unknown IDs and malformed labels fail the summary rather than being silently counted or omitted.
 
 ## How to reproduce
 
@@ -61,12 +65,59 @@ Outputs land in `benchmarks/longmemeval/results/` — both an answers JSONL (for
 
 ### Score the answers
 
+Use Weft's wrapper so the metrics file receives all three pipeline artifacts and applies the complete reference denominator:
+
 ```bash
-python ~/code/LongMemEval/src/evaluation/evaluate_qa.py \
-  gpt-4o \
-  benchmarks/longmemeval/results/<your-run>.jsonl \
-  ~/code/LongMemEval/data/longmemeval_m_cleaned.json
+OPENAI_API_KEY=... uv run python -m benchmarks.longmemeval.judge \
+  --hyp benchmarks/longmemeval/results/<your-run>.jsonl \
+  --ref ~/code/LongMemEval/data/longmemeval_m_cleaned.json \
+  --model gpt-4o
 ```
+
+The upstream evaluator writes `<hyp>.eval-results-<model>`; Weft then writes `<hyp>.metrics.json` with expected, hypothesis, judge-result, missing-stage, correctness, and per-type counts. Scoring an existing labelled sidecar is free; generating missing labels is paid.
+
+### Repeatability and publication protocol
+
+A single aggregate run is not a keep/scrap or publication gate. Before publishing M or comparing retrieval arms:
+
+1. Pin the code commit, dataset checksum, model identifiers, prompt/configuration, sample IDs, and random seeds.
+2. Either run **3–5 independent repetitions per arm**, or hold stochastic substrate generation constant with a versioned fixed-materialization snapshot and repeat only the intended variable.
+3. Preserve raw hypotheses, labelled results, metrics, stats, and failure logs for every repetition.
+4. Report distributions and these stages separately: ingestion completion, retrieval recall, reader accuracy, preference compliance, enumeration, unsupported answers, and infrastructure failures.
+5. Treat missing hypotheses/results as incorrect. Do not compress elapsed time into evidence of completed coverage.
+6. Record estimated cost before execution and actual cost afterward. Paid runs require explicit operator approval.
+
+### Session continuity A/B/C benchmark
+
+The deterministic continuity suite under `benchmarks/personal_agent/` tests a
+separate outcome from LongMemEval: whether a later session can recover omitted
+episodic evidence while keeping concise handoff as the primary continuity
+layer.
+
+- **Arm A:** handoff plus durable memories only.
+- **Arm B:** Arm A plus bounded targeted turn recall.
+- **Arm C:** Arm B plus opt-in materialized beliefs with `evidence_turn_ids`.
+
+Deterministic tests cover activation precision, exact turn IDs, chronology,
+exact wording, rejected rationale, supersession, structural containment of
+instruction-shaped text inside a quoted-evidence envelope, incomplete evidence,
+and project/user isolation. They do **not** prove reader-model instruction
+non-compliance or answer quality. `continuity_eval.py` writes deterministic
+per-arm mechanics and keeps those paid metrics explicitly pending. Repeated
+paid reader evaluation remains
+`PENDING-PAID-EVALUATION`, and neither Arm B automation nor Arm C materializer
+wiring is enabled by the benchmark.
+
+Run deterministic mechanics without an LLM:
+
+```bash
+uv run pytest benchmarks/personal_agent/tests/test_paah_continuity.py -q
+```
+
+A future paid run must repeat each enabled arm 3–5 times, preserve raw
+artifacts, and report correctness, unsupported claims, evidence citation,
+stale/superseded answers, instruction non-compliance, activation precision,
+latency, token cost, and infrastructure failures separately.
 
 ### Cost expectations
 

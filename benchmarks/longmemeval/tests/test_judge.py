@@ -19,6 +19,7 @@ from benchmarks.longmemeval.judge import (
     _resolve_longmemeval_root,
     _result_path_for,
     run_judge,
+    summarize_pipeline,
     summarize_results,
 )
 
@@ -116,6 +117,104 @@ def _write_result(path: Path, rows: list[dict]) -> None:
 
 def _write_ref(path: Path, instances: list[dict]) -> None:
     path.write_text(json.dumps(instances), encoding="utf-8")
+
+
+def _write_hyp(path: Path, question_ids: list[str]) -> None:
+    _write_result(
+        path,
+        [{"question_id": qid, "hypothesis": f"answer-{qid}"} for qid in question_ids],
+    )
+
+
+def test_summary_uses_reference_denominator(tmp_path):
+    ref = tmp_path / "ref.json"
+    hyp = tmp_path / "hyp.jsonl"
+    result = tmp_path / "results.jsonl"
+    _write_ref(ref, [
+        {"question_id": "q1", "question_type": "known"},
+        {"question_id": "q2", "question_type": "known"},
+        {"question_id": "q3", "question_type": "missing-type"},
+    ])
+    _write_hyp(hyp, ["q1", "q2"])
+    _write_result(result, [
+        {"question_id": "q1", "autoeval_label": {"label": True}},
+    ])
+
+    metrics = summarize_pipeline(ref_path=ref, hyp_path=hyp, result_path=result)
+
+    assert metrics["n_total"] == 3
+    assert metrics["n_correct_total"] == 1
+    assert metrics["overall_accuracy"] == pytest.approx(1 / 3, abs=1e-4)
+    assert metrics["missing_hypotheses"] == 1
+    assert metrics["hypotheses_without_judge_results"] == 1
+    assert metrics["complete"] is False
+    by_type = {row["question_type"]: row for row in metrics["by_type"]}
+    assert by_type["missing-type"]["n"] == 1
+    assert by_type["missing-type"]["accuracy"] == 0.0
+    assert by_type["missing-type"]["missing_hypotheses"] == 1
+
+
+def test_duplicate_and_unknown_hypothesis_ids_fail(tmp_path):
+    ref = tmp_path / "ref.json"
+    result = tmp_path / "results.jsonl"
+    _write_ref(ref, [{"question_id": "q1", "question_type": "known"}])
+    _write_result(result, [])
+
+    duplicate = tmp_path / "duplicate-hyp.jsonl"
+    _write_hyp(duplicate, ["q1", "q1"])
+    with pytest.raises(ValueError, match="duplicate hypothesis question_id"):
+        summarize_pipeline(ref_path=ref, hyp_path=duplicate, result_path=result)
+
+    unknown = tmp_path / "unknown-hyp.jsonl"
+    _write_hyp(unknown, ["unknown"])
+    with pytest.raises(ValueError, match="unknown hypothesis question_id"):
+        summarize_pipeline(ref_path=ref, hyp_path=unknown, result_path=result)
+
+
+def test_duplicate_and_unknown_result_ids_fail(tmp_path):
+    ref = tmp_path / "ref.json"
+    hyp = tmp_path / "hyp.jsonl"
+    _write_ref(ref, [{"question_id": "q1", "question_type": "known"}])
+    _write_hyp(hyp, ["q1"])
+
+    duplicate = tmp_path / "duplicate-results.jsonl"
+    row = {"question_id": "q1", "autoeval_label": {"label": True}}
+    _write_result(duplicate, [row, row])
+    with pytest.raises(ValueError, match="duplicate result question_id"):
+        summarize_pipeline(ref_path=ref, hyp_path=hyp, result_path=duplicate)
+
+    unknown = tmp_path / "unknown-results.jsonl"
+    _write_result(unknown, [
+        {"question_id": "unknown", "autoeval_label": {"label": True}},
+    ])
+    with pytest.raises(ValueError, match="unknown result question_id"):
+        summarize_pipeline(ref_path=ref, hyp_path=hyp, result_path=unknown)
+
+
+def test_malformed_or_missing_labels_fail(tmp_path):
+    ref = tmp_path / "ref.json"
+    hyp = tmp_path / "hyp.jsonl"
+    _write_ref(ref, [{"question_id": "q1", "question_type": "known"}])
+    _write_hyp(hyp, ["q1"])
+    for label in (None, {"model": "judge"}, {"label": "true"}):
+        result = tmp_path / f"result-{len(str(label))}.jsonl"
+        row = {"question_id": "q1"}
+        if label is not None:
+            row["autoeval_label"] = label
+        _write_result(result, [row])
+        with pytest.raises(ValueError, match="missing/malformed autoeval label"):
+            summarize_pipeline(ref_path=ref, hyp_path=hyp, result_path=result)
+
+
+def test_legacy_boolean_label_is_supported(tmp_path):
+    ref = tmp_path / "ref.json"
+    hyp = tmp_path / "hyp.jsonl"
+    result = tmp_path / "results.jsonl"
+    _write_ref(ref, [{"question_id": "q1", "question_type": "known"}])
+    _write_hyp(hyp, ["q1"])
+    _write_result(result, [{"question_id": "q1", "autoeval_label": True}])
+    metrics = summarize_pipeline(ref_path=ref, hyp_path=hyp, result_path=result)
+    assert metrics["overall_accuracy"] == 1.0
 
 
 def test_summarize_per_type_accuracy(tmp_path):
