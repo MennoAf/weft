@@ -7,9 +7,16 @@ The signatures here are stable: changes are additive-only (the test suite enforc
 ## Tool lifecycle and usage
 
 Weft records daily aggregate invocation counts for every MCP tool without
-retaining request arguments. The trailing 30-day summary is included in
-`weft_check_health` under `tool_usage`; use it before removing or
-internalizing a tool.
+retaining request arguments. Coverage telemetry separately records the
+versioned recorder heartbeat, successful writes, failures, and shutdown-drain
+state. The trailing summary is included in `weft_check_health` under
+`tool_usage`.
+
+A zero count means **not observed**, not valueless. Removal recommendations
+require at least 30 valid coverage days with no gaps; 30 elapsed calendar days
+are insufficient. The checked-in public-tool manifest also rejects removals
+without an approved deprecation record. See `inventory/` and
+[`validation-findings-2026-07.md`](validation-findings-2026-07.md).
 
 `weft_up_next` is deprecated but remains available as a compatibility alias.
 Use `weft_board` for the canonical unified open-items view. It will remain
@@ -197,11 +204,11 @@ Manage relationships between memories.
 
 ### `weft_consolidate`
 
-Run the consolidation pipeline: decay stale memories, merge duplicates, flag contradictions.
+Run the consolidation pipeline: propose stale-memory review candidates, merge duplicates, flag contradictions, and process other maintenance passes. Decay scoring is **review-only**: neither scheduled consolidation nor this MCP tool changes a candidate's status. Confidence is write-time/revision metadata and one input to the proposal score; pinned memories and `preference`, `user_model`, and `decision` types are protected.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `dry_run` | `bool` | `false` | Preview changes without applying |
+| `dry_run` | `bool` | `false` | Preview all consolidation changes; decay candidates are non-mutating in both modes |
 
 ### `weft_extract`
 

@@ -11,8 +11,11 @@
 # Create the Fly.io app
 fly launch --no-deploy
 
-# Set secrets (never put these in fly.toml)
-fly secrets set DATABASE_URL="postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
+# Provision/migrate with the Supabase owner credential out of band, then set
+# Fly's runtime DSN to a distinct non-owner application login:
+#   LOGIN NOSUPERUSER NOBYPASSRLS
+# Never use the `postgres` owner credential as Fly's DATABASE_URL.
+fly secrets set DATABASE_URL="postgresql://weft_app:APP_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
 fly secrets set WEFT_API_KEY="your-bootstrap-secret"
 ```
 
@@ -21,8 +24,9 @@ single supervisor token row on first request so a brand-new deployment
 has at least one usable credential. From there, mint per-client tokens
 via `weft tokens issue` (see "Connecting MCP Clients" below) and stop
 handing the bootstrap key out. The env-var fallback stays available
-through Phase 5 / public Wick launch and will be removed once
-deprecation logs show zero hits for two weeks.
+through Phase 5 / public Wick launch. Removal requires an approved deprecation
+record and at least 30 valid telemetry coverage days; elapsed time or zero
+counts with collection gaps are not sufficient evidence.
 
 ### Supabase Connection Notes
 
