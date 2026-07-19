@@ -71,6 +71,13 @@ class WeftEnv(str, Enum):
     production = "production"
 
 
+class MigrationMode(str, Enum):
+    """Startup handling for database schema migrations."""
+
+    apply = "apply"
+    verify = "verify"
+
+
 class DatabaseConfig(BaseModel):
     url: str = "postgresql://weft:weft_local@localhost:5433/weft"
     pool_min_size: int = 2
@@ -286,6 +293,7 @@ class AlertCooldownConfig(BaseModel):
 
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
+    migration_mode: MigrationMode = MigrationMode.apply
     project_name: str = "default"
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
@@ -663,6 +671,9 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.log_level = level
     if env := os.environ.get("WEFT_ENV"):
         config.env = WeftEnv(env)
+    migration_mode = os.environ.get("WEFT_MIGRATION_MODE")
+    if migration_mode:
+        config.migration_mode = MigrationMode(migration_mode)
     if api_key := os.environ.get("WEFT_API_KEY"):
         config.api_key = api_key
     if supabase_url := os.environ.get("SUPABASE_URL"):
@@ -685,6 +696,13 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.daily_brief.channel = brief_channel.strip()
     if brief_channel_type := os.environ.get("WEFT_DAILY_BRIEF_CHANNEL_TYPE"):
         config.daily_brief.channel_type = brief_channel_type.strip()
+
+    if config.env is WeftEnv.production and not migration_mode:
+        raise ValueError(
+            "WEFT_MIGRATION_MODE must be explicitly set in production; "
+            "use 'verify' for the restricted runtime or 'apply' only for a "
+            "deliberate owner-managed migration process"
+        )
 
     # OAuth 2.1 authz-server env vars (optional unless WEFT_OAUTH_ENABLED=1).
     # When disabled, every field below stays at its default and the OAuth

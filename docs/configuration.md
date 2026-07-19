@@ -18,6 +18,7 @@ To inspect what's actually in effect: `weft config show` prints the resolved con
 | `WEFT_EMBEDDING_PROVIDER` | Embedding provider | `fastembed` |
 | `WEFT_EMBEDDING_MODEL` | Embedding model | `BAAI/bge-small-en-v1.5` |
 | `WEFT_LOG_LEVEL` | Log level | `INFO` |
+| `WEFT_MIGRATION_MODE` | `apply` runs owner-managed DDL; `verify` performs a read-only exact migration-version check for restricted hosted runtimes | `apply` |
 | `WEFT_API_KEY` | Hosted-server bearer (legacy — auto-bootstraps a token row at startup; see [authentication](user-identity.md)) | unset |
 | `WEFT_DEFAULT_USER_ID` | UUID the legacy bootstrap row binds to. Required for the `weft_api_key` path and owner-scoped integrations such as Slack sync and the daily brief. The recall-canary scheduler discovers and audits owners independently. | unset |
 | `WEFT_OAUTH_ENABLED` | Enable Supabase JWT fallback when the bearer doesn't match a token row | `0` |

@@ -38,14 +38,147 @@ async def _get_applied_versions(pool: asyncpg.Pool) -> set[int]:
         SELECT EXISTS (
             SELECT 1 FROM information_schema.tables
             WHERE table_name = 'schema_migrations'
-              AND table_schema = current_schema()
+              AND table_schema = 'public'
         )
         """
     )
     if not exists:
         return set()
-    rows = await pool.fetch("SELECT version FROM schema_migrations")
+    rows = await pool.fetch("SELECT version FROM public.schema_migrations")
     return {r["version"] for r in rows}
+
+
+_REQUIRED_RUNTIME_TABLES = (
+    "memories",
+    "weft_tokens",
+    "episode_turns",
+    "replay_queue",
+    "weft_tool_usage_coverage",
+)
+
+
+async def verify_runtime_invariants(pool: asyncpg.Pool) -> None:
+    """Read-only privilege, RLS, policy, and head-schema checks."""
+    role = await pool.fetchrow(
+        "SELECT r.rolsuper, r.rolbypassrls, r.rolcanlogin "
+        "FROM pg_roles r WHERE r.rolname = current_user"
+    )
+    table = await pool.fetchrow(
+        "SELECT c.relrowsecurity, c.relforcerowsecurity, "
+        "current_user = owner.rolname AS app_is_owner "
+        "FROM pg_class c JOIN pg_roles owner ON owner.oid = c.relowner "
+        "WHERE c.oid = 'public.memories'::regclass"
+    )
+    if role is None or table is None:
+        raise RuntimeError("Runtime schema verification failed: role/table metadata missing")
+    violations: list[str] = []
+    if not role["rolcanlogin"]:
+        violations.append("runtime role lacks LOGIN")
+    if role["rolsuper"]:
+        violations.append("runtime role is SUPERUSER")
+    if role["rolbypassrls"]:
+        violations.append("runtime role has BYPASSRLS")
+    if table["app_is_owner"] and not table["relforcerowsecurity"]:
+        violations.append("runtime role owns memories while FORCE RLS is disabled")
+    owned_objects = await pool.fetch(
+        "SELECT c.relname FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'public' "
+        "AND c.relkind = ANY($1::char[]) "
+        "AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)",
+        ["r", "p", "S", "v", "m", "f"],
+    )
+    if owned_objects:
+        violations.append("runtime role owns public database objects")
+    if not table["relrowsecurity"]:
+        violations.append("memories RLS is disabled")
+
+    memberships = await pool.fetch(
+        "SELECT parent.rolname FROM pg_auth_members m "
+        "JOIN pg_roles member ON member.oid = m.member "
+        "JOIN pg_roles parent ON parent.oid = m.roleid "
+        "WHERE member.rolname = current_user"
+    )
+    if memberships:
+        violations.append("runtime role has role memberships")
+
+    ledger_write_privileges = await pool.fetchval(
+        "SELECT has_table_privilege(current_user, "
+        "'public.schema_migrations', 'INSERT,UPDATE,DELETE,TRUNCATE')"
+    )
+    if ledger_write_privileges:
+        violations.append("runtime role can modify schema_migrations")
+    if not await pool.fetchval(
+        "SELECT has_table_privilege(current_user, "
+        "'public.schema_migrations', 'SELECT')"
+    ):
+        violations.append("runtime role cannot read schema_migrations")
+
+    policies = await pool.fetch(
+        "SELECT policyname FROM pg_policies "
+        "WHERE schemaname = 'public' AND tablename = 'memories'"
+    )
+    policy_names = {row["policyname"] for row in policies}
+    required_policies = {
+        "memories_select",
+        "memories_insert",
+        "memories_update",
+        "memories_delete",
+    }
+    missing_policies = sorted(required_policies - policy_names)
+    if missing_policies:
+        violations.append(f"missing memories policies={missing_policies}")
+
+    existing_tables = set(
+        await pool.fetchval(
+            "SELECT array_agg(table_name ORDER BY table_name) "
+            "FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = ANY($1::text[])",
+            list(_REQUIRED_RUNTIME_TABLES),
+        )
+        or []
+    )
+    missing_tables = sorted(set(_REQUIRED_RUNTIME_TABLES) - existing_tables)
+    if missing_tables:
+        violations.append(f"missing required tables={missing_tables}")
+
+    if violations:
+        raise RuntimeError(
+            "Runtime schema verification failed: " + "; ".join(violations)
+        )
+
+
+async def verify_migration_ledger(pool: asyncpg.Pool) -> None:
+    """Fail unless the migration ledger exactly matches the code version set."""
+    from weft.db.migrations import MIGRATIONS
+
+    expected = {version for version, _, _ in MIGRATIONS}
+    applied = await _get_applied_versions(pool)
+    if not applied:
+        raise RuntimeError(
+            "Database migration verification failed: public.schema_migrations "
+            "is missing or empty. Run migrations with the owner role before "
+            "starting Weft in verify mode."
+        )
+    pending = sorted(expected - applied)
+    unknown = sorted(applied - expected)
+    if pending or unknown:
+        details: list[str] = []
+        if pending:
+            details.append(f"pending versions={pending}")
+        if unknown:
+            details.append(f"unknown applied versions={unknown}")
+        raise RuntimeError(
+            "Database migration verification failed: "
+            + "; ".join(details)
+            + ". Run owner-managed migrations before restarting Weft."
+        )
+
+
+async def verify_migrations(pool: asyncpg.Pool) -> None:
+    """Run every read-only restricted-runtime database gate."""
+    await verify_migration_ledger(pool)
+    await verify_runtime_invariants(pool)
 
 
 async def run_migrations(pool: asyncpg.Pool) -> list[int]:
