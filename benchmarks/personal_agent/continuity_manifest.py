@@ -8,7 +8,7 @@ the session/scenario IDs below are the independent units used for decisions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -39,6 +39,7 @@ class ContinuityQuestion:
     query: str
     handoff_sufficient: bool
     expected_turn_keys: tuple[str, ...] = ()
+    gold_answer: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,19 +397,68 @@ _RESEARCH = ContinuitySession(
     ),
 )
 
-SESSIONS: tuple[ContinuitySession, ...] = (
-    _LAUNCH,
-    _EVENT,
-    _RENOVATION,
-    _RESEARCH,
+_GOLD_ANSWERS: dict[str, dict[str, str]] = {
+    "launch-plan": {
+        "next_action": "Run the staging smoke test next.",
+        "final_decision": "Ship the blue launch plan.",
+        "rejected_rationale": "Red required a risky schema freeze.",
+        "chronology": "The canary health probe timed out, red was rejected for requiring a schema freeze, then blue became final.",
+        "exact_wording": '"Blue buys us a reversible launch."',
+        "omitted_detail": "The staging access token is behind the brass-key label.",
+        "superseded": "The earlier position was green; blue is the final authoritative plan.",
+    },
+    "community-forum": {
+        "next_action": "Confirm the atrium reservation with facilities next.",
+        "final_decision": "Hold the community forum in the library atrium.",
+        "rejected_rationale": "The ballroom's fixed stage blocked wheelchair access.",
+        "chronology": "Street noise defeated the courtyard, the ballroom was rejected for accessibility, then the atrium became final.",
+        "exact_wording": '"The atrium keeps every entrance on one level."',
+        "omitted_detail": "The captioning tablet is reserved under the cedar-badge label.",
+        "superseded": "The earlier venue was the rooftop; the atrium is final.",
+    },
+    "kitchen-renovation": {
+        "next_action": "Approve the dedicated circuit quote next.",
+        "final_decision": "Use induction cooking with the island layout.",
+        "rejected_rationale": "Acidic spills etched the marble sample overnight.",
+        "chronology": "Pendant lights shadowed the prep surface, marble was rejected after etching, then induction on the island became final.",
+        "exact_wording": '"Induction makes the island a safer shared workspace."',
+        "omitted_detail": "The cabinet stain sample uses the maple-kite code.",
+        "superseded": "The earlier position was a north-wall gas range; island induction is final.",
+    },
+    "field-study": {
+        "next_action": "Pilot two interview prompts next.",
+        "final_decision": "Run stratified interviews before the diary study.",
+        "rejected_rationale": "Senior participants anchored everyone else's focus-group answers.",
+        "chronology": "The diary scale was interpreted inconsistently, the focus group was rejected for anchoring, then stratified interviews became final.",
+        "exact_wording": '"Stratification lets quiet roles shape the first model."',
+        "omitted_detail": "The neutral-probe appendix uses the silver-orchid tag.",
+        "superseded": "The earlier position was one broad anonymous survey; stratified interviews are final.",
+    },
+}
+
+
+def _with_gold(session: ContinuitySession) -> ContinuitySession:
+    gold = _GOLD_ANSWERS[session.session_id]
+    return replace(
+        session,
+        questions=tuple(
+            replace(question, gold_answer=gold[question.key])
+            for question in session.questions
+        ),
+    )
+
+
+SESSIONS: tuple[ContinuitySession, ...] = tuple(
+    _with_gold(session)
+    for session in (_LAUNCH, _EVENT, _RENOVATION, _RESEARCH)
 )
 
 # Backwards-compatible aliases for the original acceptance fixture. Existing DB
 # integration tests remain focused on one corpus while manifest/eval tests cover
 # the four-session decision substrate.
-HANDOFF = _LAUNCH.handoff
-TURNS = _LAUNCH.turns
-QUESTIONS = _LAUNCH.questions
+HANDOFF = SESSIONS[0].handoff
+TURNS = SESSIONS[0].turns
+QUESTIONS = SESSIONS[0].questions
 
 CORE_EPISODIC_CLASSES = frozenset({
     "rationale",
@@ -489,6 +539,8 @@ def validate_manifest(
                 raise ValueError(f"duplicate scenario: {scenario_id}")
             question_keys.add(question.key)
             scenario_ids.add(scenario_id)
+            if not question.gold_answer.strip():
+                raise ValueError(f"missing gold answer: {scenario_id}")
             if not set(question.expected_turn_keys).issubset(turn_keys):
                 raise ValueError(f"unknown expected turn in scenario: {scenario_id}")
             if question.handoff_sufficient:
