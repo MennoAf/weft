@@ -188,6 +188,7 @@ def test_production_container_uses_frozen_virtualenv_directly():
     assert 'CMD ["/app/.venv/bin/python", "-m", "weft.mcp"]' in dockerfile
     assert 'CMD ["uv", "run"' not in dockerfile
     assert 'WEFT_MIGRATION_MODE = "verify"' in fly_config
+    assert 'grace_period = "60s"' in fly_config
 
 
 def test_db_timeout_defaults_are_bounded():
