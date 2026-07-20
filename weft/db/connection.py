@@ -61,14 +61,18 @@ def get_db(pool: asyncpg.Pool) -> Union[asyncpg.Pool, asyncpg.Connection]:
 
 
 async def _pgvector_codec_init(conn: asyncpg.Connection) -> None:
-    """Pool init callback: register pgvector type codec on each new connection.
+    """Initialize pgvector resolution and its codec on each connection.
 
-    Encodes list[float] → pgvector text format and decodes back automatically,
-    eliminating manual string manipulation.
+    Supabase's pooler resets ``search_path`` to ``"$user", public`` even when
+    the login role has a role-level setting. Weft contains unqualified
+    ``::vector`` casts, while Supabase installs pgvector in ``extensions``.
+    Set the application search path explicitly before registering the codec so
+    both SQL type resolution and asyncpg's Python codec work consistently.
 
     Tries multiple schemas since managed Postgres providers may install
     pgvector in different schemas (public, extensions, pg_catalog).
     """
+    await conn.execute("SET search_path TO public, extensions")
     for schema in ("public", "extensions", "pg_catalog"):
         try:
             await conn.set_type_codec(
