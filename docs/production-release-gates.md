@@ -18,14 +18,19 @@ FastMCP Client
 It does not call the Python handler directly. The test verifies:
 
 - `weft_prime` appears in `tools/list`;
-- omitted `project_id` returns within an outer five-second deadline when roots capability is absent, roots returns empty, or the roots callback remains silent;
-- the silent callback exercises the server's two-second reverse-RPC timeout;
-- explicit `project_id` bypasses roots even if the client callback is silent;
+- the active FastMCP request transport—not ambient process configuration—controls roots behavior;
+- Streamable HTTP and SSE never issue the `roots/list` reverse RPC, so omitted `project_id` returns within an outer deadline even when the client advertises a silent roots callback;
+- stdio retains bounded roots discovery for local clients, even if a stale HTTP environment value is present;
+- explicit `project_id` remains correctly scoped even if the client callback is silent;
 - progressive and full disclosure respect a 500-token output budget.
+
+The suite also serves the production FastMCP ASGI app through Uvicorn on a real loopback TCP socket. This catches response-stream and cancellation-lifecycle behavior hidden by HTTPX's in-process `ASGITransport`, and asserts clean server shutdown after a silent-roots call.
+
+On HTTP/SSE, omitted `project_id` is deliberately **user-wide**, not repo-scoped: project filters and project handoff continuity are absent, while authenticated-user/workspace RLS still applies. The response reports `project_resolution.scope="user-wide"` and warns callers to pass an explicit ID. Agents that require repository isolation must provide `project_id`; the liveness fallback must not be described as scoped.
 
 The current public `weft_prime` schema supports `progressive` and `full`. It does **not** support a `minimal` disclosure value; the approved plan's minimal-mode check is therefore an API/spec mismatch, not silently claimed coverage. Adding a new mode requires a separate product decision.
 
-The in-process harness covers MCP framing, session management, registration, and dispatch but not TCP, TLS, Fly proxy behavior, or real credentials. Before public release, run a redacted staging smoke against the deployed `/mcp` URL with a staging token and all three roots behaviors where the client supports them. Record commit/image, timestamp, client/version, elapsed time, disclosure, token counts, and status—never the bearer, DSN, raw memories, or user IDs.
+The local harness covers MCP framing, session management, registration, dispatch, TCP, and Uvicorn shutdown, but not TLS, Fly proxy behavior, or real credentials. Before public release, run a redacted staging smoke against the deployed `/mcp` URL. Record commit/image, timestamp, client/version, elapsed time, disclosure, token counts, and status—never the bearer, DSN, raw memories, or user IDs.
 
 ## Required Postgres role topology
 
@@ -86,11 +91,29 @@ Release requirements for the application connection:
 
 Then provision isolated synthetic users in staging and run the CRUD matrix through the production connection setup. Do not perform destructive probes against real user rows. Use synthetic/redacted content and delete only the staging fixture.
 
+## Supabase pooler requirements verified during cutover
+
+The restricted pooler login preserves Supabase's tenant suffix while changing
+the database role prefix. The suffix and credentials are secrets and must not
+be written to logs or artifacts.
+
+Supabase installs pgvector in the `extensions` schema and its pooler resets new
+sessions to `"$user", public`. The application role therefore needs `USAGE` on
+`extensions`, and `weft.db.connection._pgvector_codec_init` explicitly sets
+`search_path TO public, extensions` before registering the codec. A startup
+schema check alone is insufficient evidence: the release gate includes a real
+vector-backed write through the production MCP boundary.
+
 ## Gate status
 
 - Repository Streamable HTTP registered-tool harness: **PASS**.
 - Local production-equivalent RLS role/CRUD suite: **PASS**.
-- Real Fly Streamable HTTP smoke: **EXTERNAL / PENDING ACCESS**.
-- Real Supabase effective-role and staging CRUD verification: **EXTERNAL / PENDING ACCESS**.
+- Real Fly Streamable HTTP smoke: **PARTIAL** — absent/empty/explicit cases passed on the prior release; the silent-roots case remains tracked by `loom-8ec815de` and must be rerun against v163.
+- Real Supabase effective-role and CRUD verification: **PASS** on 2026-07-20 UTC, Fly v163 / commit `351103b` / image `deployment-01KXZY9DRYNX6SHAHAVZF5ETX4`.
+- Real vector-backed production writes: **PASS** (`weft_learn` and `weft_handoff`) after the pooler search-path fix.
 
-A deployed role mismatch blocks multi-user public release. It does not block single-user local evaluation.
+The production application connection reports login enabled, `SUPERUSER`,
+`CREATEROLE`, `CREATEDB`, and `BYPASSRLS` false, and zero public-object
+ownership. Synthetic two-user INSERT/SELECT/UPDATE/DELETE isolation passed;
+unset identity failed loudly; fixtures were removed. Stored evidence excludes
+DSNs, passwords, tenant suffixes, synthetic user IDs, and memory content.

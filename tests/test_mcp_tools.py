@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -590,22 +589,42 @@ class TestCoerceList:
 
 
 class TestDetectProjectId:
-    """A client that never answers roots/list must not hang the server.
+    """Roots discovery must be bounded on stdio and skipped on HTTP."""
 
-    Regression for the 2026-07-16 prime hang: ``ctx.list_roots()`` is a reverse
-    JSON-RPC to the client. HTTP/SSE clients may never reply, so the call must be
-    bounded by a timeout that degrades to None instead of awaiting forever.
-    """
+    async def test_http_transport_never_calls_roots(self, monkeypatch):
+        from weft.mcp.tools import _detect_project_id
 
-    async def test_returns_none_when_client_never_answers(self):
+        monkeypatch.setenv("WEFT_TRANSPORT", "stdio")
+        ctx = MagicMock()
+        ctx.transport = "streamable-http"
+        ctx.list_roots = AsyncMock(side_effect=AssertionError("roots RPC issued"))
+
+        assert await _detect_project_id(ctx) is None
+        ctx.list_roots.assert_not_awaited()
+
+    async def test_sse_transport_never_calls_roots(self, monkeypatch):
+        from weft.mcp.tools import _detect_project_id
+
+        monkeypatch.setenv("WEFT_TRANSPORT", "stdio")
+        ctx = MagicMock()
+        ctx.transport = "sse"
+        ctx.list_roots = AsyncMock(side_effect=AssertionError("roots RPC issued"))
+
+        assert await _detect_project_id(ctx) is None
+        ctx.list_roots.assert_not_awaited()
+
+    async def test_returns_none_when_stdio_client_never_answers(self, monkeypatch):
         import asyncio
 
         from weft.mcp.tools import _detect_project_id
+
+        monkeypatch.setenv("WEFT_TRANSPORT", "stdio")
 
         async def _never_returns():
             await asyncio.Event().wait()  # blocks forever, like a silent client
 
         ctx = MagicMock()
+        ctx.transport = "stdio"
         ctx.list_roots = _never_returns
 
         # Without the timeout this awaits forever; wait_for is the test's own
@@ -613,17 +632,29 @@ class TestDetectProjectId:
         result = await asyncio.wait_for(_detect_project_id(ctx), timeout=5.0)
         assert result is None
 
-    async def test_resolves_project_from_roots(self):
-        from unittest.mock import AsyncMock
-
+    async def test_resolves_project_from_stdio_roots(self, monkeypatch):
         from weft.mcp.tools import _detect_project_id
 
+        monkeypatch.setenv("WEFT_TRANSPORT", "stdio")
         root = MagicMock()
         root.uri = "file:///Users/jason/Projects/Weft"
         ctx = MagicMock()
+        ctx.transport = "stdio"
         ctx.list_roots = AsyncMock(return_value=[root])
 
         assert await _detect_project_id(ctx) == "weft"
+
+    async def test_active_stdio_transport_overrides_stale_http_env(self, monkeypatch):
+        from weft.mcp.tools import _detect_project_id
+
+        monkeypatch.setenv("WEFT_TRANSPORT", "streamable-http")
+        root = MagicMock()
+        root.uri = "file:///tmp/CurrentProject"
+        ctx = MagicMock()
+        ctx.transport = "stdio"
+        ctx.list_roots = AsyncMock(return_value=[root])
+
+        assert await _detect_project_id(ctx) == "currentproject"
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +730,7 @@ class TestUserIdFiltering:
 
     async def test_recall_without_user_id_defaults_to_caller(self, app, monkeypatch):
         """Calling weft_recall without user_id uses the authenticated caller (resolve_caller_user_id) automatically."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
 
         from weft.mcp.tools import weft_recall
 
