@@ -3,7 +3,7 @@
 **Date:** 2026-07-16
 **Trigger:** `weft_prime` hung at session start (>60s, never returned, twice — once at `disclosure="full"`, once at `"progressive"`).
 **Original incident status:** Root cause **confirmed by reproduction**. No code changed during the incident session.
-**Current status (2026-07-18):** **Fixed in repository, deployment transport verification pending.** `weft/mcp/tools.py::_detect_project_id` now bounds the reverse `roots/list` RPC with `asyncio.timeout(2.0)` and has a unit regression. A production-like Streamable HTTP registered-tool harness is still required before declaring the deployed transport gate complete. See [`validation-findings-2026-07.md`](validation-findings-2026-07.md).
+**Current status (2026-07-20):** **Fixed in repository; deployed rerun pending.** The initial two-second timeout proved insufficient on deployed Streamable HTTP because cancellation can remain coupled to FastMCP's reverse-RPC response stream. `weft/mcp/tools.py::_detect_project_id` now avoids `roots/list` entirely on Streamable HTTP/SSE and retains bounded roots discovery on stdio. Unit, registered-tool, and real loopback TCP/Uvicorn regressions pass, including clean shutdown after a client advertises but never answers roots. See [`validation-findings-2026-07.md`](validation-findings-2026-07.md).
 
 ---
 
