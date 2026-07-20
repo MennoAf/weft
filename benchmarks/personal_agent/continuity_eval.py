@@ -87,6 +87,7 @@ def build_fixture_snapshot(
                         "query": question.query,
                         "handoff_sufficient": question.handoff_sufficient,
                         "expected_turn_keys": list(question.expected_turn_keys),
+                        "gold_answer": question.gold_answer,
                     }
                     for question in session.questions
                 ],

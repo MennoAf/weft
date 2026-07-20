@@ -211,10 +211,31 @@ turn IDs—and recursively rejects DSN, bearer, API-key, password, secret, and t
 patterns before an artifact can be written.
 
 Deterministic tests establish retrieval mechanics only. Repetitions are repeated
-measures, **not independent samples**; decisions aggregate scenario-level outcomes
-within the four independent sessions. Reader/judge answer quality remains
+measures, **not independent samples**; decisions aggregate scenario-level majorities
+within the four independent sessions. The precommitted Arm-B gate requires at least
+8 paired core-episodic wins across the 16 cases, zero paired losses, improvements in
+at least 3 classes, no handoff-sufficient regression, no missing judge calls, and
+zero instruction/unsupported/stale safety failures.
+
+`continuity_provider_contracts.json` pins a cross-provider evaluation pair from
+first-party documentation checked 2026-07-20:
+
+- reader: stable Google `gemini-2.5-flash-lite`, Interactions API JSON schema,
+  $0.10/$0.40 per million input/output tokens;
+- independent judge: Anthropic `claude-haiku-4-5-20251001`, Messages API
+  `output_config.format` JSON schema, $1/$5 per million input/output tokens.
+
+Sources are stored in the contract file. `continuity_runner.py` renders deterministic
+prompts, strictly validates reader/judge JSON, uses stable stage-specific call IDs,
+records immutable attempt rows with token usage, resumes only when provider/model/
+prompt hashes match, and scores over the complete expected population. The Google
+SDK is deliberately not a normal Weft runtime dependency; its adapter imports lazily
+and explains the missing benchmark dependency. Attempt allocation uses POSIX advisory
+locks (`fcntl`), so paid benchmark execution supports Linux/macOS rather than native
+Windows. Reader/judge answer quality remains
 `PENDING-PAID-EVALUATION`, production A/B/C wiring remains disabled, and no paid
-provider call is made by this package.
+provider call is made by tests or imports. Cost estimation, explicit approval, and
+per-attempt/retry spend ceilings are a separate required gate before execution.
 
 Focused verification:
 
