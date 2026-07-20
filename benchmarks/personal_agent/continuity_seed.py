@@ -12,6 +12,7 @@ from benchmarks.personal_agent.continuity_manifest import (
     PAAH_CONTINUITY_OTHER_USER_ID,
     PAAH_CONTINUITY_PROJECT_ID,
     PAAH_CONTINUITY_USER_ID,
+    SESSIONS,
     TURNS,
 )
 from weft.auth import current_user_id
@@ -19,14 +20,34 @@ from weft.auth import current_user_id
 
 @dataclass(slots=True)
 class SeedContinuityResult:
-    episode_id: str
-    turn_ids: dict[str, str] = field(default_factory=dict)
+    episode_ids: dict[str, str] = field(default_factory=dict)
+    turn_ids_by_session: dict[str, dict[str, str]] = field(default_factory=dict)
     other_project_turn_id: str | None = None
     other_user_turn_id: str | None = None
 
     @property
+    def episode_id(self) -> str:
+        """Legacy accessor for the original launch-plan session."""
+        return self.episode_ids[SESSIONS[0].session_id]
+
+    @property
+    def turn_ids(self) -> dict[str, str]:
+        """Legacy accessor for the original launch-plan turn map."""
+        return self.turn_ids_by_session[SESSIONS[0].session_id]
+
+    @property
     def clean(self) -> bool:
-        return len(set(self.turn_ids.values())) == len(TURNS)
+        expected_turns = sum(len(session.turns) for session in SESSIONS)
+        all_ids = [
+            turn_id
+            for session_turns in self.turn_ids_by_session.values()
+            for turn_id in session_turns.values()
+        ]
+        return (
+            set(self.episode_ids) == {session.session_id for session in SESSIONS}
+            and len(all_ids) == expected_turns
+            and len(set(all_ids)) == expected_turns
+        )
 
 
 async def _seed_episode(ctx, *, user_id: str, project_id: str, title: str):
@@ -58,22 +79,26 @@ async def _append(ctx, *, user_id: str, episode_id: str, content: str, occurred_
 async def seed_continuity(pool: asyncpg.Pool) -> SeedContinuityResult:
     app = await build_app_context(pool)
     ctx = make_ctx(app)
-    episode = await _seed_episode(
-        ctx,
-        user_id=PAAH_CONTINUITY_USER_ID,
-        project_id=PAAH_CONTINUITY_PROJECT_ID,
-        title="Continuity acceptance session",
-    )
-    result = SeedContinuityResult(episode_id=episode["id"])
-    for spec in TURNS:
-        turn = await _append(
+    result = SeedContinuityResult()
+    for session in SESSIONS:
+        episode = await _seed_episode(
             ctx,
             user_id=PAAH_CONTINUITY_USER_ID,
-            episode_id=result.episode_id,
-            content=spec.content,
-            occurred_at=spec.occurred_at,
+            project_id=session.project_id,
+            title=session.title,
         )
-        result.turn_ids[spec.key] = turn["turn_id"]
+        result.episode_ids[session.session_id] = episode["id"]
+        session_turn_ids: dict[str, str] = {}
+        for spec in session.turns:
+            turn = await _append(
+                ctx,
+                user_id=PAAH_CONTINUITY_USER_ID,
+                episode_id=episode["id"],
+                content=spec.content,
+                occurred_at=spec.occurred_at,
+            )
+            session_turn_ids[spec.key] = turn["turn_id"]
+        result.turn_ids_by_session[session.session_id] = session_turn_ids
 
     other_project = await _seed_episode(
         ctx,

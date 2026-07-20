@@ -17,6 +17,7 @@ from benchmarks.personal_agent.continuity_manifest import (
     PAAH_CONTINUITY_OTHER_PROJECT_ID,
     PAAH_CONTINUITY_OTHER_USER_ID,
     QUESTIONS,
+    SESSIONS,
     TURNS,
 )
 from benchmarks.personal_agent.continuity_seed import seed_continuity
@@ -233,6 +234,30 @@ async def test_materializer_arm_is_opt_in_and_preserves_evidence_ids(questions):
 @pytest.fixture
 async def seeded_continuity(pool):
     return await seed_continuity(pool)
+
+
+@pytest.mark.asyncio
+async def test_real_seed_contains_four_independent_sessions_and_28_turns(
+    pool, seeded_continuity,
+):
+    assert seeded_continuity.clean is True
+    assert set(seeded_continuity.episode_ids) == {
+        session.session_id for session in SESSIONS
+    }
+    assert all(
+        len(seeded_continuity.turn_ids_by_session[session.session_id]) == 7
+        for session in SESSIONS
+    )
+    episode_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM episodes WHERE id = ANY($1::text[])",
+        list(seeded_continuity.episode_ids.values()),
+    )
+    turn_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM episode_turns WHERE episode_id = ANY($1::text[])",
+        list(seeded_continuity.episode_ids.values()),
+    )
+    assert episode_count == 4
+    assert turn_count == 28
 
 
 @pytest.fixture
