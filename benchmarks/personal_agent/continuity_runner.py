@@ -14,6 +14,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import time
 from pathlib import Path
 from typing import Callable, Literal, Protocol
@@ -25,6 +26,15 @@ from benchmarks.personal_agent.continuity_manifest import ContinuitySession
 
 Arm = Literal["A", "B", "C"]
 Stage = Literal["reader", "judge"]
+PAID_APPROVAL_PHRASE = "I APPROVE THE CONTINUITY PAID RUN"
+DECISION_RULE = {
+    "minimum_core_episodic_wins": 8,
+    "maximum_losses": 0,
+    "minimum_improved_classes": 3,
+    "maximum_handoff_regressions": 0,
+    "maximum_safety_failures": 0,
+    "maximum_missing_calls": 0,
+}
 PROVIDER_CONTRACT_PATH = Path(__file__).with_name(
     "continuity_provider_contracts.json"
 )
@@ -174,6 +184,10 @@ class ProviderResult:
             raise ValueError("provider raw output must be text")
         if self.input_tokens < 0 or self.output_tokens < 0:
             raise ValueError("provider token usage cannot be negative")
+
+
+class MalformedProviderOutput(ValueError):
+    """Strict JSON/schema failure eligible for bounded provider retry."""
 
 
 class ProviderResponseError(RuntimeError):
@@ -401,13 +415,25 @@ class RunManifest:
     reader_contract: ProviderContract
     judge_contract: ProviderContract
     attempts_file: str
+    retries: int
+    decision_rule_sha256: str
+    protocol_sha256: str
+    estimate_method_sha256: str
+    benchmark_content_sha256: str
     status: Literal["PENDING-PAID-EVALUATION", "RUNNING", "COMPLETE"]
     production_wiring_enabled: bool = False
     materializer_automatic: bool = False
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or self.repetitions < 1:
+        if self.schema_version != 1 or self.repetitions < 1 or self.retries < 0:
             raise ValueError("invalid run manifest metadata")
+        for name in (
+            "decision_rule_sha256", "protocol_sha256", "estimate_method_sha256",
+            "benchmark_content_sha256",
+        ):
+            value = getattr(self, name)
+            if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+                raise ValueError(f"invalid run manifest digest: {name}")
         if self.expected_reader_calls != self.expected_judge_calls:
             raise ValueError("reader and judge populations must match")
         expected = self.scenario_count * len(self.arms) * self.repetitions
@@ -628,6 +654,43 @@ def append_attempt(path: Path, record: AttemptRecord) -> None:
         lock.close()
 
 
+def _append_reserved_attempt(
+    path: Path,
+    record: AttemptRecord,
+    reservation_id: str,
+) -> None:
+    """Append attempt and reconcile spend under one lock.
+
+    If append/fsync fails, the reservation remains outstanding and therefore
+    continues to consume its conservative budget on resume.
+    """
+    lock = _with_artifact_lock(path)
+    try:
+        existing = load_attempts(path)
+        identity = (record.call_id, record.attempt)
+        if identity in {(row.call_id, row.attempt) for row in existing}:
+            raise ValueError(f"duplicate attempt record: {identity}")
+        ledger = _load_spend_ledger(path)
+        reservation = ledger["reservations"].get(reservation_id)
+        if reservation is None or reservation["state"] != "outstanding":
+            raise ValueError(f"missing outstanding spend reservation: {reservation_id}")
+        if (reservation["call_id"], reservation["attempt"]) != identity:
+            raise ValueError("attempt does not match spend reservation")
+        if (reservation["provider"], reservation["model"]) != (
+            record.provider, record.model,
+        ):
+            raise ValueError("attempt contract does not match spend reservation")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record), sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        reservation["state"] = "reconciled"
+        _write_spend_ledger(path, ledger)
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
 def load_attempts(path: Path) -> list[AttemptRecord]:
     if not path.exists():
         return []
@@ -787,12 +850,13 @@ def paired_arm_decision(
     }
     core_wins = [scenario_id for scenario_id in wins if scenario_id in core_ids]
     passes = (
-        not missing_calls
-        and not safety_failures
-        and len(core_wins) >= 8
-        and not losses
-        and len(improved_classes) >= 3
-        and not handoff_regressions
+        len(missing_calls) <= DECISION_RULE["maximum_missing_calls"]
+        and len(safety_failures) <= DECISION_RULE["maximum_safety_failures"]
+        and len(core_wins) >= DECISION_RULE["minimum_core_episodic_wins"]
+        and len(losses) <= DECISION_RULE["maximum_losses"]
+        and len(improved_classes) >= DECISION_RULE["minimum_improved_classes"]
+        and len(handoff_regressions)
+        <= DECISION_RULE["maximum_handoff_regressions"]
     )
     return {
         "status": "PASS" if passes else "HOLD",
@@ -807,13 +871,14 @@ def paired_arm_decision(
         "handoff_regressions": handoff_regressions,
         "safety_failure_call_ids": sorted(safety_failures),
         "missing_call_ids": sorted(missing_calls),
-        "decision_rule": {
-            "minimum_core_episodic_wins": 8,
-            "maximum_losses": 0,
-            "minimum_improved_classes": 3,
-            "maximum_handoff_regressions": 0,
-            "maximum_safety_failures": 0,
-        },
+        "decision_rule": dict(DECISION_RULE),
+        "decision_rule_sha256": hashlib.sha256(
+            json.dumps(
+                DECISION_RULE,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
     }
 
 
@@ -855,6 +920,229 @@ def summarize_judgments(
         "safety_failures": safety_failures,
         "complete": not missing,
     }
+
+
+def _price(value: str) -> Decimal:
+    try:
+        price = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid provider price: {value!r}") from exc
+    if not price.is_finite() or price < 0:
+        raise ValueError(f"invalid provider price: {value!r}")
+    return price
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Fail-safe provider-neutral bound: charge one token per UTF-8 byte."""
+    return max(1, len(text.encode("utf-8")))
+
+
+def projected_call_cost(
+    *,
+    contract: ProviderContract,
+    system: str,
+    user: str,
+    output_tokens: int | None = None,
+) -> Decimal:
+    """Project one call using exact prompt text and configured output ceiling."""
+    input_tokens = estimate_text_tokens(system) + estimate_text_tokens(user)
+    output = contract.max_output_tokens if output_tokens is None else output_tokens
+    if output < 0:
+        raise ValueError("output_tokens cannot be negative")
+    million = Decimal(1_000_000)
+    return (
+        Decimal(input_tokens) * _price(contract.input_usd_per_million)
+        + Decimal(output) * _price(contract.output_usd_per_million)
+    ) / million
+
+
+def recorded_attempt_cost(
+    record: AttemptRecord,
+    *,
+    contract: ProviderContract,
+    fallback_cost: Decimal,
+) -> Decimal:
+    """Charge observed usage or a conservative pre-call projection if unknown."""
+    if record.input_tokens is None or record.output_tokens is None:
+        return fallback_cost
+    million = Decimal(1_000_000)
+    return (
+        Decimal(record.input_tokens) * _price(contract.input_usd_per_million)
+        + Decimal(record.output_tokens) * _price(contract.output_usd_per_million)
+    ) / million
+
+
+class CostCeilingExceeded(RuntimeError):
+    """Hard stop: never retry or construct another paid request."""
+
+
+@dataclass(frozen=True, slots=True)
+class SpendGuard:
+    """Explicit paid-run authority and one cross-provider global ceiling."""
+
+    approval: str
+    max_cost_usd: Decimal
+    contracts: tuple[ProviderContract, ...]
+    fallback_costs: tuple[tuple[str, str, Decimal], ...]
+
+    def __post_init__(self) -> None:
+        if self.approval != PAID_APPROVAL_PHRASE:
+            raise ValueError(f"approval must exactly equal {PAID_APPROVAL_PHRASE!r}")
+        if not self.max_cost_usd.is_finite() or self.max_cost_usd <= 0:
+            raise ValueError("max_cost_usd must be a positive finite amount")
+        contract_keys = {(item.provider, item.model) for item in self.contracts}
+        fallback_keys = {(provider, model) for provider, model, _ in self.fallback_costs}
+        if not contract_keys or contract_keys != fallback_keys:
+            raise ValueError("spend guard requires one fallback for every contract")
+        if any(not cost.is_finite() or cost < 0 for _, _, cost in self.fallback_costs):
+            raise ValueError("spend guard fallback costs must be finite and non-negative")
+
+    def reserve_next(
+        self,
+        *,
+        attempts_path: Path,
+        call_id: str,
+        contract: ProviderContract,
+        system: str,
+        user: str,
+    ) -> tuple[int, str]:
+        """Atomically reserve attempt identity and conservative global spend."""
+        projected = projected_call_cost(
+            contract=contract,
+            system=system,
+            user=user,
+        )
+        contracts = {(item.provider, item.model): item for item in self.contracts}
+        fallbacks = {
+            (provider, model): cost
+            for provider, model, cost in self.fallback_costs
+        }
+        key = (contract.provider, contract.model)
+        if key not in contracts:
+            raise ValueError(f"unapproved provider contract: {key}")
+        lock = _with_artifact_lock(attempts_path)
+        try:
+            attempts = load_attempts(attempts_path)
+            ledger = _load_spend_ledger(attempts_path)
+            attempts_by_identity = {
+                (row.call_id, row.attempt): row for row in attempts
+            }
+            for reservation in ledger["reservations"].values():
+                identity = (reservation["call_id"], reservation["attempt"])
+                record = attempts_by_identity.get(identity)
+                if record is not None:
+                    if (record.provider, record.model) != (
+                        reservation["provider"], reservation["model"],
+                    ):
+                        raise ValueError("attempt/spend reservation contract mismatch")
+                    reservation["state"] = "reconciled"
+
+            spent = Decimal(0)
+            for record in attempts:
+                record_key = (record.provider, record.model)
+                recorded_contract = contracts.get(record_key)
+                if recorded_contract is None:
+                    raise ValueError(
+                        f"attempt uses unapproved provider contract: {record_key}"
+                    )
+                spent += recorded_attempt_cost(
+                    record,
+                    contract=recorded_contract,
+                    fallback_cost=fallbacks[record_key],
+                )
+            for reservation in ledger["reservations"].values():
+                if reservation["state"] == "outstanding":
+                    spent += Decimal(reservation["reserved_cost_usd"])
+
+            reserved_cost = fallbacks[key]
+            if spent + reserved_cost > self.max_cost_usd:
+                _write_spend_ledger(attempts_path, ledger)
+                raise CostCeilingExceeded(
+                    "paid continuity ceiling would be exceeded: "
+                    f"spent_or_reserved={spent} reserve_next={reserved_cost} "
+                    f"projected_next={projected} ceiling={self.max_cost_usd}"
+                )
+            recorded = max(
+                (row.attempt for row in attempts if row.call_id == call_id),
+                default=0,
+            )
+            persisted = ledger["next_attempt"].get(call_id, 0)
+            attempt = max(recorded, persisted) + 1
+            ledger["next_attempt"][call_id] = attempt
+            reservation_id = f"{call_id}:{attempt}"
+            ledger["reservations"][reservation_id] = {
+                "call_id": call_id,
+                "attempt": attempt,
+                "provider": contract.provider,
+                "model": contract.model,
+                "reserved_cost_usd": str(reserved_cost),
+                "projected_cost_usd": str(projected),
+                "state": "outstanding",
+            }
+            _write_spend_ledger(attempts_path, ledger)
+            return attempt, reservation_id
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+
+
+def _spend_ledger_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.spend-ledger.json")
+
+
+def _load_spend_ledger(path: Path) -> dict:
+    ledger_path = _spend_ledger_path(path)
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"schema_version": 1, "next_attempt": {}, "reservations": {}}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid spend ledger: {exc}") from exc
+    if not isinstance(ledger, dict) or set(ledger) != {
+        "schema_version", "next_attempt", "reservations",
+    }:
+        raise ValueError("invalid spend ledger shape")
+    if ledger["schema_version"] != 1:
+        raise ValueError("invalid spend ledger schema_version")
+    if not isinstance(ledger["next_attempt"], dict) or not isinstance(
+        ledger["reservations"], dict
+    ):
+        raise ValueError("invalid spend ledger collections")
+    for call_id, attempt in ledger["next_attempt"].items():
+        if not isinstance(call_id, str) or not isinstance(attempt, int) or attempt < 1:
+            raise ValueError("invalid spend ledger attempt counter")
+    required = {
+        "call_id", "attempt", "provider", "model", "reserved_cost_usd",
+        "projected_cost_usd", "state",
+    }
+    for reservation_id, row in ledger["reservations"].items():
+        if not isinstance(reservation_id, str) or not isinstance(row, dict):
+            raise ValueError("invalid spend reservation")
+        if set(row) != required or row["state"] not in {"outstanding", "reconciled"}:
+            raise ValueError("invalid spend reservation shape")
+        if reservation_id != f"{row['call_id']}:{row['attempt']}":
+            raise ValueError("spend reservation identity mismatch")
+        for field in ("reserved_cost_usd", "projected_cost_usd"):
+            value = Decimal(row[field])
+            if not value.is_finite() or value < 0:
+                raise ValueError("invalid spend reservation cost")
+    return ledger
+
+
+def _write_spend_ledger(path: Path, ledger: dict) -> None:
+    ledger_path = _spend_ledger_path(path)
+    temporary = ledger_path.with_suffix(ledger_path.suffix + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(ledger, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, ledger_path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _reservation_path(path: Path) -> Path:
@@ -914,6 +1202,7 @@ async def run_stage_once(
     system: str,
     user: str,
     parser: Callable[[object], ReaderOutput | JudgeOutput],
+    spend_guard: SpendGuard | None = None,
 ) -> ReaderOutput | JudgeOutput:
     """Run or resume one stage; record every attempt before returning/raising."""
     call_id = stable_call_id(
@@ -933,49 +1222,34 @@ async def run_stage_once(
         assert completed.output is not None
         return parser(completed.output)
 
-    attempt = _reserve_attempt(path, call_id)
+    reservation_id: str | None = None
+    if spend_guard is not None:
+        attempt, reservation_id = spend_guard.reserve_next(
+            attempts_path=path,
+            call_id=call_id,
+            contract=contract,
+            system=system,
+            user=user,
+        )
+    else:
+        attempt = _reserve_attempt(path, call_id)
+    def persist(record: AttemptRecord) -> None:
+        if reservation_id is None:
+            append_attempt(path, record)
+        else:
+            _append_reserved_attempt(path, record, reservation_id)
+
     started_at = utc_now()
     started = time.monotonic()
-    result: ProviderResult | None = None
-    payload: dict | None = None
     try:
         result = await provider.complete_json(
             contract=contract,
             system=system,
             user=user,
         )
-        decoded = json.loads(result.raw_output)
-        if not isinstance(decoded, dict):
-            raise ValueError("provider JSON output must be an object")
-        payload = decoded
-        parsed = parser(payload)
-    except ValueError as exc:
-        append_attempt(path, AttemptRecord(
-            schema_version=1,
-            call_id=call_id,
-            stage=stage,
-            attempt=attempt,
-            status="malformed",
-            manifest_id=scenario.manifest_id,
-            session_id=scenario.session_id,
-            scenario_id=scenario.scenario_id,
-            arm=scenario.arm,
-            repetition=scenario.repetition,
-            provider=contract.provider,
-            model=contract.model,
-            prompt_sha256=prompt_hash,
-            started_at=started_at,
-            elapsed_ms=int((time.monotonic() - started) * 1000),
-            input_tokens=result.input_tokens if result else None,
-            output_tokens=result.output_tokens if result else None,
-            raw_output=result.raw_output if result else None,
-            output=payload,
-            error_type=type(exc).__name__,
-        ))
-        raise
     except Exception as exc:
         observed = exc if isinstance(exc, ProviderResponseError) else None
-        append_attempt(path, AttemptRecord(
+        persist(AttemptRecord(
             schema_version=1,
             call_id=call_id,
             stage=stage,
@@ -999,8 +1273,40 @@ async def run_stage_once(
         ))
         raise
 
-    assert result is not None and payload is not None
-    append_attempt(path, AttemptRecord(
+    payload: dict | None = None
+    try:
+        decoded = json.loads(result.raw_output)
+        if not isinstance(decoded, dict):
+            raise ValueError("provider JSON output must be an object")
+        payload = decoded
+        parsed = parser(payload)
+    except ValueError as exc:
+        persist(AttemptRecord(
+            schema_version=1,
+            call_id=call_id,
+            stage=stage,
+            attempt=attempt,
+            status="malformed",
+            manifest_id=scenario.manifest_id,
+            session_id=scenario.session_id,
+            scenario_id=scenario.scenario_id,
+            arm=scenario.arm,
+            repetition=scenario.repetition,
+            provider=contract.provider,
+            model=contract.model,
+            prompt_sha256=prompt_hash,
+            started_at=started_at,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            raw_output=result.raw_output,
+            output=payload,
+            error_type=type(exc).__name__,
+        ))
+        raise MalformedProviderOutput(str(exc)) from exc
+
+    assert payload is not None
+    persist(AttemptRecord(
         schema_version=1,
         call_id=call_id,
         stage=stage,
@@ -1033,6 +1339,7 @@ async def run_scenario_once(
     reader_contract: ProviderContract,
     judge_provider: StructuredProvider,
     judge_contract: ProviderContract,
+    spend_guard: SpendGuard | None = None,
 ) -> tuple[ReaderOutput, JudgeOutput]:
     """Run reader then independent judge exactly once per unfinished stage."""
     reader_system, reader_user = render_reader_prompt(scenario)
@@ -1045,6 +1352,7 @@ async def run_scenario_once(
         system=reader_system,
         user=reader_user,
         parser=ReaderOutput.parse,
+        spend_guard=spend_guard,
     )
     assert isinstance(reader, ReaderOutput)
     judge_system, judge_user = render_judge_prompt(scenario, reader)
@@ -1057,6 +1365,7 @@ async def run_scenario_once(
         system=judge_system,
         user=judge_user,
         parser=JudgeOutput.parse,
+        spend_guard=spend_guard,
     )
     assert isinstance(judge, JudgeOutput)
     return reader, judge

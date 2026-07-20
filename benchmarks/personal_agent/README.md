@@ -234,14 +234,62 @@ and explains the missing benchmark dependency. Attempt allocation uses POSIX adv
 locks (`fcntl`), so paid benchmark execution supports Linux/macOS rather than native
 Windows. Reader/judge answer quality remains
 `PENDING-PAID-EVALUATION`, production A/B/C wiring remains disabled, and no paid
-provider call is made by tests or imports. Cost estimation, explicit approval, and
-per-attempt/retry spend ceilings are a separate required gate before execution.
+provider call is made by tests or imports.
+
+### Zero-call estimate and paid-run gate
+
+Generate the complete estimate artifact without constructing either provider client:
+
+```bash
+uv run python -m benchmarks.personal_agent.continuity_cli estimate \
+  --output artifacts/continuity/estimate.json \
+  --retries 1
+```
+
+The artifact contains all 168 exact reader prompts and stable call IDs. A judge prompt
+depends on the future paid reader answer, so the pre-call artifact labels its 168 judge
+entries as conservative envelopes rather than pretending they are future exact prompts.
+Each envelope sizes the synthetic candidate to `reader.max_output_tokens * 4` bytes and
+charges every reader/judge attempt at the configured maximum output. It reports both the
+one-attempt projection and the retry-inclusive worst case. Estimate mode records
+`provider_clients_constructed=false`, `network_calls=0`, the precommitted scenario-level
+decision rule, and its SHA-256.
+
+A paid run requires all three controls: the exact approval phrase, a positive finite
+global ceiling, and a ceiling at least as large as the retry-inclusive estimate:
+
+```bash
+uv run python -m benchmarks.personal_agent.continuity_cli run \
+  --run-dir artifacts/continuity/run-YYYYMMDD \
+  --approval "I APPROVE THE CONTINUITY PAID RUN" \
+  --max-cost-usd <AT-OR-ABOVE-ESTIMATE> \
+  --retries 1
+```
+
+The command validates authority, estimate, and immutable manifest before constructing
+SDK clients. The manifest pins retry policy plus decision-rule, estimator-method, and
+full protocol digests (scenario content, provider contracts, reader prompt hashes,
+judge-envelope hashes, estimator assumptions, and the exact runner/CLI/manifest/contract
+file bytes actually executed); the protocol is rebuilt before clients and again before
+scoring, so uncommitted implementation drift is detected rather than hidden by Git HEAD.
+The same global ceiling is checked immediately before every reader/judge
+attempt and retry; observed usage from both providers counts toward it, and attempts
+with missing usage are conservatively charged at that provider's maximum projected
+call. Attempt identity and conservative spend are reserved atomically before a paid
+request. Unresolved reservations (including a crash or append/fsync failure after the
+request) remain charged until a durable attempt row reconciles them. Ceiling exhaustion
+is a hard stop, never a retry. Artifacts are
+`manifest.json`, append-only `attempts.jsonl`, and `results.json`. Results cannot enable
+production routing or automatic materialization. No paid continuity command was run as
+part of implementation or tests.
 
 Focused verification:
 
 ```bash
 uv run pytest benchmarks/personal_agent/tests/test_paah_continuity.py \
-  benchmarks/personal_agent/tests/test_continuity_eval.py -q
+  benchmarks/personal_agent/tests/test_continuity_eval.py \
+  benchmarks/personal_agent/tests/test_continuity_runner.py \
+  benchmarks/personal_agent/tests/test_continuity_cli.py -q
 ```
 
 ## Layout
@@ -254,4 +302,4 @@ uv run pytest benchmarks/personal_agent/tests/test_paah_continuity.py \
 - `harness.py` / `temporal_harness.py` / `entity_harness.py` / `agenda_harness.py`
   — drive the real read paths, distill agent-facing signals.
 - `__main__.py` — testcontainers runner (all four shapes) → `results.json`.
-- `tests/` — structural pytest asserts (17 total).
+- `tests/` — structural, persistence, provider-contract, and paid-safety asserts.
