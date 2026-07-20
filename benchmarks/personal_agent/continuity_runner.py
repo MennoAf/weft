@@ -358,8 +358,14 @@ class GoogleStructuredProvider:
         )
         text, text_invalid = _observed_text(interaction, "output_text")
         usage = getattr(interaction, "usage", None)
-        input_tokens, input_invalid = _observed_token_count(usage, "input_tokens")
-        output_tokens, output_invalid = _observed_token_count(usage, "output_tokens")
+        input_tokens, input_invalid = _observed_token_count(
+            usage,
+            "total_input_tokens",
+        )
+        output_tokens, output_invalid = _observed_token_count(
+            usage,
+            "total_output_tokens",
+        )
         if text_invalid or input_invalid or output_invalid:
             invalid = [
                 name for name, failed in (

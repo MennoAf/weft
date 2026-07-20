@@ -3,12 +3,12 @@
   "checked_at": "2026-07-20",
   "reader": {
     "provider": "google",
-    "model": "gemini-2.5-flash-lite",
+    "model": "gemini-3.1-flash-lite",
     "api": "interactions.create:application/json-schema",
     "temperature": 0,
     "max_output_tokens": 512,
-    "input_usd_per_million": "0.10",
-    "output_usd_per_million": "0.40",
+    "input_usd_per_million": "0.25",
+    "output_usd_per_million": "1.50",
     "pricing_source": "https://ai.google.dev/gemini-api/docs/pricing",
     "pricing_checked_at": "2026-07-20"
   },
@@ -24,7 +24,8 @@
     "pricing_checked_at": "2026-07-20"
   },
   "model_sources": {
-    "reader": "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite",
+    "reader": "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite",
+    "reader_replacement": "https://ai.google.dev/gemini-api/docs/deprecations",
     "reader_structured_output": "https://ai.google.dev/gemini-api/docs/structured-output",
     "judge": "https://platform.claude.com/docs/en/about-claude/models/overview",
     "judge_structured_output": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
