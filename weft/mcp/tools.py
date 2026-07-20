@@ -152,19 +152,33 @@ def _parse_review_after(value: str | None) -> datetime | None:
 
 
 async def _detect_project_id(ctx: Context) -> str | None:
-    """Auto-detect project_id by asking the MCP client for its workspace roots.
+    """Auto-detect project_id from roots on cancellation-safe transports.
 
-    This is NOT a local filesystem lookup: ``ctx.list_roots()`` sends a reverse
-    JSON-RPC ``roots/list`` request back to the connected client and awaits the
-    reply. Clients on HTTP/SSE transports (or any client that doesn't advertise
-    the ``roots`` capability) may never answer, so the call is bounded by an
-    explicit timeout. On timeout — or any other failure — we return None, which
-    callers treat as "roots unavailable" and fall back to an explicit/env project.
+    ``ctx.list_roots()`` is a reverse JSON-RPC request. Streamable HTTP and SSE
+    sessions may advertise roots yet never answer; cancelling that request can
+    remain coupled to the response-stream lifecycle and hang the original tool
+    call. The active FastMCP request transport is authoritative, so HTTP transports
+    never issue the reverse RPC and require an explicit project when scoping
+    matters. Stdio retains bounded roots discovery for local clients that support
+    it. ``WEFT_TRANSPORT`` is only a fallback outside a FastMCP request context.
 
     Uses the directory name of the first root URI as the project identifier.
-    E.g. file:///Users/jason/Projects/Weft → "weft"
-    Returns None if roots are unavailable, empty, or the client doesn't respond.
+    E.g. file:///Users/jason/Projects/Weft → "weft". Returns None when roots are
+    unavailable, empty, or unresponsive.
     """
+    context_transport = ctx.transport
+    transport = (
+        context_transport
+        if isinstance(context_transport, str)
+        else os.environ.get("WEFT_TRANSPORT", "stdio")
+    ).strip().lower()
+    if transport in {"streamable-http", "streamable_http", "sse"}:
+        logger.debug(
+            "detect_project_id skipped roots reverse RPC on transport=%s",
+            transport,
+        )
+        return None
+
     try:
         async with asyncio.timeout(2.0):
             roots = await ctx.list_roots()
@@ -1439,7 +1453,10 @@ async def weft_prime(
     mode: str | None = None,
 ) -> dict:
     """Session primer: assemble structured context for session startup.
-    If project_id is omitted, auto-detects from the client's working directory.
+
+    Stdio clients may omit project_id and use roots auto-detection. HTTP/SSE
+    clients must pass project_id for repo-scoped context; omission is explicitly
+    user-wide because reverse roots requests are unsafe on silent clients.
 
     query: optional intent/topic string to bias which behaviors, decisions,
     issues, and recent work are surfaced. When provided, those sections use
@@ -1487,9 +1504,10 @@ async def weft_prime(
         if resolved_project is None:
             result["project_resolution"] = {
                 "resolved": False,
+                "scope": "user-wide",
                 "warning": (
-                    "No project_id resolved from MCP client roots. "
-                    "Project handoff continuity is skipped; pass project_id "
+                    "No project_id resolved. Prime is user-wide: project filters "
+                    "and project handoff continuity are absent. Pass project_id "
                     "explicitly for repo-scoped prime."
                 ),
             }
