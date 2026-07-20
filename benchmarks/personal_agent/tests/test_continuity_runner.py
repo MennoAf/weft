@@ -16,6 +16,7 @@ from benchmarks.personal_agent.continuity_runner import (
     AttemptRecord,
     GoogleStructuredProvider,
     JudgeOutput,
+    MalformedProviderOutput,
     ProviderContract,
     ProviderResponseError,
     ProviderResult,
@@ -173,6 +174,11 @@ def test_run_manifest_is_immutable_and_population_honest(tmp_path):
         reader_contract=CONTRACT,
         judge_contract=CONTRACT,
         attempts_file="attempts.jsonl",
+        retries=1,
+        decision_rule_sha256="a" * 64,
+        protocol_sha256="b" * 64,
+        estimate_method_sha256="c" * 64,
+        benchmark_content_sha256="d" * 64,
         status="PENDING-PAID-EVALUATION",
     )
     path = tmp_path / "manifest.json"
@@ -645,7 +651,7 @@ async def test_real_adapter_malformed_json_retains_billed_usage_and_raw_output(
         contract = reader_contract
 
     path = tmp_path / "attempts.jsonl"
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(MalformedProviderOutput):
         await run_stage_once(
             path=path,
             scenario=_scenario(),
