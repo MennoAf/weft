@@ -108,7 +108,7 @@ vector-backed write through the production MCP boundary.
 
 - Repository Streamable HTTP registered-tool harness: **PASS**.
 - Local production-equivalent RLS role/CRUD suite: **PASS**.
-- Real Fly Streamable HTTP smoke: **PARTIAL** — absent/empty/explicit cases passed on the prior release; the silent-roots case remains tracked by `loom-8ec815de` and must be rerun against v163.
+- Real Fly Streamable HTTP smoke: **PASS** on 2026-07-20 UTC, main commit `8a0861d`, image `deployment-01KY065WB2XV30E12YF6AHMC0R`. Redacted elapsed times: absent roots 4.170s, empty roots 2.733s, silent advertised roots 2.932s, explicit progressive 2.657s, explicit full 2.856s. All calls respected the 500-token budget; omitted-project responses reported `scope="user-wide"`; the ephemeral five-minute supervisor token was revoked immediately after the matrix.
 - Real Supabase effective-role and CRUD verification: **PASS** on 2026-07-20 UTC, Fly v163 / commit `351103b` / image `deployment-01KXZY9DRYNX6SHAHAVZF5ETX4`.
 - Real vector-backed production writes: **PASS** (`weft_learn` and `weft_handoff`) after the pooler search-path fix.
 
