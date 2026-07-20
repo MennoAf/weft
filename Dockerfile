@@ -37,4 +37,4 @@ ENV WEFT_ENV=production \
 
 EXPOSE 8000
 
-CMD ["uv", "run", "python", "-m", "weft.mcp"]
+CMD ["/app/.venv/bin/python", "-m", "weft.mcp"]

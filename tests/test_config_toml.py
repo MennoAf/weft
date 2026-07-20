@@ -179,6 +179,17 @@ def test_invalid_migration_mode_fails_config_load(tmp_path: Path, monkeypatch):
         load_config()
 
 
+def test_production_container_uses_frozen_virtualenv_directly():
+    """Runtime startup must not reconcile packages inside Fly's health gate."""
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+    fly_config = (repo_root / "fly.toml").read_text(encoding="utf-8")
+
+    assert 'CMD ["/app/.venv/bin/python", "-m", "weft.mcp"]' in dockerfile
+    assert 'CMD ["uv", "run"' not in dockerfile
+    assert 'WEFT_MIGRATION_MODE = "verify"' in fly_config
+
+
 def test_db_timeout_defaults_are_bounded():
     """Pool must ship with finite timeouts so a stalled query/drained pool
     fails fast instead of hanging (intermittent-hang regression guard)."""
