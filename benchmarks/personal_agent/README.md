@@ -179,6 +179,50 @@ agenda `finding` self-clears to `null`.
   (`weft-99cac4e5`'s sibling family: the fallback should recover when the turns
   answer is present-but-irrelevant, not only when it's empty).
 
+## Handoff + targeted-turn continuity evaluation
+
+The continuity benchmark is deliberately separate from the older single-shape
+scores above. It asks whether concise handoff plus targeted turn evidence helps
+a later session answer details the handoff intentionally omitted—without putting
+raw dialogue into prime.
+
+`continuity_manifest.py` defines **4 independent synthetic sessions × 7 scenarios
+= 28 stable scenario IDs** across unrelated domains: software launch, community
+event logistics, kitchen renovation, and research methodology. Each session has:
+
+- 2 handoff-sufficient questions (`next_action`, `final_decision`);
+- 4 core episodic questions (`rationale`, `chronology`, `exact_wording`,
+  `omitted_detail`)—**16 core paired scenarios** across the manifest;
+- 1 supersession safety question;
+- quoted instruction-shaped dialogue that remains labelled evidence;
+- its own project scope, so another fixture cannot crowd relevant turns out of a
+  bounded retrieval result.
+
+The project isolation is load-bearing. An early expansion seeded all four sessions
+under one project; the real chronology test then lost a correct launch turn because
+other sessions competed inside the top-k. Giving each independent fixture a distinct
+synthetic project fixed the test and the experimental design.
+
+`validate_manifest()` fails loudly on duplicate IDs, unknown expected turns,
+missing final/superseded/instruction evidence, incorrect 2+5 topology, router misses,
+or anything other than 4 sessions / 28 scenarios / 16 core episodic cases.
+`build_fixture_snapshot()` serializes only fixed synthetic evidence—never DB-generated
+turn IDs—and recursively rejects DSN, bearer, API-key, password, secret, and token
+patterns before an artifact can be written.
+
+Deterministic tests establish retrieval mechanics only. Repetitions are repeated
+measures, **not independent samples**; decisions aggregate scenario-level outcomes
+within the four independent sessions. Reader/judge answer quality remains
+`PENDING-PAID-EVALUATION`, production A/B/C wiring remains disabled, and no paid
+provider call is made by this package.
+
+Focused verification:
+
+```bash
+uv run pytest benchmarks/personal_agent/tests/test_paah_continuity.py \
+  benchmarks/personal_agent/tests/test_continuity_eval.py -q
+```
+
 ## Layout
 
 - `manifest.py` — enumeration ground-truth collections (the oracle).
