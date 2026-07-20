@@ -134,6 +134,51 @@ def test_env_vars_override_toml(tmp_path: Path, monkeypatch):
     assert config.log_level == "ERROR"
 
 
+def test_migration_mode_env_override(tmp_path: Path, monkeypatch):
+    """Hosted runtimes can verify schema without receiving DDL ownership."""
+    from weft.config import MigrationMode
+
+    toml_path = tmp_path / ".weft" / "config.toml"
+    toml_path.parent.mkdir(parents=True)
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    monkeypatch.setenv("WEFT_MIGRATION_MODE", "verify")
+
+    assert load_config().migration_mode is MigrationMode.verify
+
+
+def test_production_requires_explicit_migration_mode(tmp_path: Path, monkeypatch):
+    toml_path = tmp_path / ".weft" / "config.toml"
+    toml_path.parent.mkdir(parents=True)
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    monkeypatch.setenv("WEFT_ENV", "production")
+    monkeypatch.delenv("WEFT_MIGRATION_MODE", raising=False)
+
+    with pytest.raises(ValueError, match="must be explicitly set in production"):
+        load_config()
+
+
+def test_production_accepts_explicit_verify_mode(tmp_path: Path, monkeypatch):
+    from weft.config import MigrationMode
+
+    toml_path = tmp_path / ".weft" / "config.toml"
+    toml_path.parent.mkdir(parents=True)
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    monkeypatch.setenv("WEFT_ENV", "production")
+    monkeypatch.setenv("WEFT_MIGRATION_MODE", "verify")
+
+    assert load_config().migration_mode is MigrationMode.verify
+
+
+def test_invalid_migration_mode_fails_config_load(tmp_path: Path, monkeypatch):
+    toml_path = tmp_path / ".weft" / "config.toml"
+    toml_path.parent.mkdir(parents=True)
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    monkeypatch.setenv("WEFT_MIGRATION_MODE", "silently-ignore")
+
+    with pytest.raises(ValueError):
+        load_config()
+
+
 def test_db_timeout_defaults_are_bounded():
     """Pool must ship with finite timeouts so a stalled query/drained pool
     fails fast instead of hanging (intermittent-hang regression guard)."""
