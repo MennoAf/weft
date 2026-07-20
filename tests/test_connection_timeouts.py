@@ -9,16 +9,35 @@ intermittent ``prime``/``recall`` hangs under concurrency.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, call
 
 import asyncpg
 import pytest
 
 from weft.config import DatabaseConfig, WeftConfig
-from weft.db.connection import acquire, create_pool
+from weft.db.connection import _pgvector_codec_init, acquire, create_pool
 
 
 def _config(dsn: str, **db_overrides) -> WeftConfig:
     return WeftConfig(database=DatabaseConfig(url=dsn, **db_overrides))
+
+
+async def test_pool_init_sets_extensions_search_path_before_vector_codec():
+    """Supabase pooler connections must resolve unqualified ``::vector`` casts."""
+    conn = AsyncMock()
+
+    await _pgvector_codec_init(conn)
+
+    assert conn.mock_calls[:2] == [
+        call.execute("SET search_path TO public, extensions"),
+        call.set_type_codec(
+            "vector",
+            encoder=conn.set_type_codec.await_args.kwargs["encoder"],
+            decoder=conn.set_type_codec.await_args.kwargs["decoder"],
+            schema="public",
+            format="text",
+        ),
+    ]
 
 
 class TestCommandTimeout:
