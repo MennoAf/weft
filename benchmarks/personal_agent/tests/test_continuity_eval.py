@@ -2,13 +2,44 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from benchmarks.personal_agent.continuity_eval import build_run_artifact, evaluate_arm
-from benchmarks.personal_agent.continuity_manifest import HANDOFF, QUESTIONS, TURNS
+from benchmarks.personal_agent.continuity_eval import (
+    _assert_redacted,
+    build_fixture_snapshot,
+    build_run_artifact,
+    evaluate_arm,
+    evaluate_sessions,
+)
+from benchmarks.personal_agent.continuity_manifest import (
+    CORE_EPISODIC_SCENARIO_IDS,
+    HANDOFF,
+    QUESTIONS,
+    SESSIONS,
+    TURNS,
+    validate_manifest,
+)
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_manifest_has_four_independent_sessions_and_28_stable_scenarios():
+    assert validate_manifest() == {
+        "sessions": 4,
+        "scenarios": 28,
+        "core_episodic": 16,
+        "handoff_sufficient": 8,
+    }
+    scenario_ids = [
+        session.scenario_id(question)
+        for session in SESSIONS
+        for question in session.questions
+    ]
+    assert len(scenario_ids) == len(set(scenario_ids)) == 28
+    assert len(CORE_EPISODIC_SCENARIO_IDS) == 16
 
 
 def _turn(key: str) -> dict:
@@ -51,6 +82,87 @@ async def test_evaluator_propagates_ids_for_production_shaped_turns():
     )
     assert result["episodic_complete_rate"] == 1.0
     assert result["scenarios"][0]["status"] == "complete"
+
+
+async def test_manifest_rejects_supersession_class_drift():
+    first = SESSIONS[0]
+    mutated_questions = tuple(
+        replace(question, question_class="other_episodic")
+        if question.question_class == "superseded" else question
+        for question in first.questions
+    )
+    mutated_sessions = (replace(first, questions=mutated_questions), *SESSIONS[1:])
+    with pytest.raises(ValueError, match="exactly one supersession"):
+        validate_manifest(mutated_sessions)
+
+
+async def test_fixed_snapshot_is_synthetic_stable_and_contains_no_db_ids():
+    snapshot = build_fixture_snapshot(SESSIONS)
+    assert snapshot["synthetic"] is True
+    assert snapshot["session_count"] == 4
+    assert snapshot["scenario_count"] == 28
+    assert all(
+        "id" not in turn
+        for session in snapshot["sessions"]
+        for turn in session["turns"]
+    )
+
+
+@pytest.mark.parametrize("secret", [
+    "postgresql://user:pass@host/db",
+    "Bearer abc.def.ghi",
+    "OPENAI_API_KEY=not-safe",
+    "weft-abcdefghijklmnopqrstuvwxyz1234567890",
+])
+async def test_snapshot_redaction_rejects_secret_shaped_values(secret):
+    with pytest.raises(ValueError, match=r"snapshot\.payload"):
+        _assert_redacted({"payload": secret})
+
+
+@pytest.mark.parametrize("key", [
+    "password",
+    "token",
+    "api_key",
+    "authorization_header",
+    "database_dsn",
+])
+async def test_snapshot_redaction_rejects_nonempty_secret_bearing_fields(key):
+    with pytest.raises(ValueError, match=rf"snapshot\.{key}"):
+        _assert_redacted({key: "ordinary-short-value"})
+
+
+async def test_multi_session_evaluator_preserves_independent_scenario_ids():
+    turn_specs = {
+        turn.key: turn
+        for session in SESSIONS
+        for turn in session.turns
+    }
+
+    async def recall(_session, question):
+        return [
+            {
+                "id": f"turn-{key}",
+                "fixture_key": key,
+                "role": "user",
+                "content": turn_specs[key].content,
+                "occurred_at": turn_specs[key].occurred_at.isoformat(),
+                "authority": turn_specs[key].authority,
+            }
+            for key in question.expected_turn_keys
+        ]
+
+    result = await evaluate_sessions(
+        arm="B",
+        sessions=SESSIONS,
+        recall_turns=recall,
+    )
+    assert result["independent_session_count"] == 4
+    assert result["scenario_count"] == 28
+    assert result["core_episodic_count"] == 16
+    assert result["core_episodic_complete"] == 16
+    scenario_ids = [row["scenario_id"] for row in result["scenarios"]]
+    assert len(scenario_ids) == len(set(scenario_ids)) == 28
+    assert all(session["scenario_count"] == 7 for session in result["sessions"])
 
 
 async def test_deterministic_artifact_compares_handoff_and_targeted_turn_arms():
