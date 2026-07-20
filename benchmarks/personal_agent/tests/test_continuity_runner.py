@@ -194,10 +194,10 @@ def test_run_manifest_is_immutable_and_population_honest(tmp_path):
 def test_checked_in_provider_contracts_are_cross_provider_and_exactly_pinned():
     reader, judge = load_provider_contracts()
     assert (reader.provider, reader.model) == (
-        "google", "gemini-2.5-flash-lite",
+        "google", "gemini-3.1-flash-lite",
     )
     assert (reader.input_usd_per_million, reader.output_usd_per_million) == (
-        "0.10", "0.40",
+        "0.25", "1.50",
     )
     assert (judge.provider, judge.model) == (
         "anthropic", "claude-haiku-4-5-20251001",
@@ -492,7 +492,7 @@ async def test_google_adapter_uses_interactions_schema_and_usage():
     }
     interaction = SimpleNamespace(
         output_text=json.dumps(payload),
-        usage=SimpleNamespace(input_tokens=88, output_tokens=11),
+        usage=SimpleNamespace(total_input_tokens=88, total_output_tokens=11),
     )
     create = AsyncMock(return_value=interaction)
     client = SimpleNamespace(
@@ -505,7 +505,7 @@ async def test_google_adapter_uses_interactions_schema_and_usage():
     )
     assert result == ProviderResult(json.dumps(payload), 88, 11)
     kwargs = create.await_args.kwargs
-    assert kwargs["model"] == "gemini-2.5-flash-lite"
+    assert kwargs["model"] == "gemini-3.1-flash-lite"
     assert kwargs["system_instruction"] == "reader"
     assert kwargs["input"] == "payload"
     assert kwargs["store"] is False
@@ -642,7 +642,7 @@ async def test_real_adapter_malformed_json_retains_billed_usage_and_raw_output(
     else:
         interaction = SimpleNamespace(
             output_text=malformed,
-            usage=SimpleNamespace(input_tokens=88, output_tokens=7),
+            usage=SimpleNamespace(total_input_tokens=88, total_output_tokens=7),
         )
         create = AsyncMock(return_value=interaction)
         provider = GoogleStructuredProvider(SimpleNamespace(
@@ -669,6 +669,30 @@ async def test_real_adapter_malformed_json_retains_billed_usage_and_raw_output(
     assert (row.input_tokens, row.output_tokens) == (
         (123, 9) if provider_name == "anthropic" else (88, 7)
     )
+
+
+@pytest.mark.asyncio
+async def test_google_adapter_rejects_legacy_usage_field_names():
+    reader_contract, _judge_contract = load_provider_contracts()
+    interaction = SimpleNamespace(
+        output_text=json.dumps({
+            "answer": "Answer",
+            "cited_evidence_ids": [],
+            "incomplete_evidence": False,
+        }),
+        usage=SimpleNamespace(input_tokens=88, output_tokens=11),
+    )
+    client = SimpleNamespace(
+        aio=SimpleNamespace(interactions=SimpleNamespace(
+            create=AsyncMock(return_value=interaction),
+        )),
+    )
+    with pytest.raises(ProviderResponseError, match="extraction failed"):
+        await GoogleStructuredProvider(client).complete_json(
+            contract=reader_contract,
+            system="reader",
+            user="payload",
+        )
 
 
 @pytest.mark.asyncio
@@ -700,7 +724,11 @@ async def test_real_adapter_invalid_usage_retains_raw_and_valid_sibling_count(
         ))
         contract = judge_contract
     else:
-        interaction = SimpleNamespace(output_text=raw, usage=usage)
+        google_usage = SimpleNamespace(
+            total_input_tokens=input_tokens,
+            total_output_tokens=output_tokens,
+        )
+        interaction = SimpleNamespace(output_text=raw, usage=google_usage)
         provider = GoogleStructuredProvider(SimpleNamespace(
             aio=SimpleNamespace(interactions=SimpleNamespace(
                 create=AsyncMock(return_value=interaction),
@@ -750,7 +778,12 @@ async def test_real_adapter_content_shape_failure_retains_valid_usage(
         ))
         contract = judge_contract
     else:
-        interaction_kwargs = {"usage": usage}
+        interaction_kwargs = {
+            "usage": SimpleNamespace(
+                total_input_tokens=31,
+                total_output_tokens=4,
+            )
+        }
         if content_case == "missing_text":
             interaction_kwargs["not_output_text"] = "missing"
         else:

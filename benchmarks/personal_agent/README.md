@@ -220,8 +220,9 @@ zero instruction/unsupported/stale safety failures.
 `continuity_provider_contracts.json` pins a cross-provider evaluation pair from
 first-party documentation checked 2026-07-20:
 
-- reader: stable Google `gemini-2.5-flash-lite`, Interactions API JSON schema,
-  $0.10/$0.40 per million input/output tokens;
+- reader: stable Google `gemini-3.1-flash-lite`, Interactions API JSON schema,
+  $0.25/$1.50 per million input/output tokens (Google's documented replacement
+  after `gemini-2.5-flash-lite` rejected new-user access);
 - independent judge: Anthropic `claude-haiku-4-5-20251001`, Messages API
   `output_config.format` JSON schema, $1/$5 per million input/output tokens.
 
