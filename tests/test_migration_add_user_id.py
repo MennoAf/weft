@@ -98,6 +98,46 @@ async def test_migration_adds_user_id_column_to_degradation_policies(pool):
 
 
 @pytest.mark.asyncio
+async def test_verify_migrations_accepts_current_schema(pool):
+    from weft.db.migrations import verify_migration_ledger
+
+    assert await verify_migration_ledger(pool) is None
+
+
+async def test_verify_migrations_rejects_pending_version(pool):
+    from weft.db.migrations import MIGRATIONS, verify_migration_ledger
+
+    latest = max(version for version, _, _ in MIGRATIONS)
+    async with pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await conn.execute(
+                "DELETE FROM schema_migrations WHERE version = $1", latest
+            )
+            with pytest.raises(RuntimeError, match=f"pending versions=\\[{latest}\\]"):
+                await verify_migration_ledger(conn)
+        finally:
+            await transaction.rollback()
+
+
+async def test_verify_migrations_rejects_unknown_version(pool):
+    from weft.db.migrations import verify_migration_ledger
+
+    async with pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await conn.execute(
+                "INSERT INTO schema_migrations (version, description) "
+                "VALUES (999999, 'synthetic unknown migration')"
+            )
+            with pytest.raises(RuntimeError, match="unknown applied versions"):
+                await verify_migration_ledger(conn)
+        finally:
+            await transaction.rollback()
+
+
 async def test_migration_is_idempotent(pool):
     """Assert running migration twice does not error."""
     from weft.db.migrations import run_migrations

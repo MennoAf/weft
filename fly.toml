@@ -8,6 +8,7 @@ primary_region = "iad"
 
 [env]
   WEFT_ENV = "production"
+  WEFT_MIGRATION_MODE = "verify"
   WEFT_TRANSPORT = "streamable-http"
   WEFT_REDIS_URL = ""
   WEFT_LOG_LEVEL = "INFO"

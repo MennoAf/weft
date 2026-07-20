@@ -195,6 +195,28 @@ async def auto_migrate_dimensions(
     return migrated
 
 
+async def verify_vector_dimensions(
+    pool: asyncpg.Pool,
+    config_dim: int,
+) -> None:
+    """Read-only vector dimension check for restricted runtime roles."""
+    async with pool.acquire() as conn:
+        discovered, mismatches = await get_dimension_status(conn, config_dim)
+    missing = sorted(set(VECTOR_TABLES) - set(discovered))
+    if missing:
+        raise RuntimeError(
+            "Vector dimension verification failed: missing vector tables/columns="
+            + str(missing)
+        )
+    if mismatches:
+        details = ", ".join(str(mismatch) for mismatch in mismatches)
+        raise RuntimeError(
+            "Vector dimension verification failed: "
+            + details
+            + ". Run owner-managed dimension migration before restarting Weft."
+        )
+
+
 async def ensure_vector_dimensions(
     pool: asyncpg.Pool,
     config_dim: int,
