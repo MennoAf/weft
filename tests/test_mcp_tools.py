@@ -57,6 +57,30 @@ def ctx(app):
 
 
 # ---------------------------------------------------------------------------
+# weft_focus
+# ---------------------------------------------------------------------------
+
+
+class TestWeftFocus:
+    async def test_targeted_turn_recall_option_reaches_focus_builder(self, ctx, monkeypatch):
+        """Dogfood opt-in is explicit and forwarded unchanged at the MCP boundary."""
+        from weft.focus import FocusResult
+        from weft.mcp.tools import weft_focus
+
+        build_focus = AsyncMock(return_value=FocusResult(intent="decision rationale"))
+        monkeypatch.setattr("weft.focus.build_focus", build_focus)
+
+        result = await weft_focus(
+            ctx,
+            intent="decision rationale",
+            targeted_turn_recall="auto",
+        )
+
+        assert result["targeted_turn_evidence"] == []
+        assert build_focus.await_args.kwargs["targeted_turn_recall"] == "auto"
+
+
+# ---------------------------------------------------------------------------
 # weft_remember
 # ---------------------------------------------------------------------------
 
