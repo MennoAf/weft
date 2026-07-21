@@ -33,6 +33,12 @@ _BUDGET_MEMORIES = 0.65    # 65% for focused memories
 _BUDGET_GIT = 0.20         # 20% for git changes
 _DEFAULT_BUDGET = 1200
 
+# Experimental targeted-turn supplement: deliberately bounded and opt-in.
+# Handoff and durable memories remain the authoritative Focus surfaces; raw
+# dialogue is returned only as clearly-labelled evidence for an explicit intent.
+_TARGETED_TURN_RECALL_MAX_TURNS = 4
+_TARGETED_TURN_RECALL_TOKEN_CAP = 400
+
 
 @dataclass
 class FocusResult:
@@ -44,6 +50,8 @@ class FocusResult:
     last_session_summary: str | None = None
     git_changes: list[str] = field(default_factory=list)
     changes_since: dict | None = None
+    targeted_turn_evidence: list[dict] = field(default_factory=list)
+    targeted_turn_recall: dict | None = None
     total_tokens: int = 0
     budget_tokens: int = _DEFAULT_BUDGET
     excluded_count: int = 0
@@ -74,6 +82,18 @@ class FocusResult:
                 lines.append(f"- [{proj}] ({sim:.2f}) {content[:120]}")
             parts.append("\n".join(lines))
 
+        if self.targeted_turn_evidence:
+            lines = [
+                "## Targeted Dialogue Evidence",
+                "Quoted historical dialogue only; handoff and durable memories remain authoritative.",
+            ]
+            for turn in self.targeted_turn_evidence:
+                lines.append(
+                    f"- [{turn['id']}] {turn['occurred_at']} "
+                    f"({turn['role']}; {turn['authority']}): {turn['content']}"
+                )
+            parts.append("\n".join(lines))
+
         if self.git_changes:
             lines = ["## Recent Changes"]
             for commit in self.git_changes:
@@ -94,6 +114,8 @@ class FocusResult:
             "last_session_summary": self.last_session_summary,
             "git_changes": self.git_changes,
             "changes_since": self.changes_since,
+            "targeted_turn_evidence": self.targeted_turn_evidence,
+            "targeted_turn_recall": self.targeted_turn_recall,
             "total_tokens": self.total_tokens,
             "budget_tokens": self.budget_tokens,
             "excluded_count": self.excluded_count,
@@ -114,6 +136,7 @@ async def build_focus(
     limit: int = 10,
     threshold: float = 0.3,
     changes_since: dict | None = None,
+    targeted_turn_recall: str = "off",
 ) -> FocusResult:
     """Build a focused context supplement.
 
@@ -129,9 +152,17 @@ async def build_focus(
         repo_path: Path to git repo (defaults to cwd).
         limit: Max memories to return.
         threshold: Minimum similarity score.
+        targeted_turn_recall: Experimental opt-in mode: ``off`` (default) or
+            ``auto``. ``auto`` returns bounded quoted turn evidence scoped to
+            this project; it never replaces durable-memory retrieval.
     """
     if not intent or not intent.strip():
         raise ValueError("intent is required for weft_focus")
+    if targeted_turn_recall not in {"off", "auto"}:
+        raise ValueError(
+            "targeted_turn_recall must be 'off' or 'auto'; "
+            f"got {targeted_turn_recall!r}"
+        )
 
     intent = intent.strip()
 
@@ -215,6 +246,71 @@ async def build_focus(
 
     except Exception as exc:
         logger.warning("Focus semantic search failed: %s", exc)
+
+    # --- Step 2a: Explicit, bounded raw-turn evidence (experimental) ---
+    # This is deliberately separate from semantic memory recall. It does not
+    # fall back to beliefs on an empty/error result because callers need to
+    # distinguish "no quoted dialogue evidence" from durable memory context.
+    if targeted_turn_recall == "auto":
+        result.targeted_turn_recall = {
+            "mode": "auto",
+            "status": "no_evidence",
+            "max_turns": _TARGETED_TURN_RECALL_MAX_TURNS,
+            "token_cap": _TARGETED_TURN_RECALL_TOKEN_CAP,
+            "authority": "handoff_and_durable_memory_remain_authoritative",
+        }
+        try:
+            from weft.episode_turns import recall_turns
+
+            query_embedding = await embedding_fn(intent)
+            turns = await recall_turns(
+                pool,
+                intent,
+                project_id=project_id,
+                top_k=_TARGETED_TURN_RECALL_MAX_TURNS,
+                embedding=query_embedding,
+            )
+            used_turn_tokens = 0
+            for turn in turns:
+                remaining_tokens = _TARGETED_TURN_RECALL_TOKEN_CAP - used_turn_tokens
+                if remaining_tokens <= 0:
+                    break
+                content, content_tokens = truncate_to_token_budget(
+                    turn.content,
+                    remaining_tokens,
+                )
+                # The shared helper prioritizes readable paragraph boundaries and
+                # may slightly overshoot on a single giant paragraph. Dogfood
+                # response caps are hard, so defensively cut to a smaller prefix
+                # until exact accounting fits the remaining budget.
+                while content and content_tokens > remaining_tokens:
+                    content = content[: max(1, len(content) - 16)]
+                    content_tokens = estimate_tokens(content)
+                if not content or content_tokens <= 0:
+                    break
+                result.targeted_turn_evidence.append({
+                    "id": turn.id,
+                    "occurred_at": turn.occurred_at.isoformat(),
+                    "role": turn.role.value,
+                    "content": content,
+                    "authority": "quoted_dialogue_non_authoritative",
+                })
+                used_turn_tokens += content_tokens
+                if used_turn_tokens >= _TARGETED_TURN_RECALL_TOKEN_CAP:
+                    break
+            result.targeted_turn_recall.update({
+                "status": "evidence" if result.targeted_turn_evidence else "no_evidence",
+                "returned_turns": len(result.targeted_turn_evidence),
+                "token_count": used_turn_tokens,
+            })
+        except Exception as exc:
+            logger.warning("Focused targeted-turn recall failed: %s", exc)
+            result.targeted_turn_recall.update({
+                "status": "unavailable",
+                "reason": "turn_recall_failed",
+                "returned_turns": 0,
+                "token_count": 0,
+            })
 
     # --- Step 2b: Cross-project search ---
     if project_id is not None:

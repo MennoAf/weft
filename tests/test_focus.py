@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import pytest
 
+from weft.episodes import create_episode
+from weft.episode_turns import append_turn
 from weft.focus import FocusResult, build_focus
-from weft.models import MemoryCreate, MemorySource, MemoryType
+from weft.models import (
+    EpisodeCreate,
+    EpisodeTurnCreate,
+    MemoryCreate,
+    MemorySource,
+    MemoryType,
+    TurnRole,
+)
 from weft.store import search_by_vector, store_memory
-from weft.tokens import estimate_tokens
 
 
 # --- FocusResult formatting ---
@@ -72,6 +80,94 @@ async def test_empty_intent_raises():
 
     with pytest.raises(ValueError, match="intent is required"):
         await build_focus(None, intent="   ", embedding_fn=None)
+
+
+@pytest.mark.asyncio
+async def test_focus_targeted_turn_recall_is_off_by_default(pool):
+    """Normal Focus calls never retrieve or report raw dialogue evidence."""
+    result = await build_focus(
+        pool,
+        intent="launch timeline",
+        embedding_fn=_make_embedding_fn(),
+        exclude_memory_ids=[],
+    )
+
+    assert result.targeted_turn_evidence == []
+    assert result.targeted_turn_recall is None
+
+
+@pytest.mark.asyncio
+async def test_focus_targeted_turn_recall_returns_bounded_quoted_evidence(pool):
+    """Opt-in Focus exposes labelled, project-scoped dialogue evidence only."""
+    embedding_fn = _make_embedding_fn()
+    project_id = "focus-targeted-turns"
+    episode = await create_episode(
+        pool, EpisodeCreate(title="launch decision", project_id=project_id),
+    )
+    for index in range(6):
+        content = f"Launch decision evidence {index}: " + "detail " * 100
+        await append_turn(
+            pool,
+            EpisodeTurnCreate(
+                episode_id=episode.id,
+                role=TurnRole.user,
+                content=content,
+            ),
+            embedding=await embedding_fn(content),
+        )
+
+    result = await build_focus(
+        pool,
+        intent="launch decision evidence",
+        embedding_fn=embedding_fn,
+        project_id=project_id,
+        exclude_memory_ids=[],
+        targeted_turn_recall="auto",
+    )
+
+    metadata = result.targeted_turn_recall
+    assert metadata is not None
+    assert metadata["mode"] == "auto"
+    assert metadata["status"] == "evidence"
+    assert metadata["returned_turns"] <= 4
+    assert metadata["token_count"] <= 400
+    assert metadata["authority"] == "handoff_and_durable_memory_remain_authoritative"
+    assert result.targeted_turn_evidence
+    assert all(turn["id"].startswith("et-") for turn in result.targeted_turn_evidence)
+    assert all(turn["authority"] == "quoted_dialogue_non_authoritative" for turn in result.targeted_turn_evidence)
+    assert "## Targeted Dialogue Evidence" in result.format()
+
+
+@pytest.mark.asyncio
+async def test_focus_targeted_turn_recall_does_not_cross_project_scope(pool):
+    """Explicit turn evidence observes the same project boundary as Focus."""
+    embedding_fn = _make_embedding_fn()
+    other_project = "other-project"
+    episode = await create_episode(
+        pool, EpisodeCreate(title="other", project_id=other_project),
+    )
+    content = "Unique other project confidential launch evidence"
+    await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=episode.id,
+            role=TurnRole.user,
+            content=content,
+        ),
+        embedding=await embedding_fn(content),
+    )
+
+    result = await build_focus(
+        pool,
+        intent="confidential launch evidence",
+        embedding_fn=embedding_fn,
+        project_id="requested-project",
+        exclude_memory_ids=[],
+        targeted_turn_recall="auto",
+    )
+
+    assert result.targeted_turn_evidence == []
+    assert result.targeted_turn_recall["status"] == "no_evidence"
 
 
 @pytest.mark.asyncio

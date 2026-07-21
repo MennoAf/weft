@@ -1590,6 +1590,7 @@ async def weft_focus(
     project_id: str | None = None,
     agent_id: str | None = None,
     budget_tokens: int = 1200,
+    targeted_turn_recall: Literal["off", "auto"] = "off",
 ) -> dict:
     """Post-intent re-prime: surface memories the generic primer missed.
 
@@ -1601,7 +1602,10 @@ async def weft_focus(
     Can be called multiple times as intent shifts mid-session.
 
     intent: what you're focusing on (e.g., "implement session tracking")
-    budget_tokens: max tokens in result (default 1200, supplemental to prime)"""
+    budget_tokens: max tokens in result (default 1200, supplemental to prime)
+    targeted_turn_recall: experimental explicit opt-in. ``auto`` adds up to
+    four capped, clearly-labelled dialogue-evidence turns; ``off`` preserves
+    current behavior. Handoff and durable memories remain authoritative."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_focus start [%s] intent=%r", cid, intent[:50])
@@ -1618,6 +1622,7 @@ async def weft_focus(
                 project_id=resolved_project,
                 agent_id=agent_id,
                 budget_tokens=budget_tokens,
+                targeted_turn_recall=targeted_turn_recall,
             )
 
         # Fire-and-forget: log focused memories (outside acquire — system-level op)
