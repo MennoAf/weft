@@ -14,6 +14,31 @@ def test_extract_preference():
     assert results[0]["confidence"] >= 0.7
 
 
+def test_extract_preference_metadata_polarity_and_strength():
+    positive = extract_candidates("I prefer history podcasts on my commute")[0]
+    avoidance = extract_candidates("I never want true crime podcasts")[0]
+    constraint = extract_candidates("I always use a written checklist")[0]
+
+    assert positive["preference_metadata"] == {
+        "polarity": "positive", "strength": "soft",
+        "value": "history podcasts on my commute",
+    }
+    assert avoidance["preference_metadata"]["polarity"] == "avoidance"
+    assert avoidance["preference_metadata"]["value"] == "true crime podcasts"
+    assert constraint["preference_metadata"] == {
+        "polarity": "constraint", "strength": "hard",
+        "value": "use a written checklist",
+    }
+
+
+def test_preference_metadata_ignores_negation_and_impersonal_instructions():
+    negated = extract_candidates("I prefer not to use dark mode")
+    assert not any("preference_metadata" in item for item in negated)
+    assert extract_candidates("I want to fix the auth bug") == []
+    assert extract_candidates("Always validate input before storing it") == []
+    assert extract_candidates("I prefer history, but Alex prefers comedy") == []
+
+
 def test_extract_fact():
     """Detects factual statements about project."""
     text = "The project uses PostgreSQL 16 with pgvector"

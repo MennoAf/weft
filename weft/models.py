@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class MemoryType(str, Enum):
@@ -78,6 +78,39 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class PreferenceMetadata(BaseModel):
+    """Validated semantic annotation for a preference memory.
+
+    This is descriptive metadata only: it does not alter embeddings, ranking,
+    contradiction detection, or supersession behavior.
+    """
+
+    model_config = {"extra": "forbid", "str_strip_whitespace": True}
+
+    schema_version: Literal[1] = 1
+    polarity: Literal["positive", "negative", "constraint", "avoidance"]
+    strength: Literal["hard", "soft"]
+    subject: str | None = Field(default=None, max_length=200)
+    value: str | None = Field(default=None, max_length=500)
+    context: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("subject", "value")
+    @classmethod
+    def _validate_text(cls, value: str | None) -> str | None:
+        if value is not None and not value:
+            raise ValueError("preference metadata text fields must not be blank")
+        return value
+
+    @field_validator("context")
+    @classmethod
+    def _validate_context(cls, value: list[str]) -> list[str]:
+        if any(not item or len(item) > 100 for item in value):
+            raise ValueError(
+                "preference metadata context labels must be non-blank and at most 100 characters"
+            )
+        return value
+
+
 class Memory(BaseModel):
     """A single memory record."""
 
@@ -104,6 +137,13 @@ class Memory(BaseModel):
     write_provenance: str = "supervisor"
     review_status: str = "active"
     project_facets: list[str] = Field(default_factory=list)
+    preference_metadata: PreferenceMetadata | None = None
+
+    @model_validator(mode="after")
+    def _validate_preference_metadata(self) -> "Memory":
+        if self.preference_metadata is not None and self.type is not MemoryType.preference:
+            raise ValueError("preference_metadata requires type='preference'")
+        return self
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for MCP tool responses."""
@@ -139,6 +179,13 @@ class MemoryCreate(BaseModel):
     pinned: bool = False
     review_after: datetime | None = None
     project_facets: list[str] = Field(default_factory=list)
+    preference_metadata: PreferenceMetadata | None = None
+
+    @model_validator(mode="after")
+    def _validate_preference_metadata(self) -> "MemoryCreate":
+        if self.preference_metadata is not None and self.type is not MemoryType.preference:
+            raise ValueError("preference_metadata requires type='preference'")
+        return self
 
 
 class Workspace(BaseModel):

@@ -193,7 +193,9 @@ event logistics, kitchen renovation, and research methodology. Each session has:
 - 2 handoff-sufficient questions (`next_action`, `final_decision`);
 - 4 core episodic questions (`rationale`, `chronology`, `exact_wording`,
   `omitted_detail`)—**16 core paired scenarios** across the manifest;
-- 1 supersession safety question;
+- 1 supersession safety question whose evidence contract requires the historical
+  raw turn plus the stable authoritative `handoff:final_state` ID, without a
+  duplicate final raw-dialogue turn;
 - quoted instruction-shaped dialogue that remains labelled evidence;
 - its own project scope, so another fixture cannot crowd relevant turns out of a
   bounded retrieval result.
@@ -215,7 +217,9 @@ measures, **not independent samples**; decisions aggregate scenario-level majori
 within the four independent sessions. The precommitted Arm-B gate requires at least
 8 paired core-episodic wins across the 16 cases, zero paired losses, improvements in
 at least 3 classes, no handoff-sufficient regression, no missing judge calls, and
-zero instruction/unsupported/stale safety failures.
+zero Arm-B citation/instruction/unsupported/stale safety failures. Arm-A safety
+failures remain reported as baseline diagnostics but do not veto an otherwise-safe
+candidate prospectively.
 
 `continuity_provider_contracts.json` pins a cross-provider evaluation pair from
 first-party documentation checked 2026-07-20:
@@ -255,6 +259,11 @@ charges every reader/judge attempt at the configured maximum output. It reports 
 one-attempt projection and the retry-inclusive worst case. Estimate mode records
 `provider_clients_constructed=false`, `network_calls=0`, the precommitted scenario-level
 decision rule, and its SHA-256.
+
+After a protocol change, rerun the full immutable A/B population unless a separately
+reviewed confirmation protocol is added. The current CLI intentionally has no arms,
+scenario, session, or repetition subset flags, so an ad hoc "supersession-only" paid
+run would not preserve the precommitted paired decision semantics.
 
 A paid run requires all three controls: the exact approval phrase, a positive finite
 global ceiling, and a ceiling at least as large as the retry-inclusive estimate:

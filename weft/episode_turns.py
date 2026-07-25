@@ -24,8 +24,9 @@ Spec: weft-d3a2ef78. Loom epic: loom-52ffc3a2.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 import asyncpg
 
@@ -430,6 +431,74 @@ async def delete_turns_after_graduation(
     return {"scored_deleted": scored_deleted, "no_score_deleted": no_score_deleted}
 
 
+# --- Occurrence aggregation ---
+
+
+@dataclass(frozen=True, slots=True)
+class TurnOccurrence:
+    """One distinct conversation occurrence represented by retrieved turns."""
+
+    occurrence_id: str
+    occurred_at: datetime
+    turn_ids: tuple[str, ...]
+    evidence: str
+
+
+@dataclass(frozen=True, slots=True)
+class OccurrenceSummary:
+    """Distinct occurrence count plus auditable evidence."""
+
+    count: int
+    occurrences: tuple[TurnOccurrence, ...]
+
+
+def summarize_occurrences(
+    turns: Iterable[EpisodeTurn],
+    *,
+    basis: str = "distinct_conversations",
+    max_evidence_chars: int = 240,
+) -> OccurrenceSummary:
+    """Group retrieved turns into distinct conversation occurrences.
+
+    Product semantics are explicit:
+
+    * ``distinct_conversations`` groups by ``episode_id``.
+    * ``distinct_days`` groups by the UTC calendar date of ``occurred_at``.
+
+    Multiple matching turns in one group count once, with the earliest
+    matching timestamp and a bounded evidence excerpt. This is intentionally
+    conservative; semantic clustering across separate conversations belongs
+    in a later, explicitly scored layer.
+    """
+    if basis not in {"distinct_conversations", "distinct_days"}:
+        raise ValueError(
+            "basis must be 'distinct_conversations' or 'distinct_days'"
+        )
+    grouped: dict[str, list[EpisodeTurn]] = {}
+    for turn in turns:
+        key = (
+            turn.episode_id
+            if basis == "distinct_conversations"
+            else turn.occurred_at.astimezone(timezone.utc).date().isoformat()
+        )
+        grouped.setdefault(key, []).append(turn)
+
+    occurrences: list[TurnOccurrence] = []
+    for occurrence_id, members in grouped.items():
+        ordered = sorted(members, key=lambda turn: turn.occurred_at)
+        evidence = " ".join(turn.content.strip() for turn in ordered if turn.content.strip())
+        occurrences.append(
+            TurnOccurrence(
+                occurrence_id=occurrence_id,
+                occurred_at=ordered[0].occurred_at,
+                turn_ids=tuple(turn.id for turn in ordered),
+                evidence=evidence[:max_evidence_chars],
+            )
+        )
+    occurrences.sort(key=lambda occurrence: occurrence.occurred_at)
+    return OccurrenceSummary(count=len(occurrences), occurrences=tuple(occurrences))
+
+
 # --- Recall ---
 
 
@@ -664,6 +733,7 @@ async def list_recent_turns(
     text that nothing matches semantically)."""
     sql_filter, params = _build_turn_filters(
         project_id=project_id, since=since, until=until,
+        leading_args=0,
     )
     db = get_db(pool)
     sql = f"""
@@ -693,16 +763,20 @@ def _build_turn_filters(
     since: datetime | None,
     until: datetime | None,
     episode_ids: list[str] | None = None,
+    leading_args: int = 1,
 ) -> tuple[str, list]:
-    """Compose AND-joined WHERE fragments; param numbering is offset by the
-    caller's leading positional args (embedding or query string)."""
+    """Compose AND-joined WHERE fragments with correct parameter offsets.
+
+    ``leading_args`` is the number of positional SQL arguments the caller
+    binds before these filter params. Most turn-search callers bind one
+    leading argument (embedding or query); time-ordered fallback callers bind
+    none and must therefore start filters at ``$1``.
+    """
+    if leading_args < 0:
+        raise ValueError("leading_args must be non-negative")
     fragments: list[str] = []
     params: list = []
-    # Param numbering convention: caller's leading args are $1 (and $2 if
-    # embedding+query both pre-bound). We emit fragments using $2, $3, ...
-    # by counting from len(caller_leading_args) + 1 — the caller passes the
-    # full param list to fetch().
-    base = 2  # one leading arg (embedding OR query)
+    base = leading_args + 1
     if since is not None:
         fragments.append(f"AND t.occurred_at >= ${base + len(params)}")
         params.append(since)

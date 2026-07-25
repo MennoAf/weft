@@ -64,13 +64,40 @@ Output:
 - `results/<split>_<mode>_<UTC-timestamp>.jsonl` — hypotheses (the eval contract)
 - `results/<split>_<mode>_<UTC-timestamp>.jsonl.stats.json` — token + timing stats
 
+## Detached, resumable runs
+
+For long runs, use the detached launcher rather than holding an interactive shell
+or MCP call open. It writes hypotheses incrementally, records a PID/log/metadata
+trio under `benchmarks/longmemeval/runs/`, and `--resume` skips question IDs
+already present in the stable output JSONL after an interruption.
+
+```bash
+./benchmarks/longmemeval/run_detached.sh \
+    ../LongMemEval/data/longmemeval_m_cleaned.json \
+    benchmarks/longmemeval/results/lme_m_turns_full.jsonl \
+    --mode turns --tier turns --top-k 10
+```
+
+The launcher prints the PID and log path. Monitor with:
+
+```bash
+tail -f benchmarks/longmemeval/runs/run_<timestamp>.log
+kill -0 <pid>                 # still running?
+wc -l benchmarks/longmemeval/results/lme_m_turns_full.jsonl
+```
+
+If the process is interrupted, rerun the exact same command. The stable output
+path plus `--resume` prevents duplicate hypotheses. Do not use `--no-cleanup`
+with belief-view or replay tiers.
+
 ## Scoring with the upstream evaluator
 
 The hypotheses file is the exact format LongMemEval's judge expects. From the LongMemEval clone:
 
 ```bash
 cd ../LongMemEval/src/evaluation
-python evaluate_qa.py gpt-4o \
+uv run --with tqdm --with openai --with backoff --with numpy \
+    python evaluate_qa.py gpt-4o \
     ../../../Weft/benchmarks/longmemeval/results/<file>.jsonl \
     ../../data/longmemeval_oracle.json
 python print_qa_metrics.py <labeled_file>

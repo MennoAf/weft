@@ -50,6 +50,7 @@ Tier = Literal["belief", "turns", "both", "auto"]
 # captures a temporal-reasoning marker that belief-tier extraction tends
 # to lose. Order doesn't matter; first hit returns.
 _TURN_TIER_MARKERS: tuple[re.Pattern, ...] = (
+    re.compile(r"\bhow many times\b"),
     re.compile(r"\bhow many (?:days|weeks|months|hours|minutes|years)\b"),
     re.compile(r"\bhow long (?:since|ago|before|after|between)\b"),
     re.compile(r"\bwhen (?:did|was)\b"),
@@ -157,6 +158,62 @@ _ANCHOR_PATTERNS: tuple[re.Pattern, ...] = (
 )
 
 
+def temporal_query_variants(query: str) -> list[str]:
+    """Return the original query plus an event-focused temporal variant.
+
+    Temporal scaffolding (``how many weeks ago did I`` / ``when did we``)
+    often dominates keyword ranking while the event name carries the useful
+    retrieval signal. Keep the original for semantic recall, and add a
+    conservative lexical variant only when removing the scaffolding leaves a
+    meaningful event phrase. Variants are ordered original-first and are
+    deduplicated case-insensitively.
+    """
+    variants = [query.strip()]
+    cleaned = re.sub(
+        r"^\s*how\s+many\s+times\s+(?:have|has)\s+(?:i|we|you|we\s+all)\s+",
+        "",
+        query,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^\s*(?:how\s+many\s+(?:days|weeks|months|hours|minutes|years)\s+ago|"
+        r"how\s+long\s+ago|when\s+did|when\s+was|"
+        r"what\s+(?:day|date|time)\s+was)\s+",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^\s*(?:did\s+)?(?:i|we|you)\s+", "", cleaned,
+        count=1, flags=re.IGNORECASE,
+    )
+    cleaned = cleaned.strip(" ?.,")
+    if len(cleaned) >= 4 and cleaned.casefold() != query.strip().casefold():
+        variants.append(cleaned)
+
+    chronology = re.sub(
+        r"^\s*(?:what\s+is\s+the\s+order\s+of|order\s+of|what\s+was\s+the\s+order\s+of)\s+"
+        r"(?:the\s+)?(?:three|four|five|six|several|multiple)\s+",
+        "",
+        query,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    chronology = re.sub(
+        r"\s+from\s+earliest\s+to\s+latest\s*\??$", "", chronology,
+        flags=re.IGNORECASE,
+    ).strip(" ?.,")
+    if (
+        len(chronology) >= 4
+        and chronology.casefold() not in {variant.casefold() for variant in variants}
+        and chronology.casefold() != query.strip(" ?.,").casefold()
+    ):
+        variants.append(chronology)
+    return variants
+
+
 def extract_anchors(query: str) -> list[str]:
     """Extract named anchor phrases from a temporal query.
 
@@ -218,21 +275,38 @@ async def temporal_anchor(
     """
     anchors = extract_anchors(query)
     if not anchors:
-        # No multi-anchor pattern — single recall under the query itself.
-        embedding = await embedder.embed(query) if embedder else None
-        turns = await recall_turns(
-            pool, query,
-            project_id=project_id, since=since, until=until,
-            top_k=top_k_per_anchor, embedding=embedding,
-        )
-        if not turns:
+        # No multi-anchor pattern — search the original question and, for
+        # temporal scaffolding, an event-focused lexical variant. Unioning
+        # these result sets prevents words like "how many weeks ago" from
+        # crowding the actual event (e.g. "friends and family sale at
+        # Nordstrom") out of the candidate pool.
+        variants = temporal_query_variants(query)
+        seen: set[str] = set()
+        merged: list[EpisodeTurn] = []
+        for variant in variants:
+            embedding = await embedder.embed(variant) if embedder else None
+            turns = await recall_turns(
+                pool, variant,
+                project_id=project_id, since=since, until=until,
+                top_k=top_k_per_anchor, embedding=embedding,
+            )
+            for turn in turns:
+                if turn.id in seen:
+                    continue
+                seen.add(turn.id)
+                merged.append(turn)
+                if len(merged) >= top_k_per_anchor:
+                    break
+            if len(merged) >= top_k_per_anchor:
+                break
+        if not merged:
             # Empty hybrid hit — try a temporal-only fallback so the
             # Reader at least sees recent dialogue.
-            turns = await list_recent_turns(
+            merged = await list_recent_turns(
                 pool, project_id=project_id, since=since, until=until,
                 limit=top_k_per_anchor,
             )
-        return {query: turns}
+        return {query: merged[:top_k_per_anchor]}
 
     out: dict[str, list[EpisodeTurn]] = {}
     for anchor in anchors:

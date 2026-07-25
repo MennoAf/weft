@@ -126,6 +126,35 @@ class TestDataModels:
         assert Intent(type="reminder", content="x", confidence=1.5).confidence == 1.0
         assert Intent(type="reminder", content="x", confidence=-0.5).confidence == 0.0
 
+    def test_intent_extracts_positive_preference_metadata(self):
+        intent = Intent(
+            type="general_note",
+            content="I prefer history podcasts on my commute",
+            raw_text="I prefer history podcasts on my commute",
+        )
+        assert intent.preference_metadata == {
+            "polarity": "positive",
+            "strength": "soft",
+            "value": "history podcasts on my commute",
+        }
+
+    def test_intent_extracts_avoidance_metadata(self):
+        intent = Intent(
+            type="general_note",
+            content="I never want true crime podcasts",
+            raw_text="I never want true crime podcasts",
+        )
+        assert intent.preference_metadata["polarity"] == "avoidance"
+        assert intent.preference_metadata["strength"] == "hard"
+
+    def test_intent_does_not_scan_other_raw_text_intents(self):
+        intent = Intent(
+            type="person_fact",
+            content="Bob is the CEO of Acme",
+            raw_text="I prefer history podcasts. Bob is the CEO of Acme",
+        )
+        assert intent.preference_metadata is None
+
     def test_ingest_item_defaults(self):
         item = IngestItem(text="hello")
         assert item.source == "unknown"

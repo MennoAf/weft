@@ -157,6 +157,7 @@ _ROLE_MAP: dict[str, TurnRole] = {
 # conservative chunk size that keeps individual requests responsive and
 # avoids hitting the 8192-token-per-input ceiling on long-turn batches.
 _EMBED_BATCH_SIZE = 100
+_EMBEDDING_DIMENSIONS = 768
 
 
 async def _ingest_haystack_turns(
@@ -233,8 +234,40 @@ async def _ingest_haystack_turns(
         texts = [content for _, content, _ in chunk]
         try:
             batch_vecs = await embedder.embed_batch(texts)
+            if len(batch_vecs) != len(texts):
+                raise ValueError(
+                    f"embed_batch returned {len(batch_vecs)} vectors for "
+                    f"{len(texts)} texts"
+                )
             for i, vec in enumerate(batch_vecs):
+                if vec is not None and len(vec) != _EMBEDDING_DIMENSIONS:
+                    logger.warning(
+                        "invalid embedding dimension %d for turn %d (q=%s); "
+                        "retrying individually",
+                        len(vec), start + i, instance.question_id,
+                    )
+                    continue
                 embeddings[start + i] = vec
+            invalid = [
+                i for i, vec in enumerate(batch_vecs)
+                if vec is None or len(vec) != _EMBEDDING_DIMENSIONS
+            ]
+            for i in invalid:
+                try:
+                    vec = await embedder.embed(texts[i])
+                    if len(vec) == _EMBEDDING_DIMENSIONS:
+                        embeddings[start + i] = vec
+                    else:
+                        logger.warning(
+                            "per-turn embedding dimension %d invalid (q=%s); "
+                            "storing without vector",
+                            len(vec), instance.question_id,
+                        )
+                except Exception as inner_exc:
+                    logger.warning(
+                        "embed failed on turn %d (q=%s): %s — storing without vector",
+                        start + i, instance.question_id, inner_exc,
+                    )
         except Exception as exc:
             logger.warning(
                 "embed_batch failed for chunk %d-%d (q=%s): %s — falling back per-turn",
@@ -242,7 +275,15 @@ async def _ingest_haystack_turns(
             )
             for i, text in enumerate(texts):
                 try:
-                    embeddings[start + i] = await embedder.embed(text)
+                    vec = await embedder.embed(text)
+                    if len(vec) == _EMBEDDING_DIMENSIONS:
+                        embeddings[start + i] = vec
+                    else:
+                        logger.warning(
+                            "per-turn embedding dimension %d invalid (q=%s); "
+                            "storing without vector",
+                            len(vec), instance.question_id,
+                        )
                 except Exception as inner_exc:
                     logger.warning(
                         "embed failed on turn %d (q=%s): %s — storing without vector",

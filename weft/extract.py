@@ -8,11 +8,11 @@ from typing import Any
 
 # Pattern definitions: (regex, memory_type, base_confidence)
 _PREFERENCE_PATTERNS = [
-    (re.compile(r"(?:I |[Uu]ser )prefer[s]?\s+(.+)", re.IGNORECASE), "preference", 0.85),
-    (re.compile(r"(?:I )?always\s+(.+)", re.IGNORECASE), "preference", 0.8),
-    (re.compile(r"(?:I )?never\s+(.+)", re.IGNORECASE), "preference", 0.8),
-    (re.compile(r"(?:I )?(?:don't|do not) (?:like|want|use)\s+(.+)", re.IGNORECASE), "preference", 0.8),
-    (re.compile(r"(?:I )?(?:like|want) to\s+(.+)", re.IGNORECASE), "preference", 0.7),
+    (re.compile(r"^I prefer\s+(?!not\b)(.+?)(?:\s+but\s+I\s+prefer\s+.+)?$", re.IGNORECASE), "preference", 0.85, "positive", "soft"),
+    (re.compile(r"^I always\s+(.+)$", re.IGNORECASE), "preference", 0.8, "constraint", "hard"),
+    (re.compile(r"^I never\s+(?:like|want|use|prefer)\s+(.+)$", re.IGNORECASE), "preference", 0.8, "avoidance", "hard"),
+    (re.compile(r"^I (?:avoid|don't|do not) (?:like|want|use|prefer)\s+(.+)$", re.IGNORECASE), "preference", 0.8, "avoidance", "hard"),
+    (re.compile(r"^I (?:like|want) to\s+(?!fix|debug|implement|build|write|run|check|use\b)(.+)$", re.IGNORECASE), "preference", 0.7, "positive", "soft"),
 ]
 
 _FACT_PATTERNS = [
@@ -255,9 +255,17 @@ def extract_candidates(
         clean = re.sub(r"^[-*]\s+", "", line)
         clean = re.sub(r"^\d+\.\s+", "", clean)
 
-        for pattern, mem_type, confidence in ALL_PATTERNS:
+        for pattern_entry in ALL_PATTERNS:
+            pattern, mem_type, confidence = pattern_entry[:3]
+            if mem_type == "preference" and not re.match(r"^I\b", clean, re.IGNORECASE):
+                continue
             match = pattern.search(clean)
             if match:
+                if mem_type == "preference" and re.search(
+                    r"\b[A-Z][a-z]+\s+(?:prefers?|likes?|wants?|avoids?)\b",
+                    match.group(1),
+                ):
+                    continue
                 # Use the full clean line as content (more context than just the capture group)
                 content = clean.strip()
 
@@ -268,13 +276,20 @@ def extract_candidates(
                 seen_content.add(content_key)
 
                 if confidence >= min_confidence:
-                    candidates.append({
+                    candidate = {
                         "content": content,
                         "type": mem_type,
                         "confidence": round(confidence, 2),
                         "topic": _extract_topics(content),
                         "source_line": line,
-                    })
+                    }
+                    if mem_type == "preference" and len(pattern_entry) >= 5:
+                        candidate["preference_metadata"] = {
+                            "polarity": pattern_entry[3],
+                            "strength": pattern_entry[4],
+                            "value": match.group(1).strip(),
+                        }
+                    candidates.append(candidate)
                 break  # One match per line
 
     return candidates

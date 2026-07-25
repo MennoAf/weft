@@ -20,14 +20,20 @@ real graph write path, then measures how completely each read path answers
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from benchmarks.personal_agent.entity_manifest import (
+    PAAH_ENTITY_PROJECT_ID,
     get_brief_entity,
     get_distractor_entity,
 )
 from benchmarks.personal_agent.entity_harness import run_entity_brief_paah
 from benchmarks.personal_agent.seed import seed_entity_brief
+from weft.episode_turns import append_turn
+from weft.episodes import create_episode
+from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
 
 pytestmark = pytest.mark.asyncio
 
@@ -76,6 +82,38 @@ async def test_no_brief_phrasing_comes_back_empty(seeded_entity):
             for c in stats.candidate if c.recall_at_links < 1.0
         )
     )
+
+
+async def test_temporal_worded_briefs_recover_with_unrelated_turns(pool):
+    """A same-project distractor turn must not suppress belief recovery."""
+    seeded = await seed_entity_brief(pool)
+    episode = await create_episode(
+        pool,
+        EpisodeCreate(
+            title="unrelated entity-project conversation",
+            project_id=PAAH_ENTITY_PROJECT_ID,
+        ),
+    )
+    await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=episode.id,
+            role=TurnRole.user,
+            content="The hardware delivery arrived and the loading dock is clear.",
+            occurred_at=datetime.now(timezone.utc),
+        ),
+        embedding=[0.1] * 768,
+    )
+
+    stats = await run_entity_brief_paah(pool, seeded)
+
+    temporal = [c for c in stats.candidate if any(
+        marker in c.query.lower() for marker in ("before", "since")
+    )]
+    assert temporal
+    assert all(c.recall_at_links == 1.0 for c in temporal), [
+        (c.query, c.recall_at_links, c.fell_back) for c in temporal
+    ]
 
 
 async def test_temporal_worded_briefs_recover_via_fallback(seeded_entity):
