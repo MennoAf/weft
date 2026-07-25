@@ -10,7 +10,14 @@ from weft.cache import NullCache
 from weft.config import WeftConfig
 from weft.embeddings import get_provider
 from weft.mcp.server import AppContext
-from weft.models import MemoryCreate, MemorySource, MemoryStatus, MemoryType, RelationType
+from weft.models import (
+    MemoryCreate,
+    MemorySource,
+    MemoryStatus,
+    MemoryType,
+    PreferenceMetadata,
+    RelationType,
+)
 from weft.revise import revise_memory
 from weft.store import get_memory, get_relationships, store_memory
 
@@ -174,6 +181,48 @@ async def test_revise_without_new_type_inherits(original_memory):
 
     new, _ = await revise_memory(pool, old.id, "same type update", embedding=emb)
     assert new.type == old.type
+
+
+@pytest.fixture
+async def preference_original(pool):
+    provider = get_provider("fastembed")
+    metadata = PreferenceMetadata(
+        polarity="avoidance", strength="hard", subject="commute", value="true crime"
+    )
+    create = MemoryCreate(
+        type=MemoryType.preference,
+        content="I avoid true crime podcasts during my commute.",
+        source=MemorySource.conversation,
+        preference_metadata=metadata,
+    )
+    memory = await store_memory(pool, create, embedding=await provider.embed(create.content))
+    return pool, memory, provider, metadata
+
+
+async def test_revise_preference_metadata_omission_preserves(preference_original):
+    pool, old, provider, metadata = preference_original
+    new, _ = await revise_memory(pool, old.id, "I still avoid true crime podcasts.", embedding=await provider.embed("I still avoid true crime podcasts."))
+    assert new.preference_metadata == metadata
+
+
+async def test_revise_preference_metadata_explicit_clear(preference_original):
+    pool, old, provider, _ = preference_original
+    new, _ = await revise_memory(pool, old.id, "I no longer avoid true crime podcasts.", embedding=await provider.embed("I no longer avoid true crime podcasts."), preference_metadata=None)
+    assert new.preference_metadata is None
+
+
+async def test_revise_preference_metadata_replacement(preference_original):
+    pool, old, provider, _ = preference_original
+    replacement = PreferenceMetadata(polarity="positive", strength="soft", subject="commute", value="history")
+    content = "I prefer history podcasts during my commute."
+    new, _ = await revise_memory(pool, old.id, content, embedding=await provider.embed(content), preference_metadata=replacement)
+    assert new.preference_metadata == replacement
+
+
+async def test_revise_preference_retype_requires_explicit_clear(preference_original):
+    pool, old, provider, _ = preference_original
+    with pytest.raises(ValueError, match="requires explicit preference_metadata=null"):
+        await revise_memory(pool, old.id, "A factual statement.", embedding=await provider.embed("A factual statement."), new_type=MemoryType.fact)
 
 
 async def test_revise_with_new_project_id(original_memory):

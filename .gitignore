@@ -28,8 +28,9 @@ weft-backup-*.json
 .oauth-*-secrets.env
 
 # Benchmark run artifacts — regeneratable, large, and per-run timestamped.
-# Source code under benchmarks/ IS tracked; only the results dir is excluded.
+# Source code under benchmarks/ IS tracked; generated outputs stay local.
 benchmarks/**/results/
+artifacts/continuity/
 
 # Local-only personal acceptance cases — seeded from real Weft data, never
 # committed. The README in that directory IS tracked so the convention

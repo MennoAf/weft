@@ -111,11 +111,14 @@ class Intent:
     # (e.g. Discord channel mapping). None means "no override; use defaults".
     memory_type_hint: str | None = None
     extra_topics: list[str] = field(default_factory=list)
+    preference_metadata: dict[str, Any] | None = None
 
     def __post_init__(self):
         if self.type not in INTENT_TYPES:
             self.type = "general_note"
         self.confidence = max(0.0, min(1.0, self.confidence))
+        if self.preference_metadata is None:
+            self.preference_metadata = _preference_metadata_for_intent(self)
 
 
 @dataclass
@@ -159,6 +162,24 @@ def _get_client() -> AsyncAnthropic:
 def _normalize_text(text: str) -> str:
     """Strip and collapse whitespace."""
     return re.sub(r"\s+", " ", text.strip())
+
+
+def _preference_metadata_for_intent(intent: Intent) -> dict[str, Any] | None:
+    """Extract conservative preference polarity from an already-classified intent.
+
+    This reuses the deterministic candidate extractor; it does not add an LLM
+    call and returns None when the text does not contain a clear preference
+    expression. The human-readable intent content remains the source of truth.
+    """
+    if intent.type not in {"person_fact", "general_note"}:
+        return None
+    from weft.extract import extract_candidates
+
+    text = intent.content or intent.raw_text
+    for candidate in extract_candidates(text, min_confidence=0.7):
+        if candidate.get("type") == "preference":
+            return candidate.get("preference_metadata")
+    return None
 
 
 def _should_skip(text: str, metadata: dict[str, Any]) -> bool:
@@ -554,6 +575,7 @@ async def route(
         MemoryCreate,
         MemorySource,
         MemoryType,
+        PreferenceMetadata,
     )
     from weft.store import store_memory
 
@@ -567,6 +589,8 @@ async def route(
             # LLM-derived default. Validate against MemoryType; on invalid hint
             # log + fall back to lookup so a bad config can't crash ingest.
             mem_type_str = _INTENT_MEMORY_TYPE.get(intent.type, "fact")
+            if intent.preference_metadata is not None:
+                mem_type_str = MemoryType.preference.value
             if intent.memory_type_hint:
                 try:
                     MemoryType(intent.memory_type_hint)
@@ -627,6 +651,12 @@ async def route(
                     source=MemorySource(source) if source in MemorySource._value2member_map_ else MemorySource.ingest,
                     confidence=intent.confidence,
                     project_id=project_id,
+                    preference_metadata=(
+                        PreferenceMetadata.model_validate(intent.preference_metadata)
+                        if mem_type_str == MemoryType.preference.value
+                        and intent.preference_metadata is not None
+                        else None
+                    ),
                 )
                 memory = await store_memory(pool, create, embedding=embedding)
                 result.memories_created += 1

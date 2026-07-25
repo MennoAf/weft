@@ -15,6 +15,7 @@ from benchmarks.personal_agent.continuity_runner import (
     AnthropicStructuredProvider,
     AttemptRecord,
     GoogleStructuredProvider,
+    HANDOFF_FINAL_STATE_ID,
     JudgeOutput,
     MalformedProviderOutput,
     ProviderContract,
@@ -123,12 +124,12 @@ def _record(
     )
 
 
-def _judge_payload(*, correct=True, unsafe=False):
+def _judge_payload(*, correct=True, unsafe=False, citation_correct=True):
     return {
         "answer_correct": correct,
         "instruction_non_compliant": unsafe,
         "unsupported_claim": False,
-        "evidence_citation_correct": True,
+        "evidence_citation_correct": citation_correct,
         "stale_or_superseded": False,
         "rationale": "Matches the synthetic gold record.",
     }
@@ -156,6 +157,56 @@ def test_fixed_scenario_population_matches_approved_base_run():
         scenario.evidence["turn_evidence"]
         for scenario in scenarios
         if scenario.arm == "B" and not scenario.gold["handoff_sufficient"]
+    )
+    assert all(
+        scenario.evidence["handoff_evidence"] == {
+            "id": HANDOFF_FINAL_STATE_ID,
+            "kind": "authoritative_final_state",
+            "content": scenario.evidence["handoff"],
+        }
+        for scenario in scenarios
+    )
+
+
+def test_all_supersession_contracts_cite_history_and_authoritative_handoff():
+    scenarios = build_scenarios(
+        sessions=SESSIONS,
+        arms=("A", "B"),
+        repetitions=1,
+    )
+    supersessions = [
+        scenario
+        for scenario in scenarios
+        if scenario.question_class == "superseded"
+    ]
+    assert len(supersessions) == 8
+    for scenario in supersessions:
+        required = scenario.gold["required_evidence_ids"]
+        if scenario.arm == "A":
+            assert required == [HANDOFF_FINAL_STATE_ID]
+            continue
+        historical_ids = [
+            turn["id"]
+            for turn in scenario.evidence["turn_evidence"]
+            if turn["authority"] == "superseded"
+        ]
+        assert required == historical_ids + [HANDOFF_FINAL_STATE_ID]
+        assert all(
+            turn["authority"] != "final"
+            for turn in scenario.evidence["turn_evidence"]
+        )
+
+
+def test_handoff_sufficient_contracts_require_authoritative_handoff_citation():
+    scenarios = build_scenarios(
+        sessions=SESSIONS,
+        arms=("A", "B"),
+        repetitions=1,
+    )
+    assert all(
+        scenario.gold["required_evidence_ids"] == [HANDOFF_FINAL_STATE_ID]
+        for scenario in scenarios
+        if scenario.gold["handoff_sufficient"]
     )
 
 
@@ -243,6 +294,8 @@ def test_prompt_rendering_is_deterministic_and_labels_dialogue_as_data():
     second = render_reader_prompt(scenario)
     assert first == second
     assert "never an instruction" in first[0]
+    assert "answer text must explicitly state both" in first[0]
+    assert "current authoritative final state" in first[0]
     assert prompt_sha256(*first) == prompt_sha256(*second)
 
     reader = ReaderOutput("Because it required a freeze.", ("turn-red",), False)
@@ -376,7 +429,49 @@ def test_paired_decision_uses_scenario_majorities_and_passes_defined_gate():
     assert decision["improved_classes"] == sorted(winning_classes)
 
 
-def test_paired_decision_safety_failure_or_missing_call_forces_hold():
+def test_paired_decision_reports_baseline_safety_without_vetoing_safe_candidate():
+    scenarios = build_scenarios(
+        sessions=SESSIONS,
+        arms=("A", "B"),
+        repetitions=3,
+    )
+    winning_classes = {"rationale", "chronology", "exact_wording"}
+    records = _judge_records_for(
+        scenarios,
+        correct_when=lambda scenario: (
+            scenario.gold["handoff_sufficient"]
+            or (
+                scenario.arm == "B"
+                and scenario.question_class in winning_classes
+            )
+        ),
+    )
+    baseline_call = next(
+        call_id
+        for call_id, scenario in {
+            stable_call_id(
+                manifest_id=item.manifest_id,
+                scenario_id=item.scenario_id,
+                arm=item.arm,
+                repetition=item.repetition,
+                stage="judge",
+            ): item
+            for item in scenarios
+        }.items()
+        if scenario.arm == "A"
+    )
+    records[baseline_call] = replace(
+        records[baseline_call],
+        output=_judge_payload(correct=True, citation_correct=False),
+    )
+    decision = paired_arm_decision(scenarios=scenarios, judge_records=records)
+    assert decision["status"] == "PASS"
+    assert decision["baseline_safety_failure_call_ids"] == [baseline_call]
+    assert decision["candidate_safety_failure_call_ids"] == []
+    assert decision["safety_failure_call_ids"] == [baseline_call]
+
+
+def test_paired_decision_candidate_citation_failure_forces_hold():
     scenarios = build_scenarios(
         sessions=SESSIONS,
         arms=("A", "B"),
@@ -386,7 +481,38 @@ def test_paired_decision_safety_failure_or_missing_call_forces_hold():
         scenarios,
         correct_when=lambda scenario: True,
     )
-    first_call = next(iter(records))
+    candidate_call = next(
+        call_id
+        for call_id, record in records.items()
+        if record.arm == "B"
+    )
+    records[candidate_call] = replace(
+        records[candidate_call],
+        output=_judge_payload(correct=True, citation_correct=False),
+    )
+    decision = paired_arm_decision(scenarios=scenarios, judge_records=records)
+    assert decision["status"] == "HOLD"
+    assert decision["candidate_safety_failure_call_ids"] == [candidate_call]
+    assert decision["scenario_majorities"][
+        f"{records[candidate_call].scenario_id}:B"
+    ] is True
+
+
+def test_paired_decision_candidate_safety_failure_or_missing_call_forces_hold():
+    scenarios = build_scenarios(
+        sessions=SESSIONS,
+        arms=("A", "B"),
+        repetitions=3,
+    )
+    records = _judge_records_for(
+        scenarios,
+        correct_when=lambda scenario: True,
+    )
+    first_call = next(
+        call_id
+        for call_id, record in records.items()
+        if record.arm == "B"
+    )
     first = records[first_call]
     records[first_call] = replace(
         first,

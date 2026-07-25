@@ -7,11 +7,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-logger = logging.getLogger(__name__)
-
 import asyncpg
 
+from weft.db.connection import get_db
 from weft.store import search_by_vector
+
+logger = logging.getLogger(__name__)
 
 
 async def weekly_recap(
@@ -24,7 +25,7 @@ async def weekly_recap(
     """Query memories from the last N days, grouped by topic and type."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-    conditions = ["status = 'active'", f"created_at >= $1"]
+    conditions = ["status = 'active'", "created_at >= $1"]
     params: list = [cutoff]
     idx = 2
 
@@ -356,8 +357,12 @@ async def list_projects_with_handoffs(pool: asyncpg.Pool) -> list[dict]:
     so an agent in one project can discover the canonical project_id strings
     for other projects and form a `weft_prime(project_id=...)` call to read
     that project's most recent handoff.
+
+    Reuses an enclosing ``acquire(pool)`` connection when called from the MCP
+    tool so both queries carry the authenticated caller's RLS identity.
     """
-    rows = await pool.fetch(
+    db = get_db(pool)
+    rows = await db.fetch(
         """
         SELECT
             project_id,
@@ -374,7 +379,7 @@ async def list_projects_with_handoffs(pool: asyncpg.Pool) -> list[dict]:
         """,
     )
 
-    summary_rows = await pool.fetch(
+    summary_rows = await db.fetch(
         """
         SELECT DISTINCT ON (project_id) project_id, content
         FROM memories

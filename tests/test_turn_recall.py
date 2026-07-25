@@ -21,15 +21,17 @@ from weft.episode_turns import (
     append_turn,
     list_recent_turns,
     recall_turns,
+    summarize_occurrences,
 )
 from weft.episodes import create_episode
 from weft.mcp.server import AppContext
-from weft.mcp.tools import weft_recall
-from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
+from weft.mcp.tools import weft_count_occurrences, weft_recall
+from weft.models import EpisodeCreate, EpisodeTurn, EpisodeTurnCreate, TurnRole
 from weft.turn_recall import (
     extract_anchors,
     route_query_to_tier,
     temporal_anchor,
+    temporal_query_variants,
 )
 
 
@@ -37,6 +39,70 @@ from weft.turn_recall import (
 
 
 _FAKE_EMBEDDING = [0.1] * 768
+
+
+def test_summarize_occurrences_deduplicates_turns_by_episode():
+    turns = [
+        EpisodeTurnCreate(
+            episode_id="episode-a", role=TurnRole.user, content="first mention",
+            occurred_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        ),
+        EpisodeTurnCreate(
+            episode_id="episode-a", role=TurnRole.assistant, content="follow-up mention",
+            occurred_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+        ),
+        EpisodeTurnCreate(
+            episode_id="episode-b", role=TurnRole.user, content="separate occurrence",
+            occurred_at=datetime(2026, 1, 4, tzinfo=timezone.utc),
+        ),
+    ]
+    # The pure helper consumes EpisodeTurn records; construct lightweight
+    # validated records from the same fixture inputs.
+    records = [
+        EpisodeTurn(
+            id=f"turn-{i}", episode_id=t.episode_id, turn_index=0,
+            role=t.role, content=t.content, occurred_at=t.occurred_at,
+        )
+        for i, t in enumerate(turns)
+    ]
+    summary = summarize_occurrences(records)
+    assert summary.count == 2
+    assert [o.occurrence_id for o in summary.occurrences] == ["episode-a", "episode-b"]
+    assert summary.occurrences[0].turn_ids == ("turn-0", "turn-1")
+    assert "first mention" in summary.occurrences[0].evidence
+
+
+def test_summarize_occurrences_distinct_days_uses_utc_calendar_date():
+    records = [
+        EpisodeTurn(
+            id="turn-day-a-1", episode_id="episode-a", turn_index=0,
+            role=TurnRole.user, content="morning mention",
+            occurred_at=datetime(2026, 1, 2, 23, 30, tzinfo=timezone.utc),
+        ),
+        EpisodeTurn(
+            id="turn-day-a-2", episode_id="episode-b", turn_index=0,
+            role=TurnRole.user, content="same UTC day",
+            occurred_at=datetime(2026, 1, 2, 23, 45, tzinfo=timezone.utc),
+        ),
+        EpisodeTurn(
+            id="turn-day-b", episode_id="episode-c", turn_index=0,
+            role=TurnRole.user, content="next day",
+            occurred_at=datetime(2026, 1, 3, 0, 5, tzinfo=timezone.utc),
+        ),
+    ]
+    summary = summarize_occurrences(records, basis="distinct_days")
+    assert summary.count == 2
+    assert [o.occurrence_id for o in summary.occurrences] == [
+        "2026-01-02", "2026-01-03",
+    ]
+    assert set(summary.occurrences[0].turn_ids) == {
+        "turn-day-a-1", "turn-day-a-2",
+    }
+
+
+def test_summarize_occurrences_rejects_unknown_basis():
+    with pytest.raises(ValueError, match="basis must be"):
+        summarize_occurrences([], basis="incidents")
 
 
 class _FakeEmbedding:
@@ -129,6 +195,7 @@ class TestRouteQueryToTier:
     def test_temporal_markers_route_to_turns(self):
         for q in [
             "how many days between A and B",
+            "how many times have we hit this issue",
             "how long since I last shipped",
             "when did the launch happen",
             "what happened before the demo",
@@ -220,6 +287,22 @@ class TestExtractAnchors:
         # Single-temporal-marker queries don't trigger multi-anchor split.
         assert extract_anchors("when did I last commit") == []
         assert extract_anchors("how many days since launch") == []
+
+    def test_temporal_query_variants_preserve_event_anchor(self):
+        variants = temporal_query_variants(
+            "How many weeks ago did I attend the friends and family sale at Nordstrom?"
+        )
+        assert variants == [
+            "How many weeks ago did I attend the friends and family sale at Nordstrom?",
+            "attend the friends and family sale at Nordstrom",
+        ]
+        assert temporal_query_variants("How many times have we hit this issue?") == [
+            "How many times have we hit this issue?",
+            "hit this issue",
+        ]
+        assert temporal_query_variants(
+            "What is the order of the three trips I took in the past three months, from earliest to latest?"
+        )[-1] == "trips I took in the past three months"
 
     def test_no_temporal_pattern_returns_empty(self):
         assert extract_anchors("describe the architecture") == []
@@ -477,6 +560,51 @@ async def test_temporal_anchor_no_split_keys_under_query(pool, episode_with_turn
 
 
 # --- MCP tool: weft_recall(tier=...) ---
+
+
+async def test_weft_count_occurrences_validates_input(ctx):
+    empty = await weft_count_occurrences(ctx, query="   ")
+    assert empty == {"error": "query must not be empty"}
+    bad_limit = await weft_count_occurrences(ctx, query="issue", limit=0)
+    assert bad_limit == {"error": "limit must be between 1 and 500"}
+    bad_basis = await weft_count_occurrences(ctx, query="issue", basis="bad")
+    assert bad_basis == {"error": "basis must be distinct_conversations or distinct_days"}
+    bad_range = await weft_count_occurrences(
+        ctx,
+        query="issue",
+        since=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        until=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    assert bad_range == {"error": "since must be before or equal to until"}
+
+
+async def test_weft_count_occurrences_returns_distinct_conversations(
+    ctx, episode_with_turns,
+):
+    result = await weft_count_occurrences(
+        ctx,
+        query="Acme demo",
+        project_id=episode_with_turns.project_id,
+        limit=10,
+    )
+    assert result["count_basis"] == "distinct_conversations"
+    assert result["count"] == 1
+    assert result["candidate_turn_count"] >= 1
+    assert result["occurrences"][0]["occurrence_id"] == episode_with_turns.id
+    assert result["occurrences"][0]["evidence"]
+    day_result = await weft_count_occurrences(
+        ctx,
+        query="Acme demo",
+        project_id=episode_with_turns.project_id,
+        basis="distinct_days",
+        limit=10,
+    )
+    assert day_result["count_basis"] == "distinct_days"
+    assert day_result["count"] >= 1
+    assert all(
+        len(occurrence["occurrence_id"]) == 10
+        for occurrence in day_result["occurrences"]
+    )
 
 
 async def test_weft_recall_tier_turns_returns_turns_array(ctx, episode_with_turns):

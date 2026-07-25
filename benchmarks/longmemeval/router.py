@@ -82,6 +82,12 @@ class RetrievalPolicy:
 
     top_k: int
     overfetch_multiplier: int = 4
+    candidate_top_k: int | None = None
+
+    @property
+    def candidate_limit(self) -> int:
+        """Return the wider retrieval pool before final Reader selection."""
+        return self.candidate_top_k or self.top_k
 
 
 # Defaults are chosen from the failure analysis on the
@@ -93,8 +99,8 @@ class RetrievalPolicy:
 #   single-session-* 10–17%                 →  keep top_k=10 baseline
 #   knowledge-update  7.7%                  →  keep top_k=10 baseline
 _DEFAULT_POLICIES: dict[str, RetrievalPolicy] = {
-    "multi-session": RetrievalPolicy(top_k=30),
-    "temporal-reasoning": RetrievalPolicy(top_k=30),
+    "multi-session": RetrievalPolicy(top_k=30, candidate_top_k=60),
+    "temporal-reasoning": RetrievalPolicy(top_k=30, candidate_top_k=60),
     "single-session-user": RetrievalPolicy(top_k=10),
     "single-session-assistant": RetrievalPolicy(top_k=10),
     "single-session-preference": RetrievalPolicy(top_k=10),
@@ -118,6 +124,40 @@ def policy_for(question_type: str) -> RetrievalPolicy:
 # ----------------------------------------------------------------------
 # Dispatch
 # ----------------------------------------------------------------------
+
+
+def diversify_temporal_turns(
+    turns: list[EpisodeTurn],
+    *,
+    limit: int,
+) -> list[EpisodeTurn]:
+    """Preserve distinct episode coverage before filling the temporal top-k.
+
+    ``recall_turns`` returns ranked turns, but chronology/counting questions
+    need breadth across conversations. The first pass takes one best-ranked
+    turn per episode; the second pass fills remaining slots in original rank
+    order. This changes neither turn relevance nor ordinary retrieval.
+    """
+    if limit <= 0:
+        return []
+    selected: list[EpisodeTurn] = []
+    selected_ids: set[str] = set()
+    selected_episodes: set[str] = set()
+    for turn in turns:
+        if turn.episode_id in selected_episodes:
+            continue
+        selected.append(turn)
+        selected_ids.add(turn.id)
+        selected_episodes.add(turn.episode_id)
+        if len(selected) >= limit:
+            return selected
+    for turn in turns:
+        if turn.id in selected_ids:
+            continue
+        selected.append(turn)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _turn_to_recall(
@@ -233,31 +273,40 @@ async def _retrieve_turns(
         anchored = await temporal_anchor(
             pool, question,
             project_id=project_id,
-            top_k_per_anchor=max(1, policy.top_k // 2),
+            top_k_per_anchor=max(1, policy.candidate_limit * 2),
             embedder=embedder,
         )
         seen: set[str] = set()
         ordered: list[EpisodeTurn] = []
-        for turns in anchored.values():
+        anchor_sets = (
+            [anchored["__merged__"]]
+            if "__merged__" in anchored
+            else list(anchored.values())
+        )
+        for turns in anchor_sets:
             for t in turns:
                 if t.id in seen:
                     continue
                 seen.add(t.id)
                 ordered.append(t)
-                if len(ordered) >= policy.top_k:
+                if len(ordered) >= policy.candidate_limit:
                     break
-            if len(ordered) >= policy.top_k:
+            if len(ordered) >= policy.candidate_limit:
                 break
-        turns_list = ordered[: policy.top_k]
+        turns_list = diversify_temporal_turns(
+            ordered, limit=policy.candidate_limit,
+        )
     else:
         query_embedding = await embedder.embed(question)
         turns_list = await recall_turns(
             pool, question,
             project_id=project_id,
-            top_k=policy.top_k,
+            top_k=policy.candidate_limit,
             embedding=query_embedding,
         )
 
+    # Keep the wider pool for candidate coverage, but cap what the Reader sees.
+    turns_list = turns_list[: policy.top_k]
     total = len(turns_list)
     return [
         _turn_to_recall(t, rank=i, total=total, project_id=project_id)

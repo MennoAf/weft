@@ -14,12 +14,27 @@ import asyncpg
 from fastmcp import Context
 
 from capability_registry.lookup import format_lookup_results, lookup_capabilities
-from weft.auth import resolve_caller_user_id
+from weft.auth import resolve_canary_user_id, resolve_caller_user_id
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
 from weft.fsck import list_orphan_memories
 from weft.mcp.server import AppContext, mcp
 from weft.tool_usage import get_tool_usage_summary
+from weft.episode_turns import recall_turns, summarize_occurrences
+from weft.turn_recall import temporal_query_variants
+
+
+async def _owner_scoped_canary_health(pool, user_id: str):
+    """Read canary health through a fresh RLS connection for one owner."""
+    from weft.auth import current_user_id
+    from weft.canary import canary_health
+
+    token = current_user_id.set(user_id)
+    try:
+        async with acquire(pool):
+            return await canary_health(pool, user_id)
+    finally:
+        current_user_id.reset(token)
 from weft.behaviors import (
     delete_behavior,
     list_behaviors as list_behaviors_store,
@@ -54,6 +69,7 @@ from weft.models import (
     EpisodeWithMemories,
     MemoryCreate,
     MemorySource,
+    PreferenceMetadata,
     MemorySourceLiteral,
     MemoryStatus,
     MemoryType,
@@ -265,6 +281,7 @@ async def weft_remember(
     pinned: bool = False,
     review_after: str | None = None,
     project_facets: list[str] | None = None,
+    preference_metadata: dict | None = None,
 ) -> dict:
     """Store a new memory with type, topics, content, confidence, and source.
     If project_id is omitted, auto-detects from the client's working directory.
@@ -320,6 +337,10 @@ async def weft_remember(
             workspace_id=workspace_id,
             pinned=pinned,
             review_after=_parse_review_after(review_after),
+            preference_metadata=(
+                PreferenceMetadata.model_validate(preference_metadata)
+                if preference_metadata is not None else None
+            ),
         )
         embedding = None
         embedding_failed = False
@@ -450,6 +471,38 @@ async def weft_remember(
         return _input_error_response("weft_remember", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_remember", e)
+
+
+_TURN_RELEVANCE_STOPWORDS = frozenset({
+    "a", "about", "after", "all", "and", "are", "before", "been", "being",
+    "but", "can", "did", "do", "does", "everything", "for", "from", "give",
+    "has", "have", "her", "how", "i", "in", "know", "me", "my", "of", "on",
+    "our", "should", "since", "tell", "the", "their", "them", "there", "this",
+    "to", "until", "was", "what", "when", "who", "with", "you", "your",
+})
+
+
+def _turns_have_query_signal(query: str, turns: list[dict]) -> bool:
+    """Return whether turn results share a meaningful term with the query.
+
+    The turn tier can be non-empty yet unrelated when the auto-router mistakes
+    a belief/entity brief for temporal recall.  This cheap lexical guard is a
+    fallback signal, not a replacement for turn ranking: it only decides
+    whether to try the belief tier as an additive recovery path.
+    """
+    query_terms = {
+        token.lower()
+        for token in re.findall(r"[a-z0-9]+", query)
+        if len(token) > 2 and token.lower() not in _TURN_RELEVANCE_STOPWORDS
+    }
+    if not query_terms:
+        return bool(turns)
+    turn_terms = {
+        token.lower()
+        for turn in turns
+        for token in re.findall(r"[a-z0-9]+", str(turn.get("content", "")))
+    }
+    return bool(query_terms & turn_terms)
 
 
 async def _weft_recall_turns(
@@ -671,6 +724,75 @@ async def _weft_recall_both(
 
 
 @mcp.tool()
+async def weft_count_occurrences(
+    ctx: Context,
+    query: str,
+    project_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 100,
+    basis: Literal["distinct_conversations", "distinct_days"] = "distinct_conversations",
+) -> dict:
+    """Count distinct conversations with retrieved evidence for a query.
+
+    The count basis is explicit: multiple matching turns in one episode count
+    once. Results include occurrence IDs, earliest matching timestamps, turn
+    IDs, and bounded evidence so callers can audit what was counted. This is
+    not a claim about distinct real-world incidents across conversations.
+    """
+    if not query.strip():
+        return {"error": "query must not be empty"}
+    if limit < 1 or limit > 500:
+        return {"error": "limit must be between 1 and 500"}
+    if basis not in {"distinct_conversations", "distinct_days"}:
+        return {"error": "basis must be distinct_conversations or distinct_days"}
+    if since is not None and until is not None and since > until:
+        return {"error": "since must be before or equal to until"}
+    try:
+        app: AppContext = ctx.request_context.lifespan_context
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        variants = temporal_query_variants(query)
+        seen: set[str] = set()
+        turns = []
+        async with acquire(app.pool):
+            for variant in variants:
+                embedding = await app.embedding.embed(variant)
+                matches = await recall_turns(
+                    app.pool,
+                    variant,
+                    project_id=resolved_project,
+                    since=since,
+                    until=until,
+                    top_k=limit,
+                    embedding=embedding,
+                )
+                for turn in matches:
+                    if turn.id not in seen:
+                        seen.add(turn.id)
+                        turns.append(turn)
+        summary = summarize_occurrences(turns, basis=basis)
+        return {
+            "query": query,
+            "count": summary.count,
+            "count_basis": basis,
+            "candidate_turn_count": len(turns),
+            "occurrences": [
+                {
+                    "occurrence_id": occurrence.occurrence_id,
+                    "occurred_at": occurrence.occurred_at.isoformat(),
+                    "turn_ids": list(occurrence.turn_ids),
+                    "evidence": occurrence.evidence,
+                }
+                for occurrence in summary.occurrences
+            ],
+        }
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_count_occurrences", e)
+    except _DB_ERRORS as e:
+        return _db_error_response("weft_count_occurrences", e)
+
+
+@mcp.tool()
 async def weft_recall(
     ctx: Context,
     query: str,
@@ -774,14 +896,17 @@ async def weft_recall(
         # turns result, so temporal queries that DO have turn answers are
         # untouched — this protects the turn tier's purpose instead of narrowing
         # it. Cost: a second recall pass on the (rare) empty-turns path.
-        if turns_response.get("count", 0) > 0:
+        turns = turns_response.get("turns", [])
+        if turns_response.get("count", 0) > 0 and _turns_have_query_signal(query, turns):
             return turns_response
+        reason = "empty_turns_result" if not turns else "irrelevant_turns_result"
         logger.debug(
-            "weft_recall: turns tier empty for %r — falling back to belief",
+            "weft_recall: turns tier %s for %r — falling back to belief",
+            reason,
             query[:50],
         )
         tier = "belief"
-        tier_fallback = {"from": "turns", "reason": "empty_turns_result"}
+        tier_fallback = {"from": "turns", "reason": reason}
     if tier == "both":
         return await _weft_recall_both(
             ctx,
@@ -1301,8 +1426,15 @@ async def weft_revise(
     new_project_id: str | None = None,
     new_pinned: bool | None = None,
     review_after: str | None = None,
+    preference_metadata: dict | None = None,
+    clear_preference_metadata: bool = False,
 ) -> dict:
-    """Update a memory's content, creating a new version that supersedes the old one.
+    """Update a memory's content.
+
+    Preference metadata is preserved when omitted. To explicitly clear it,
+    pass ``clear_preference_metadata=True``; this makes the distinction between
+    omission and JSON null unambiguous for MCP callers. Creates a new version
+    that supersedes the old one.
 
     Preserves the predecessor's pinned state and project_id by default — pass
     new_pinned/new_project_id only when explicitly changing them.
@@ -1341,6 +1473,17 @@ async def weft_revise(
             parsed = _parse_review_after(review_after)
             if parsed is not None:
                 revise_kwargs["review_after"] = parsed
+        if preference_metadata is not None and clear_preference_metadata:
+            raise ValueError(
+                "pass either preference_metadata or clear_preference_metadata, not both"
+            )
+        if preference_metadata is not None:
+            from weft.models import PreferenceMetadata as _PreferenceMetadata
+            revise_kwargs["preference_metadata"] = _PreferenceMetadata.model_validate(
+                preference_metadata
+            )
+        elif clear_preference_metadata:
+            revise_kwargs["preference_metadata"] = None
         app: AppContext = ctx.request_context.lifespan_context
         embedding = await app.embedding.embed(
             embed_text_for_memory(new_content, _coerce_list(new_topic))
@@ -1356,6 +1499,8 @@ async def weft_revise(
             await app.cache.invalidate_memory(old.id)
             await app.cache.invalidate_stats()
             return {"new": new.to_dict(), "superseded": old.to_dict()}
+    except _INPUT_ERRORS as e:
+        return _input_error_response("weft_revise", e)
     except _DB_ERRORS as e:
         return _db_error_response("weft_revise", e)
 
@@ -1519,7 +1664,7 @@ async def weft_prime(
         # never let the meter's own health break the primer.
         try:
             from weft.canary import canary_health
-            _ch = await canary_health(app.pool, resolve_caller_user_id())
+            _ch = await _owner_scoped_canary_health(app.pool, resolve_canary_user_id())
             if _ch:
                 result["recall_canary"] = _ch
         except Exception as exc:
@@ -3810,6 +3955,7 @@ async def weft_check_health(
         from weft.store import get_recent_recall_queries
 
         app: AppContext = ctx.request_context.lifespan_context
+        canary_status = None
         async with acquire(app.pool):
             result = await run_all_evaluators(app.pool)
             # PROOF metric 1: re-ask rate (query-based, last 30 min window)
@@ -3869,9 +4015,13 @@ async def weft_check_health(
             # broken" tell. replay.executor.failed reads 0 until E2.L7 lands.
             failure_counters = await get_counters(app.pool, FAILURE_COUNTERS)
             tool_usage = await get_tool_usage_summary(app.pool, days=30)
-            canary_status = await canary_health(
-                app.pool, resolve_caller_user_id()
-            )
+
+        # canary_health must run outside the shared acquire scope. It uses the
+        # pool directly and must not inherit the general health connection's RLS
+        # context; Prime invokes the same helper outside acquire().
+        canary_status = await _owner_scoped_canary_health(
+            app.pool, resolve_canary_user_id()
+        )
 
         payload = summary_to_dict(result)
         payload["reask_rate"] = reask_rate

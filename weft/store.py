@@ -97,13 +97,13 @@ async def store_memory(
             token_count, created_at, updated_at, accessed_at,
             access_count, project_id, agent_id, embedding, status, pinned,
             review_after, workspace_id, user_id, write_provenance, review_status,
-            embed_composition_version
+            preference_metadata, embed_composition_version
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
             0, $9, $10, $11::vector, 'active', $12,
             $13, $14, nullif(current_setting('app.user_id', true), ''), $15, $16,
-            $17
+            $17::jsonb, $18
         )
         """,
         memory_id,
@@ -122,6 +122,7 @@ async def store_memory(
         create.workspace_id,
         write_provenance,
         review_status,
+        create.preference_metadata.model_dump_json() if create.preference_metadata else None,
         embed_composition_version,
     )
 
@@ -167,6 +168,7 @@ async def store_memory(
         review_after=create.review_after,
         write_provenance=write_provenance,
         review_status=review_status,
+        preference_metadata=create.preference_metadata,
     )
 
 
@@ -1766,4 +1768,9 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         write_provenance=row["write_provenance"] if row.get("write_provenance") is not None else "supervisor",
         review_status=row["review_status"] if row.get("review_status") is not None else "active",
         project_facets=list(row["project_facets"]) if row.get("project_facets") else [],
+        preference_metadata=(
+            json.loads(row["preference_metadata"])
+            if isinstance(row.get("preference_metadata"), str)
+            else row.get("preference_metadata")
+        ),
     )

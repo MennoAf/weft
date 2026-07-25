@@ -69,8 +69,8 @@ from benchmarks.longmemeval.router import Tier, policy_for, retrieve
 logger = logging.getLogger(__name__)
 
 
-def _answer_text_match(gold: str, content: str) -> bool:
-    """Check whether a gold answer string is present in a turn's content.
+def _answer_text_match(gold: object, content: str) -> bool:
+    """Check whether a scalar gold answer is present in a turn's content.
 
     Heuristic (documented for transparency):
     - Both sides are lowercased and whitespace-stripped before comparison.
@@ -108,7 +108,7 @@ def _answer_text_match(gold: str, content: str) -> bool:
     Returns:
         True if the gold answer is found in the content, False otherwise.
     """
-    gold = gold.strip().lower()
+    gold = str(gold).strip().lower()
     content = content.strip().lower()
     if not gold:
         return False
@@ -414,7 +414,7 @@ async def _run_one(
         # any of the top-k retrieved turns. Requires the turn_content_map
         # side-map, which is always populated alongside turn_session_map
         # when capture_recall is True in turns mode.
-        gold_answer_text = instance.answer.strip().lower()
+        gold_answer_text = str(instance.answer).strip().lower()
         retrieved_turn_contents: list[str] = []
         if turn_content_map is not None:
             retrieved_turn_contents = [
@@ -496,6 +496,7 @@ async def run_benchmark(
     top_k: int = DEFAULT_TOP_K,
     cleanup: bool = True,
     limit: int | None = None,
+    resume: bool = False,
     question_types: frozenset[str] | None = None,
     stratified_frac: float | None = None,
     sample_seed: int = 0,
@@ -560,6 +561,20 @@ async def run_benchmark(
         )
     if limit is not None:
         instances = instances[:limit]
+
+    if resume and output_path.exists():
+        completed_ids: set[str] = set()
+        with output_path.open(encoding="utf-8") as existing:
+            for line in existing:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                question_id = row.get("question_id")
+                if question_id:
+                    completed_ids.add(question_id)
+        instances = [i for i in instances if i.question_id not in completed_ids]
+        logger.info("resume: skipping %d completed questions", len(completed_ids))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -834,6 +849,18 @@ async def run_benchmark(
     help="Only run the first N questions (smoke testing).",
 )
 @click.option(
+    "--output-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Stable hypotheses JSONL path (enables detached runs and resume).",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Skip question_ids already present in --output-file.",
+)
+@click.option(
     "--question-type",
     "question_types",
     multiple=True,
@@ -903,6 +930,8 @@ def cli(
     output_dir: Path,
     top_k: int,
     limit: int | None,
+    output_file: Path | None,
+    resume: bool,
     question_types: tuple[str, ...],
     stratified_frac: float | None,
     sample_seed: int,
@@ -971,7 +1000,11 @@ def cli(
         warm_slug = f"{warm_slug}_rerankoff"
     # Suffix the replay executor so inline-vs-batch A/B runs don't collide.
     replay_slug = f"_{replay_executor}" if tier == "replay" else ""
-    output_path = output_dir / f"{split_name}_{mode}{tier_slug}{replay_slug}{slug}{warm_slug}_{timestamp}.jsonl"
+    output_path = output_file or (
+        output_dir / f"{split_name}_{mode}{tier_slug}{replay_slug}{slug}{warm_slug}_{timestamp}.jsonl"
+    )
+    if resume and output_file is None:
+        raise click.UsageError("--resume requires --output-file")
 
     stats = asyncio.run(
         run_benchmark(
@@ -981,6 +1014,7 @@ def cli(
             top_k=top_k,
             cleanup=not no_cleanup,
             limit=limit,
+            resume=resume,
             question_types=qt_set,
             stratified_frac=stratified_frac,
             sample_seed=sample_seed,

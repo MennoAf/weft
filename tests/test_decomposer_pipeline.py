@@ -543,6 +543,24 @@ class TestRoute:
         assert result.alerts_created == 1
 
     @pytest.mark.asyncio
+    async def test_preference_intent_routes_as_preference_with_metadata(self):
+        pool = AsyncMock()
+        intent = Intent(
+            type="general_note",
+            content="I prefer history podcasts on my commute",
+            raw_text="I prefer history podcasts on my commute",
+            confidence=0.9,
+        )
+        with patch("weft.store.store_memory", new_callable=AsyncMock) as mock_store:
+            mock_store.return_value = _mock_memory()
+            result = await route([intent], pool)
+
+        assert result.memories_created == 1
+        create = mock_store.call_args.args[1]
+        assert create.type.value == "preference"
+        assert create.preference_metadata.polarity == "positive"
+
+    @pytest.mark.asyncio
     async def test_person_fact_creates_memory_with_entity(self):
         pool = AsyncMock()
         provider = _mock_embedding_provider()

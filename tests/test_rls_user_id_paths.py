@@ -33,6 +33,7 @@ from weft.models import (
 )
 from weft.primer import build_primer
 from weft.revise import revise_memory
+from weft.skills import list_projects_with_handoffs
 from weft.store import store_memory, add_relationship
 
 TEST_USER = "rls-integration-user-1"
@@ -323,6 +324,71 @@ class TestEndToEndUserIdFlow:
         )
         assert row is not None, "supersedes relationship from revise not found"
         assert row["user_id"] == TEST_USER
+
+
+class TestPrimerReadScoping:
+    """Production-shaped RLS regressions for session boot reads."""
+
+    async def test_primer_surfaces_owned_project_handoff_without_outer_acquire(
+        self, pool,
+    ):
+        project_id = "muttr-prime-regression"
+        content = "## Session Handoff\n\n**Summary:** Owned Muttr handoff"
+        tok = current_user_id.set(TEST_USER)
+        try:
+            async with acquire(pool):
+                handoff = await store_memory(
+                    pool,
+                    MemoryCreate(
+                        type=MemoryType.handoff,
+                        content=content,
+                        topic=["session-handoff"],
+                        confidence=1.0,
+                        project_id=project_id,
+                    ),
+                )
+
+            # Mirrors weft_prime: build_primer receives the pool directly and
+            # must scope every concurrent section query itself.
+            primer = await build_primer(
+                pool, project_id=project_id, disclosure="full",
+            )
+        finally:
+            current_user_id.reset(tok)
+
+        assert [item["id"] for item in primer["handoff"]] == [handoff.id]
+        assert primer["handoff"][0]["content"] == content
+
+    async def test_project_index_reuses_mcp_scoped_connection(self, pool):
+        project_id = "muttr-project-index-regression"
+        tok = current_user_id.set(TEST_USER)
+        try:
+            async with acquire(pool):
+                await store_memory(
+                    pool,
+                    MemoryCreate(
+                        type=MemoryType.handoff,
+                        content=(
+                            "## Session Handoff\n\n"
+                            "**Summary:** Indexed owned handoff"
+                        ),
+                        topic=["session-handoff"],
+                        confidence=1.0,
+                        project_id=project_id,
+                    ),
+                )
+
+            # Mirrors weft_projects' outer acquire(app.pool). The helper must
+            # use get_db(pool), not raw pool.fetch(), to retain app.user_id.
+            async with acquire(pool):
+                projects = await list_projects_with_handoffs(pool)
+        finally:
+            current_user_id.reset(tok)
+
+        indexed = {item["project_id"]: item for item in projects}[project_id]
+        assert indexed["last_handoff_at"] is not None
+        assert indexed["last_handoff_summary"] == "Indexed owned handoff"
+        assert indexed["memory_count"] == 1
 
 
 class TestConsolidationUserIdPropagation:

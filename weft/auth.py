@@ -85,6 +85,16 @@ def resolve_caller_user_id() -> str:
     return current_user_id.get() or get_user_id()
 
 
+def resolve_canary_user_id() -> str:
+    """Return the owner scope used by deployment-wide canary surfaces.
+
+    Deployment-owned canary surfaces use the explicit ``WEFT_DEFAULT_USER_ID``
+    owner, matching the background scheduler. Deployments without an owner
+    configured retain the authenticated/install identity fallback.
+    """
+    return os.environ.get("WEFT_DEFAULT_USER_ID") or resolve_caller_user_id()
+
+
 def parse_caller_mode_header(header_value: str | None) -> CallerMode:
     """Normalize an ``X-Weft-Caller-Mode`` header into a known value.
 

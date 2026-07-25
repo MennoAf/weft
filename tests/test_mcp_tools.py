@@ -164,6 +164,108 @@ class TestWeftRemember:
         assert "id" in result
         assert result.get("review_after") is not None
 
+    async def test_preference_metadata_round_trip(self, ctx):
+        from weft.mcp.tools import weft_remember
+
+        result = await weft_remember(
+            ctx,
+            content="I avoid true crime podcasts during my commute.",
+            type="preference",
+            preference_metadata={
+                "polarity": "avoidance",
+                "strength": "hard",
+                "subject": "commute",
+                "value": "true crime",
+            },
+            check_contradictions=False,
+        )
+        assert result["preference_metadata"]["polarity"] == "avoidance"
+        assert result["preference_metadata"]["strength"] == "hard"
+
+    async def test_preference_metadata_rejected_for_fact(self, ctx):
+        from weft.mcp.tools import weft_remember
+
+        result = await weft_remember(
+            ctx,
+            content="This is an ordinary fact with invalid metadata.",
+            type="fact",
+            preference_metadata={"polarity": "positive", "strength": "soft"},
+        )
+        assert result["error"] == "Invalid input"
+
+
+# ---------------------------------------------------------------------------
+# weft_revise preference metadata
+# ---------------------------------------------------------------------------
+
+
+class TestWeftRevisePreferenceMetadata:
+    async def _create(self, ctx):
+        from weft.mcp.tools import weft_remember
+
+        return await weft_remember(
+            ctx,
+            content="I avoid true crime podcasts during my commute.",
+            type="preference",
+            preference_metadata={
+                "polarity": "avoidance",
+                "strength": "hard",
+                "subject": "commute",
+                "value": "true crime",
+            },
+            check_contradictions=False,
+        )
+
+    async def test_omission_preserves(self, ctx):
+        from weft.mcp.tools import weft_revise
+
+        original = await self._create(ctx)
+        result = await weft_revise(ctx, original["id"], "I still avoid true crime podcasts.")
+        assert result["new"]["preference_metadata"]["polarity"] == "avoidance"
+
+    async def test_explicit_clear(self, ctx):
+        from weft.mcp.tools import weft_revise
+
+        original = await self._create(ctx)
+        result = await weft_revise(
+            ctx, original["id"], "I no longer avoid true crime podcasts.",
+            clear_preference_metadata=True,
+        )
+        assert result["new"]["preference_metadata"] is None
+
+    async def test_replacement(self, ctx):
+        from weft.mcp.tools import weft_revise
+
+        original = await self._create(ctx)
+        result = await weft_revise(
+            ctx, original["id"], "I prefer history podcasts during my commute.",
+            preference_metadata={
+                "polarity": "positive", "strength": "soft",
+                "subject": "commute", "value": "history",
+            },
+        )
+        assert result["new"]["preference_metadata"]["value"] == "history"
+
+    async def test_retype_requires_clear(self, ctx):
+        from weft.mcp.tools import weft_revise
+
+        original = await self._create(ctx)
+        result = await weft_revise(
+            ctx, original["id"], "A factual statement.", new_type="fact",
+        )
+        assert result["error"] == "Invalid input"
+
+    async def test_clear_and_replacement_are_mutually_exclusive(self, ctx):
+        from weft.mcp.tools import weft_revise
+
+        original = await self._create(ctx)
+        result = await weft_revise(
+            ctx, original["id"], "Conflicting request.",
+            preference_metadata={"polarity": "positive", "strength": "soft"},
+            clear_preference_metadata=True,
+        )
+        assert result["error"] == "Invalid input"
+
 
 # ---------------------------------------------------------------------------
 # weft_recall

@@ -25,11 +25,43 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+from weft.db.connection import _current_conn, acquire
+
 # Overhead tokens per memory dict entry (id, type, timestamps, metadata fields).
 # Accounts for JSON keys and values that to_dict() adds beyond content.
 _DICT_OVERHEAD_TOKENS = 40
 
 logger = logging.getLogger(__name__)
+
+
+class _ScopedQueryPool:
+    """Pool-shaped facade that scopes every query to a fresh RLS connection."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def _call(self, method: str, *args, **kwargs):
+        # A parent MCP handler may already hold an acquire() connection. Do not
+        # inherit it: parallel primer queries require independent connections.
+        token = _current_conn.set(None)
+        try:
+            async with acquire(self._pool) as conn:
+                return await getattr(conn, method)(*args, **kwargs)
+        finally:
+            _current_conn.reset(token)
+
+    async def execute(self, *args, **kwargs):
+        return await self._call("execute", *args, **kwargs)
+
+    async def fetch(self, *args, **kwargs):
+        return await self._call("fetch", *args, **kwargs)
+
+    async def fetchrow(self, *args, **kwargs):
+        return await self._call("fetchrow", *args, **kwargs)
+
+    async def fetchval(self, *args, **kwargs):
+        return await self._call("fetchval", *args, **kwargs)
+
 
 # Hard caps on items shown in primer sections.
 _MAX_DECISIONS = 5
@@ -194,15 +226,19 @@ async def build_primer(
 
     now = datetime.now(timezone.utc)
 
-    # Resolve mode weights (never raises — falls back to defaults).
-    weights = await get_active_weights(pool, mode)
+    # Every query issued during primer construction must carry the caller's
+    # RLS identity, while parallel and nested-parallel sections must never share
+    # one asyncpg connection. The facade acquires per query and preserves the
+    # pool-shaped API expected by store/section helpers.
+    scoped_pool = _ScopedQueryPool(pool)
+    weights = await get_active_weights(scoped_pool, mode)
 
     # Build context.
     ctx = PrimerContext(
         user_id="",  # Not used by sections directly (RLS handles auth).
         project_id=project_id,
         agent_id=agent_id,
-        pool=pool,
+        pool=scoped_pool,
         budget_tokens=budget_tokens,
         query=None,
         query_vec=query_vec,
@@ -240,26 +276,7 @@ async def build_primer(
     async def _noop_result() -> SectionResult:
         return _skip
 
-    (
-        grounding_fetch,
-        rules_fetch,
-        behaviors_fetch,
-        handoff_fetch,
-        recent_memories_fetch,
-        recent_work_fetch,
-        issues_fetch,
-        anti_patterns_fetch,
-        decisions_fetch,
-        entities_fetch,
-        autonomy_fetch,
-        calibration_fetch,
-        degradation_fetch,
-        triggers_fetch,
-        cost_fetch,
-        working_memory_fetch,
-        changes_result,
-        wellness_result,
-    ) = await asyncio.gather(
+    fetch_results = await asyncio.gather(
         fetch_grounding_section(ctx) if _enabled("grounding") else _noop_fetch(),
         fetch_rules_section(ctx) if _enabled("rules") else _noop_fetch(),
         fetch_behaviors_section(ctx) if _enabled("behaviors") else _noop_fetch(),
@@ -279,6 +296,27 @@ async def build_primer(
         build_changes_since_section(ctx) if _enabled("changes_since") else _noop_result(),
         build_wellness_section(ctx) if _enabled("wellness") else _noop_result(),
     )
+
+    (
+        grounding_fetch,
+        rules_fetch,
+        behaviors_fetch,
+        handoff_fetch,
+        recent_memories_fetch,
+        recent_work_fetch,
+        issues_fetch,
+        anti_patterns_fetch,
+        decisions_fetch,
+        entities_fetch,
+        autonomy_fetch,
+        calibration_fetch,
+        degradation_fetch,
+        triggers_fetch,
+        cost_fetch,
+        working_memory_fetch,
+        changes_result,
+        wellness_result,
+    ) = fetch_results
 
     # --- Phase 1b: Budget packing — sequential in priority order ---
     # Sections mutate shared ctx state (used_tokens, seen_ids, excluded,

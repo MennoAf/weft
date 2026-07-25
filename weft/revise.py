@@ -17,6 +17,7 @@ from weft.db.connection import acquire
 from weft.models import (
     Memory,
     MemoryStatus,
+    PreferenceMetadata,
     MemoryType,
     RelationType,
     _weft_id,
@@ -39,6 +40,7 @@ async def revise_memory(
     new_project_id: str | None = _UNSET,
     new_pinned: bool | None = _UNSET,
     review_after: datetime | None = _UNSET,
+    preference_metadata: object = _UNSET,
 ) -> tuple[Memory, Memory]:
     """Create a new version of a memory, superseding the old one.
 
@@ -56,6 +58,16 @@ async def revise_memory(
     resolved_confidence = new_confidence if new_confidence is not None else old.confidence
     resolved_project_id = old.project_id if new_project_id is _UNSET else new_project_id
     resolved_pinned = old.pinned if new_pinned is _UNSET else bool(new_pinned)
+    if preference_metadata is _UNSET:
+        resolved_preference_metadata = old.preference_metadata
+    elif preference_metadata is None:
+        resolved_preference_metadata = None
+    else:
+        resolved_preference_metadata = PreferenceMetadata.model_validate(preference_metadata)
+    if resolved_type is not MemoryType.preference and resolved_preference_metadata is not None:
+        raise ValueError(
+            "retyping away from preference requires explicit preference_metadata=null"
+        )
     new_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(new_content)
@@ -68,12 +80,14 @@ async def revise_memory(
                     id, type, topic, content, source, confidence,
                     token_count, created_at, updated_at, accessed_at,
                     access_count, project_id, agent_id, embedding, status, pinned,
-                    review_after, user_id
+                    review_after, user_id, preference_metadata, workspace_id,
+                    project_facets, write_provenance, review_status, embed_composition_version
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $8, $8,
                     0, $9, $10, $11::vector, 'active', $13,
-                    $12, nullif(current_setting('app.user_id', true), '')
+                    $12, nullif(current_setting('app.user_id', true), ''), $14::jsonb,
+                    $15, $16, $17, $18, $19
                 )
                 """,
                 new_id,
@@ -89,6 +103,13 @@ async def revise_memory(
                 embedding,
                 resolved_review,
                 resolved_pinned,
+                resolved_preference_metadata.model_dump_json()
+                if resolved_preference_metadata is not None else None,
+                old.workspace_id,
+                old.project_facets,
+                old.write_provenance,
+                old.review_status,
+                1,
             )
 
             # 2. Link: new supersedes old
@@ -127,6 +148,11 @@ async def revise_memory(
         status=MemoryStatus.active,
         pinned=resolved_pinned,
         review_after=resolved_review,
+        preference_metadata=resolved_preference_metadata,
+        workspace_id=old.workspace_id,
+        project_facets=old.project_facets,
+        write_provenance=old.write_provenance,
+        review_status=old.review_status,
     )
 
     return new, Memory(

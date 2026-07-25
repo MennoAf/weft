@@ -13,6 +13,7 @@ from weft.auth import (
     current_user_id,
     extract_user_id,
     extract_user_id_from_header,
+    resolve_canary_user_id,
     resolve_caller_user_id,
 )
 
@@ -167,6 +168,18 @@ class TestResolveCallerUserId:
             "weft.config.user_identity.get_user_id", return_value="install-id"
         ):
             assert resolve_caller_user_id() == "install-id"
+
+    def test_canary_owner_fallback_matches_scheduler(self, monkeypatch):
+        monkeypatch.setenv("WEFT_DEFAULT_USER_ID", "deployment-owner")
+        assert resolve_canary_user_id() == "deployment-owner"
+
+    def test_canary_owner_matches_scheduler_for_authenticated_caller(self, monkeypatch):
+        monkeypatch.setenv("WEFT_DEFAULT_USER_ID", "deployment-owner")
+        tok = current_user_id.set("caller-from-credential")
+        try:
+            assert resolve_canary_user_id() == "deployment-owner"
+        finally:
+            current_user_id.reset(tok)
 
     def test_empty_contextvar_falls_back(self):
         # An empty string is not a valid identity — fall through, don't scope
