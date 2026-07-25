@@ -31,6 +31,18 @@ def test_extract_preference_metadata_polarity_and_strength():
     }
 
 
+def test_extracts_classifier_normalized_preference_summaries():
+    preferred = extract_candidates("Prefers history podcasts during commute")[0]
+    avoided = extract_candidates("Avoids true crime content")[0]
+    required = extract_candidates("Requires audio-compatible activities while driving")[0]
+    assert preferred["preference_metadata"]["polarity"] == "positive"
+    assert avoided["preference_metadata"]["polarity"] == "avoidance"
+    assert required["preference_metadata"] == {
+        "polarity": "constraint", "strength": "hard",
+        "value": "audio-compatible activities while driving",
+    }
+
+
 def test_preference_metadata_ignores_negation_and_impersonal_instructions():
     negated = extract_candidates("I prefer not to use dark mode")
     assert not any("preference_metadata" in item for item in negated)

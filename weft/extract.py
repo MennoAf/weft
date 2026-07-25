@@ -8,11 +8,13 @@ from typing import Any
 
 # Pattern definitions: (regex, memory_type, base_confidence)
 _PREFERENCE_PATTERNS = [
-    (re.compile(r"^I prefer\s+(?!not\b)(.+?)(?:\s+but\s+I\s+prefer\s+.+)?$", re.IGNORECASE), "preference", 0.85, "positive", "soft"),
+    (re.compile(r"^(?:I prefer|[Uu]ser prefers?|[Pp]refers?)\s+(?!not\b)(.+?)(?:\s+but\s+I\s+prefer\s+.+)?$", re.IGNORECASE), "preference", 0.85, "positive", "soft"),
     (re.compile(r"^I always\s+(.+)$", re.IGNORECASE), "preference", 0.8, "constraint", "hard"),
-    (re.compile(r"^I never\s+(?:like|want|use|prefer)\s+(.+)$", re.IGNORECASE), "preference", 0.8, "avoidance", "hard"),
-    (re.compile(r"^I (?:avoid|don't|do not) (?:like|want|use|prefer)\s+(.+)$", re.IGNORECASE), "preference", 0.8, "avoidance", "hard"),
-    (re.compile(r"^I (?:like|want) to\s+(?!fix|debug|implement|build|write|run|check|use\b)(.+)$", re.IGNORECASE), "preference", 0.7, "positive", "soft"),
+    (re.compile(r"^(?:I never|[Uu]ser never|[Nn]ever)\s+(?:like|want|use|prefer)\s+(.+)$", re.IGNORECASE), "preference", 0.8, "avoidance", "hard"),
+    (re.compile(r"^(?:I avoid|[Uu]ser avoids?|[Aa]voids?)\s+(.+)$", re.IGNORECASE), "preference", 0.8, "avoidance", "hard"),
+    (re.compile(r"^(?:I (?:don't|do not) (?:like|want|use|prefer)|[Uu]ser (?:doesn't|does not) (?:like|want|use|prefer))\s+(.+)$", re.IGNORECASE), "preference", 0.8, "avoidance", "hard"),
+    (re.compile(r"^(?:I (?:like|want) to|[Uu]ser wants? to)\s+(?!fix|debug|implement|build|write|run|check|use\b)(.+)$", re.IGNORECASE), "preference", 0.7, "positive", "soft"),
+    (re.compile(r"^(?:I require|[Uu]ser requires?|[Rr]equires?)\s+(.+)$", re.IGNORECASE), "preference", 0.85, "constraint", "hard"),
 ]
 
 _FACT_PATTERNS = [
@@ -257,7 +259,11 @@ def extract_candidates(
 
         for pattern_entry in ALL_PATTERNS:
             pattern, mem_type, confidence = pattern_entry[:3]
-            if mem_type == "preference" and not re.match(r"^I\b", clean, re.IGNORECASE):
+            if mem_type == "preference" and not re.match(
+                r"^(?:I\b|user\s+(?:prefers?|avoids?|never|doesn't|does not|wants?|requires?)\b|(?:prefers?|avoids?|never|requires?)\b)",
+                clean,
+                re.IGNORECASE,
+            ):
                 continue
             match = pattern.search(clean)
             if match:
