@@ -4058,9 +4058,24 @@ async def weft_check_health(
             canary_task is not None and not canary_task.done()
         )
         canary_status["scheduler_mode"] = "per_user"
+        canary_runtime_state = getattr(app, "_canary_audit_state", None)
+        if canary_runtime_state is not None:
+            canary_status["scheduler_runtime"] = canary_runtime_state.as_dict()
+        else:
+            canary_status["scheduler_runtime"] = {
+                "last_attempt_at": None,
+                "last_success_at": None,
+                "consecutive_failures": 0,
+                "last_exception": None,
+            }
         if not canary_status["scheduler_running"]:
             canary_status["scheduler_warning"] = (
                 "The background canary audit task is not running."
+            )
+        elif canary_status["scheduler_runtime"]["consecutive_failures"]:
+            canary_status["scheduler_warning"] = (
+                "The background canary audit task is running but its most "
+                "recent pass failed."
             )
         payload["recall_canary"] = canary_status
         return payload
