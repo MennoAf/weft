@@ -1036,7 +1036,16 @@ async def _run_canary_audit_pass(
     from weft.canary import list_canary_user_ids, run_canary_audit
     from weft.db.connection import acquire
 
-    user_ids = await list_canary_user_ids(pool)
+    configured_owner = os.environ.get("WEFT_DEFAULT_USER_ID")
+    if configured_owner:
+        # Hosted Weft runs under a deliberately non-BYPASSRLS role. It cannot
+        # enumerate arbitrary owners, nor should it. The deployment owner is an
+        # explicit part of the scheduler contract and matches health/brief scope.
+        user_ids = [configured_owner]
+    else:
+        # Local/test service-role contexts may support discovery. An empty list
+        # is valid there: a fresh local database can genuinely have no probes.
+        user_ids = await list_canary_user_ids(pool)
     summary = {
         "owners_considered": len(user_ids),
         "owners_audited": 0,
