@@ -1258,30 +1258,38 @@ async def log_recall_query(
     """
     import uuid
     query_id = f"rq-{uuid.uuid4().hex[:8]}"
+    user_token = current_user_id.set(user_id) if user_id is not None else None
     try:
-        await get_db(pool).execute(
-            """
-            INSERT INTO weft_recall_queries
-                (query_id, project_id, user_id, tool_name, query_text,
-                 tier, mode, retrieval_mode, result_count)
-            VALUES (
-                $1, $2,
-                COALESCE($3, nullif(current_setting('app.user_id', true), '')),
-                $4, $5, $6, $7, $8, $9
+        # Fire-and-forget callers run after the request-scoped connection has
+        # exited. Re-open an RLS-scoped connection here so the explicit owner
+        # is applied to app.user_id before the strict v50 INSERT policy runs.
+        async with acquire(pool) as conn:
+            await conn.execute(
+                """
+                INSERT INTO weft_recall_queries
+                    (query_id, project_id, user_id, tool_name, query_text,
+                     tier, mode, retrieval_mode, result_count)
+                VALUES (
+                    $1, $2,
+                    COALESCE($3, nullif(current_setting('app.user_id', true), '')),
+                    $4, $5, $6, $7, $8, $9
+                )
+                """,
+                query_id,
+                project_id,
+                user_id,
+                tool_name,
+                query_text,
+                tier,
+                mode,
+                retrieval_mode,
+                result_count,
             )
-            """,
-            query_id,
-            project_id,
-            user_id,
-            tool_name,
-            query_text,
-            tier,
-            mode,
-            retrieval_mode,
-            result_count,
-        )
     except (asyncpg.PostgresError, OSError, ConnectionError) as exc:
         logger.warning("log_recall_query failed (tool=%s): %s", tool_name, exc)
+    finally:
+        if user_token is not None:
+            current_user_id.reset(user_token)
 
 
 async def record_feedback(
