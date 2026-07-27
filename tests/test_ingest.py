@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from weft.ingest import (
+    _MAX_ARCHITECTURE_EVIDENCE_CHARS,
+    _MAX_FILE_CHARS,
     build_file_tree,
     discover_files,
     filter_files,
@@ -224,6 +226,16 @@ class TestSummarizeFile:
         user_msg = call_args.kwargs["messages"][0]["content"]
         assert "truncated" not in user_msg
 
+    async def test_long_lines_are_character_bounded(self):
+        client = _make_mock_client("Summary")
+        content = "\n".join(["x" * (_MAX_FILE_CHARS // 2)] * 20)
+
+        await summarize_file("src/long-lines.py", content, client)
+
+        user_msg = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert f"truncated at {_MAX_FILE_CHARS} characters" in user_msg
+        assert len(user_msg) < _MAX_FILE_CHARS + 500
+
 
 # ---------------------------------------------------------------------------
 # TestGenerateArchitectureOverview
@@ -262,6 +274,22 @@ class TestGenerateArchitectureOverview:
 
         result = await generate_architecture_overview(tree, {}, client)
         assert result == "Architecture with no summaries"
+
+    async def test_aggregate_evidence_is_bounded_and_reports_omissions(self):
+        client = _make_mock_client("Bounded overview")
+        summaries = {
+            f"module_{i:03d}.py": "s" * 2_000
+            for i in range(100)
+        }
+
+        await generate_architecture_overview("└── src", summaries, client)
+
+        user_msg = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        marker = "## File Summaries\n"
+        evidence = user_msg.split(marker, 1)[1]
+        assert len(evidence) <= _MAX_ARCHITECTURE_EVIDENCE_CHARS + 150
+        assert "omitted" in evidence
+        assert "summary truncated" in evidence
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,13 @@ _MAX_CONCURRENCY = 5
 # Max lines to send per file
 _MAX_LINES = 500
 
+# Character ceilings keep provider requests bounded even when a file has very
+# long lines. These are deliberately provider-neutral; UTF-8 characters are a
+# conservative proxy for tokens and leave room for the surrounding prompt.
+_MAX_FILE_CHARS = 24_000
+_MAX_SUMMARY_CHARS = 800
+_MAX_ARCHITECTURE_EVIDENCE_CHARS = 80_000
+
 # Min lines for a file to be worth summarizing
 _MIN_LINES = 10
 
@@ -167,6 +174,11 @@ async def summarize_file(
         truncated += f"\n\n[... truncated at {_MAX_LINES} lines out of {len(lines)} ...]"
     else:
         truncated = content
+    if len(truncated) > _MAX_FILE_CHARS:
+        truncated = (
+            truncated[:_MAX_FILE_CHARS]
+            + f"\n\n[... truncated at {_MAX_FILE_CHARS} characters ...]"
+        )
 
     response = await client.messages.create(
         model=_MODEL,
@@ -192,10 +204,26 @@ async def generate_architecture_overview(
     summaries: dict[str, str],
     client: AsyncAnthropic,
 ) -> str:
-    """Generate a concise project architecture overview from file tree and summaries."""
-    summary_text = "\n\n".join(
-        f"### {path}\n{summary}" for path, summary in sorted(summaries.items())
-    )
+    """Generate a concise project architecture overview from bounded evidence."""
+    evidence_parts: list[str] = []
+    evidence_chars = 0
+    omitted = 0
+    for path, summary in sorted(summaries.items()):
+        bounded_summary = summary[:_MAX_SUMMARY_CHARS]
+        entry = f"### {path}\n{bounded_summary}"
+        if len(summary) > _MAX_SUMMARY_CHARS:
+            entry += f"\n[... summary truncated at {_MAX_SUMMARY_CHARS} characters ...]"
+        separator = 2 if evidence_parts else 0
+        if evidence_chars + separator + len(entry) > _MAX_ARCHITECTURE_EVIDENCE_CHARS:
+            omitted += 1
+            continue
+        evidence_parts.append(entry)
+        evidence_chars += separator + len(entry)
+    if omitted:
+        evidence_parts.append(
+            f"[... omitted {omitted} file summaries to stay within the architecture evidence limit ...]"
+        )
+    summary_text = "\n\n".join(evidence_parts)
 
     response = await client.messages.create(
         model=_MODEL,
