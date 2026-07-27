@@ -170,6 +170,36 @@ async def _store_probe_for_user(pool, embedder, user_id: str, content: str) -> s
         current_user_id.reset(token)
 
 
+async def test_configured_owner_bypasses_empty_rls_discovery(
+    pool, embedder, monkeypatch
+):
+    """Hosted scheduler audits its configured owner even if discovery sees none."""
+    owner = "configured-canary-owner"
+    probe_id = await _store_probe_for_user(
+        pool, embedder, owner, "The configured owner remembers the silver orchard"
+    )
+    monkeypatch.setenv("WEFT_DEFAULT_USER_ID", owner)
+
+    async def empty_discovery(_pool):
+        return []
+
+    monkeypatch.setattr("weft.canary.list_canary_user_ids", empty_discovery)
+    summary = await _run_canary_audit_pass(pool, embedder, min_age_hours=0)
+
+    assert summary == {
+        "owners_considered": 1,
+        "owners_audited": 1,
+        "probes_checked": 1,
+        "misses": 0,
+    }
+    row = await pool.fetchrow(
+        "SELECT audit_count, last_audit_at FROM recall_canary WHERE probe_id = $1",
+        probe_id,
+    )
+    assert row["audit_count"] == 1
+    assert row["last_audit_at"] is not None
+
+
 async def test_pass_fans_out_without_cross_owner_misses(pool, embedder):
     """REGRESSION: a BYPASSRLS scheduler must search each probe in its owner corpus."""
     owner_a = "canary-owner-a"
