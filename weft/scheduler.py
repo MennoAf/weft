@@ -15,6 +15,8 @@ import asyncio
 import logging
 import os
 import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 import asyncpg
@@ -888,6 +890,34 @@ async def reask_feedback_loop(
 # transactional — see the Phase 0 audit P2s).
 _CANARY_AUDIT_POLL_INTERVAL = 3600   # check hourly whether a daily audit is due
 _CANARY_AUDIT_MIN_AGE_HOURS = 23     # don't re-run within ~a day (restart-safe)
+_CANARY_ERROR_MAX_CHARS = 1000
+
+
+@dataclass
+class CanaryAuditRuntimeState:
+    """Observable state for the current process's canary scheduler.
+
+    ``recall_canary.last_audit_at`` remains the durable, restart-safe marker of
+    successful probe execution. This state explains what the live process has
+    attempted since startup and why repeated hourly retries may be failing.
+    """
+
+    last_attempt_at: datetime | None = None
+    last_success_at: datetime | None = None
+    consecutive_failures: int = 0
+    last_exception: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "last_attempt_at": (
+                self.last_attempt_at.isoformat() if self.last_attempt_at else None
+            ),
+            "last_success_at": (
+                self.last_success_at.isoformat() if self.last_success_at else None
+            ),
+            "consecutive_failures": self.consecutive_failures,
+            "last_exception": self.last_exception,
+        }
 
 
 async def _canary_audit_due(
@@ -939,6 +969,7 @@ async def canary_audit_loop(
     *,
     interval: int = _CANARY_AUDIT_POLL_INTERVAL,
     min_age_hours: float = _CANARY_AUDIT_MIN_AGE_HOURS,
+    runtime_state: CanaryAuditRuntimeState | None = None,
 ) -> None:
     """Periodic recall-canary audit — the reconciliation meter. Runs until cancelled.
 
@@ -960,15 +991,26 @@ async def canary_audit_loop(
             "mode": "per_user",
         },
     )
+    state = runtime_state or CanaryAuditRuntimeState()
     try:
         while True:
+            state.last_attempt_at = datetime.now(timezone.utc)
             try:
                 summary = await _run_canary_audit_pass(
                     pool, embedder, min_age_hours=min_age_hours
                 )
+                state.last_success_at = datetime.now(timezone.utc)
+                state.consecutive_failures = 0
+                state.last_exception = None
                 logger.info("canary_audit.pass", extra=summary)
-            except Exception:
-                logger.exception("canary_audit.loop_error")
+            except Exception as exc:
+                state.consecutive_failures += 1
+                detail = f"{type(exc).__name__}: {exc}"
+                state.last_exception = detail[:_CANARY_ERROR_MAX_CHARS]
+                logger.exception(
+                    "canary_audit.loop_error",
+                    extra={"consecutive_failures": state.consecutive_failures},
+                )
 
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
@@ -982,8 +1024,17 @@ async def _run_canary_audit_pass(
     *,
     min_age_hours: float = _CANARY_AUDIT_MIN_AGE_HOURS,
 ) -> dict[str, int]:
-    """Run one sequential, explicitly scoped pass across canary owners."""
+    """Run one sequential, RLS-scoped pass across canary owners.
+
+    Owner discovery is the one intentional system-level query. Every due check,
+    probe read, vector search, counter update, and audit-event insert then runs
+    on a connection acquired with that owner's ``app.user_id``. Merely setting
+    ``current_user_id`` is insufficient: without :func:`acquire`, ``get_db``
+    returns the raw pool and PostgreSQL never receives the RLS GUC.
+    """
+    from weft.auth import current_user_id
     from weft.canary import list_canary_user_ids, run_canary_audit
+    from weft.db.connection import acquire
 
     user_ids = await list_canary_user_ids(pool)
     summary = {
@@ -993,16 +1044,22 @@ async def _run_canary_audit_pass(
         "misses": 0,
     }
     for user_id in user_ids:
-        if not await _canary_audit_due(
-            pool, user_id, min_age_hours=min_age_hours
-        ):
-            continue
-        result = await run_canary_audit(
-            pool,
-            embedder,
-            user_id=user_id,
-            active_probing_enabled=True,
-        )
+        token = current_user_id.set(user_id)
+        try:
+            async with acquire(pool):
+                if not await _canary_audit_due(
+                    pool, user_id, min_age_hours=min_age_hours
+                ):
+                    continue
+                result = await run_canary_audit(
+                    pool,
+                    embedder,
+                    user_id=user_id,
+                    active_probing_enabled=True,
+                )
+        finally:
+            current_user_id.reset(token)
+
         if not result.get("audit_valid"):
             logger.info(
                 "canary_audit.skipped",

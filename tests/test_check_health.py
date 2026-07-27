@@ -145,6 +145,7 @@ class TestProofMetricsIntegration:
         from weft.auth import current_user_id
         from weft.health_check import HealthSummary
         from weft.mcp import tools
+        from weft.scheduler import CanaryAuditRuntimeState
 
         monkeypatch.setenv("WEFT_DEFAULT_USER_ID", "scheduler-owner")
         token = current_user_id.set("health-caller")
@@ -152,9 +153,16 @@ class TestProofMetricsIntegration:
             ctx = MagicMock()
             canary_task = MagicMock()
             canary_task.done.return_value = False
+            attempted_at = datetime.now(timezone.utc)
+            runtime_state = CanaryAuditRuntimeState(
+                last_attempt_at=attempted_at,
+                consecutive_failures=2,
+                last_exception="RuntimeError: scoped audit failed",
+            )
             ctx.request_context.lifespan_context = SimpleNamespace(
                 pool=pool,
                 _canary_audit_task=canary_task,
+                _canary_audit_state=runtime_state,
             )
             summary = HealthSummary(findings=[], errors=[], evaluated_at=datetime.now(timezone.utc))
             monkeypatch.setattr(
@@ -171,6 +179,15 @@ class TestProofMetricsIntegration:
         assert payload["recall_canary"]["scheduler_configured"] is True
         assert payload["recall_canary"]["scheduler_running"] is True
         assert payload["recall_canary"]["scheduler_mode"] == "per_user"
+        assert payload["recall_canary"]["scheduler_runtime"] == {
+            "last_attempt_at": attempted_at.isoformat(),
+            "last_success_at": None,
+            "consecutive_failures": 2,
+            "last_exception": "RuntimeError: scoped audit failed",
+        }
+        assert payload["recall_canary"]["scheduler_warning"].endswith(
+            "most recent pass failed."
+        )
 
     @pytest.mark.asyncio
     async def test_agent_health_redacts_detailed_tool_usage(self, pool, monkeypatch):

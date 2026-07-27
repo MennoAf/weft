@@ -37,6 +37,7 @@ from weft.mcp.slack_commands import handle_slash_checkin
 from weft.mcp.tool_usage import ToolUsageMiddleware
 from weft.cost_enforcement import cost_enforcement_loop
 from weft.scheduler import (
+    CanaryAuditRuntimeState,
     canary_audit_loop,
     daily_brief_loop,
     discord_bot_loop,
@@ -231,6 +232,9 @@ class AppContext:
     _tool_usage_heartbeat_task: asyncio.Task | None = field(default=None, repr=False)
     _fallback_task: asyncio.Task | None = field(default=None, repr=False)
     _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
+    _canary_audit_state: CanaryAuditRuntimeState = field(
+        default_factory=CanaryAuditRuntimeState, repr=False
+    )
 
 
 async def _connect_with_retry(
@@ -589,7 +593,11 @@ async def lifespan(server: FastMCP):
         reask_feedback_loop(pool)
     )
     ctx._canary_audit_task = asyncio.create_task(
-        canary_audit_loop(pool, embedding)
+        canary_audit_loop(
+            pool,
+            embedding,
+            runtime_state=ctx._canary_audit_state,
+        )
     )
     ctx._quarantine_review_task = None
     if config.quarantine_review.enabled:

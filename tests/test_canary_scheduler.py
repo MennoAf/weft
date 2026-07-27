@@ -24,6 +24,7 @@ from weft.db.connection import acquire, get_db
 from weft.embeddings import get_provider
 from weft.models import MemoryCreate, MemoryType
 from weft.scheduler import (
+    CanaryAuditRuntimeState,
     _canary_audit_due,
     _run_canary_audit_pass,
     canary_audit_loop,
@@ -96,6 +97,55 @@ async def test_loop_runs_without_default_user(pool, embedder, monkeypatch):
     try:
         await asyncio.sleep(0.1)
         assert not task.done(), "scheduler unexpectedly stopped without owner env"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_loop_records_failure_and_clears_it_after_recovery(
+    pool, embedder, monkeypatch
+):
+    """A live loop exposes its last exception and clears it after recovery."""
+    attempts = 0
+
+    async def fail_then_recover(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("production-like RLS failure")
+        return {
+            "owners_considered": 1,
+            "owners_audited": 1,
+            "probes_checked": 1,
+            "misses": 0,
+        }
+
+    monkeypatch.setattr(
+        "weft.scheduler._run_canary_audit_pass", fail_then_recover
+    )
+    state = CanaryAuditRuntimeState()
+    task = asyncio.create_task(
+        canary_audit_loop(pool, embedder, interval=0.05, runtime_state=state)
+    )
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if state.consecutive_failures == 1:
+                break
+        assert state.last_attempt_at is not None
+        assert state.last_success_at is None
+        assert state.consecutive_failures == 1
+        assert state.last_exception == "RuntimeError: production-like RLS failure"
+        assert not task.done(), "a failed pass must not kill the retry loop"
+
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if state.last_success_at is not None:
+                break
+        assert state.last_success_at is not None
+        assert state.consecutive_failures == 0
+        assert state.last_exception is None
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
