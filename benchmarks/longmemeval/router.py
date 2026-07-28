@@ -35,6 +35,7 @@ relevance score has the same monotonic shape as the belief path.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
@@ -53,6 +54,8 @@ from weft.models import (
 from weft.store import search_hybrid
 from weft.turn_recall import route_query_to_tier, temporal_anchor
 from weft.views.belief_query import BeliefClaimResult, search_belief_claims
+
+logger = logging.getLogger(__name__)
 
 
 Tier = Literal["belief", "turns", "auto", "belief-view", "replay"]
@@ -304,6 +307,29 @@ async def _retrieve_turns(
             top_k=policy.candidate_limit,
             embedding=query_embedding,
         )
+        # Retry on empty — under heavy pool churn, a connection in a bad
+        # state can return 0 turns despite thousands being indexed. Re-embed
+        # and retry once; if it still returns empty, fall through to the
+        # never-miss belief fallback in retrieve().
+        if not turns_list:
+            logger.warning(
+                "recall_turns returned 0 turns for q (project_id=%s, "
+                "question_type=%s) — retrying with fresh embedding",
+                project_id, question_type,
+            )
+            query_embedding = await embedder.embed(question)
+            turns_list = await recall_turns(
+                pool, question,
+                project_id=project_id,
+                top_k=policy.candidate_limit,
+                embedding=query_embedding,
+            )
+            if not turns_list:
+                logger.warning(
+                    "recall_turns still 0 after retry (project_id=%s) — "
+                    "falling through to belief fallback",
+                    project_id,
+                )
 
     # Keep the wider pool for candidate coverage, but cap what the Reader sees.
     turns_list = turns_list[: policy.top_k]
