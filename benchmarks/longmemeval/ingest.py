@@ -36,6 +36,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -60,6 +61,41 @@ from weft.store import store_memory
 from benchmarks.longmemeval.dataset import Instance, Session
 
 logger = logging.getLogger(__name__)
+
+# Retry config for batch embedding. The OpenAI SDK retries internally
+# (max_retries=2), but when those exhaust, the ingest code falls back to
+# per-turn embedding — which sends N individual API calls instead of 1,
+# causing 429 cascades that leave turns without vectors. This wrapper adds
+# one more retry layer with exponential backoff before the per-turn fallback.
+_BATCH_RETRY_ATTEMPTS = 3
+_BATCH_RETRY_BASE_DELAY = 2.0  # seconds, doubles each attempt
+_PER_TURN_DELAY = 0.1  # seconds between per-turn fallback calls
+
+
+async def _embed_batch_with_retry(
+    embedder: EmbeddingProvider, texts: list[str], *, question_id: str, chunk_label: str,
+) -> list[list[float]]:
+    """Wrap embed_batch with exponential backoff on transient failures."""
+    last_exc: Exception | None = None
+    for attempt in range(_BATCH_RETRY_ATTEMPTS):
+        try:
+            return await embedder.embed_batch(texts)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _BATCH_RETRY_ATTEMPTS - 1:
+                delay = _BATCH_RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "embed_batch attempt %d/%d failed for chunk %s (q=%s): %s — retrying in %.1fs",
+                    attempt + 1, _BATCH_RETRY_ATTEMPTS, chunk_label, question_id, exc, delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.warning(
+                    "embed_batch exhausted %d retries for chunk %s (q=%s): %s — falling back per-turn",
+                    _BATCH_RETRY_ATTEMPTS, chunk_label, question_id, last_exc,
+                )
+    assert last_exc is not None
+    raise last_exc
 
 
 IngestMode = Literal["raw", "extracted", "turns"]
@@ -233,7 +269,11 @@ async def _ingest_haystack_turns(
         chunk = pending[start : start + _EMBED_BATCH_SIZE]
         texts = [content for _, content, _ in chunk]
         try:
-            batch_vecs = await embedder.embed_batch(texts)
+            batch_vecs = await _embed_batch_with_retry(
+                embedder, texts,
+                question_id=instance.question_id,
+                chunk_label=f"{start}-{start + len(chunk)}",
+            )
             if len(batch_vecs) != len(texts):
                 raise ValueError(
                     f"embed_batch returned {len(batch_vecs)} vectors for "
@@ -255,6 +295,7 @@ async def _ingest_haystack_turns(
             for i in invalid:
                 try:
                     vec = await embedder.embed(texts[i])
+                    await asyncio.sleep(_PER_TURN_DELAY)
                     if len(vec) == _EMBEDDING_DIMENSIONS:
                         embeddings[start + i] = vec
                     else:
@@ -276,6 +317,7 @@ async def _ingest_haystack_turns(
             for i, text in enumerate(texts):
                 try:
                     vec = await embedder.embed(text)
+                    await asyncio.sleep(_PER_TURN_DELAY)
                     if len(vec) == _EMBEDDING_DIMENSIONS:
                         embeddings[start + i] = vec
                     else:
