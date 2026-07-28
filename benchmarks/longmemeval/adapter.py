@@ -191,6 +191,21 @@ async def _bench_setup(conn: asyncpg.Connection) -> None:
     await conn.execute(f"SET app.user_id = '{BENCHMARK_USER_ID}'")
 
 
+async def _bench_reset(conn: asyncpg.Connection) -> None:
+    """Pool ``reset`` callback — runs when a connection is returned to the pool.
+
+    The asyncpg default reset runs ``RESET ALL``, which wipes session-level
+    GUCs including ``search_path``. The ``_pgvector_codec_init`` callback sets
+    ``search_path TO public, extensions`` on connection creation, but after
+    ``RESET ALL`` it reverts to the default. On local Docker (pgvector in
+    ``public``) this is harmless, but on Supabase (pgvector in ``extensions``)
+    it breaks ``::vector`` type resolution. Re-set search_path here so the
+    next checkout always has the correct path.
+    """
+    await conn.execute("RESET ALL")
+    await conn.execute("SET search_path TO public, extensions")
+
+
 async def _make_pool() -> asyncpg.Pool:
     """Create an asyncpg pool from WeftConfig (env / ~/.weft/config.toml)."""
     config = load_config()
@@ -203,6 +218,7 @@ async def _make_pool() -> asyncpg.Pool:
         max_size=8,
         init=_pgvector_codec_init,
         setup=_bench_setup,
+        reset=_bench_reset,
     )
     await register_pgvector_codec(pool)
     return pool
