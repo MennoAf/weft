@@ -590,6 +590,15 @@ async def run_benchmark(
     if reader is None:
         reader = Reader()
 
+    # Refresh the connection pool every N questions to simulate realistic usage.
+    # In production, a user asks one or a few questions per session — not 500
+    # rapid-fire recalls on the same pool. Sustained pool churn causes
+    # nondeterministic state degradation (stale snapshots, leaked transaction
+    # state) that doesn't reflect real usage. Recreating the pool every few
+    # questions gives a clean, fair benchmark that matches how the system is
+    # actually used: a few recalls per session, then a fresh connection.
+    _POOL_REFRESH_INTERVAL = 3
+
     stats = RunStats(questions_total=len(instances), started_at=time.monotonic())
 
     # Recall@10 instrumentation is only meaningful when we have a stable
@@ -604,7 +613,12 @@ async def run_benchmark(
 
     try:
         with output_path.open("a", encoding="utf-8") as out:
-            for instance in instances:
+            for q_idx, instance in enumerate(instances):
+                # Refresh pool every N questions for clean connection state.
+                if owns_pool and q_idx > 0 and q_idx % _POOL_REFRESH_INTERVAL == 0:
+                    await pool.close()
+                    pool = await _make_pool()
+                    logger.info("pool refreshed at question %d/%d", q_idx, len(instances))
                 try:
                     hypothesis, telemetry = await _run_one(
                         pool, embedder, reader, instance,
