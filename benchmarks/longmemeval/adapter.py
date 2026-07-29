@@ -182,27 +182,16 @@ class RunStats:
 
 
 async def _bench_setup(conn: asyncpg.Connection) -> None:
-    """Pool ``setup`` callback — sets app.user_id for migration-34 NOT NULL.
+    """Pool ``setup`` callback — runs on every connection acquire.
 
-    Mirrors the pattern in tests/conftest.py: every direct ``pool.execute``
-    call needs a non-null user_id to satisfy the schema. We use a stable
-    sentinel so every benchmark write goes under the same identity.
+    Sets app.user_id for migration-34 NOT NULL and search_path for pgvector
+    type resolution. Both are needed because the default pool reset runs
+    RESET ALL on connection release, which wipes both GUCs. The init callback
+    (_pgvector_codec_init) sets search_path on connection creation, but that
+    only runs once — this setup callback re-sets it on every acquire so it's
+    always correct after a reset cycle.
     """
     await conn.execute(f"SET app.user_id = '{BENCHMARK_USER_ID}'")
-
-
-async def _bench_reset(conn: asyncpg.Connection) -> None:
-    """Pool ``reset`` callback — runs when a connection is returned to the pool.
-
-    The asyncpg default reset runs ``RESET ALL``, which wipes session-level
-    GUCs including ``search_path``. The ``_pgvector_codec_init`` callback sets
-    ``search_path TO public, extensions`` on connection creation, but after
-    ``RESET ALL`` it reverts to the default. On local Docker (pgvector in
-    ``public``) this is harmless, but on Supabase (pgvector in ``extensions``)
-    it breaks ``::vector`` type resolution. Re-set search_path here so the
-    next checkout always has the correct path.
-    """
-    await conn.execute("RESET ALL")
     await conn.execute("SET search_path TO public, extensions")
 
 
@@ -218,7 +207,6 @@ async def _make_pool() -> asyncpg.Pool:
         max_size=8,
         init=_pgvector_codec_init,
         setup=_bench_setup,
-        reset=_bench_reset,
     )
     await register_pgvector_codec(pool)
     return pool
