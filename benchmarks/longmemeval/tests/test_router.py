@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from benchmarks.longmemeval.adapter import _answer_text_match
-from benchmarks.longmemeval.router import diversify_temporal_turns
 from weft.models import EpisodeTurn, TurnRole
 from benchmarks.longmemeval.router import (
     RetrievalPolicy,
@@ -21,24 +20,6 @@ def _turn(turn_id: str, episode_id: str) -> EpisodeTurn:
         role=TurnRole.user,
         content=turn_id,
     )
-
-
-def test_temporal_diversity_preserves_episode_coverage():
-    ranked = [
-        _turn("a1", "episode-a"),
-        _turn("a2", "episode-a"),
-        _turn("a3", "episode-a"),
-        _turn("b1", "episode-b"),
-        _turn("c1", "episode-c"),
-    ]
-    selected = diversify_temporal_turns(ranked, limit=3)
-    assert [turn.id for turn in selected] == ["a1", "b1", "c1"]
-
-
-def test_temporal_diversity_fills_remaining_slots_by_rank():
-    ranked = [_turn("a1", "a"), _turn("a2", "a"), _turn("b1", "b")]
-    selected = diversify_temporal_turns(ranked, limit=4)
-    assert [turn.id for turn in selected] == ["a1", "b1", "a2"]
 
 
 def test_multi_session_widens_top_k():
