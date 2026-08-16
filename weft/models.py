@@ -512,7 +512,8 @@ class EpisodeTurn(BaseModel):
 
     Lives alongside Episode + EpisodeMemory, never replacing them. Each turn
     carries its own embedding for retrieval, its own occurred_at for temporal
-    queries, and an optional trace_id mapping to Wick's run_id. The
+    queries, an optional execution trace_id, and an optional provider-namespaced
+    source_session_id identifying the originating conversation or source. The
     importance_score is the Face hook for retention gating; populated async
     post-hoc, gates behavior at graduation rather than ingest.
     """
@@ -524,6 +525,7 @@ class EpisodeTurn(BaseModel):
     content: str
     occurred_at: datetime = Field(default_factory=_now)
     trace_id: str | None = None
+    source_session_id: str | None = Field(default=None, max_length=500)
     importance_score: float | None = None
     token_count: int = 0
     user_id: str | None = None
@@ -535,6 +537,13 @@ class EpisodeTurn(BaseModel):
     usefulness_score: float = Field(default=0.7, ge=0.0, le=1.0)
     usefulness_count: int = 0
     last_boosted_at: datetime | None = None
+
+    @field_validator("source_session_id")
+    @classmethod
+    def _validate_source_session_id(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("source_session_id must not be blank")
+        return value
 
     def to_dict(self) -> dict[str, Any]:
         d = self.model_dump(mode="json")
@@ -550,6 +559,14 @@ class EpisodeTurnCreate(BaseModel):
     content: str
     occurred_at: datetime | None = None
     trace_id: str | None = None
+    source_session_id: str | None = Field(default=None, max_length=500)
+
+    @field_validator("source_session_id")
+    @classmethod
+    def _validate_source_session_id(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("source_session_id must not be blank")
+        return value
 
 
 class ModeWeights(BaseModel):

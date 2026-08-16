@@ -403,6 +403,7 @@ class TestEpisodeTurnsMigration:
             "occurred_at",
             "embedding",
             "trace_id",
+            "source_session_id",
             "importance_score",
             "token_count",
             "user_id",
@@ -428,6 +429,7 @@ class TestEpisodeTurnsMigration:
         assert "idx_episode_turns_episode_index" in idx
         assert "idx_episode_turns_occurred" in idx
         assert "idx_episode_turns_trace" in idx
+        assert "idx_episode_turns_source_session" in idx
         assert "idx_episode_turns_user" in idx
         assert "idx_episode_turns_embedding_hnsw" in idx
 

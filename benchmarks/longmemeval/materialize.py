@@ -101,8 +101,8 @@ async def _fetch_question_turns(
         rows = await conn.fetch(
             """
             SELECT et.id, et.episode_id, et.turn_index, et.role, et.content,
-                   et.occurred_at, et.trace_id, et.importance_score,
-                   et.token_count, et.user_id, et.created_at
+                   et.occurred_at, et.trace_id, et.source_session_id,
+                   et.importance_score, et.token_count, et.user_id, et.created_at
             FROM episode_turns et
             JOIN episodes e ON et.episode_id = e.id
             WHERE e.project_id = $1
@@ -119,6 +119,7 @@ async def _fetch_question_turns(
             content=r["content"],
             occurred_at=r["occurred_at"],
             trace_id=r["trace_id"],
+            source_session_id=r["source_session_id"],
             importance_score=r["importance_score"],
             token_count=r["token_count"],
             user_id=r["user_id"],
