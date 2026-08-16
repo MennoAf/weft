@@ -260,7 +260,7 @@ _SESSION_RERANK_TYPES = frozenset({
     "single-session-user",
     "single-session-preference",
 })
-SESSION_RERANK_POOL_LIMIT = 90
+SESSION_RERANK_POOL_LIMIT = 60
 
 
 def session_rerank_enabled_for(question_type: str) -> bool:

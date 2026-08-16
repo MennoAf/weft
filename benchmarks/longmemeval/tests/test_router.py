@@ -105,9 +105,9 @@ def test_session_rerank_policy_enables_only_validated_types():
     )
     for question_type in enabled:
         assert session_rerank_enabled_for(question_type) is True
-        assert session_rerank_pool_limit_for(question_type) == 90
+        assert session_rerank_pool_limit_for(question_type) == 60
         assert session_rerank_enabled_for(f"{question_type}_abs") is True
-        assert session_rerank_pool_limit_for(f"{question_type}_abs") == 90
+        assert session_rerank_pool_limit_for(f"{question_type}_abs") == 60
     for question_type in disabled:
         assert session_rerank_enabled_for(question_type) is False
         assert session_rerank_pool_limit_for(question_type) is None
@@ -557,7 +557,7 @@ async def test_type_gated_session_rerank_dispatch(monkeypatch) -> None:
         turn_session_map={"turn-1": "session-1"},
     )
     assert calls[-1]["use_session_selector"] is True
-    assert calls[-1]["session_selector_pool_limit"] == 90
+    assert calls[-1]["session_selector_pool_limit"] == 60
 
     await retrieve(
         object(), object(), question="What happened?",
