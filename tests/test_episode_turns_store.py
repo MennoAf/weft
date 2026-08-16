@@ -109,6 +109,48 @@ async def test_append_with_trace_id(pool):
     assert t.trace_id == "run-abc123"
 
 
+async def test_append_with_source_session_id(pool):
+    ep = await _make_episode(pool)
+    t = await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content="source conversation turn",
+            source_session_id="conversation-42",
+        ),
+    )
+    assert t.source_session_id == "conversation-42"
+    stored = await pool.fetchval(
+        "SELECT source_session_id FROM episode_turns WHERE id = $1", t.id,
+    )
+    assert stored == "conversation-42"
+
+
+async def test_append_without_source_session_id_remains_compatible(pool):
+    ep = await _make_episode(pool)
+    t = await append_turn(
+        pool,
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content="legacy caller",
+        ),
+    )
+    assert t.source_session_id is None
+
+
+async def test_blank_source_session_id_is_rejected(pool):
+    ep = await _make_episode(pool)
+    with pytest.raises(ValueError, match="must not be blank"):
+        EpisodeTurnCreate(
+            episode_id=ep.id,
+            role=TurnRole.user,
+            content="invalid source identity",
+            source_session_id="   ",
+        )
+
+
 async def test_append_concurrent_writers_no_index_collision(pool):
     """Race-safety: 10 concurrent appenders to the same episode should yield
     10 distinct turn_indexes 0..9 with no UniqueViolationError leaking."""

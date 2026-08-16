@@ -145,6 +145,22 @@ async def test_explicit_occurred_at_is_persisted(ctx, pool, episode):
     assert row["occurred_at"].isoformat() == "2024-06-15T12:00:00+00:00"
 
 
+async def test_source_session_id_is_persisted(ctx, pool, episode):
+    result = await weft_turn_append(
+        ctx,
+        episode_id=episode.id,
+        role="user",
+        content="source session turn",
+        source_session_id="conversation-42",
+    )
+    assert "error" not in result
+    row = await pool.fetchrow(
+        "SELECT source_session_id FROM episode_turns WHERE id = $1",
+        result["turn_id"],
+    )
+    assert row["source_session_id"] == "conversation-42"
+
+
 async def test_naive_iso_timestamp_is_treated_as_utc(ctx, pool, episode):
     """Wick may send timestamps without an explicit zone; assume UTC."""
     result = await weft_turn_append(

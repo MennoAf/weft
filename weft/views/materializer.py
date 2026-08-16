@@ -177,7 +177,8 @@ async def _fetch_pending_turns(
     rows = await conn.fetch(
         """
         SELECT id, episode_id, turn_index, role, content, occurred_at,
-               trace_id, importance_score, token_count, user_id, created_at,
+               trace_id, source_session_id, importance_score, token_count,
+               user_id, created_at,
                0.7::real AS usefulness_score,
                0 AS usefulness_count,
                NULL AS last_boosted_at
@@ -203,6 +204,7 @@ def _row_to_turn(row: asyncpg.Record) -> EpisodeTurn:
         content=row["content"],
         occurred_at=row["occurred_at"],
         trace_id=row["trace_id"],
+        source_session_id=row["source_session_id"],
         importance_score=row["importance_score"],
         token_count=row["token_count"],
         user_id=row["user_id"],

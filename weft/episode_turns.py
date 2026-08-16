@@ -114,7 +114,8 @@ async def append_turn(
                 """
                 INSERT INTO episode_turns (
                     id, episode_id, turn_index, role, content,
-                    occurred_at, embedding, trace_id, token_count
+                    occurred_at, embedding, trace_id, source_session_id,
+                    token_count
                 )
                 SELECT
                     $1,
@@ -125,7 +126,8 @@ async def append_turn(
                     $5,
                     $6::vector,
                     $7,
-                    $8
+                    $8,
+                    $9
                 FROM episode_turns
                 WHERE episode_id = $2
                 RETURNING *
@@ -137,6 +139,7 @@ async def append_turn(
                 occurred_at,
                 embedding,
                 create.trace_id,
+                create.source_session_id,
                 token_count,
             )
             if row is None:
@@ -872,6 +875,7 @@ def _row_to_turn(row: asyncpg.Record) -> EpisodeTurn:
         content=row["content"],
         occurred_at=row["occurred_at"],
         trace_id=row["trace_id"],
+        source_session_id=_opt("source_session_id", None),
         importance_score=row["importance_score"],
         token_count=row["token_count"],
         user_id=row["user_id"],

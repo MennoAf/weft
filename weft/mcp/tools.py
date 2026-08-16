@@ -5666,17 +5666,22 @@ async def weft_turn_append(
     content: str,
     occurred_at: str | None = None,
     trace_id: str | None = None,
+    source_session_id: str | None = None,
 ) -> dict:
     """Append one dialogue turn to an existing episode (turn-tier write).
 
-    Wick's per-completion fire-and-forget hook: each user/assistant exchange
-    becomes one turn so the raw trace is queryable later. Race-safe under
+    A source or ingestion adapter may append each user/assistant exchange
+    as one turn so the raw trace is queryable later. Race-safe under
     concurrent appenders to the same episode (advisory lock keyed by
     episode_id; turn_index assigned inside the same transaction).
 
     role: one of "user", "assistant", "tool", "system".
     occurred_at: ISO-8601 timestamp; defaults to now() if omitted.
-    trace_id: optional Wick run_id for cross-system correlation.
+    trace_id: optional execution/run identifier for cross-system correlation.
+    source_session_id: optional provider-namespaced source conversation/session
+        identity, for example ``discord:channel-123:thread-456``.
+        This is distinct from the reader/access session used for usefulness
+        tracking; reranking remains disabled unless a complete mapping exists.
 
     Returns ``{turn_id, episode_id, turn_index, occurred_at}``. Embedding
     is computed inline before insert, matching the ``weft_remember`` →
@@ -5689,8 +5694,8 @@ async def weft_turn_append(
         logger.debug("weft_turn_append start [%s]", cid)
         app: AppContext = ctx.request_context.lifespan_context
 
-        # Validate role early so a typo from Wick surfaces as an input
-        # error, not a 422-ish enum failure later.
+        # Validate role early so a typo from an ingestion adapter surfaces as
+        # an input error, not a 422-ish enum failure later.
         from weft.models import EpisodeTurnCreate, TurnRole
         try:
             role_enum = TurnRole(role)
@@ -5719,10 +5724,11 @@ async def weft_turn_append(
             content=content,
             occurred_at=parsed_at,
             trace_id=trace_id,
+            source_session_id=source_session_id,
         )
 
-        # Verify the episode exists before locking the row — gives Wick a
-        # clean "episode not found" instead of a foreign-key violation
+        # Verify the episode exists before locking the row — gives the source
+        # adapter a clean "episode not found" instead of a foreign-key violation
         # surfaced as a generic DB error.
         async with acquire(app.pool):
             episode_row = await app.pool.fetchrow(
@@ -5751,6 +5757,7 @@ async def weft_turn_append(
             "episode_id": turn.episode_id,
             "turn_index": turn.turn_index,
             "occurred_at": turn.occurred_at.isoformat(),
+            "source_session_id": turn.source_session_id,
         }
         if embedding_failed:
             result["warning"] = (
