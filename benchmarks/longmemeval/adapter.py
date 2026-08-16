@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import asyncpg
 import click
@@ -54,6 +56,7 @@ from benchmarks.longmemeval.dataset import Instance, load_split
 from benchmarks.longmemeval.ingest import (
     IngestMode,
     cleanup_haystack,
+    expected_turn_count,
     load_haystack,
     project_id_for,
 )
@@ -64,7 +67,7 @@ from benchmarks.longmemeval.materialize import (
 )
 from benchmarks.longmemeval.reader import Reader
 from benchmarks.longmemeval.replay_drive import ReplayExecutorKind, drive_replay
-from benchmarks.longmemeval.router import Tier, policy_for, retrieve
+from benchmarks.longmemeval.router import RetrievalDiagnostics, Tier, policy_for, retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -195,20 +198,81 @@ async def _bench_setup(conn: asyncpg.Connection) -> None:
     await conn.execute("SET search_path TO public, extensions")
 
 
+DEFAULT_LOCAL_BENCHMARK_DSN = (
+    "postgresql://postgres@127.0.0.1:55432/weftbench"
+)
+
+
+def _redacted_database_target(dsn: str) -> str:
+    """Render a DSN target without logging its password or query options."""
+    try:
+        parsed = urlsplit(dsn)
+        if not parsed.scheme or not parsed.hostname:
+            return "<keyword-style-or-invalid-dsn>"
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = parsed.port or 5432
+        database = parsed.path.lstrip("/") or "<default>"
+        user = parsed.username or "<default>"
+        return f"{parsed.scheme}://{user}@{host}:{port}/{database}"
+    except ValueError:
+        return "<invalid-dsn>"
+
+
 async def _make_pool() -> asyncpg.Pool:
-    """Create an asyncpg pool from WeftConfig (env / ~/.weft/config.toml)."""
-    config = load_config()
-    dsn = config.database.url
+    """Create the benchmark pool from an explicit benchmark-only DSN.
+
+    LongMemEval must never inherit ``DATABASE_URL``/``WEFT_DATABASE_URL``.
+    Those normally point at hosted Weft/Supabase, where a benchmark can be
+    slow, throttled, and—more importantly—silently run against the wrong
+    materialization. The detached local runner supplies the canonical DSN;
+    direct callers must export ``LONGMEMEVAL_DATABASE_URL`` themselves.
+    """
+    dsn = os.environ.get("LONGMEMEVAL_DATABASE_URL", "").strip()
+    if not dsn:
+        raise RuntimeError(
+            "LONGMEMEVAL_DATABASE_URL is required for LongMemEval; refusing "
+            "to fall back to DATABASE_URL/WEFT_DATABASE_URL. For the canonical "
+            "local benchmark container, export "
+            f"{DEFAULT_LOCAL_BENCHMARK_DSN!r}."
+        )
     if "+psycopg2" in dsn:
         dsn = dsn.replace("+psycopg2", "")
-    pool = await asyncpg.create_pool(
-        dsn,
-        min_size=2,
-        max_size=8,
-        init=_pgvector_codec_init,
-        setup=_bench_setup,
+
+    target = _redacted_database_target(dsn)
+    password = os.environ.get("LONGMEMEVAL_DATABASE_PASSWORD") or None
+    logger.info(
+        "longmemeval.database_target target=%s password_source=%s",
+        target,
+        "env" if password else "dsn_or_none",
     )
-    await register_pgvector_codec(pool)
+    pool_kwargs = {
+        "min_size": 2,
+        "max_size": 8,
+        "init": _pgvector_codec_init,
+        "setup": _bench_setup,
+    }
+    if password:
+        pool_kwargs["password"] = password
+    pool = await asyncpg.create_pool(dsn, **pool_kwargs)
+    try:
+        await register_pgvector_codec(pool)
+        identity = await pool.fetchrow(
+            "SELECT current_database() AS database_name, current_user AS role_name, "
+            "inet_server_addr()::text AS server_addr, inet_server_port() AS server_port"
+        )
+        logger.info(
+            "longmemeval.database_identity target=%s database=%s role=%s server=%s:%s",
+            target,
+            identity["database_name"],
+            identity["role_name"],
+            identity["server_addr"],
+            identity["server_port"],
+        )
+    except Exception:
+        await pool.close()
+        raise
     return pool
 
 
@@ -225,6 +289,80 @@ def _make_embedder() -> EmbeddingProvider:
         model_name=config.embedding.model,
         dimensions=config.embedding.dimensions,
     )
+
+
+async def _snapshot_live_identity(
+    pool: asyncpg.Pool,
+    manifest: "Manifest",
+) -> dict[str, object]:
+    """Read and validate the live shape for a fixed-materialization run.
+
+    This is deliberately read-only.  It is shared by the snapshot Reader
+    runner and its tests so a Reader artifact cannot be produced against a
+    partial restore or a different database shape.  The canonical baseline
+    has a stronger, literal count gate than arbitrary manifests because a
+    small/subset materialization must never masquerade as
+    ``baseline_v1_local``.
+    """
+    row = await pool.fetchrow(
+        "SELECT count(t.id) AS turns, count(DISTINCT e.id) AS episodes, "
+        "count(t.id) FILTER (WHERE t.embedding IS NOT NULL) AS embedded, "
+        "current_database() AS database_name, current_user AS role_name, "
+        "inet_server_addr()::text AS server_addr, inet_server_port() AS server_port "
+        "FROM episode_turns t JOIN episodes e ON t.episode_id = e.id "
+        "WHERE e.project_id LIKE 'lme_%'"
+    )
+    if row is None:
+        raise RuntimeError("fixed-materialization identity query returned no row")
+
+    counts: dict[str, object] = {
+        "turns": int(row["turns"]),
+        "episodes": int(row["episodes"]),
+        "embedded": int(row["embedded"]),
+        "database": row["database_name"],
+        "role": row["role_name"],
+        "server_addr": row["server_addr"],
+        "server_port": row["server_port"],
+    }
+    expected = {
+        "turns": manifest.total_turns,
+        "episodes": manifest.total_episodes,
+        "embedded": manifest.total_turns,
+    }
+    if manifest.snapshot_name == "baseline_v1_local":
+        expected = {"turns": 2_446_993, "episodes": 500, "embedded": 2_446_993}
+    live_shape = {key: counts[key] for key in expected}
+    if live_shape != expected:
+        raise ValueError(
+            "fixed-materialization row-count/embedding mismatch: "
+            f"live={live_shape}, expected={expected}, "
+            f"snapshot={manifest.snapshot_name!r}, database={counts['database']!r}"
+        )
+    return counts
+
+
+def _manifest_identity(manifest: "Manifest") -> str:
+    """Return the stable hash used to bind outputs to one manifest."""
+    return hashlib.sha256(manifest.to_json().encode("utf-8")).hexdigest()
+
+
+def _assert_local_benchmark_target() -> None:
+    """Refuse the fixed-snapshot CLI unless its DSN is the dedicated local DB."""
+    dsn = os.environ.get("LONGMEMEVAL_DATABASE_URL", "").strip()
+    if not dsn:
+        raise click.ClickException(
+            "LONGMEMEVAL_DATABASE_URL is required for fixed-snapshot runs; "
+            "refusing to inspect an implicit/hosted database."
+        )
+    parsed = urlsplit(dsn.replace("+psycopg2", ""))
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or 5432
+    database = parsed.path.lstrip("/")
+    if host not in {"127.0.0.1", "localhost", "::1"} or port != 55432 or database != "weftbench":
+        raise click.ClickException(
+            "fixed-snapshot runs require the dedicated local target "
+            f"{DEFAULT_LOCAL_BENCHMARK_DSN!r}; got {_redacted_database_target(dsn)!r}"
+        )
 
 
 # ----------------------------------------------------------------------
@@ -356,6 +494,16 @@ async def _run_one(
     if top_k > policy.top_k:
         from benchmarks.longmemeval.router import RetrievalPolicy
         policy = RetrievalPolicy(top_k=top_k, overfetch_multiplier=policy.overfetch_multiplier)
+    # Ground-truth turn count for diagnostics: if the side-map was
+    # populated during ingest, its length is the exact number of turns
+    # inserted for this question. Used by the 0-return diagnostic path.
+    expected_turn_count = len(turn_session_map) if turn_session_map else 0
+    # Gold turn IDs for per-half miss diagnostics: all turn IDs from
+    # the side-map are gold candidates (any of them could surface the
+    # gold answer). Used to log where gold turns ranked in vector vs.
+    # keyword halves when recall@k misses.
+    gold_turn_ids = list(turn_session_map.keys()) if turn_session_map else None
+
     memories = await retrieve(
         pool, embedder,
         question=instance.question,
@@ -364,6 +512,9 @@ async def _run_one(
         policy=policy,
         tier=tier,
         user_id=BENCHMARK_USER_ID,
+        expected_turn_count=expected_turn_count,
+        gold_turn_ids=gold_turn_ids,
+        turn_session_map=turn_session_map,
     )
 
     # 4. Read — Claude synthesizes the answer.
@@ -791,6 +942,668 @@ async def run_benchmark(
 
 
 # ----------------------------------------------------------------------
+# Materialize-only and recall-only modes (Phase 2 A/B framework)
+# ----------------------------------------------------------------------
+
+
+async def _run_materialize_only(
+    *,
+    dataset_path: Path,
+    snapshot_dir: Path,
+    snapshot_name: str,
+    limit: int | None = None,
+    question_types: frozenset[str] | None = None,
+    stratified_frac: float | None = None,
+    sample_seed: int = 0,
+) -> None:
+    """Ingest all questions into the DB, persist manifest + snapshot, exit.
+
+    No recall, no Reader, no cleanup. Creates the fixed-materialization
+    state all A/B comparisons run against.
+    """
+    from benchmarks.longmemeval.snapshot import (
+        Manifest,
+        QuestionManifest,
+        code_version,
+        dataset_checksum,
+        snapshot as snapshot_fn,
+    )
+    from benchmarks.longmemeval.ingest import load_haystack
+
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"dataset not found: {dataset_path}")
+
+    instances = load_split(dataset_path)
+    if question_types:
+        instances = [i for i in instances if i.question_type in question_types]
+    if stratified_frac is not None:
+        instances = _stratified_sample(instances, frac=stratified_frac, seed=sample_seed)
+    if limit is not None:
+        instances = instances[:limit]
+
+    pool = await _make_pool()
+    embedder = _make_embedder()
+
+    try:
+        retrieval_as_of = datetime.now(timezone.utc).isoformat()
+        questions: list[QuestionManifest] = []
+        total_episodes = 0
+        total_turns = 0
+
+        for idx, instance in enumerate(instances):
+            project_id = project_id_for(instance.question_id)
+
+            # Resume only a complete question sandbox. A forced close can
+            # leave an episode with some inserted turns; accepting any
+            # positive count would silently publish an under-materialized
+            # snapshot. Partial sandboxes are deleted and re-ingested.
+            existing_turns = await pool.fetchval(
+                "SELECT count(*) FROM episode_turns t "
+                "JOIN episodes e ON t.episode_id = e.id "
+                "WHERE e.project_id = $1",
+                project_id,
+            )
+            existing_episodes = await pool.fetchval(
+                "SELECT count(*) FROM episodes WHERE project_id = $1",
+                project_id,
+            )
+            expected_turns = expected_turn_count(instance)
+            if (
+                int(existing_episodes or 0) == 1
+                and int(existing_turns or 0) == expected_turns
+            ):
+                logger.info(
+                    "materialize-only: %d/%d (%s) — SKIPPED (complete: %d turns)",
+                    idx + 1, len(instances), instance.question_id,
+                    expected_turns,
+                )
+                rows = await pool.fetch(
+                    "SELECT t.id, e.id AS ep_id FROM episode_turns t "
+                    "JOIN episodes e ON t.episode_id = e.id "
+                    "WHERE e.project_id = $1 ORDER BY t.turn_index",
+                    project_id,
+                )
+                turn_session_map = {r["id"]: r["ep_id"] for r in rows}
+                ep_count = await pool.fetchval(
+                    "SELECT count(*) FROM episodes WHERE project_id = $1",
+                    project_id,
+                )
+                turn_count = int(existing_turns or 0)
+                total_episodes += int(ep_count or 0)
+                total_turns += turn_count
+                questions.append(QuestionManifest(
+                    question_id=instance.question_id,
+                    question_type=instance.question_type,
+                    project_id=project_id,
+                    gold_session_ids=list(getattr(instance, "answer_session_ids", [])),
+                    turn_ids=list(turn_session_map.keys()),
+                    turn_session_map=dict(turn_session_map),
+                    row_count=turn_count,
+                ))
+                continue
+            if int(existing_episodes or 0) > 0:
+                logger.warning(
+                    "materialize-only: %s has partial sandbox (%d episodes, %d/%d turns); cleaning it before retry",
+                    instance.question_id, int(existing_episodes),
+                    int(existing_turns or 0), expected_turns,
+                )
+                await cleanup_haystack(pool, instance)
+
+            turn_session_map: dict[str, str] = {}
+            turn_content_map: dict[str, str] = {}
+            await load_haystack(
+                pool, embedder, instance, "turns",
+                turn_session_map=turn_session_map,
+                turn_content_map=turn_content_map,
+            )
+
+            # Count episodes and turns for this question
+            ep_count = await pool.fetchval(
+                "SELECT count(*) FROM episodes WHERE project_id = $1",
+                project_id,
+            )
+            turn_count = await pool.fetchval(
+                "SELECT count(*) FROM episode_turns t "
+                "JOIN episodes e ON t.episode_id = e.id "
+                "WHERE e.project_id = $1",
+                project_id,
+            )
+            total_episodes += int(ep_count or 0)
+            total_turns += int(turn_count or 0)
+
+            questions.append(QuestionManifest(
+                question_id=instance.question_id,
+                question_type=instance.question_type,
+                project_id=project_id,
+                gold_session_ids=list(getattr(instance, "answer_session_ids", [])),
+                turn_ids=list(turn_session_map.keys()),
+                turn_session_map=dict(turn_session_map),
+                turn_content_map=dict(turn_content_map),
+                row_count=int(turn_count or 0),
+            ))
+            logger.info(
+                "materialize-only: %d/%d (%s) — %d turns",
+                idx + 1, len(instances), instance.question_id,
+                turn_count or 0,
+            )
+
+        # Get embedding info
+        config = load_config()
+        manifest = Manifest(
+            snapshot_name=snapshot_name,
+            dataset_path=str(dataset_path),
+            dataset_checksum=dataset_checksum(dataset_path),
+            code_version=code_version(),
+            embedding_provider=config.embedding.provider,
+            embedding_model=config.embedding.model or "",
+            embedding_dimensions=config.embedding.dimensions or 0,
+            retrieval_as_of=retrieval_as_of,
+            questions=questions,
+            total_episodes=total_episodes,
+            total_turns=total_turns,
+        )
+
+        await snapshot_fn(pool, name=snapshot_name, manifest=manifest, base_dir=snapshot_dir)
+    finally:
+        await pool.close()
+
+
+async def _run_recall_only(
+    *,
+    dataset_path: Path,
+    snapshot_dir: Path,
+    snapshot_name: str,
+    output_dir: Path,
+    split_name: str,
+    timestamp: str,
+    limit: int | None = None,
+    question_types: frozenset[str] | None = None,
+    top_k: int = DEFAULT_TOP_K,
+) -> dict:
+    """Load manifest, run recall-only, record recall@k. No ingest, no Reader.
+
+    Assumes the snapshot is already loaded in the DB (via restore_snapshot
+    or a prior --materialize-only run that left data in place).
+    """
+    from benchmarks.longmemeval.snapshot import Manifest, snapshot_dir as snap_dir_fn
+    from benchmarks.longmemeval.router import (
+        RetrievalDiagnostics,
+        policy_for,
+        retrieve,
+    )
+
+    sdir = snap_dir_fn(snapshot_dir, snapshot_name)
+    manifest_path = sdir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"manifest not found: {manifest_path}")
+    manifest = Manifest.from_json(manifest_path.read_text(encoding="utf-8"))
+
+    # Load question texts from the dataset (needed for embedding the query)
+    instances = load_split(dataset_path)
+    question_text_map = {i.question_id: i.question for i in instances}
+
+    # Filter questions
+    qs = manifest.questions
+    if question_types:
+        qs = [q for q in qs if q.question_type in question_types]
+    if limit is not None:
+        qs = qs[:limit]
+
+    pool = await _make_pool()
+    embedder = _make_embedder()
+    from datetime import datetime as _dt
+    as_of = _dt.fromisoformat(manifest.retrieval_as_of)
+
+    recall_k = 10
+    recall_records: list[dict] = []
+
+    try:
+        for idx, q in enumerate(qs):
+            policy = policy_for(q.question_type)
+            if top_k > policy.top_k:
+                from benchmarks.longmemeval.router import RetrievalPolicy
+                policy = RetrievalPolicy(
+                    top_k=top_k, overfetch_multiplier=policy.overfetch_multiplier,
+                )
+
+            text = question_text_map.get(q.question_id, q.question_id)
+            diagnostics = RetrievalDiagnostics()
+            indexed_turn_ids = list(q.turn_ids)
+            gold_session_ids = set(q.gold_session_ids)
+            gold_session_turn_ids = [
+                tid for tid in indexed_turn_ids
+                if q.turn_session_map.get(tid) in gold_session_ids
+            ]
+            diagnostics.indexed_turn_ids = indexed_turn_ids
+            diagnostics.gold_session_turn_ids = gold_session_turn_ids
+            memories = await retrieve(
+                pool, embedder,
+                question=text,
+                question_type=q.question_type,
+                project_id=q.project_id,
+                policy=policy,
+                tier="turns",
+                expected_turn_count=q.row_count,
+                as_of=as_of,
+                gold_turn_ids=gold_session_turn_ids,
+                diagnostics=diagnostics,
+            )
+
+            topk = memories[:recall_k]
+            retrieved_turn_ids = [m.memory.id for m in topk]
+            retrieved_session_ids = set()
+            for tid in retrieved_turn_ids:
+                sid = q.turn_session_map.get(tid)
+                if sid:
+                    retrieved_session_ids.add(sid)
+            gold_set = set(q.gold_session_ids)
+            recall_hit = bool(retrieved_session_ids & gold_set)
+
+            recall_records.append({
+                "question_id": q.question_id,
+                "question_type": q.question_type,
+                "recall_at_k_hit": recall_hit,
+                "retrieved_turn_ids": retrieved_turn_ids,
+                "gold_session_ids": q.gold_session_ids,
+                "retrieval_diagnostics": diagnostics.to_dict(
+                    gold_turn_ids=q.turn_ids,
+                    top_k=policy.top_k,
+                    recall_hit=recall_hit,
+                ),
+            })
+
+            if (idx + 1) % 50 == 0:
+                logger.info("recall-only: %d/%d", idx + 1, len(qs))
+    finally:
+        await pool.close()
+
+    # Build summary
+    n_total = len(recall_records)
+    n_hits = sum(1 for r in recall_records if r["recall_at_k_hit"])
+    per_type: dict[str, dict[str, int | float]] = {}
+    for r in recall_records:
+        qt = r["question_type"]
+        slot = per_type.setdefault(qt, {"n": 0, "hits": 0})
+        slot["n"] += 1
+        slot["hits"] += 1 if r["recall_at_k_hit"] else 0
+    for qt, slot in per_type.items():
+        slot["recall_at_k"] = slot["hits"] / slot["n"] if slot["n"] else 0.0
+
+    diagnostic_counts: dict[str, int] = {}
+    diagnostic_by_type: dict[str, dict[str, int]] = {}
+    for record in recall_records:
+        diag = record["retrieval_diagnostics"]
+        cause = diag["cause"]
+        diagnostic_counts[cause] = diagnostic_counts.get(cause, 0) + 1
+        for key in (
+            "initial_empty", "retry_attempted", "retry_rescued",
+            "fallback_attempted", "fallback_rescued", "final_empty",
+        ):
+            if diag[key]:
+                diagnostic_counts[key] = diagnostic_counts.get(key, 0) + 1
+        qt_counts = diagnostic_by_type.setdefault(record["question_type"], {})
+        for key in (cause, diag["path"]):
+            qt_counts[key] = qt_counts.get(key, 0) + 1
+        if record["recall_at_k_hit"]:
+            qt_counts["recall_hits"] = qt_counts.get("recall_hits", 0) + 1
+        else:
+            qt_counts["recall_misses"] = qt_counts.get("recall_misses", 0) + 1
+
+    summary = {
+        "k": recall_k,
+        "n_questions": n_total,
+        "n_hits": n_hits,
+        "recall_at_k": n_hits / n_total if n_total else 0.0,
+        "per_question_type": per_type,
+        "diagnostic_counts": diagnostic_counts,
+        "diagnostic_by_question_type": diagnostic_by_type,
+        "mode": "turns",
+        "tier": "turns",
+        "dataset": str(dataset_path),
+        "snapshot_name": snapshot_name,
+        "retrieval_as_of": manifest.retrieval_as_of,
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / f"{split_name}_recall_only_{snapshot_name}_{timestamp}_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    jsonl_path = output_dir / f"{split_name}_recall_only_{snapshot_name}_{timestamp}.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as f:
+        for r in recall_records:
+            f.write(json.dumps(r) + "\n")
+
+    summary["summary_path"] = str(summary_path)
+    return summary
+
+
+async def _run_snapshot_reader_only(
+    *,
+    dataset_path: Path,
+    snapshot_dir: Path,
+    snapshot_name: str,
+    output_path: Path,
+    telemetry_path: Path | None = None,
+    summary_path: Path | None = None,
+    limit: int | None = None,
+    question_types: frozenset[str] | None = None,
+    top_k: int = DEFAULT_TOP_K,
+    resume: bool = False,
+    pool: asyncpg.Pool | None = None,
+    embedder: EmbeddingProvider | None = None,
+    reader: Reader | None = None,
+) -> dict:
+    """Read answers from an already-restored turn snapshot.
+
+    This is intentionally a separate path from :func:`run_benchmark`.  It
+    never calls ``load_haystack``, ``cleanup_haystack``, materialization,
+    replay, snapshot restore, or any other benchmark write during the
+    question loop.  The only per-question operations are query embedding,
+    the existing turn-tier ``retrieve`` router, and ``Reader.read_answer``.
+
+    ``output_path`` is evaluator-compatible JSONL.  ``telemetry_path`` is a
+    separate resumable audit trail so provenance and token accounting never
+    pollute the evaluator input.  A question is resumable only after a
+    successful telemetry row and a hypothesis row both exist; failed rows are
+    retried on the next invocation.
+    """
+    from benchmarks.longmemeval.snapshot import Manifest, snapshot_dir as snap_dir_fn
+
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"dataset not found: {dataset_path}")
+    sdir = snap_dir_fn(snapshot_dir, snapshot_name)
+    manifest_path = sdir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"manifest not found: {manifest_path}")
+    if not (sdir / ".complete").exists():
+        raise RuntimeError(f"snapshot is not marked complete: {sdir}")
+
+    manifest = Manifest.from_json(manifest_path.read_text(encoding="utf-8"))
+    if manifest.snapshot_name != snapshot_name:
+        raise ValueError(
+            f"snapshot name mismatch: requested={snapshot_name!r}, "
+            f"manifest={manifest.snapshot_name!r}"
+        )
+    actual_dataset_checksum = _dataset_checksum_for_reader(dataset_path)
+    if actual_dataset_checksum != manifest.dataset_checksum:
+        raise ValueError(
+            "dataset checksum mismatch: "
+            f"dataset={actual_dataset_checksum}, manifest={manifest.dataset_checksum}"
+        )
+
+    instances = load_split(dataset_path)
+    instance_by_id = {instance.question_id: instance for instance in instances}
+    if len(instance_by_id) != len(instances):
+        raise ValueError("dataset contains duplicate question_id values")
+    missing_instances = [q.question_id for q in manifest.questions if q.question_id not in instance_by_id]
+    if missing_instances:
+        raise ValueError(
+            "dataset is missing manifest question IDs: "
+            f"{missing_instances[:5]}" + ("..." if len(missing_instances) > 5 else "")
+        )
+
+    questions = list(manifest.questions)
+    if question_types:
+        questions = [q for q in questions if q.question_type in question_types]
+    if limit is not None:
+        questions = questions[:limit]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry_path = telemetry_path or output_path.with_suffix(output_path.suffix + ".telemetry.jsonl")
+    summary_path = summary_path or output_path.with_suffix(output_path.suffix + ".summary.json")
+    telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    completed_ids: set[str] = set()
+    if resume:
+        hypothesis_ids: set[str] = set()
+        if output_path.exists():
+            with output_path.open(encoding="utf-8") as existing:
+                for line in existing:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    qid = row.get("question_id")
+                    if qid:
+                        hypothesis_ids.add(qid)
+        successful_telemetry_ids: set[str] = set()
+        if telemetry_path.exists():
+            with telemetry_path.open(encoding="utf-8") as existing:
+                for line in existing:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        row.get("status") == "ok"
+                        and row.get("question_id")
+                        and row.get("snapshot_name") == snapshot_name
+                        and row.get("dataset_checksum") == manifest.dataset_checksum
+                        and row.get("manifest_identity") == _manifest_identity(manifest)
+                        and row.get("retrieval_as_of") == manifest.retrieval_as_of
+                    ):
+                        successful_telemetry_ids.add(row["question_id"])
+        completed_ids = hypothesis_ids & successful_telemetry_ids
+        logger.info("snapshot-reader resume: skipping %d completed questions", len(completed_ids))
+
+    owns_pool = pool is None
+    if pool is None:
+        pool = await _make_pool()
+    if embedder is None:
+        embedder = _make_embedder()
+    if reader is None:
+        reader = Reader()
+
+    # The identity gate is read-only and runs before any Reader billing.
+    live_identity = await _snapshot_live_identity(pool, manifest)
+    manifest_identity = _manifest_identity(manifest)
+    as_of = datetime.fromisoformat(manifest.retrieval_as_of)
+    started_at = time.monotonic()
+    records: list[dict] = []
+    questions_failed = 0
+    questions_done = 0
+    input_tokens = 0
+    cached_tokens = 0
+    output_tokens = 0
+
+    try:
+        with output_path.open("a", encoding="utf-8") as hypotheses, telemetry_path.open(
+            "a", encoding="utf-8"
+        ) as telemetry_out:
+            for index, q in enumerate(questions):
+                if q.question_id in completed_ids:
+                    continue
+                instance = instance_by_id[q.question_id]
+                policy = policy_for(q.question_type)
+                if top_k > policy.top_k:
+                    from benchmarks.longmemeval.router import RetrievalPolicy
+                    policy = RetrievalPolicy(
+                        top_k=top_k,
+                        overfetch_multiplier=policy.overfetch_multiplier,
+                    )
+
+                diagnostics = RetrievalDiagnostics()
+                indexed_turn_ids = list(q.turn_ids)
+                gold_session_turn_ids = [
+                    tid for tid in indexed_turn_ids
+                    if q.turn_session_map.get(tid) in set(q.gold_session_ids)
+                ]
+                diagnostics.indexed_turn_ids = indexed_turn_ids
+                diagnostics.gold_session_turn_ids = gold_session_turn_ids
+                question_started = time.perf_counter()
+                provenance = {
+                    "question_id": q.question_id,
+                    "question_type": q.question_type,
+                    "project_id": q.project_id,
+                    "snapshot_name": manifest.snapshot_name,
+                    "manifest_identity": manifest_identity,
+                    "dataset_checksum": manifest.dataset_checksum,
+                    "retrieval_as_of": manifest.retrieval_as_of,
+                    "indexed_turn_count": len(indexed_turn_ids),
+                    "gold_session_turn_count": len(gold_session_turn_ids),
+                    "retrieval_tier": "turns",
+                    "reader_top_k": policy.top_k,
+                }
+                try:
+                    memories = await retrieve(
+                        pool,
+                        embedder,
+                        question=instance.question,
+                        question_type=instance.question_type,
+                        project_id=q.project_id,
+                        policy=policy,
+                        tier="turns",
+                        user_id=BENCHMARK_USER_ID,
+                        expected_turn_count=q.row_count,
+                        as_of=as_of,
+                        gold_turn_ids=gold_session_turn_ids,
+                        diagnostics=diagnostics,
+                        turn_session_map=q.turn_session_map,
+                    )
+                    response = await reader.read_answer(
+                        question=instance.question,
+                        question_date=instance.question_date,
+                        question_type=instance.question_type,
+                        memories=memories,
+                        top_k=policy.top_k,
+                    )
+                except Exception as exc:
+                    questions_failed += 1
+                    failed = {
+                        **provenance,
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "elapsed_ms": (time.perf_counter() - question_started) * 1000.0,
+                        "retrieved_turn_ids": [],
+                        "retrieval_diagnostics": diagnostics.to_dict(
+                            gold_turn_ids=gold_session_turn_ids,
+                            top_k=policy.top_k,
+                            recall_hit=False,
+                        ),
+                    }
+                    telemetry_out.write(json.dumps(failed) + "\n")
+                    telemetry_out.flush()
+                    records.append(failed)
+                    logger.exception("snapshot-reader question %s failed", q.question_id)
+                    continue
+
+                retrieved_turn_ids = [memory.memory.id for memory in memories[:10]]
+                retrieved_sessions = {
+                    q.turn_session_map[turn_id]
+                    for turn_id in retrieved_turn_ids
+                    if turn_id in q.turn_session_map
+                }
+                recall_hit = bool(retrieved_sessions & set(q.gold_session_ids))
+                record = {
+                    **provenance,
+                    "status": "ok",
+                    "hypothesis": response.hypothesis,
+                    "reader_model": response.model,
+                    "input_tokens": response.input_tokens,
+                    "cached_input_tokens": response.cached_input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "n_recalled": len(memories),
+                    "retrieved_turn_ids": retrieved_turn_ids,
+                    "retrieved_session_ids": sorted(retrieved_sessions),
+                    "gold_session_ids": list(q.gold_session_ids),
+                    "recall_at_10_hit": recall_hit,
+                    "retrieval_diagnostics": diagnostics.to_dict(
+                        gold_turn_ids=gold_session_turn_ids,
+                        top_k=policy.top_k,
+                        recall_hit=recall_hit,
+                    ),
+                    "elapsed_ms": (time.perf_counter() - question_started) * 1000.0,
+                }
+                hypotheses.write(json.dumps({
+                    "question_id": q.question_id,
+                    "hypothesis": response.hypothesis,
+                }) + "\n")
+                hypotheses.flush()
+                telemetry_out.write(json.dumps(record) + "\n")
+                telemetry_out.flush()
+                records.append(record)
+                questions_done += 1
+                input_tokens += response.input_tokens
+                cached_tokens += response.cached_input_tokens
+                output_tokens += response.output_tokens
+                if (index + 1) % 25 == 0:
+                    logger.info("snapshot-reader: %d/%d", index + 1, len(questions))
+    finally:
+        if owns_pool:
+            await pool.close()
+
+    # A second read-only gate catches accidental state drift while the Reader
+    # was running. It never restores or mutates the snapshot.
+    final_identity = await _snapshot_live_identity(pool, manifest) if not owns_pool else None
+    if owns_pool:
+        # Reopen only for the final identity query; this remains read-only.
+        check_pool = await _make_pool()
+        try:
+            final_identity = await _snapshot_live_identity(check_pool, manifest)
+        finally:
+            await check_pool.close()
+    if final_identity != live_identity:
+        raise RuntimeError(
+            "fixed-materialization identity drifted during snapshot-reader run: "
+            f"before={live_identity}, after={final_identity}"
+        )
+
+    successful_total = sum(1 for record in records if record.get("status") == "ok")
+    expected_ids = {q.question_id for q in questions}
+    output_ids: list[str] = []
+    if output_path.exists():
+        with output_path.open(encoding="utf-8") as existing:
+            for line in existing:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("question_id") in expected_ids:
+                    output_ids.append(row["question_id"])
+    unique_output_ids = set(output_ids)
+    duplicate_question_ids = sorted({qid for qid in output_ids if output_ids.count(qid) > 1})
+    summary = {
+        "status": (
+            "complete"
+            if len(unique_output_ids) == len(expected_ids) and not duplicate_question_ids
+            else "incomplete"
+        ),
+        "questions_requested": len(expected_ids),
+        "questions_done_this_run": questions_done,
+        "questions_failed_this_run": questions_failed,
+        "questions_complete": len(unique_output_ids),
+        "questions_missing": sorted(expected_ids - unique_output_ids),
+        "duplicate_question_ids": duplicate_question_ids,
+        "input_tokens_this_run": input_tokens,
+        "cached_input_tokens_this_run": cached_tokens,
+        "output_tokens_this_run": output_tokens,
+        "elapsed_seconds": time.monotonic() - started_at,
+        "dataset": str(dataset_path),
+        "dataset_checksum": manifest.dataset_checksum,
+        "snapshot_name": manifest.snapshot_name,
+        "manifest_identity": manifest_identity,
+        "retrieval_as_of": manifest.retrieval_as_of,
+        "live_identity_before": live_identity,
+        "live_identity_after": final_identity,
+        "hypotheses_path": str(output_path),
+        "telemetry_path": str(telemetry_path),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
+def _dataset_checksum_for_reader(dataset_path: Path) -> str:
+    """Hash the dataset without importing snapshot helpers into the CLI path."""
+    digest = hashlib.sha256()
+    with dataset_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
 
@@ -936,6 +1749,50 @@ async def run_benchmark(
     ),
 )
 @click.option(
+    "--snapshot-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("benchmarks/longmemeval/snapshots"),
+    show_default=True,
+    help="Directory for snapshots (manifest + COPY files).",
+)
+@click.option(
+    "--snapshot-name",
+    default=None,
+    help="Name for the snapshot (used as subdirectory under --snapshot-dir).",
+)
+@click.option(
+    "--materialize-only",
+    is_flag=True,
+    default=False,
+    help=(
+        "Ingest all questions, persist a manifest + snapshot, then exit. "
+        "Does NOT run recall, Reader, or cleanup. Creates the fixed-"
+        "materialization state for A/B comparisons. Use with --mode turns "
+        "--tier turns."
+    ),
+)
+@click.option(
+    "--recall-only",
+    is_flag=True,
+    default=False,
+    help=(
+        "Assume a snapshot is already loaded in the DB. Load the manifest "
+        "for side-maps, run recall-only (no ingest, no Reader), record "
+        "recall@k. Does NOT cleanup. Use with --snapshot-name to specify "
+        "which manifest to load."
+    ),
+)
+@click.option(
+    "--snapshot-reader-only",
+    is_flag=True,
+    default=False,
+    help=(
+        "Read from an already-restored fixed snapshot with retrieve()+Reader "
+        "only. Never ingests, materializes, restores, or cleans up. Requires "
+        "--snapshot-name and --output-file; supports --resume."
+    ),
+)
+@click.option(
     "--log-level",
     default="INFO",
     show_default=True,
@@ -957,6 +1814,11 @@ def cli(
     warm_boost_rounds: int,
     warm_boost_queries_per_round: int,
     replay_executor: str,
+    snapshot_dir: Path,
+    snapshot_name: str | None,
+    materialize_only: bool,
+    recall_only: bool,
+    snapshot_reader_only: bool,
     log_level: str,
 ) -> None:
     """Run Weft against the LongMemEval benchmark, write hypotheses JSONL."""
@@ -990,10 +1852,51 @@ def cli(
     from dotenv import load_dotenv
     load_dotenv()
     load_dotenv(Path.home() / ".weft" / ".env")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise click.ClickException(
-            "ANTHROPIC_API_KEY is required for the Reader stage. "
-            "Set it in your shell or add it to ~/.weft/.env."
+
+    selected_modes = sum(
+        bool(flag) for flag in (materialize_only, recall_only, snapshot_reader_only)
+    )
+    if selected_modes > 1:
+        raise click.UsageError(
+            "--materialize-only, --recall-only, and --snapshot-reader-only "
+            "are mutually exclusive"
+        )
+
+    # --materialize-only and --recall-only don't need the Reader (no LLM calls).
+    # Only the full pipeline and fixed-snapshot Reader require ANTHROPIC_API_KEY.
+    if not materialize_only and not recall_only:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise click.ClickException(
+                "ANTHROPIC_API_KEY is required for the Reader stage. "
+                "Set it in your shell or add it to ~/.weft/.env."
+            )
+
+    if snapshot_reader_only:
+        _assert_local_benchmark_target()
+        if not snapshot_name:
+            raise click.UsageError(
+                "--snapshot-reader-only requires --snapshot-name"
+            )
+        if output_file is None:
+            raise click.UsageError(
+                "--snapshot-reader-only requires --output-file so the run is "
+                "stable, resumable, and judgeable"
+            )
+        if no_cleanup:
+            logger.warning("--no-cleanup is ignored by --snapshot-reader-only")
+
+    # --materialize-only requires --mode turns
+    if materialize_only and mode != "turns":
+        raise click.UsageError(
+            "--materialize-only requires --mode turns: only turn-mode "
+            "ingest produces episode_turns rows for the snapshot."
+        )
+
+    # --recall-only requires --snapshot-name
+    if recall_only and not snapshot_name:
+        raise click.UsageError(
+            "--recall-only requires --snapshot-name: specify the manifest "
+            "to load for the recall-only run."
         )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1023,6 +1926,79 @@ def cli(
     )
     if resume and output_file is None:
         raise click.UsageError("--resume requires --output-file")
+
+    # --materialize-only: ingest all questions, persist manifest + snapshot, exit.
+    if materialize_only:
+        snap_name = snapshot_name or f"{split_name}_{timestamp}"
+        asyncio.run(
+            _run_materialize_only(
+                dataset_path=dataset_path,
+                snapshot_dir=snapshot_dir,
+                snapshot_name=snap_name,
+                limit=limit,
+                question_types=qt_set,
+                stratified_frac=stratified_frac,
+                sample_seed=sample_seed,
+            )
+        )
+        click.echo(f"\nMaterialized snapshot: {snapshot_dir / snap_name}")
+        return
+
+    # --recall-only: load manifest, run recall-only, record recall@k, exit.
+    if recall_only:
+        recall_summary = asyncio.run(
+            _run_recall_only(
+                dataset_path=dataset_path,
+                snapshot_dir=snapshot_dir,
+                snapshot_name=snapshot_name,
+                output_dir=output_dir,
+                split_name=split_name,
+                timestamp=timestamp,
+                limit=limit,
+                question_types=qt_set,
+                top_k=top_k,
+            )
+        )
+        click.echo(f"\nRecall-only complete:")
+        click.echo(f"  recall@{recall_summary['k']}: {recall_summary['recall_at_k']:.3f} "
+                   f"({recall_summary['n_hits']}/{recall_summary['n_questions']})")
+        click.echo(f"  summary: {recall_summary['summary_path']}")
+        return
+
+    if snapshot_reader_only:
+        snapshot_output = output_file
+        assert snapshot_output is not None
+        snapshot_telemetry = snapshot_output.with_suffix(
+            snapshot_output.suffix + ".telemetry.jsonl"
+        )
+        snapshot_summary = snapshot_output.with_suffix(
+            snapshot_output.suffix + ".summary.json"
+        )
+        reader_summary = asyncio.run(
+            _run_snapshot_reader_only(
+                dataset_path=dataset_path,
+                snapshot_dir=snapshot_dir,
+                snapshot_name=snapshot_name,
+                output_path=snapshot_output,
+                telemetry_path=snapshot_telemetry,
+                summary_path=snapshot_summary,
+                limit=limit,
+                question_types=qt_set,
+                top_k=top_k,
+                resume=resume,
+            )
+        )
+        click.echo("\\nFixed-snapshot Reader complete:")
+        click.echo(
+            f"  status={reader_summary['status']} "
+            f"complete={reader_summary['questions_complete']}/"
+            f"{reader_summary['questions_requested']} "
+            f"failed_this_run={reader_summary['questions_failed_this_run']}"
+        )
+        click.echo(f"  hypotheses: {snapshot_output}")
+        click.echo(f"  telemetry: {snapshot_telemetry}")
+        click.echo(f"  summary: {snapshot_summary}")
+        return
 
     stats = asyncio.run(
         run_benchmark(
