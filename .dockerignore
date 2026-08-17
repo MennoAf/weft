@@ -17,3 +17,5 @@ PLAN.md
 DEPLOY.md
 CLAUDE.md
 CHANGELOG.md
+benchmarks/
+.polytoken/

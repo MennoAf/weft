@@ -301,5 +301,7 @@ def rank_turns(
         score_turn(t, base, weights=weights, now=now)
         for t, base in turns_with_base
     ]
-    scored.sort(key=lambda s: s.score, reverse=True)
+    # Secondary sort by turn ID ensures deterministic order when composite
+    # scores tie — critical for reproducible A/B comparisons.
+    scored.sort(key=lambda s: (-s.score, s.turn.id))
     return scored
