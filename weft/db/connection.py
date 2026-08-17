@@ -208,6 +208,37 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
         return pool
 
 
+def _validate_user_id(user_id: str) -> bool:
+    """Validate a user_id string for safe interpolation into SET LOCAL.
+
+    SET is a utility command — doesn't support $1 parameterization.
+    Allow alphanumerics, dashes (UUIDs), and underscores
+    (sentinels like ``__system_global_zathras__``).
+    """
+    return user_id.replace("-", "").replace("_", "").isalnum()
+
+
+async def set_user_context_value(conn: asyncpg.Connection, user_id: str) -> bool:
+    """Set ``app.user_id`` on a connection from an explicit user_id string.
+
+    Issues ``SET LOCAL app.user_id = ...`` inside the current transaction.
+    SET LOCAL is transaction-scoped, so the setting is automatically
+    cleared when the transaction ends — no pool leakage.
+
+    Returns True if the GUC was set, False if the user_id was rejected
+    as suspicious (non-alphanumeric characters outside dashes/underscores).
+
+    This is the explicit-identity variant of :func:`set_user_context`,
+    which resolves identity from the ``current_user_id`` ContextVar.
+    Both share the same validation and SET LOCAL logic.
+    """
+    if not _validate_user_id(user_id):
+        logger.warning("Rejecting suspicious user_id: %r", user_id)
+        return False
+    await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
+    return True
+
+
 async def set_user_context(conn: asyncpg.Connection) -> None:
     """Set ``app.user_id`` on a connection from the current contextvar.
 
@@ -222,14 +253,7 @@ async def set_user_context(conn: asyncpg.Connection) -> None:
     """
     user_id = _resolve_user_id()
     if user_id is not None:
-        # SET is a utility command — doesn't support $1 parameterization.
-        # Sanitize by rejecting characters outside the safe set: alphanumeric,
-        # dashes (UUIDs), and underscores (for the SYSTEM_GLOBAL sentinel
-        # ``__system_global_zathras__`` and similar named identities).
-        if not user_id.replace("-", "").replace("_", "").isalnum():
-            logger.warning("Rejecting suspicious user_id: %r", user_id)
-            return
-        await conn.execute(f"SET LOCAL app.user_id = '{user_id}'")
+        await set_user_context_value(conn, user_id)
 
 
 @asynccontextmanager
@@ -270,10 +294,11 @@ async def acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
         if user_id is not None:
             # SET LOCAL requires a transaction context.
             async with conn.transaction():
-                # SET is a utility command — doesn't support $1 parameterization.
-                # Allow alphanumerics, dashes (UUIDs), and underscores
-                # (sentinels like ``__system_global_zathras__``).
-                if not user_id.replace("-", "").replace("_", "").isalnum():
+                # Use the shared validator — same logic as
+                # set_user_context_value, just inlined here because
+                # we need to manage the contextvar token within the
+                # transaction scope.
+                if not _validate_user_id(user_id):
                     logger.warning("Rejecting suspicious user_id: %r", user_id)
                     token = _current_conn.set(conn)
                     try:
