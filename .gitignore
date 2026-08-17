@@ -47,3 +47,15 @@ posts/
 
 # Enumeration-eval runtime artifact (CL1 minted cases)
 benchmarks/enumeration_eval/minted_cases.jsonl
+
+# LongMemEval local dataset and generated benchmark artifacts.
+# Keep benchmark source, tests, README files, and small manifests eligible.
+benchmarks/longmemeval/data/longmemeval_m_cleaned.json
+benchmarks/longmemeval/runs/
+benchmarks/longmemeval/results/
+benchmarks/longmemeval/snapshots/*/*.csv.gz
+benchmarks/longmemeval/snapshots/*/.complete
+!benchmarks/longmemeval/snapshots/*/manifest.json
+
+# Polytoken local session/config state.
+.polytoken/
