@@ -12,22 +12,10 @@
 fly launch --no-deploy
 
 # 1. Apply migrations out of band with the Supabase owner credential.
-DATABASE_URL="postgresql://OWNER:OWNER_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres" \
-  WEFT_MIGRATION_MODE=apply uv run python - <<'PY'
-import asyncio
-from weft.config import load_config
-from weft.db.connection import create_pool
-from weft.db.migrations import run_migrations
-
-async def main():
-    pool = await create_pool(load_config())
-    try:
-        await run_migrations(pool)
-    finally:
-        await pool.close()
-
-asyncio.run(main())
-PY
+# Keep the owner URL in your environment or a 0600 local secret file; do not
+# put it in shell history or commit it. The CA is passed by file path.
+export WEFT_OWNER_DATABASE_URL="postgresql://OWNER:OWNER_PASSWORD@db.YOUR_PROJECT.supabase.co:5432/postgres"
+uv run weft migrate --ca-cert-file ~/Downloads/prod-ca-2021.crt
 
 # 2. As the owner, provision/update the restricted runtime role. Replace
 #    APP_PASSWORD through a secret-safe SQL client; never commit it.
@@ -75,16 +63,35 @@ counts with collection gaps are not sufficient evidence.
 
 ## Deploy
 
+The supported production workflow is one command with a read-only migration
+preflight and a longer blue/green health wait:
+
 ```bash
-fly deploy                          # production (weft-mcp)
-fly deploy -c fly.staging.toml      # staging (weft-mcp-staging, OAuth on)
+# WEFT_OWNER_DATABASE_URL is the owner/migration connection for the preflight.
+# Fly itself continues using the restricted weft_app secret.
+uv run weft deploy --ca-cert-file ~/Downloads/prod-ca-2021.crt
 ```
 
-Fly must run with `WEFT_MIGRATION_MODE=verify`: startup performs a read-only
-comparison of `public.schema_migrations` against the code migration set and
-fails loudly if the owner migration step was skipped. Local/owner workflows
-default to `apply` for backward compatibility. The runtime role must never be
-granted table ownership or DDL solely to make startup pass.
+This command:
+
+1. Verifies the owner connection can read the migration ledger and that no
+   migration is pending.
+2. Runs `fly deploy -a weft-mcp --wait-timeout 10m`.
+3. Leaves Fly's `WEFT_MIGRATION_MODE=verify` startup gate unchanged.
+
+If the preflight reports pending migrations, run:
+
+```bash
+uv run weft migrate --ca-cert-file ~/Downloads/prod-ca-2021.crt
+```
+
+The migration command refuses to run as `weft_app`; it requires the owner or
+migration role. The runtime role must never be granted table ownership or DDL
+solely to make startup pass. Staging remains explicit:
+
+```bash
+fly deploy -c fly.staging.toml --wait-timeout 10m
+```
 
 `fly.staging.toml` is a separate Fly config with `WEFT_OAUTH_ENABLED=1` pinned
 in the env block; see "Bringing up a new environment" below for OAuth setup.
@@ -102,7 +109,10 @@ curl https://weft-mcp.fly.dev/healthz
 
 | Environment Variable | Required | Default | Description |
 |---------------------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | — | Supabase Postgres connection string; Fly must use the restricted non-owner application role. |
+| `WEFT_OWNER_DATABASE_URL` | Required for owner commands | — | Supabase owner/migration connection for `weft migrate` and `weft deploy` preflight; never use the restricted `weft_app` URL here. |
+| `DATABASE_URL` | Required by runtime | — | Supabase connection string used internally after owner preflight; Fly stores the restricted `weft_app` URL. |
+| `WEFT_DATABASE_CA_CERT_FILE` | Recommended locally | — | Path to the trusted Supabase CA PEM; avoids placing certificate contents in shell history. |
+| `WEFT_DATABASE_CA_CERT` | Fly secret compatibility path | — | PEM certificate contents for environments that provide secrets as text. |
 | `WEFT_MIGRATION_MODE` | Yes on hosted runtime | `apply` | `apply` executes pending DDL with the owner role; `verify` performs a read-only exact version check and is required for Fly. |
 | `WEFT_API_KEY` | Yes (prod, bootstrap) | — | Auto-bootstraps one supervisor token row on first authenticated request. Use it to mint real per-client tokens via `weft tokens issue`, then stop sharing it. Coexists with OAuth and bearer-token paths. |
 | `WEFT_DEFAULT_USER_ID` | No | — | Single-tenant fallback `user_id` for hosted deployments without OAuth and owner-scoped integrations. The background recall-canary audit discovers owners independently. |

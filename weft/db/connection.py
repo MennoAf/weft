@@ -147,10 +147,18 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
     # A deployment may provide the provider's CA bundle when it is not present
     # in the runtime image trust store.
     if "supabase.co" in dsn or "supabase.com" in dsn or "sslmode=require" in dsn:
-        if config.database.ca_cert:
+        ca_cert = config.database.ca_cert
+        if config.database.ca_cert_file:
+            try:
+                ca_cert = config.database.ca_cert_file.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(
+                    f"Database CA certificate file is unreadable: {config.database.ca_cert_file}"
+                ) from exc
+        if ca_cert:
             try:
                 ssl_context = ssl.create_default_context(
-                    cadata=config.database.ca_cert,
+                    cadata=ca_cert,
                 )
                 # Python 3.13 enables VERIFY_X509_STRICT by default. The
                 # documented Supabase prod-ca-2021 root predates RFC 5280's
