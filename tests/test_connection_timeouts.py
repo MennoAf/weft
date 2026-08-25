@@ -35,7 +35,9 @@ def _config(dsn: str, **db_overrides) -> WeftConfig:
 class TestSupabaseTLS:
     async def test_configured_ca_is_passed_as_cadata(self):
         pool = object()
-        ssl_context = object()
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if hasattr(ssl, "VERIFY_X509_STRICT"):
+            ssl_context.verify_flags |= ssl.VERIFY_X509_STRICT
         with (
             patch(
                 "weft.db.connection.ssl.create_default_context",
@@ -53,6 +55,10 @@ class TestSupabaseTLS:
         assert result is pool
         create_context.assert_called_once_with(cadata=_CA_PLACEHOLDER)
         assert create_pool_mock.await_args.kwargs["ssl"] is ssl_context
+        assert ssl_context.verify_mode is ssl.CERT_REQUIRED
+        assert ssl_context.check_hostname is True
+        if hasattr(ssl, "VERIFY_X509_STRICT"):
+            assert not ssl_context.verify_flags & ssl.VERIFY_X509_STRICT
 
     async def test_unconfigured_ca_uses_system_trust_store(self):
         pool = object()
