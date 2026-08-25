@@ -47,6 +47,10 @@ COUNTER_CALIBRATION_AUTO_PROMOTE_FAILED = "calibration.auto_promote.failed"
 # executor lands and increments it).
 COUNTER_REPLAY_EXECUTOR_FAILED = "replay.executor.failed"
 
+# Terminal replay status persistence failed after a bounded retry. The row stays
+# pending for stale reaping, but this counter makes the operational seam visible.
+COUNTER_REPLAY_TERMINAL_STATUS_FAILED = "replay.terminal_status.failed"
+
 # reap_stale_pending_replays — orphaned 'pending' rows reaped to 'failed' past
 # REPLAY_QUEUE_STALENESS_DAYS. Not a failure counter (reaping is remediation, not
 # an error): a rising value tracks how many orphaned rows the sweep has drained.
@@ -58,6 +62,7 @@ FAILURE_COUNTERS: tuple[str, ...] = (
     COUNTER_REPLAY_ENQUEUE_FAILED,
     COUNTER_CALIBRATION_AUTO_PROMOTE_FAILED,
     COUNTER_REPLAY_EXECUTOR_FAILED,
+    COUNTER_REPLAY_TERMINAL_STATUS_FAILED,
 )
 
 

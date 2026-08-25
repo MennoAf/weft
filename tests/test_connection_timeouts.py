@@ -15,7 +15,12 @@ import asyncpg
 import pytest
 
 from weft.config import DatabaseConfig, WeftConfig
-from weft.db.connection import _pgvector_codec_init, acquire, create_pool
+from weft.db.connection import (
+    _pgvector_codec_init,
+    acquire,
+    create_pool,
+    register_pgvector_codec,
+)
 
 
 def _config(dsn: str, **db_overrides) -> WeftConfig:
@@ -38,6 +43,58 @@ async def test_pool_init_sets_extensions_search_path_before_vector_codec():
             format="text",
         ),
     ]
+
+
+async def test_register_pgvector_codec_initializes_all_existing_connections(monkeypatch):
+    """Every warm connection is initialized before any one is released."""
+    connections = [object(), object(), object()]
+    events = []
+
+    class Pool:
+        def get_size(self):
+            return len(connections)
+
+        async def acquire(self):
+            connection = connections[len([event for event in events if event[0] == "acquire"])]
+            events.append(("acquire", connection))
+            return connection
+
+        async def release(self, connection):
+            events.append(("release", connection))
+
+    async def init(connection):
+        events.append(("init", connection))
+
+    monkeypatch.setattr("weft.db.connection._pgvector_codec_init", init)
+
+    await register_pgvector_codec(Pool())
+
+    assert [event[0] for event in events] == [
+        "acquire", "acquire", "acquire", "init", "init", "init",
+        "release", "release", "release",
+    ]
+    assert [event[1] for event in events if event[0] == "init"] == connections
+    assert [event[1] for event in events if event[0] == "release"] == connections
+
+
+async def test_register_pgvector_codec_empty_pool_is_noop(monkeypatch):
+    """A pool with no currently created connections needs no acquire/release."""
+    init = AsyncMock()
+    monkeypatch.setattr("weft.db.connection._pgvector_codec_init", init)
+
+    class Pool:
+        def get_size(self):
+            return 0
+
+        async def acquire(self):
+            raise AssertionError("empty pool must not acquire")
+
+        async def release(self, connection):
+            raise AssertionError("empty pool must not release")
+
+    await register_pgvector_codec(Pool())
+
+    init.assert_not_awaited()
 
 
 class TestCommandTimeout:

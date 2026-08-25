@@ -94,9 +94,23 @@ async def register_pgvector_codec(pool: asyncpg.Pool) -> None:
 
     Call this AFTER migrations have run (which CREATE EXTENSION vector).
     The pool's init callback handles future connections automatically.
+
+    Acquire every connection that existed when registration started before
+    initializing any of them.  This prevents a connection released after its
+    own initialization from being reacquired and initialized twice while a
+    warm connection is still waiting.  Always release connections acquired so
+    far, including when acquisition or initialization fails, so registration
+    cannot leave the pool starved.
     """
-    async with pool.acquire() as conn:
-        await _pgvector_codec_init(conn)
+    connections: list[asyncpg.Connection] = []
+    try:
+        for _ in range(pool.get_size()):
+            connections.append(await pool.acquire())
+        for conn in connections:
+            await _pgvector_codec_init(conn)
+    finally:
+        for conn in connections:
+            await pool.release(conn)
 
 
 async def create_pool(config: WeftConfig) -> asyncpg.Pool:
@@ -128,12 +142,11 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
     # Supabase pooler requires statement_cache_size=0 (no prepared statements)
     elif ":6543/" in dsn or "pooler.supabase.com" in dsn:
         kwargs["statement_cache_size"] = 0
-    # Enable SSL for Supabase and other cloud Postgres providers
+    # Enable certificate- and hostname-verified SSL for Supabase and other
+    # cloud Postgres providers. Do not weaken TLS verification for pooler
+    # compatibility: a public deployment must authenticate the database peer.
     if "supabase.co" in dsn or "supabase.com" in dsn or "sslmode=require" in dsn:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        kwargs["ssl"] = ctx
+        kwargs["ssl"] = ssl.create_default_context()
 
     try:
         pool = await asyncpg.create_pool(dsn, **kwargs)

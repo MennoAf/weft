@@ -19,6 +19,7 @@ async def export_memories(
     topic: str | None = None,
     status: str = "active",
     project_id: str | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Export memories as markdown or JSON string.
 
@@ -29,6 +30,8 @@ async def export_memories(
         topic: Filter by topic tag.
         status: Filter by status (default "active").
         project_id: Scope export to a specific project (includes global memories).
+        user_id: Scope export to one owner's memories; ``None`` is an explicit
+            operator-only all-user export and must not be used by public callers.
 
     Returns:
         Formatted string of exported memories.
@@ -48,6 +51,7 @@ async def export_memories(
             memory_type=type_enum,
             topic=topic,
             project_id=project_id,
+            user_id=user_id,
             limit=batch_size,
             offset=offset,
         )

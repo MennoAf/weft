@@ -21,7 +21,11 @@ from weft.episode_turns import append_turn
 from weft.episodes import create_episode
 from weft.models import EpisodeCreate, EpisodeTurnCreate, TurnRole
 from weft.views import belief_detector
-from weft.counters import COUNTER_REPLAY_STALE_REAPED, get_counter
+from weft.counters import (
+    COUNTER_REPLAY_STALE_REAPED,
+    COUNTER_REPLAY_TERMINAL_STATUS_FAILED,
+    get_counter,
+)
 from weft.replay import REPLAY_QUEUE_STALENESS_DAYS
 from weft.replay_executor import (
     REPLAY_AGGREGATE_DETECTOR_VERSION,
@@ -361,6 +365,46 @@ async def test_escalation_never_routes_to_opus():
     for module in (replay_executor, aggregate_detector):
         source = inspect.getsource(module)
         assert "claude-opus" not in source, f"opus model id found in {module.__name__}"
+
+
+async def test_terminal_status_retries_once_and_succeeds(pool):
+    """A transient terminal-write failure is retried once and not counted."""
+    from weft import replay_executor as rx
+
+    calls = 0
+    real_set_status = rx._set_status
+
+    async def _flaky_set_status(pool_, replay_id, user_id, status):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated transient status failure")
+        return await real_set_status(pool_, replay_id, user_id, status)
+
+    with patch.object(rx, "_set_status", side_effect=_flaky_set_status):
+        assert await rx._set_terminal_status_with_retry(
+            pool, "missing-replay-row", DEFAULT_TEST_USER_ID, "done"
+        ) is True
+
+    assert calls == 2
+    assert await get_counter(pool, COUNTER_REPLAY_TERMINAL_STATUS_FAILED) == 0
+
+
+async def test_terminal_status_failure_after_retry_is_counted(pool):
+    """Two terminal-write failures leave the row pending and increment the counter."""
+    from weft import replay_executor as rx
+
+    before = await get_counter(pool, COUNTER_REPLAY_TERMINAL_STATUS_FAILED)
+    with patch.object(
+        rx,
+        "_set_status",
+        side_effect=RuntimeError("simulated persistent status failure"),
+    ):
+        assert await rx._set_terminal_status_with_retry(
+            pool, "poison-replay-row", DEFAULT_TEST_USER_ID, "failed"
+        ) is False
+
+    assert await get_counter(pool, COUNTER_REPLAY_TERMINAL_STATUS_FAILED) == before + 1
 
 
 # ---------------------------------------------------------------------------
