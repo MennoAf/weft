@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import click
@@ -135,7 +135,7 @@ def status():
     stats = asyncio.run(_status())
     console = Console()
 
-    console.print(f"\n[bold]Weft Memory Status[/bold]")
+    console.print("\n[bold]Weft Memory Status[/bold]")
     console.print(f"Total memories: {stats['total']}\n")
 
     if stats["by_status"]:
@@ -239,11 +239,13 @@ def auto_consolidate(dry_run: bool, force: bool):
 @click.option("--topic", default=None, help="Filter by topic")
 @click.option("--status", "-s", default="active", help="Filter by status")
 @click.option("--output", "-o", "output_file", default=None, type=click.Path(), help="Write to file instead of stdout")
-def export_cmd(fmt: str, memory_type: str | None, topic: str | None, status: str, output_file: str | None):
+@click.option("--all", "export_all", is_flag=True, help="Export all users' memories (operator-only)")
+def export_cmd(fmt: str, memory_type: str | None, topic: str | None, status: str, output_file: str | None, export_all: bool):
     """Export memories as markdown or JSON."""
 
     async def _export():
         import asyncpg
+        from weft.auth import resolve_caller_user_id
         from weft.exporter import export_memories
 
         config = load_config()
@@ -254,6 +256,7 @@ def export_cmd(fmt: str, memory_type: str | None, topic: str | None, status: str
             memory_type=memory_type,
             topic=topic,
             status=status,
+            user_id=None if export_all else resolve_caller_user_id(),
         )
         await pool.close()
         return result

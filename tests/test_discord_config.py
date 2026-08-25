@@ -10,13 +10,48 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from weft.models import MemoryType
+
+
+# ---------------------------------------------------------------------------
+# Discord Bot lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discord_close_cancels_inbound_ingest_tasks():
+    """Closing the bot observes detached ingest work before returning."""
+    from weft.discord.bot import Bot
+
+    bot = Bot("token", 123)
+    started = asyncio.Event()
+    canceled = asyncio.Event()
+
+    async def worker():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            canceled.set()
+
+    task = asyncio.create_task(worker())
+    bot._ingest_tasks.add(task)
+    task.add_done_callback(bot._ingest_task_done)
+    await started.wait()
+    bot._client.close = AsyncMock()
+
+    await bot.close()
+
+    assert canceled.is_set()
+    assert not bot._ingest_tasks
 
 
 # ---------------------------------------------------------------------------

@@ -127,6 +127,48 @@ async def test_export_empty(pool):
     assert data["memories"] == []
 
 
+async def test_export_user_scope_excludes_other_owner(pool):
+    """A caller-scoped export never includes another user's memory."""
+    from weft.auth import current_user_id
+    from weft.db.connection import acquire
+
+    token = current_user_id.set("export-owner-a")
+    try:
+        async with acquire(pool):
+            await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="Owner A secret"))
+    finally:
+        current_user_id.reset(token)
+    token = current_user_id.set("export-owner-b")
+    try:
+        async with acquire(pool):
+            await store_memory(pool, MemoryCreate(type=MemoryType.fact, content="Owner B secret"))
+    finally:
+        current_user_id.reset(token)
+
+    result = await export_memories(pool, format="json", user_id="export-owner-a")
+    data = json.loads(result)
+    contents = {memory["content"] for memory in data["memories"]}
+    assert contents == {"Owner A secret"}
+
+
+async def test_export_all_scope_is_explicitly_available_to_operator(pool):
+    """The low-level exporter can still perform an explicit all-user export."""
+    from weft.auth import current_user_id
+    from weft.db.connection import acquire
+
+    for owner, content in (("export-owner-a", "Owner A secret"), ("export-owner-b", "Owner B secret")):
+        token = current_user_id.set(owner)
+        try:
+            async with acquire(pool):
+                await store_memory(pool, MemoryCreate(type=MemoryType.fact, content=content))
+        finally:
+            current_user_id.reset(token)
+
+    result = await export_memories(pool, format="json", user_id=None)
+    contents = {memory["content"] for memory in json.loads(result)["memories"]}
+    assert contents == {"Owner A secret", "Owner B secret"}
+
+
 async def test_export_markdown_topic_sorting(pool):
     """Markdown export renders topics in alphabetical order."""
     await store_memory(pool, MemoryCreate(
