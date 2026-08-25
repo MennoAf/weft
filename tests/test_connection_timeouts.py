@@ -33,6 +33,28 @@ def _config(dsn: str, **db_overrides) -> WeftConfig:
 
 
 class TestSupabaseTLS:
+    async def test_configured_ca_file_is_passed_as_cadata(self, tmp_path):
+        pool = object()
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ca_file = tmp_path / "supabase-ca.crt"
+        ca_file.write_text(_CA_PLACEHOLDER, encoding="utf-8")
+        with (
+            patch(
+                "weft.db.connection.ssl.create_default_context",
+                return_value=ssl_context,
+            ) as create_context,
+            patch(
+                "weft.db.connection.asyncpg.create_pool",
+                new=AsyncMock(return_value=pool),
+            ),
+        ):
+            result = await create_pool(
+                _config(_SUPABASE_DSN, ca_cert_file=ca_file)
+            )
+
+        assert result is pool
+        create_context.assert_called_once_with(cadata=_CA_PLACEHOLDER)
+
     async def test_configured_ca_is_passed_as_cadata(self):
         pool = object()
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
