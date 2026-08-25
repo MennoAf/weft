@@ -7,7 +7,6 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable
 
 import asyncpg
@@ -53,12 +52,8 @@ from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
 
-FALLBACK_PATH = Path.home() / ".weft" / "fallback.md"
-
 # Pool health check interval in seconds
 _KEEPALIVE_INTERVAL = 300  # 5 minutes
-# Fallback snapshot refresh interval in seconds
-_FALLBACK_REFRESH_INTERVAL = 1800  # 30 minutes
 # Startup retry config
 _STARTUP_MAX_RETRIES = 5
 _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
@@ -230,11 +225,29 @@ class AppContext:
     episode_embedding: EmbeddingProvider | None = None
     _keepalive_task: asyncio.Task | None = field(default=None, repr=False)
     _tool_usage_heartbeat_task: asyncio.Task | None = field(default=None, repr=False)
-    _fallback_task: asyncio.Task | None = field(default=None, repr=False)
     _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
     _canary_audit_state: CanaryAuditRuntimeState = field(
         default_factory=CanaryAuditRuntimeState, repr=False
     )
+    _background_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
+
+    def spawn_background_task(self, awaitable, *, name: str) -> asyncio.Task:
+        """Create a request-triggered task owned by this application context.
+
+        Fire-and-forget work must not outlive the pool that created it. The
+        lifespan cancels and observes this registry before closing resources.
+        """
+        task = asyncio.create_task(awaitable, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_task_done)
+        return task
+
+    def _background_task_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        if (error := task.exception()) is not None:
+            logger.warning("application background task failed: %s", error)
 
 
 async def _connect_with_retry(
@@ -326,26 +339,6 @@ async def _redis_keepalive(ctx: AppContext) -> None:
                 await old_redis.aclose()
             except Exception as e:
                 logger.debug("Old Redis close failed: %s", e, exc_info=True)
-
-
-async def _refresh_fallback(ctx: AppContext) -> None:
-    """Periodically re-export the fallback snapshot."""
-    while True:
-        await asyncio.sleep(_FALLBACK_REFRESH_INTERVAL)
-        await _write_fallback_snapshot(ctx.pool)
-
-
-async def _write_fallback_snapshot(pool: asyncpg.Pool) -> None:
-    """Export active memories to the fallback markdown file."""
-    try:
-        from weft.exporter import export_memories
-
-        content = await export_memories(pool, format="md")
-        FALLBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
-        FALLBACK_PATH.write_text(content, encoding="utf-8")
-        logger.info("Fallback snapshot written to %s", FALLBACK_PATH)
-    except Exception as e:
-        logger.warning("Failed to write fallback snapshot: %s", e)
 
 
 def _validate_outbound_connector_env() -> None:
@@ -449,8 +442,10 @@ async def lifespan(server: FastMCP):
         default_user_id=os.environ.get("WEFT_DEFAULT_USER_ID") or None,
     )
 
-    # Export fallback snapshot
-    await _write_fallback_snapshot(pool)
+    # Content fallback is intentionally disabled for the multi-user MCP server.
+    # A process-wide snapshot cannot be safely scoped to the authenticated caller.
+    # The standalone ``weft export`` command remains available for explicit,
+    # operator-controlled local backups.
 
     # Redis (optional — use NullCache if not configured)
     r: aioredis.Redis | None = None
@@ -555,7 +550,6 @@ async def lifespan(server: FastMCP):
         _tool_usage_heartbeat_loop(ctx)
     )
     _redis_task = asyncio.create_task(_redis_keepalive(ctx)) if r else None
-    ctx._fallback_task = asyncio.create_task(_refresh_fallback(ctx))
     ctx._scheduler_task = asyncio.create_task(
         scheduler_loop(
             pool,
@@ -637,7 +631,6 @@ async def lifespan(server: FastMCP):
                 ctx._keepalive_task,
                 ctx._tool_usage_heartbeat_task,
                 _redis_task,
-                ctx._fallback_task,
                 ctx._scheduler_task,
                 ctx._slack_sync_task,
                 ctx._daily_brief_task,
@@ -652,7 +645,8 @@ async def lifespan(server: FastMCP):
             )
             if task is not None
         )
-        await _cancel_background_tasks(tasks)
+        request_tasks = tuple(ctx._background_tasks)
+        await _cancel_background_tasks(tasks + request_tasks)
 
         # Keepalive may replace the original pool. AppContext is the live owner;
         # drain telemetry and close that current pool rather than a stale local.
@@ -743,8 +737,13 @@ async def healthz(request: Request) -> JSONResponse:
             await conn.fetchval("SELECT 1")
         return JSONResponse({"status": "ok"})
     except Exception as exc:
+        # Keep operational details in logs; /healthz is intentionally
+        # unauthenticated and must not disclose database topology or errors.
         logger.warning("Health check failed: %s", exc)
-        return JSONResponse({"status": "unhealthy", "error": str(exc)}, status_code=503)
+        return JSONResponse(
+            {"status": "unhealthy", "error": type(exc).__name__},
+            status_code=503,
+        )
 
 
 @mcp.custom_route("/slack/commands", methods=["POST"])

@@ -7,6 +7,7 @@ same DB the rest of the test suite uses.
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -40,6 +41,38 @@ def _extract_hash(output: str) -> str:
     match = re.search(r"^Hash:\s+(\S+)$", output, flags=re.MULTILINE)
     assert match, f"no Hash: line in output:\n{output}"
     return match.group(1)
+
+
+def test_export_defaults_to_caller_scope(runner, monkeypatch):
+    """The packaged CLI must not perform a process-wide export by default."""
+    captured = {}
+
+    async def fake_export(pool, **kwargs):
+        captured.update(kwargs)
+        return json.dumps({"memories": [], "count": 0})
+
+    monkeypatch.setenv("WEFT_USER_ID", "cli-owner")
+    monkeypatch.setattr("weft.exporter.export_memories", fake_export)
+
+    result = runner.invoke(cli, ["export", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["user_id"] == "cli-owner"
+
+
+def test_export_all_requires_explicit_flag(runner, monkeypatch):
+    """The all-user scope is only selected by the explicit --all flag."""
+    captured = {}
+
+    async def fake_export(pool, **kwargs):
+        captured.update(kwargs)
+        return json.dumps({"memories": [], "count": 0})
+
+    monkeypatch.setattr("weft.exporter.export_memories", fake_export)
+    result = runner.invoke(cli, ["export", "--format", "json", "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["user_id"] is None
 
 
 def test_issue_supervisor_token_prints_plaintext_once(runner):

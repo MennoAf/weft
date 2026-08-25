@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
-from weft.mcp.server import (
-    _connect_with_retry,
-    _write_fallback_snapshot,
-)
+from weft.mcp.server import _connect_with_retry
 
 
 # --- Startup retry ---
@@ -44,36 +41,8 @@ class TestConnectWithRetry:
         assert fn.call_count == 1
 
 
-# --- Fallback snapshot ---
-
-
-class TestWriteFallbackSnapshot:
-    """Tests for _write_fallback_snapshot."""
-
-    async def test_writes_file(self, pool, tmp_path):
-        from weft.models import MemoryCreate, MemorySource, MemoryType
-        from weft.store import store_memory
-
-        await store_memory(pool, MemoryCreate(
-            type=MemoryType.fact,
-            content="Test memory for fallback",
-            topic=["test"],
-            source=MemorySource.conversation,
-            confidence=0.9,
-        ))
-
-        with patch("weft.mcp.server.FALLBACK_PATH", tmp_path / "fallback.md"):
-            await _write_fallback_snapshot(pool)
-
-        content = (tmp_path / "fallback.md").read_text()
-        assert "Test memory for fallback" in content
-
-    async def test_handles_export_error(self):
-        """No exception propagated when export fails."""
-        bad_pool = MagicMock()
-        with patch("weft.mcp.server.FALLBACK_PATH", MagicMock()):
-            # Should not raise even though pool is fake
-            await _write_fallback_snapshot(bad_pool)
+# Content fallback is intentionally disabled in the multi-user MCP server.
+# The standalone ``weft export`` command remains covered by tests/test_fallback.py.
 
 
 # --- Migration advisory lock ---
