@@ -12,6 +12,24 @@ import pytest
 
 
 @pytest.mark.asyncio
+async def test_weft_tokens_rls_policy_targets_hosted_app_role(pool):
+    """Token rows are not exposed through a broad public RLS policy."""
+    policy = await pool.fetchrow(
+        """
+        SELECT polname, polroles, pg_get_expr(polqual, polrelid) AS using_expr
+        FROM pg_policy
+        WHERE polrelid = 'weft_tokens'::regclass
+          AND polname = 'weft_tokens_service'
+        """
+    )
+    assert policy is not None, "token table must retain an explicit RLS policy"
+    assert policy["polroles"] == [0], "policy must apply to PUBLIC and fail closed by expression"
+    using_expr = policy["using_expr"].lower()
+    assert "current_user" in using_expr
+    assert "weft_app" in using_expr
+
+
+@pytest.mark.asyncio
 async def test_weft_tokens_table_exists(pool):
     exists = await pool.fetchval(
         """
