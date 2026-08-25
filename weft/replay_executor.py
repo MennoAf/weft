@@ -52,6 +52,7 @@ from weft.auth import current_user_id
 from weft.counters import (
     COUNTER_REPLAY_EXECUTOR_FAILED,
     COUNTER_REPLAY_STALE_REAPED,
+    COUNTER_REPLAY_TERMINAL_STATUS_FAILED,
     increment_counter,
 )
 from weft.db.connection import acquire, get_db
@@ -160,6 +161,41 @@ async def _set_status(
             )
 
 
+async def _set_terminal_status_with_retry(
+    pool: asyncpg.Pool,
+    replay_id: str,
+    user_id: str,
+    status: str,
+) -> bool:
+    """Persist a terminal status, retrying once before leaving the row pending.
+
+    A pending row is safer than pretending a terminal write succeeded, because
+    the stale-reaper will eventually drain it. The retry and durable counter make
+    this rare lifecycle seam observable instead of silently pinning work.
+    """
+    for attempt in range(2):
+        try:
+            await _set_status(pool, replay_id, user_id, status)
+            return True
+        except Exception:
+            if attempt == 0:
+                logger.warning(
+                    "replay_executor.terminal_status_retry: id=%s status=%s",
+                    replay_id,
+                    status,
+                    exc_info=True,
+                )
+                continue
+            logger.exception(
+                "replay_executor.terminal_status_failed: id=%s status=%s (row stays pending)",
+                replay_id,
+                status,
+            )
+            await increment_counter(pool, COUNTER_REPLAY_TERMINAL_STATUS_FAILED)
+            return False
+    return False
+
+
 async def reap_stale_pending_replays(
     pool: asyncpg.Pool,
     *,
@@ -211,17 +247,11 @@ async def reap_stale_pending_replays(
     for row in rows:
         replay_id = row["id"]
         user_id = row["user_id"]
-        try:
-            await _set_status(pool, replay_id, user_id, REPLAY_QUEUE_STATUS_FAILED)
+        if await _set_terminal_status_with_retry(
+            pool, replay_id, user_id, REPLAY_QUEUE_STATUS_FAILED
+        ):
             await increment_counter(pool, COUNTER_REPLAY_STALE_REAPED)
             reaped += 1
-        except Exception:  # noqa: BLE001 — isolate per-row; never abort the sweep
-            logger.exception(
-                "replay_executor.reap_failed: id=%s user_id=%s "
-                "(left pending, retried next pass)",
-                replay_id,
-                user_id,
-            )
     if reaped:
         logger.info("replay_executor.reaped_stale_pending: reaped=%d", reaped)
     return reaped
@@ -309,8 +339,10 @@ async def run_replay_executor(
             result.claims_written += written["written"]
             result.claims_superseded += written["superseded"]
 
-            await _set_status(pool, replay_id, user_id, REPLAY_QUEUE_STATUS_DONE)
-            result.rows_done += 1
+            if await _set_terminal_status_with_retry(
+                pool, replay_id, user_id, REPLAY_QUEUE_STATUS_DONE
+            ):
+                result.rows_done += 1
         except Exception as exc:  # noqa: BLE001 — isolate per-row; never abort the pass
             logger.error(
                 "replay_executor.row_failed: id=%s user_id=%s error=%s",
@@ -320,14 +352,10 @@ async def run_replay_executor(
             )
             await increment_counter(pool, COUNTER_REPLAY_EXECUTOR_FAILED)
             # Drive to a terminal status so the row cannot pin its turns forever.
-            try:
-                await _set_status(pool, replay_id, user_id, REPLAY_QUEUE_STATUS_FAILED)
+            if await _set_terminal_status_with_retry(
+                pool, replay_id, user_id, REPLAY_QUEUE_STATUS_FAILED
+            ):
                 result.rows_failed += 1
-            except Exception:
-                logger.exception(
-                    "replay_executor.mark_failed_error: id=%s (row stays pending)",
-                    replay_id,
-                )
 
     if result.rows_processed:
         logger.info(
@@ -521,14 +549,10 @@ async def run_replay_executor_batch(
         request = build_aggregate_request(turns)
         if request is None:
             result.rows_processed += 1
-            try:
-                await _set_status(pool, replay_id, user_id, REPLAY_QUEUE_STATUS_DONE)
+            if await _set_terminal_status_with_retry(
+                pool, replay_id, user_id, REPLAY_QUEUE_STATUS_DONE
+            ):
                 result.rows_done += 1
-            except Exception:
-                logger.exception(
-                    "replay_executor.mark_done_error: id=%s (no-aggregate row stays pending)",
-                    replay_id,
-                )
             continue
         request_by_id[replay_id] = request
         batch_requests.append(
@@ -550,8 +574,10 @@ async def run_replay_executor_batch(
         )
         result.claims_written += written["written"]
         result.claims_superseded += written["superseded"]
-        await _set_status(pool, replay_id, user_id, REPLAY_QUEUE_STATUS_DONE)
-        result.rows_done += 1
+        if await _set_terminal_status_with_retry(
+            pool, replay_id, user_id, REPLAY_QUEUE_STATUS_DONE
+        ):
+            result.rows_done += 1
 
     async def _fail(replay_id, user_id, exc):
         result.rows_processed += 1
@@ -562,14 +588,10 @@ async def run_replay_executor_batch(
             exc,
         )
         await increment_counter(pool, COUNTER_REPLAY_EXECUTOR_FAILED)
-        try:
-            await _set_status(pool, replay_id, user_id, REPLAY_QUEUE_STATUS_FAILED)
+        if await _set_terminal_status_with_retry(
+            pool, replay_id, user_id, REPLAY_QUEUE_STATUS_FAILED
+        ):
             result.rows_failed += 1
-        except Exception:
-            logger.exception(
-                "replay_executor.batch_mark_failed_error: id=%s (row stays pending)",
-                replay_id,
-            )
 
     # Phase 3 — submit + poll the cheap Haiku batch. None => left pending.
     results_iter = await _submit_and_poll_batch(
