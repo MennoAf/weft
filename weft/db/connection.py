@@ -149,9 +149,17 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
     if "supabase.co" in dsn or "supabase.com" in dsn or "sslmode=require" in dsn:
         if config.database.ca_cert:
             try:
-                kwargs["ssl"] = ssl.create_default_context(
+                ssl_context = ssl.create_default_context(
                     cadata=config.database.ca_cert,
                 )
+                # Python 3.13 enables VERIFY_X509_STRICT by default. The
+                # documented Supabase prod-ca-2021 root predates RFC 5280's
+                # required CA key-usage extension, so strict mode rejects the
+                # otherwise valid chain. Keep CERT_REQUIRED and hostname
+                # verification; relax only this compatibility check.
+                if hasattr(ssl, "VERIFY_X509_STRICT"):
+                    ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+                kwargs["ssl"] = ssl_context
             except ssl.SSLError as exc:
                 raise ValueError(
                     "WEFT_DATABASE_CA_CERT is not a valid PEM certificate bundle"
