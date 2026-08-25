@@ -142,11 +142,22 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
     # Supabase pooler requires statement_cache_size=0 (no prepared statements)
     elif ":6543/" in dsn or "pooler.supabase.com" in dsn:
         kwargs["statement_cache_size"] = 0
-    # Enable certificate- and hostname-verified SSL for Supabase and other
     # cloud Postgres providers. Do not weaken TLS verification for pooler
     # compatibility: a public deployment must authenticate the database peer.
+    # A deployment may provide the provider's CA bundle when it is not present
+    # in the runtime image trust store.
     if "supabase.co" in dsn or "supabase.com" in dsn or "sslmode=require" in dsn:
-        kwargs["ssl"] = ssl.create_default_context()
+        if config.database.ca_cert:
+            try:
+                kwargs["ssl"] = ssl.create_default_context(
+                    cadata=config.database.ca_cert,
+                )
+            except ssl.SSLError as exc:
+                raise ValueError(
+                    "WEFT_DATABASE_CA_CERT is not a valid PEM certificate bundle"
+                ) from exc
+        else:
+            kwargs["ssl"] = ssl.create_default_context()
 
     try:
         pool = await asyncpg.create_pool(dsn, **kwargs)
