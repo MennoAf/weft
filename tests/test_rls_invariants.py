@@ -63,6 +63,7 @@ SCOPED_CRUD_TABLES: tuple[str, ...] = (
     "alert_state",
     "belief_claims",
     "weft_recall_queries",
+    "weft_recovery_attempts",
     "replay_queue",
     # Topic-digest recall (v56/v57): both carry full GUC-scoped CRUD policies
     # plus the system-sentinel SELECT, same shape as belief_claims.

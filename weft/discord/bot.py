@@ -149,6 +149,7 @@ class Bot:
         self._channel: discord.TextChannel | None = None
         self._ready = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._ingest_tasks: set[asyncio.Task] = set()
 
         # Channel-mapping-aware ingest adapter.  The custom channel_map is
         # injected here so the bot's message handler routes via the mapping
@@ -271,8 +272,23 @@ class Bot:
                 logger.exception("discord_bot.ingest_error: msg_id=%s", message.id)
 
         # Detach from the gateway event loop to avoid backing up the serial
-        # event queue on slow ingest calls.
-        asyncio.create_task(_ingest())
+        # event queue on slow ingest calls, but retain ownership so close()
+        # can cancel and observe the work before shared resources disappear.
+        task = asyncio.create_task(_ingest(), name=f"weft-discord-ingest-{message.id}")
+        # Some scheduler tests use a lightweight Bot double without running
+        # __init__; preserve that shape while keeping real Bot instances' task
+        # ownership and close-time draining intact.
+        ingest_tasks = getattr(self, "_ingest_tasks", None)
+        if ingest_tasks is not None:
+            ingest_tasks.add(task)
+            task.add_done_callback(self._ingest_task_done)
+
+    def _ingest_task_done(self, task: asyncio.Task) -> None:
+        self._ingest_tasks.discard(task)
+        if task.cancelled():
+            return
+        if (error := task.exception()) is not None:
+            logger.warning("discord_bot.ingest_task_failed: %s", error)
 
     async def start(self) -> None:
         """Schedule the gateway handshake in the background. Returns immediately."""
@@ -284,8 +300,14 @@ class Bot:
     async def close(self) -> None:
         await self._client.close()
         if self._task is not None:
-            with contextlib.suppress(Exception):
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._task
+        ingest_tasks = tuple(self._ingest_tasks)
+        for task in ingest_tasks:
+            task.cancel()
+        if ingest_tasks:
+            await asyncio.gather(*ingest_tasks, return_exceptions=True)
 
     async def post(self, message: str) -> list[int]:
         """Post chunked text to the configured channel. Returns created message IDs.
