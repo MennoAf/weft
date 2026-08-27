@@ -232,7 +232,7 @@ in production. That question can be closed.
   `loom_inbox()` / `loom_status()` were rejected and never retried, so Loom is **unverified**, not
   known-broken. The former private connection-recovery runbook documented a Loom-specific gotcha
   (global `settings.json` declares `loom` with **no auth header** while a project `.mcp.json`
-  declares it *with* one) and points at `~/.claude/loom-binding.md`. The operational note is
+  declares it *with* one) and points at `<private-loom-binding-note>`. The operational note is
   intentionally retained outside the public candidate; do not copy its personal paths or topology.
 - **Operational connection recovery runbook is private.** Its production-verified scenarios and
   identity/topology details remain maintainer material outside the public candidate. A sanitized,

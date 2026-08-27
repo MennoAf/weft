@@ -72,7 +72,7 @@ The work interleaves with two in-flight Loom programs in the `weft-public` proje
 
 ## Ground Truth
 
-CONFIRMED (source greps this session, repo root `/Users/jasonbauman/Documents/code_projects/Personal/Weft`):
+CONFIRMED (source greps from the repository root; local absolute paths are intentionally omitted from public documentation):
 - `resolve_entities` merges on a **single** 0.6 cosine threshold. Source: `weft/ingest_pipeline.py:307` (def), `:359` (`threshold=0.6`).
 - `gather_topic_memories` does an unbounded `= ANY(topic)` gather, `ORDER BY created_at ASC`, and returns a `truncated` flag. Source: `weft/topic_gather.py:43` (def), `:134` (ORDER BY), `:198-199` (sets `truncated`), `:213` (returns it).
 - `_ENTITY_MEMORIES_LIMIT = 100`. Source: `weft/topic_gather.py:34`.

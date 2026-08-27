@@ -2,7 +2,7 @@
 
 **Baseline commit:** `d7a1f3575868172add934402e4889c8bfb129eec`
 **Validation started:** 2026-07-18
-**External provenance:** `/Users/jasonbauman/Documents/code_projects/Personal/weft_review/` (evidence only; not an executable specification)
+**External provenance:** `<private-review-workspace>` (evidence only; not an executable specification; omitted from the public release)
 
 ## Governing continuity contract
 
