@@ -110,5 +110,5 @@ This phase adds tests only to the classifier path that previously fabricated dur
 ## Documentation reconciliation
 
 - `docs/findings-2026-07-16-prime-hang.md` is preserved as the original incident report; its “not yet fixed” status is historical and must be annotated with the current timeout fix and pending transport verification.
-- `docs/connection-recovery.md` remains the operational runbook and should gain a scenario for one hanging tool while other calls work, plus the user-scope configuration shadowing evidence recorded by the tribunal handoff.
+- The former `docs/connection-recovery.md` runbook was maintainer-only and is excluded from the public candidate. A sanitized symptom-first troubleshooting guide should be authored for the release, including the one-hanging-tool scenario and user-scope configuration guidance without personal topology or identifiers.
 - External tribunal prose stays in the external workspace. Only reproducible claims and implementation-relevant provenance are summarized here.

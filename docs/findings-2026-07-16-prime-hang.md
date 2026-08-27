@@ -24,7 +24,7 @@ This is not corpus size, not the Fly deployment, not the recent commits. The ser
 
 | Observation | What it rules out |
 |---|---|
-| `weft_status(topic="weft")` returned **349k chars / 396 memories**, `complete: true`, promptly | Server down, wedged DB, bad token, client wiring. Scenarios A/B/C of `connection-recovery.md` are all **empirically excluded** — a tool call succeeded. |
+| `weft_status(topic="weft")` returned **349k chars / 396 memories**, `complete: true`, promptly | Server down, wedged DB, bad token, client wiring. The former operational connection-recovery runbook covered these scenarios; it is intentionally excluded from the public candidate. |
 | `weft_prime(disclosure="progressive")` hung identically to `"full"` | Corpus size, tier-2 section assembly, response payload size. Both modes share the broken path. |
 | **`weft_prime(project_id="weft")` returned instantly** — full primer, 1574 tokens | Everything else. This is the confirmation: an explicit `project_id` short-circuits at `tools.py:196` and never reaches `list_roots`. |
 
@@ -123,8 +123,9 @@ Worth doing alongside it:
    first half of this investigation looking at filesystem walks and DB queries. Say it's a reverse
    RPC to the client that may not answer.
 2. **Decide the fallback.** Returning `None` means memories get written with `project_id=None`.
-   Confirm that's the intended degradation and not a silent mis-homing risk — `connection-recovery.md`
-   already documents how bad silent re-homing gets (§"which identity are you reissuing under").
+   Confirm that's the intended degradation and not a silent mis-homing risk. The former
+   operational connection-recovery runbook documented how bad silent re-homing gets;
+   that runbook is intentionally retained outside the public candidate.
 3. **Consider caching the resolved root per session** so 31 tools don't each pay a round-trip.
 4. **Consider an env override** (`WEFT_PROJECT_ID`) so a misbehaving client can't wedge the memory
    loop at all.
@@ -229,15 +230,15 @@ in production. That question can be closed.
   **probably yes**. Worth checking whether other fire-and-forget writers share it.
 - **Loom binding.** Not investigated — you said you'd sit with it. One datapoint: this session's
   `loom_inbox()` / `loom_status()` were rejected and never retried, so Loom is **unverified**, not
-  known-broken. `connection-recovery.md` §Scenario C already documents a Loom-specific gotcha
+  known-broken. The former private connection-recovery runbook documented a Loom-specific gotcha
   (global `settings.json` declares `loom` with **no auth header** while a project `.mcp.json`
-  declares it *with* one) and points at `~/.claude/loom-binding.md`. **Read that before debugging
-  from scratch** — the note explicitly warns against fighting the binding.
-- **`docs/connection-recovery.md` is untracked.** It's good — verified against prod, and it saved
-  time here by ruling out three scenarios fast. It should be committed before it gets lost.
-  Consider adding a fifth scenario: *"a tool hangs while other tools work"* → suspect an unbounded
-  reverse RPC, and pass `project_id` explicitly to confirm. The existing triage assumes tools fail
-  outright and doesn't cover this.
+  declares it *with* one) and points at `~/.claude/loom-binding.md`. The operational note is
+  intentionally retained outside the public candidate; do not copy its personal paths or topology.
+- **Operational connection recovery runbook is private.** Its production-verified scenarios and
+  identity/topology details remain maintainer material outside the public candidate. A sanitized,
+  symptom-first troubleshooting guide is still needed for the public release. Preserve the proposed
+  fifth scenario: *"a tool hangs while other tools work"* → suspect an unbounded reverse RPC, and
+  pass `project_id` explicitly to confirm.
 
 ---
 

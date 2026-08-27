@@ -1,12 +1,12 @@
 # Staging Fly.io app — mirror of fly.toml with OAuth 2.1 enabled.
 #
-# Deploy with: `fly deploy -c fly.staging.toml`
+# Sanitized staging reference configuration. Replace the app name and
+# secrets in a private deployment environment; do not commit production
+# topology here.
 #
-# Staging is the first place WEFT_OAUTH_ENABLED runs with real clients.
-# Cutover to prod waits on anthropics/claude-ai-mcp#134 landing and a
-# green smoke test on this app. See DEPLOY.md §"Route 1 staging rollout"
-# for the full runbook.
-app = "weft-mcp-staging"
+# Deploy with: `fly deploy -c fly.staging.example.toml`
+# Staging is the place to validate WEFT_OAUTH_ENABLED with real clients.
+app = "weft-mcp-staging-example"
 primary_region = "iad"
 
 [deploy]
@@ -16,6 +16,7 @@ primary_region = "iad"
 
 [env]
   WEFT_ENV = "production"
+  WEFT_MIGRATION_MODE = "verify"
   WEFT_TRANSPORT = "streamable-http"
   WEFT_REDIS_URL = ""
   WEFT_LOG_LEVEL = "INFO"
