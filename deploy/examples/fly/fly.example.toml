@@ -1,0 +1,37 @@
+# Sanitized reference configuration. Replace the app name and secrets in a
+# private deployment environment; do not commit production topology here.
+app = "weft-mcp-example"
+primary_region = "iad"
+
+[deploy]
+  strategy = "bluegreen"
+
+[build]
+
+[env]
+  WEFT_ENV = "production"
+  WEFT_MIGRATION_MODE = "verify"
+  WEFT_TRANSPORT = "streamable-http"
+  WEFT_REDIS_URL = ""
+  WEFT_LOG_LEVEL = "INFO"
+  WEFT_OUTBOUND_CONNECTOR = "discord"
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "15s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

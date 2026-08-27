@@ -50,9 +50,15 @@ benchmarks/enumeration_eval/minted_cases.jsonl
 
 # LongMemEval local dataset and generated benchmark artifacts.
 # Keep benchmark source, tests, README files, and small manifests eligible.
-benchmarks/longmemeval/data/longmemeval_m_cleaned.json
+benchmarks/longmemeval/data/*_cleaned.json
 benchmarks/longmemeval/runs/
 benchmarks/longmemeval/results/
+benchmarks/retrieval_recovery_pilot/runs/
+
+# Local worktrees must never become release contents.
+**/.worktrees/
+/tls-release/
+
 benchmarks/longmemeval/snapshots/*/*.csv.gz
 benchmarks/longmemeval/snapshots/*/.complete
 !benchmarks/longmemeval/snapshots/*/manifest.json
