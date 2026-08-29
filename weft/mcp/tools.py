@@ -7,14 +7,16 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
 import asyncpg
 from fastmcp import Context
 
 from capability_registry.lookup import format_lookup_results, lookup_capabilities
-from weft.auth import resolve_canary_user_id, resolve_caller_user_id
+from weft.auth import current_user_id, resolve_canary_user_id, resolve_caller_user_id
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
 from weft.fsck import list_orphan_memories
@@ -22,6 +24,9 @@ from weft.mcp.server import AppContext, mcp
 from weft.tool_usage import get_tool_usage_summary
 from weft.episode_turns import recall_turns, summarize_occurrences
 from weft.turn_recall import temporal_query_variants
+
+
+_STRUCTURED_RECALL_TIMEOUT_SECONDS = 5.0
 
 
 async def _owner_scoped_canary_health(pool, user_id: str):
@@ -49,6 +54,7 @@ from weft.entities import (
     search_entities,
     store_entity,
 )
+from weft.compositional_recall import CompositionalBudget
 from weft.episodes import (
     add_memory_to_episode,
     close_episode,
@@ -120,6 +126,216 @@ from weft.store import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _recovery_telemetry_projection(stage, outcome, scope, parent_query_id=None):
+    """Project one recovery stage to the bounded, redacted v72 row shape."""
+    def _json_bytes(value):
+        return json.dumps(value, separators=(",", ":"), default=str).encode()
+
+    coverage = dict(stage.coverage)
+    if len(_json_bytes(coverage)) > 4096:
+        coverage = {"truncated": True}
+    sources = [str(source)[:256] for source in scope.source_allowlist]
+    while sources and len(_json_bytes(sources)) > 2048:
+        sources.pop()
+    trigger = (outcome.trigger or "recovery")[:96] or "recovery"
+    return {
+        "attempt_id": f"ra-{uuid.uuid4().hex}"[:80],
+        "parent_query_id": parent_query_id,
+        "recovery_version": outcome.version[:64],
+        "stage": stage.stage,
+        "trigger": trigger,
+        "answerability": stage.coverage.get("answerability", outcome.answerability),
+        "query_hash": stage.query_hash,
+        "query_label": stage.query_label[:160],
+        "result_ids": list(stage.result_ids[:24]),
+        "coverage": coverage,
+        "requested_project_id": (scope.requested_project_id or "")[:256] or None,
+        "resolved_project_id": (scope.resolved_project_id or "")[:256] or None,
+        "project_policy": scope.project_policy,
+        "retrieval_mode": scope.retrieval_mode,
+        "source_allowlist": sources,
+        "provider_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "latency_ms": min(10_000, max(0, int(stage.latency_ms))),
+        "error_category": (stage.error_category or outcome.error_category or None)[:96] if (stage.error_category or outcome.error_category) else None,
+    }
+
+
+async def _write_recovery_telemetry(pool, *, user_id, stage, outcome, scope, parent_query_id=None):
+    """Best-effort v72 insert; never expose telemetry failures to recall callers."""
+    payload = _recovery_telemetry_projection(stage, outcome, scope, parent_query_id)
+    token = current_user_id.set(user_id)
+    try:
+        async with acquire(pool) as conn:
+            await conn.execute(
+                """
+                INSERT INTO weft_recovery_attempts
+                    (attempt_id, parent_query_id, recovery_version, stage, trigger,
+                     answerability, query_hash, query_label, result_ids, coverage,
+                     requested_project_id, resolved_project_id, project_policy,
+                     retrieval_mode, source_allowlist, provider_calls, input_tokens,
+                     output_tokens, latency_ms, error_category)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb,
+                        $11, $12, $13, $14, $15::jsonb, 0, 0, 0, $16, $17)
+                """,
+                payload["attempt_id"], payload["parent_query_id"],
+                payload["recovery_version"], payload["stage"], payload["trigger"],
+                payload["answerability"], payload["query_hash"], payload["query_label"],
+                json.dumps(payload["result_ids"]), json.dumps(payload["coverage"]),
+                payload["requested_project_id"], payload["resolved_project_id"],
+                payload["project_policy"], payload["retrieval_mode"],
+                json.dumps(payload["source_allowlist"]), payload["latency_ms"],
+                payload["error_category"],
+            )
+    except Exception as exc:  # noqa: BLE001 - telemetry is strictly best effort
+        logger.warning("recovery telemetry insert failed: %s", exc)
+    finally:
+        current_user_id.reset(token)
+    return payload
+
+
+async def _recall_query_was_inserted(pool, user_id, query_id):
+    """Check parent existence under the authenticated RLS owner."""
+    token = current_user_id.set(user_id)
+    try:
+        async with acquire(pool) as conn:
+            return await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM weft_recall_queries WHERE query_id = $1)",
+                query_id,
+            )
+    except Exception as exc:  # noqa: BLE001 - parent linkage is best effort
+        logger.debug("recovery parent observation failed: %s", exc, exc_info=True)
+        return False
+    finally:
+        current_user_id.reset(token)
+
+
+@mcp.tool()
+async def weft_answer(
+    ctx: Context,
+    question: str,
+    project_id: str | None = None,
+    count_unit: Literal["episode", "initiative", "benchmark_run"] | None = None,
+    as_of: datetime | None = None,
+    timezone: str = "UTC",
+    budget: CompositionalBudget | None = None,
+    retrieval_mode: Literal["face", "code", "all"] = "face",
+    limit: int = 10,
+    recovery_mode: Literal["off", "deterministic", "model"] = "off",
+) -> dict:
+    """Opt-in compositional answer service; ordinary ``weft_recall`` is unchanged.
+
+    Direct questions perform one scoped retrieval. Counts require an explicit
+    supported unit (currently ``episode``), and comparisons/chronologies use
+    one mandatory branch per named operand. Results are deterministic, cited,
+    bounded, and incomplete rather than confidently inferred when evidence is
+    missing. Secret-shaped question text is redacted in the artifact-only
+    telemetry projection.
+    """
+    from pydantic import ValidationError
+    from weft.auth import resolve_caller_user_id
+    from weft.compositional_recall import (
+        AnswerRequest, EvidenceId, EvidenceKind, adapt_recovery_to_answer,
+        adapt_recovery_to_answer_authoritative, answer_question, redact_secret_text,
+    )
+
+    if recovery_mode not in {"off", "deterministic", "model"}:
+        return _input_error_response("weft_answer", ValueError("recovery_mode must be 'off', 'deterministic', or 'model'"))
+    if recovery_mode == "model":
+        return _input_error_response("weft_answer", ValueError("model recovery is reserved for a later milestone"))
+
+    try:
+        resolved_project = await _resolve_project_id(ctx, project_id)
+        request_data = {
+            "question": redact_secret_text(question),
+            "project_id": resolved_project,
+            "user_id": resolve_caller_user_id(),
+            "count_unit": count_unit,
+            "as_of": as_of,
+            "timezone": timezone,
+            "budget": budget.model_dump(mode="json") if budget is not None else {},
+            "retrieval_mode": retrieval_mode,
+            "limit": limit,
+        }
+        request = AnswerRequest.model_validate(request_data)
+        app: AppContext = ctx.request_context.lifespan_context
+        result = await answer_question(request, app.pool, embedding_provider=app.embedding)
+        if recovery_mode == "deterministic" and result.status.value in {"incomplete", "success"}:
+            from weft.retrieval_recovery import RecoveryConfig, RecoveryController, ScopeSnapshot
+
+            scope = ScopeSnapshot.from_baseline(
+                user_id=request.user_id,
+                requested_project_id=project_id,
+                resolved_project_id=resolved_project,
+                retrieval_mode=request.retrieval_mode,
+                limit=request.limit,
+                as_of=request.as_of,
+                ambient_rls_required=True,
+            )
+
+            async def _search(probe_query, probe_scope, probe_limit):
+                kwargs = probe_scope.to_probe_kwargs()
+                async with acquire(app.pool):
+                    rows = await search_by_keyword(
+                        app.pool, probe_query, limit=probe_limit,
+                        status=MemoryStatus(kwargs["status"]) if kwargs["status"] else None,
+                        memory_type=MemoryType(kwargs["memory_type"]) if kwargs["memory_type"] else None,
+                        topic=kwargs["topic"], project_id=kwargs["project_id"],
+                        user_id=kwargs["user_id"], sources=kwargs["sources"],
+                        include_agent_provenance=kwargs["include_agent_provenance"],
+                        facet_boost_project_id=(
+                            probe_scope.resolved_project_id
+                            if probe_scope.project_policy == "facet_boost" else None
+                        ),
+                    )
+                return [row.to_dict() for row in rows]
+
+            outcome = await RecoveryController(config=RecoveryConfig(), memory_search=_search).recover(
+                request.question,
+                primary_results=(),
+                scope=scope,
+                existing_incomplete=result.status.value != "success",
+            )
+            async def _canonical_recovery_read(evidence_id):
+                async with acquire(app.pool):
+                    if evidence_id.kind is EvidenceKind.memory:
+                        from weft.store import get_memory
+                        row = await get_memory(app.pool, evidence_id.value)
+                    elif evidence_id.kind is EvidenceKind.turn:
+                        from weft.episode_turns import get_turn
+                        row = await get_turn(app.pool, evidence_id.value)
+                    elif evidence_id.kind is EvidenceKind.claim:
+                        from weft.db.connection import get_db
+                        row = await get_db(app.pool).fetchrow(
+                            "SELECT claim_id, user_id, value, status, occurred_at, superseded_by, evidence_turn_ids FROM belief_claims WHERE claim_id = $1",
+                            evidence_id.value,
+                        )
+                    else:
+                        return None
+                    if row is None:
+                        return None
+                    if isinstance(row, dict):
+                        payload = dict(row)
+                    elif hasattr(row, "keys"):
+                        payload = {key: row[key] for key in row.keys()}
+                    else:
+                        payload = row
+                    if evidence_id.kind is EvidenceKind.memory:
+                        relationships = await get_relationships(app.pool, evidence_id.value)
+                        if isinstance(payload, dict):
+                            payload["relationships"] = relationships
+                    return payload
+
+            result = await adapt_recovery_to_answer_authoritative(request, result, outcome, _canonical_recovery_read)
+        return result.model_dump(mode="json")
+    except (ValidationError, ValueError, TypeError) as exc:
+        return _input_error_response("weft_answer", exc)
+    except _DB_ERRORS as exc:
+        return _db_error_response("weft_answer", exc)
+
 
 # Exceptions that indicate the database is unreachable (not application logic errors).
 _DB_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, ConnectionRefusedError)
@@ -337,6 +553,7 @@ async def weft_remember(
             workspace_id=workspace_id,
             pinned=pinned,
             review_after=_parse_review_after(review_after),
+            project_facets=[str(facet) for facet in (_coerce_list(project_facets) or [])],
             preference_metadata=(
                 PreferenceMetadata.model_validate(preference_metadata)
                 if preference_metadata is not None else None
@@ -401,31 +618,6 @@ async def weft_remember(
                     dedup.existing_memory.id if dedup.existing_memory else "?",
                     dedup.similarity,
                 )
-
-            # (b) Initialize project_facets for project-scoped stores so future
-            #     cross-project dedup can find and facet-merge this belief.
-            #     Explicit project_facets param (normalized to lowercase) seeds
-            #     directly; omitted falls back to auto-detection from project_id.
-            if project_facets is not None:
-                normalized_facets = [f.lower() for f in _coerce_list(project_facets) or []]
-                # UNION: always include the resolved/detected current project (lowercased)
-                # so the belief is still boosted in the project it was stored under.
-                if resolved_project:
-                    rp = resolved_project.lower()
-                    if rp not in normalized_facets:
-                        normalized_facets = sorted(set(normalized_facets) | {rp})
-                from weft.db.connection import get_db as _get_db
-                await _get_db(app.pool).execute(
-                    "UPDATE memories SET project_facets = $1::text[] WHERE id = $2",
-                    normalized_facets,
-                    memory.id,
-                )
-                memory = memory.model_copy(update={"project_facets": normalized_facets})
-            elif resolved_project:
-                from weft.consolidation import init_project_facets
-                await init_project_facets(app.pool, memory.id, resolved_project)
-                memory = memory.model_copy(update={"project_facets": [resolved_project.lower()]})
-            # ────────────────────────────────────────────────────────────────
 
             # Canary enrollment: O(1) INSERT, no LLM call (PRD §V5, loom-c27ab1d2).
             # Runs inside the acquire() context so app.user_id GUC is active.
@@ -511,6 +703,8 @@ async def _weft_recall_turns(
     query: str,
     project_id: str | None,
     limit: int,
+    as_of: datetime | None = None,
+    use_stored_search_tsv: bool = False,
 ) -> dict:
     """Turn-tier dispatch for ``weft_recall(tier='turns'|'auto'→turns)``.
 
@@ -546,6 +740,7 @@ async def _weft_recall_turns(
                     top_k_episodes=10,
                     top_k_turns=limit,
                     embedder=app.embedding,
+                    use_stored_search_tsv=use_stored_search_tsv,
                 )
                 # Keep the same {anchor: [turns]} shape downstream code
                 # downstream expects so the dedup / logging blocks work
@@ -558,6 +753,8 @@ async def _weft_recall_turns(
                     project_id=resolved_project,
                     top_k_per_anchor=max(1, limit // 2),
                     embedder=app.embedding,
+                    as_of=as_of,
+                    use_stored_search_tsv=use_stored_search_tsv,
                 )
 
         # Flatten dedup'd turns for a single ``turns`` array (the most
@@ -604,7 +801,7 @@ async def _weft_recall_turns(
                     seen_log.add(t.id)
                     accessed_ids.append(t.id)
         if accessed_ids:
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_turn_access(
                     app.pool, accessed_ids, tool_name="recall",
                 ),
@@ -629,6 +826,7 @@ async def _weft_recall_both(
     memory_status: MemoryStatus,
     memory_type: MemoryType | None,
     topic: str | None,
+    use_stored_search_tsv: bool = False,
 ) -> dict:
     """Both-tier dispatch: RRF fuse belief-tier memories + turn-tier dialogue.
 
@@ -665,6 +863,7 @@ async def _weft_recall_both(
                 topic=topic,
                 sources=sources,
                 include_agent_provenance=agent_provenance_ok,
+                use_stored_search_tsv=use_stored_search_tsv,
             )
 
             # Face-mode wrapping for belief-tier payloads — same rule as
@@ -696,7 +895,7 @@ async def _weft_recall_both(
         if memory_ids:
             await bump_retrieval_telemetry(app.pool, memory_ids)
         if memory_ids:
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_memory_access(
                     app.pool, memory_ids, "recall",
                     retrieval_mode=retrieval_mode,
@@ -704,7 +903,7 @@ async def _weft_recall_both(
                 name="weft-session-log-recall-both-memory",
             )
         if turn_ids:
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_turn_access(
                     app.pool, turn_ids, tool_name="recall",
                 ),
@@ -807,6 +1006,13 @@ async def weft_recall(
     retrieval_mode: str = "face",
     user_id: str | None = None,
     tier: str = "auto",
+    opt_n_supplement: bool = False,
+    use_stored_search_tsv: bool = False,
+    opt_n_as_of: str | None = None,
+    opt_n_timezone: str = "UTC",
+    structured_recall_mode: Literal["off", "shadow", "selective"] = "off",
+    enumeration_compatibility: bool = True,
+    recovery_mode: Literal["off", "deterministic", "model"] | None = None,
 ) -> dict:
     """Retrieve memories by semantic query, keyword search, or hybrid (default).
 
@@ -839,10 +1045,208 @@ async def weft_recall(
     if user_id is None:
         user_id = resolve_caller_user_id()
 
+    parsed_opt_n_as_of: datetime | None = None
+    invalid_opt_n_as_of = False
+    if opt_n_as_of:
+        try:
+            parsed_opt_n_as_of = datetime.fromisoformat(opt_n_as_of.replace("Z", "+00:00"))
+        except ValueError:
+            invalid_opt_n_as_of = True
+
+    enum_task: asyncio.Task | None = None
+    enum_result: tuple[list[str], object] | None = None
+    enum_task_consumed = False
+    enum_target: str | None = None
+    resolved_structured_project: str | None = None
+    recall_log_task: asyncio.Task | None = None
+    recovery_parent_query_id: str | None = None
+    recovery_log_observed = False
+
+    async def _finish_recall_log_task() -> None:
+        """Settle the request-owned logger task without stranding it."""
+        if recall_log_task is None:
+            return
+        if not recall_log_task.done():
+            recall_log_task.cancel()
+        await asyncio.gather(recall_log_task, return_exceptions=True)
+
+    async def _observe_recall_log() -> str | None:
+        """Bounded parent observation for enabled recovery telemetry."""
+        nonlocal recovery_parent_query_id, recovery_log_observed
+        if recovery_log_observed:
+            return recovery_parent_query_id
+        if recall_log_task is None or recovery_config is None:
+            recovery_log_observed = True
+            return None
+        try:
+            logged_id = await asyncio.wait_for(
+                asyncio.shield(recall_log_task), timeout=recovery_config.timeout_seconds,
+            )
+            # A logger return value is only a candidate.  Link recovery rows only
+            # after the parent row is observable under the authenticated owner.
+            if logged_id == recall_query_id and await _recall_query_was_inserted(
+                app_for_log.pool, user_id, logged_id,
+            ):
+                recovery_parent_query_id = logged_id
+        except asyncio.TimeoutError:
+            logger.debug("recovery parent query log observation timed out")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("recovery parent query log observation failed", exc_info=True)
+        finally:
+            # Mark observation complete only after the task has been settled;
+            # this preserves the NULL-parent fallback on every failure path.
+            await _finish_recall_log_task()
+            recovery_log_observed = True
+        return recovery_parent_query_id
+
+    async def _consume_enum_task() -> tuple[list[str], object] | None:
+        """Consume the request-owned gather once, preserving its result."""
+        nonlocal enum_result, enum_task_consumed
+        if enum_task_consumed:
+            return enum_result
+        if enum_task is None:
+            enum_task_consumed = True
+            return None
+        try:
+            enum_result = await enum_task
+        except asyncio.CancelledError:
+            # The outer owner will finish cancellation/await cleanup.
+            raise
+        except Exception as exc:  # noqa: BLE001 - best-effort augmentation
+            logger.warning("canonical enumeration gather failed: %s", exc, exc_info=True)
+            enum_result = None
+            enum_task_consumed = True
+        else:
+            enum_task_consumed = True
+        return enum_result
+
+    async def _finish_enum_task() -> None:
+        """Cancel and await an unconsumed gather before the request exits."""
+        nonlocal enum_task_consumed, enum_result
+        if enum_task is None or enum_task_consumed:
+            return
+        if not enum_task.done():
+            enum_task.cancel()
+        try:
+            enum_result = await asyncio.shield(enum_task)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - retrieve task exceptions
+            logger.warning("canonical enumeration cleanup failed: %s", exc, exc_info=True)
+            enum_result = None
+        finally:
+            enum_task_consumed = True
+
+    sidecar_keys = []
+    if opt_n_supplement:
+        sidecar_keys.append("opt_n_supplement")
+    if structured_recall_mode != "off":
+        sidecar_keys.append("structured_recall")
+
+    def _set_sidecar_error(response: dict, error: str) -> None:
+        payload = {"version": "opt-n-v1", "error": error}
+        for key in sidecar_keys:
+            response[key] = dict(payload)
+
+    async def _with_opt_n(response: dict) -> dict:
+        """Attach one canonical sidecar projection without changing baseline fields."""
+        if not sidecar_keys:
+            await _finish_enum_task()
+            return response
+        from weft.structured_recall import build_opt_n_supplement
+        app_for_opt_n = ctx.request_context.lifespan_context
+        if invalid_opt_n_as_of:
+            await _finish_enum_task()
+            _set_sidecar_error(response, "invalid_opt_n_as_of")
+            return response
+
+        async def _build_structured_supplement() -> dict:
+            # ``wait_for`` must not implicitly own/cancel the shared request task;
+            # timeout handling below cancels and awaits it explicitly.
+            enumeration_result = await asyncio.shield(_consume_enum_task())
+            return await build_opt_n_supplement(
+                app_for_opt_n.pool,
+                query,
+                user_id=user_id,
+                project_id=resolved_structured_project,
+                topic=topic,
+                as_of=parsed_opt_n_as_of,
+                timezone_name=opt_n_timezone,
+                retrieval_mode=retrieval_mode,
+                enumeration_result=enumeration_result,
+            )
+
+        try:
+            # The timeout owns both the shared enumeration gather and the
+            # structured supplement.  A slow resolver cannot evade the sidecar
+            # budget by running before wait_for starts.
+            supplement = await asyncio.wait_for(
+                _build_structured_supplement(),
+                timeout=_STRUCTURED_RECALL_TIMEOUT_SECONDS,
+            )
+            if opt_n_supplement:
+                response["opt_n_supplement"] = supplement
+            if structured_recall_mode != "off":
+                evidence = supplement.get("evidence", {})
+                deterministic_used = (
+                    structured_recall_mode == "selective"
+                    and evidence.get("status") == "success"
+                    and evidence.get("completeness") in {"complete", "indexed_lower_bound"}
+                    and bool(evidence.get("selected_evidence"))
+                    and any(
+                        item.get("authority") == "authoritative"
+                        for item in evidence.get("selected_evidence", [])
+                    )
+                )
+                response["structured_recall"] = {
+                    **supplement,
+                    "mode": structured_recall_mode,
+                    # At this MCP seam the ordinary recall projection remains
+                    # authoritative.  A downstream Reader may consume this
+                    # selected deterministic projection, but this tool never
+                    # silently replaces baseline fields.
+                    "projection_only": True,
+                    "reader_disposition": (
+                        "deterministic_projection" if deterministic_used
+                        else "reader_or_baseline_preserved"
+                    ),
+                    "deterministic_answer": (
+                        {
+                            "operation": supplement.get("query_plan", {}).get("operation"),
+                            "evidence_status": evidence.get("status"),
+                            "completeness": evidence.get("completeness"),
+                            "authoritative_count": sum(
+                                item.get("authority") == "authoritative"
+                                for item in evidence.get("selected_evidence", [])
+                            ),
+                            "candidate_count": sum(
+                                item.get("authority") == "candidate"
+                                for item in evidence.get("selected_evidence", [])
+                            ),
+                            "selected_count": len(evidence.get("selected_evidence", [])),
+                        }
+                        if deterministic_used else None
+                    ),
+                }
+        except asyncio.TimeoutError:
+            await _finish_enum_task()
+            _set_sidecar_error(response, "sidecar_timeout")
+        except asyncio.CancelledError:
+            await _finish_enum_task()
+            raise
+        except Exception as exc:  # noqa: BLE001 - sidecar must not break baseline recall
+            await _finish_enum_task()
+            logger.warning("Structured supplement failed; preserving baseline response: %s", exc, exc_info=True)
+            _set_sidecar_error(response, exc.__class__.__name__)
+        return response
+
     # Tier dispatch happens FIRST. The turns and both paths don't reuse
     # the belief-tier helpers below — they have their own scoring,
     # response shapes, and (for multi-anchor queries) sub-recall splits.
     if tier not in ("auto", "belief", "turns", "both"):
+        await _finish_enum_task()
         return _input_error_response(
             "weft_recall",
             ValueError(
@@ -852,13 +1256,267 @@ async def weft_recall(
     if tier == "auto":
         from weft.turn_recall import route_query_to_tier
         tier = route_query_to_tier(query)
+    if structured_recall_mode not in {"off", "shadow", "selective"}:
+        await _finish_enum_task()
+        return _input_error_response(
+            "weft_recall",
+            ValueError("structured_recall_mode must be 'off', 'shadow', or 'selective'"),
+        )
+
+    # Recovery is opt-in at this seam. Resolve project-local config defensively;
+    # the explicit request value always wins. A model planner is reserved for a
+    # later milestone and must fail closed without invoking a provider.
+    recovery_config = None
+    try:
+        from weft.config import load_config
+        recovery_project_path = (
+            Path(project_id) if project_id and Path(project_id).exists() else Path.cwd()
+        )
+        loaded_config = load_config(project_dir=recovery_project_path)
+        effective_recovery_mode = (
+            loaded_config.retrieval.recovery_mode if recovery_mode is None else recovery_mode
+        )
+        planner_enabled = bool(loaded_config.retrieval.recovery_planner_enabled)
+    except Exception as exc:  # noqa: BLE001 - config must not break legacy recall
+        if recovery_mode is None:
+            await _finish_enum_task()
+            return _input_error_response("weft_recall", ValueError(f"invalid recovery config: {exc}"))
+        effective_recovery_mode = recovery_mode
+        planner_enabled = False
+    if effective_recovery_mode not in {"off", "deterministic", "model"}:
+        await _finish_enum_task()
+        return _input_error_response(
+            "weft_recall",
+            ValueError("recovery_mode must be 'off', 'deterministic', or 'model'"),
+        )
+    if effective_recovery_mode == "model":
+        await _finish_enum_task()
+        if not planner_enabled:
+            return _input_error_response(
+                "weft_recall",
+                ValueError("model recovery requires recovery_planner_enabled=true"),
+            )
+        return _input_error_response(
+            "weft_recall",
+            ValueError("model recovery is reserved for a later milestone"),
+        )
+    if effective_recovery_mode == "deterministic":
+        from weft.retrieval_recovery import RecoveryConfig
+        recovery_config = RecoveryConfig()
+
+    def _unsupported_recovery_marker(response: dict) -> dict:
+        if effective_recovery_mode == "deterministic":
+            from weft.retrieval_recovery import unsupported_recovery
+            response["recovery"] = unsupported_recovery()
+        return response
+
+    async def _attach_belief_recovery(response: dict, primary_results: list[dict]) -> dict:
+        if effective_recovery_mode != "deterministic":
+            return response
+        from weft.retrieval_recovery import RecoveryController, ScopeSnapshot
+        app_for_recovery: AppContext = ctx.request_context.lifespan_context
+        resolved_for_recovery = resolved_structured_project
+        scope = ScopeSnapshot.from_baseline(
+            user_id=user_id,
+            requested_project_id=project_id,
+            resolved_project_id=resolved_for_recovery,
+            retrieval_mode=retrieval_mode,
+            agent_id=agent_id,
+            memory_type=type,
+            status=status or "active",
+            topic=topic,
+            threshold=threshold,
+            limit=limit,
+            as_of=parsed_opt_n_as_of,
+            ambient_rls_required=True,
+        )
+        # The alternate probe is intentionally diagnostic as well as bounded:
+        # recovery must never turn the installation-user fallback into an RLS
+        # authority.  Only the authenticated middleware context is acceptable.
+        alternate_diagnostic: dict | None = None
+
+        async def _keyword_probe(probe_query: str, probe_scope, probe_limit: int):
+            kwargs = probe_scope.to_probe_kwargs()
+            async with acquire(app_for_recovery.pool):
+                results = await search_by_keyword(
+                    app_for_recovery.pool,
+                    probe_query,
+                    limit=probe_limit,
+                    status=MemoryStatus(kwargs["status"]) if kwargs["status"] else None,
+                    memory_type=MemoryType(kwargs["memory_type"]) if kwargs["memory_type"] else None,
+                    topic=kwargs["topic"],
+                    project_id=kwargs["project_id"],
+                    agent_id=kwargs["agent_id"],
+                    user_id=kwargs["user_id"],
+                    sources=kwargs["sources"],
+                    include_agent_provenance=kwargs["include_agent_provenance"],
+                    facet_boost_project_id=(
+                        probe_scope.resolved_project_id
+                        if probe_scope.project_policy == "facet_boost" else None
+                    ),
+                )
+            return [item.to_dict() for item in results]
+
+        async def _turn_alternate_probe(probe_query: str, probe_scope, probe_limit: int):
+            """Run one bounded, RLS-scoped turn-tier recovery pass."""
+            nonlocal alternate_diagnostic
+            from weft.auth import current_user_id
+
+            ambient_user_id = current_user_id.get()
+            if ambient_user_id is None:
+                alternate_diagnostic = {
+                    "kind": "unsupported",
+                    "code": "rls_context_unavailable",
+                    "answerability": "insufficient_evidence",
+                    "message": "alternate turn recovery requires an authenticated RLS user context",
+                }
+                return []
+            if probe_scope.user_id and probe_scope.user_id != ambient_user_id:
+                alternate_diagnostic = {
+                    "kind": "unsupported",
+                    "code": "rls_scope_mismatch",
+                    "answerability": "insufficient_evidence",
+                    "message": "alternate turn recovery refused a user scope different from the authenticated RLS context",
+                }
+                return []
+            if recovery_config.max_turn_anchor_probes < 1:
+                alternate_diagnostic = {
+                    "kind": "unsupported",
+                    "code": "turn_probe_budget_exhausted",
+                    "answerability": "insufficient_evidence",
+                    "message": "alternate turn recovery has no permitted anchor or variant probes",
+                }
+                return []
+
+            def _scope_time(name: str) -> datetime | None:
+                value = getattr(probe_scope, name, None)
+                if value is None:
+                    return None
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+            # Use the flat turn seam directly: this is one alternate probe,
+            # with no hierarchical descent and no model/request filters.
+            from weft.episode_turns import recall_turns
+            top_k = min(recovery_config.turn_top_k, probe_limit)
+            async with acquire(app_for_recovery.pool) as executor:
+                turns = await recall_turns(
+                    app_for_recovery.pool,
+                    probe_query,
+                    project_id=probe_scope.resolved_project_id,
+                    since=_scope_time("since"),
+                    until=_scope_time("until"),
+                    as_of=_scope_time("as_of"),
+                    top_k=top_k,
+                    candidate_sql_limit=recovery_config.turn_candidate_sql_limit,
+                    fusion_candidate_limit=recovery_config.turn_fusion_candidate_limit,
+                    result_limit=min(recovery_config.turn_result_limit, probe_limit),
+                    executor=executor,
+                )
+            return [turn.to_dict() for turn in turns][:probe_limit]
+
+        # Contradictions are explicit structural metadata, not something to
+        # infer from arbitrary candidate text.  The legacy belief results above
+        # are flat memory dictionaries, so inspect only their memory IDs and
+        # only persisted ``contradicts`` relationships.  Belief-view claims
+        # return before this sidecar and turn recovery never enters this helper.
+        explicit_conflicts: list[str] = []
+        memory_ids = [
+            str(item.get("id"))
+            for item in primary_results
+            if isinstance(item, dict) and item.get("id")
+        ]
+        if memory_ids:
+            async with acquire(app_for_recovery.pool):
+                for memory_id in memory_ids:
+                    relationships = await get_relationships(
+                        app_for_recovery.pool,
+                        memory_id,
+                        relation=RelationType.contradicts,
+                    )
+                    for relationship in relationships:
+                        other_id = (
+                            relationship.target_id
+                            if relationship.source_id == memory_id
+                            else relationship.source_id
+                        )
+                        explicit_conflicts.append(f"contradicts:{memory_id}:{other_id}")
+        explicit_conflicts = list(dict.fromkeys(explicit_conflicts))
+
+        controller = RecoveryController(
+            config=recovery_config,
+            memory_search=_keyword_probe,
+            alternate_search=_turn_alternate_probe,
+        )
+        outcome = await controller.recover(
+            query,
+            primary_results=primary_results,
+            scope=scope,
+            existing_incomplete=not bool(primary_results),
+            explicit_conflicts=explicit_conflicts,
+        )
+        response["recovery"] = outcome.to_public_dict(max_bytes=recovery_config.max_response_bytes)
+        if outcome.supported:
+            parent_query_id = await _observe_recall_log()
+            for stage in outcome.stages:
+                await _write_recovery_telemetry(
+                    app_for_recovery.pool,
+                    user_id=user_id,
+                    stage=stage,
+                    outcome=outcome,
+                    scope=scope,
+                    parent_query_id=parent_query_id,
+                )
+        if alternate_diagnostic is not None:
+            response["recovery"]["alternate_search"] = {
+                "supported": False,
+                "attempted": False,
+                "candidates": [],
+                "diagnostic": alternate_diagnostic,
+            }
+        return response
+
+    # Resolve structured authority once. Baseline retrieval retains its existing
+    # face/code/all semantics; only this explicit scope may authorize a complete
+    # deterministic sidecar result.
+    if opt_n_supplement or structured_recall_mode != "off" or tier == "belief":
+        try:
+            resolved_structured_project = await _resolve_project_id(ctx, project_id)
+        except BaseException:
+            await _finish_enum_task()
+            raise
+    if tier == "belief":
+        try:
+            from weft.enumeration_router import detect_enumeration_intent, gather_enumeration
+            is_enum, enum_noun = detect_enumeration_intent(query)
+            enum_target = topic or enum_noun
+            if is_enum and enum_target:
+                app_enum: AppContext = ctx.request_context.lifespan_context
+                enum_task = asyncio.create_task(
+                    gather_enumeration(
+                        app_enum.pool,
+                        enum_target,
+                        user_id,
+                        project_id=(
+                            resolved_structured_project
+                            if opt_n_supplement or structured_recall_mode != "off"
+                            else None
+                        ),
+                    ),
+                    name="weft-recall-enumeration-gather",
+                )
+        except Exception as exc:  # noqa: BLE001 - never break baseline on setup
+            logger.debug("enumeration router setup failed: %s", exc, exc_info=True)
+            if enum_task is not None:
+                await _finish_enum_task()
+                enum_task = None
 
     # Step 1.5 (v50) — fire-and-forget query log. Captures EVERY weft_recall
     # invocation regardless of which downstream tier path runs (belief / turns /
     # both / belief-view fallback). Logged after tier resolution so the row
     # carries the concrete tier the call actually executed against, not 'auto'.
     app_for_log: AppContext = ctx.request_context.lifespan_context
-    asyncio.create_task(
+    recall_query_id = f"rq-{uuid.uuid4().hex[:16]}"
+    recall_log_task = asyncio.create_task(
         log_recall_query(
             app_for_log.pool,
             tool_name="recall",
@@ -868,6 +1526,7 @@ async def weft_recall(
             tier=tier,
             mode=mode,
             retrieval_mode=retrieval_mode,
+            query_id=recall_query_id,
         ),
         name="weft-recall-query-log",
     )
@@ -885,6 +1544,8 @@ async def weft_recall(
             query=query,
             project_id=project_id,
             limit=limit,
+            as_of=parsed_opt_n_as_of,
+            use_stored_search_tsv=use_stored_search_tsv,
         )
         # Resilience over routing precision: the tier router is a single hard
         # regex guess, and when it guesses wrong (e.g. an entity/belief query
@@ -898,7 +1559,7 @@ async def weft_recall(
         # it. Cost: a second recall pass on the (rare) empty-turns path.
         turns = turns_response.get("turns", [])
         if turns_response.get("count", 0) > 0 and _turns_have_query_signal(query, turns):
-            return turns_response
+            return await _with_opt_n(_unsupported_recovery_marker(turns_response))
         reason = "empty_turns_result" if not turns else "irrelevant_turns_result"
         logger.debug(
             "weft_recall: turns tier %s for %r — falling back to belief",
@@ -908,7 +1569,7 @@ async def weft_recall(
         tier = "belief"
         tier_fallback = {"from": "turns", "reason": reason}
     if tier == "both":
-        return await _weft_recall_both(
+        both_response = await _weft_recall_both(
             ctx,
             query=query,
             project_id=project_id,
@@ -919,15 +1580,21 @@ async def weft_recall(
             memory_status=MemoryStatus(status) if status else MemoryStatus.active,
             memory_type=MemoryType(type) if type else None,
             topic=topic,
+            use_stored_search_tsv=use_stored_search_tsv,
         )
+        return await _with_opt_n(_unsupported_recovery_marker(both_response))
 
     # === Belief-view primary lookup (loom-719e74b0) ===
+    # Belief claims currently have only the historical ``scope`` partition,
+    # not a project column.  A project-scoped request must therefore use the
+    # project-filtered legacy path rather than risk cross-project claims.
+    # When no project is resolved, retain the existing global belief-view path.
     # When tier='belief', first check the new belief_claims table for active
     # claims that match the query.  Returns them in the standard response shape
     # if any are found, skipping the legacy memories search entirely.
     # If the primary lookup returns nothing (or errors), falls through to the
     # existing memories search below — the legacy path is NEVER broken.
-    if tier == "belief":
+    if tier == "belief" and resolved_structured_project is None:
         try:
             app: AppContext = ctx.request_context.lifespan_context
             from weft.views.belief_query import search_belief_claims
@@ -949,7 +1616,7 @@ async def weft_recall(
                 }
                 if tier_fallback:
                     claim_response["tier_fallback"] = tier_fallback
-                return claim_response
+                return await _with_opt_n(_unsupported_recovery_marker(claim_response))
         except (
             asyncpg.PostgresConnectionError,
             asyncpg.InterfaceError,
@@ -967,29 +1634,15 @@ async def weft_recall(
                 exc,
                 exc_info=True,
             )
+        except BaseException:
+            # The task is created before this fast path.  Preserve the historical
+            # programming-error propagation, but never let an unexpected error
+            # strand the request-owned enumeration gather.
+            await _finish_enum_task()
+            raise
 
-    # --- Enumeration-intent router (Phase 1, V7) ---
-    # Detect "list all / every / how many / enumerate" and fire the deterministic
-    # complete gather CONCURRENTLY with the top-k search below. The gap between
-    # what similarity surfaces (top-k) and what membership knows (the gather) is
-    # then returned as a reconciliation header instead of silently dropping
-    # sub-cutoff members. Best-effort: gather_enumeration swallows its own errors,
-    # and the reconcile step is wrapped, so this never breaks recall.
-    enum_task: asyncio.Task | None = None
-    if tier == "belief":
-        try:
-            from weft.enumeration_router import detect_enumeration_intent, gather_enumeration
-            is_enum, enum_noun = detect_enumeration_intent(query)
-            enum_target = topic or enum_noun
-            if is_enum and enum_target:
-                app_enum: AppContext = ctx.request_context.lifespan_context
-                enum_task = asyncio.create_task(
-                    gather_enumeration(app_enum.pool, enum_target, user_id),
-                    name="weft-recall-enumeration-gather",
-                )
-        except Exception as exc:  # noqa: BLE001 - never break recall on router setup
-            logger.debug("enumeration router setup failed: %s", exc, exc_info=True)
-            enum_task = None
+    # Enumeration intent/gather is initialized once above tier dispatch so the
+    # compatibility response and structured sidecar share the same execution.
 
     try:
         cid = set_correlation_id()
@@ -1176,7 +1829,7 @@ async def weft_recall(
 
         # Fire-and-forget: log session access (outside acquire — system-level op)
         if results:
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_memory_access(
                     app.pool,
                     [r.memory.id for r in results],
@@ -1185,6 +1838,12 @@ async def weft_recall(
                 ),
                 name="weft-session-log-recall",
             )
+
+        # When a sidecar is requested, it owns the shared gather timeout.  The
+        # compatibility projection below then consumes only the cached result;
+        # it must never perform an unbounded await before the sidecar budget.
+        if sidecar_keys:
+            response = await _with_opt_n(response)
 
         # --- Enumeration answer (Phase 1, V7 → V8: unambiguous) ---
         # For an enumeration ask ("how many plants", "list all my meds") the
@@ -1201,10 +1860,16 @@ async def weft_recall(
         # count next to the real answer. `results` stays the ranked top-k so
         # relevance ordering is still available (the answer, if not in the top
         # k, is in enumeration.members).
-        if enum_task is not None:
+        if enum_task is not None and enumeration_compatibility:
             try:
-                resolved_tags, gather_result = await enum_task
-                if gather_result is not None and gather_result["memories"]:
+                gathered = await _consume_enum_task()
+                if gathered is None:
+                    resolved_tags, gather_result = [], None
+                else:
+                    resolved_tags, gather_result = gathered
+                if gather_result is not None and (
+                    gather_result["memories"] or gather_result.get("scope_filtered", False)
+                ):
                     members = gather_result["memories"]
                     member_count = len(members)
                     complete = gather_result["complete"]
@@ -1212,12 +1877,24 @@ async def weft_recall(
                     extra_in_members = sum(
                         1 for m in members if m.id not in shown_ids
                     )
+                    truncated = bool(gather_result.get("truncated", False))
+                    membership_complete = bool(complete and not truncated)
                     response["enumeration"] = {
                         "target": enum_target,
                         "resolved_tags": resolved_tags,
+                        # ``count`` is the observed member count.  It is an
+                        # exact cardinality only when the gather is complete;
+                        # consumers must inspect complete/truncated before
+                        # treating it as authoritative.
                         "count": member_count,
-                        "complete": complete,
-                        "truncated": gather_result["truncated"],
+                        "count_is_exact": membership_complete,
+                        "count_basis": (
+                            "complete_membership"
+                            if membership_complete
+                            else "observed_membership_subset"
+                        ),
+                        "complete": membership_complete,
+                        "truncated": truncated,
                         "similarity_count": len(results),
                         "members": [
                             {
@@ -1234,27 +1911,59 @@ async def weft_recall(
                             f"enumeration.members; results shows the top "
                             f"{len(results)} by relevance "
                             f"({extra_in_members} more only in enumeration.members)"
+                            if membership_complete
+                            else (
+                                f"{member_count} {enum_target} observed before the "
+                                f"membership cap; the set is incomplete and "
+                                f"results shows the top {len(results)} by relevance"
+                            )
                         ),
                     }
                     # Make the most-obvious field correct — but only when the
                     # gather is COMPLETE (a truncated gather must not assert an
                     # exact count). The corpus-wide match tally is misleading as
                     # an answer to "how many X", so drop it here.
-                    if complete:
+                    if complete and not gather_result.get("truncated", False):
                         response["count"] = member_count
                         response.pop("total_matches", None)
                         response.pop("showing", None)
+                    _unsupported_recovery_marker(response)
             except Exception as exc:  # noqa: BLE001 - enumeration augmentation never breaks recall
                 logger.warning("enumeration answer assembly failed: %s", exc, exc_info=True)
 
+        if enum_task is not None or enum_target is not None:
+            _unsupported_recovery_marker(response)
+        elif effective_recovery_mode == "deterministic":
+            response = await _attach_belief_recovery(response, enriched)
+        if not sidecar_keys:
+            return await _with_opt_n(response)
         return response
     except _INPUT_ERRORS as e:
+        await _finish_enum_task()
         return _input_error_response("weft_recall", e)
     except _DB_ERRORS as e:
-        logger.warning("Database unavailable in weft_recall: %s", e)
-        from weft.fallback import search_fallback
-        results = search_fallback(query, limit=limit)
-        return {"query": query, "mode": mode, "count": len(results), "results": results, "degraded": True}
+        await _finish_enum_task()
+        response = {
+            "query": query,
+            "mode": mode,
+            "count": 0,
+            "results": [],
+            "degraded": True,
+            "incomplete_evidence": True,
+            **_db_error_response("weft_recall", e),
+        }
+        return _unsupported_recovery_marker(response)
+    finally:
+        # Enabled recovery observes the parent logger with its bounded budget;
+        # off-mode deliberately retains fire-and-forget semantics.
+        try:
+            if recall_log_task is not None and effective_recovery_mode != "off":
+                try:
+                    await _observe_recall_log()
+                except asyncio.CancelledError:
+                    raise
+        finally:
+            await _finish_enum_task()
 
 
 @mcp.tool()
@@ -1394,7 +2103,7 @@ async def weft_context(
         import asyncio
         mem_ids = [m["id"] for m in result["memories"]]
         if mem_ids:
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_memory_access(app.pool, mem_ids, "context"),
                 name="weft-session-log-context",
             )
@@ -1403,15 +2112,14 @@ async def weft_context(
     except _INPUT_ERRORS as e:
         return _input_error_response("weft_context", e)
     except _DB_ERRORS as e:
-        logger.warning("Database unavailable in weft_context: %s", e)
-        from weft.fallback import search_fallback
-        results = search_fallback(query)
         return {
-            "memories": results,
-            "count": len(results),
+            "memories": [],
+            "count": 0,
             "tokens_used": 0,
             "budget_tokens": budget_tokens,
             "degraded": True,
+            "incomplete_evidence": True,
+            **_db_error_response("weft_context", e),
         }
 
 
@@ -1675,7 +2383,7 @@ async def weft_prime(
         try:
             import asyncio
             from weft.consolidation import consolidate_if_due
-            asyncio.create_task(
+            app.spawn_background_task(
                 consolidate_if_due(app.pool),
                 name="weft-auto-consolidation",
             )
@@ -1685,7 +2393,7 @@ async def weft_prime(
         try:
             primer_mem_ids = _extract_primer_memory_ids(result)
             if primer_mem_ids:
-                asyncio.create_task(
+                app.spawn_background_task(
                     log_memory_access(app.pool, primer_mem_ids, "prime"),
                     name="weft-session-log-prime",
                 )
@@ -1694,25 +2402,17 @@ async def weft_prime(
 
         return result
     except _DB_ERRORS as e:
-        logger.warning("Database unavailable in weft_prime: %s", e)
-        from weft.fallback import read_fallback
-        content = read_fallback()
         from weft.primer import _ONBOARDING_TEXT, _SECTION_HINTS
-        from weft.tokens import estimate_tokens, truncate_to_token_budget
 
-        # Truncate fallback content to budget — raw exports can be huge.
-        handoff_section: list[dict] = []
-        if content:
-            cost = estimate_tokens(content)
-            if cost > budget_tokens:
-                content, cost = truncate_to_token_budget(content, budget_tokens)
-            handoff_section = [{"content": content, "type": "fallback"}]
-
+        # Never serve the process-wide fallback snapshot from the multi-user
+        # MCP server. It cannot be scoped to the authenticated caller and may
+        # contain another user's memories. Return an honest empty/degraded
+        # primer until the database is available again.
         return {
             "grounding": None,
             "rules": [],
             "behaviors": [],
-            "handoff": handoff_section,
+            "handoff": [],
             "recent_work": [],
             "issues": {"count": 0, "items": []},
             "decisions": [],
@@ -1722,9 +2422,11 @@ async def weft_prime(
             "budget_remaining": budget_tokens,
             "excluded": 0,
             "degraded": True,
+            "incomplete_evidence": True,
             "section_tokens": {},
             "hints": dict(_SECTION_HINTS),
             "onboarding": _ONBOARDING_TEXT,
+            **_db_error_response("weft_prime", e),
         }
 
 
@@ -1774,7 +2476,7 @@ async def weft_focus(
         import asyncio
         focused_ids = [m["id"] for m in result.focused_memories]
         if focused_ids:
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_memory_access(app.pool, focused_ids, "focus"),
                 name="weft-session-log-focus",
             )
@@ -2402,7 +3104,7 @@ async def weft_search_all(
         # search runs so a search failure still leaves a row.
         if query:
             caller_uid = resolve_caller_user_id()
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_recall_query(
                     app.pool,
                     tool_name="search_all",
@@ -2439,7 +3141,7 @@ async def weft_search_all(
         if bump_ids:
             await bump_retrieval_telemetry(app.pool, bump_ids)
         if result_ids:
-            asyncio.create_task(
+            app.spawn_background_task(
                 log_memory_access(
                     app.pool, result_ids, "search_all",
                     retrieval_mode=retrieval_mode,

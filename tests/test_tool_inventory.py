@@ -136,3 +136,60 @@ async def test_checked_in_manifest_has_no_unapproved_removals():
         baseline["tools"],
         deprecations["records"],
     )
+
+
+async def test_tool_profiles_cover_manifest_and_have_valid_inheritance():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (root / "inventory/public-tool-manifest.json").read_text(encoding="utf-8")
+    )
+    profiles = json.loads(
+        (root / "inventory/tool-profiles.json").read_text(encoding="utf-8")
+    )["profiles"]
+
+    def resolve(name: str, trail: tuple[str, ...] = ()) -> set[str]:
+        assert name in profiles, f"unknown profile {name!r}"
+        assert name not in trail, f"profile inheritance cycle: {trail + (name,)}"
+        profile = profiles[name]
+        tools = set(profile["tools"])
+        parent = profile.get("extends")
+        if parent:
+            tools |= resolve(parent, trail + (name,))
+        return tools
+
+    core = resolve("core")
+    operator = resolve("operator")
+    integrations = resolve("integrations")
+    manifest_tools = set(manifest["tools"])
+
+    assert core <= operator <= integrations
+    assert integrations == manifest_tools
+    assert "weft_count_occurrences" in operator
+    assert "weft_count_occurrences" in manifest_tools
+
+
+async def test_dependency_extras_keep_optional_integrations_out_of_base():
+    from pathlib import Path
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    base = {dependency.split("[", 1)[0].split(">", 1)[0].split("=", 1)[0].lower() for dependency in project["dependencies"]}
+
+    assert {"anthropic", "openai", "slack-sdk", "discord.py"}.isdisjoint(base)
+    assert {"anthropic", "openai", "slack", "discord", "google", "all"} <= set(
+        project["optional-dependencies"]
+    )
+    assert project["optional-dependencies"]["all"]
+
+
+async def test_default_embedding_profile_preserves_schema_width():
+    from weft.config import EmbeddingConfig
+    from weft.embeddings.fastembed_provider import DEFAULT_MODEL, DEFAULT_DIMENSIONS
+
+    config = EmbeddingConfig()
+    assert config.provider == "fastembed"
+    assert config.model == DEFAULT_MODEL
+    assert config.dimensions == DEFAULT_DIMENSIONS == 768

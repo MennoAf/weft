@@ -24,9 +24,11 @@ Spec: weft-d3a2ef78. Loom epic: loom-52ffc3a2.
 from __future__ import annotations
 
 import logging
+import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable, Literal, Mapping, Sequence
 
 import asyncpg
 
@@ -510,6 +512,58 @@ def summarize_occurrences(
 # consistent across tiers.
 _RRF_K = 60
 
+RetrievalPolicySignal = Literal["baseline", "session_diverse"]
+
+
+class RetrievalPolicyContractError(ValueError):
+    """Stable failure for an invalid explicit retrieval policy contract."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
+def validate_retrieval_policy_contract(
+    *,
+    retrieval_policy: RetrievalPolicySignal | None,
+    top_k: int,
+    result_limit: int | None,
+    ordered_pool: Sequence[str] | None = None,
+    ordered_session_pairs: Sequence[tuple[str, str]] | None = None,
+    turn_session_map: Mapping[str, str] | None = None,
+) -> None:
+    """Validate the opt-in selector boundary without touching the database."""
+    if retrieval_policy not in (None, "baseline", "session_diverse"):
+        raise RetrievalPolicyContractError("unsupported_policy", "unknown retrieval policy")
+    if retrieval_policy != "session_diverse":
+        return
+    if result_limit is None:
+        raise RetrievalPolicyContractError("missing_result_limit", "session_diverse requires result_limit")
+    if result_limit < top_k:
+        raise RetrievalPolicyContractError("result_limit_below_top_k", "result_limit must be >= top_k")
+    pool = list(ordered_pool or ())
+    if ordered_session_pairs is not None:
+        seen: set[str] = set()
+        for turn_id, _session_id in ordered_session_pairs:
+            if turn_id in seen:
+                raise RetrievalPolicyContractError("duplicate_turn_id", f"duplicate turn ID: {turn_id}")
+            seen.add(turn_id)
+        mapping = dict(ordered_session_pairs)
+    else:
+        mapping = dict(turn_session_map or {})
+    pool_set = set(pool)
+    if len(pool_set) != len(pool):
+        raise RetrievalPolicyContractError("duplicate_turn_id", "duplicate turn ID in ordered pool")
+    missing = [turn_id for turn_id in pool if turn_id not in mapping]
+    if missing:
+        raise RetrievalPolicyContractError("incomplete_session_map", f"missing pool key: {missing[0]}")
+    extra = sorted(set(mapping) - pool_set)
+    if extra:
+        raise RetrievalPolicyContractError("extra_mapping_key", f"mapping key outside pool: {extra[0]}")
+    for turn_id in pool:
+        if not isinstance(mapping[turn_id], str) or not mapping[turn_id].strip():
+            raise RetrievalPolicyContractError("blank_session_id", f"blank session for turn: {turn_id}")
+
 
 async def recall_turns(
     pool: asyncpg.Pool,
@@ -523,6 +577,17 @@ async def recall_turns(
     vector_weight: float = 0.5,
     keyword_weight: float = 0.5,
     episode_ids: list[str] | None = None,
+    executor: asyncpg.Connection | None = None,
+    as_of: datetime | None = None,
+    diag_callback: "Callable[[list, list], None] | None" = None,
+    raw_row_callback: "Callable[[list[dict[str, object]]], None] | None" = None,
+    sql_diag_callback: "Callable[[dict[str, object]], None] | None" = None,
+    candidate_sql_limit: int | None = None,
+    fusion_candidate_limit: int | None = None,
+    result_limit: int | None = None,
+    use_stored_search_tsv: bool = False,
+    retrieval_policy: RetrievalPolicySignal | None = None,
+    turn_session_map: Mapping[str, str] | None = None,
 ) -> list[EpisodeTurn]:
     """Hybrid (vector + BM25) recall over episode_turns.
 
@@ -532,12 +597,10 @@ async def recall_turns(
     is in the list — used by the hierarchical-descent path in
     :func:`recall_turns_hierarchical` to fan out from a top-K episode set.
     Vector similarity uses cosine distance against the inline embedding
-    column; keyword scoring uses Postgres FTS
-    (``to_tsvector('english', content)``) — there is no persisted tsvector
-    column on episode_turns yet, so this path is unindexed for now.
-    Acceptable at Wick scale (one user's dialogue trace); add a stored
-    search_tsv column + GIN index when a single installation crosses
-    ~100k turns.
+    column; keyword scoring uses Postgres FTS with the historical inline
+    ``to_tsvector('english', t.content)`` expression by default. The
+    benchmark-only ``use_stored_search_tsv`` option uses the equivalent
+    generated ``search_tsv`` column when the v51 schema/index is available.
 
     RRF fusion mirrors ``weft.store.search_hybrid`` so callers can reason
     about belief-tier and turn-tier results in the same rank space.
@@ -551,55 +614,197 @@ async def recall_turns(
             halves filter ``t.episode_id = ANY($N)``. ``None`` (default)
             preserves the legacy unscoped behavior. An empty list short-
             circuits to ``[]`` since no candidate episode could match.
+        executor: optional pre-acquired connection to run both vector and
+            keyword halves on the SAME connection. When provided, queries
+            execute through it instead of ``get_db(pool)`` (which may
+            return a different connection for each ``fetch``). Used by
+            the benchmark's diagnostic mode to inspect connection state
+            on the 0-return path. When omitted (production callers),
+            defaults to ``get_db(pool)`` as today.
+        as_of: optional fixed timestamp for deterministic recency
+            reranking. When provided, passed as ``now=as_of`` to
+            ``rank_turns()``. When omitted (production), wall-clock time
+            is used. Used by recall-only A/B runs for reproducibility.
+        diag_callback: optional callback invoked with the raw vector and
+            keyword candidate rows (each a list of asyncpg.Record in their
+            natural SQL ordering) before RRF fusion. Used by the benchmark's
+            miss-diagnostic path to log per-half rank of gold turns. Errors
+            in the callback are silently swallowed — diagnostics must never
+            break recall.
+        raw_row_callback: optional benchmark-only callback invoked after fusion
+            with a narrow, deterministic payload containing only ``turn_id``,
+            the stored ``vector``, and zero-based fused ``rank``. This keeps
+            raw vector capture out of ``EpisodeTurn`` and production return
+            values. Callback errors are swallowed like diagnostic errors.
+        candidate_sql_limit: optional raw SQL candidate width. Defaults to
+            ``top_k * 3``. This changes only the vector/keyword LIMITs.
+        fusion_candidate_limit: optional absent-half penalty width for RRF.
+            Defaults to the SQL width for backward compatibility; benchmark
+            experiments pass the baseline width explicitly when widening SQL.
+        result_limit: optional number of fused/reranked turns to return.  This
+            is a benchmark-only overfetch control: SQL candidate widths and
+            RRF semantics are unchanged, while the caller may apply a second
+            ranking or diversity policy before restoring its Reader cap.
+            Defaults to ``top_k``.
+        use_stored_search_tsv: benchmark-only opt-in to use the generated
+            ``episode_turns.search_tsv`` column for keyword matching and
+            ranking. The default keeps the inline ``to_tsvector`` SQL for
+            production compatibility.
     """
+    validate_retrieval_policy_contract(
+        retrieval_policy=retrieval_policy,
+        top_k=top_k,
+        result_limit=result_limit,
+        turn_session_map=turn_session_map,
+    )
     if episode_ids is not None and len(episode_ids) == 0:
         # Empty filter would produce ``ANY('{}'::text[])`` which matches
         # nothing — shortcut so callers (the hierarchical path on an
         # empty episode result) don't pay the round-trip.
         return []
-    candidate_limit = top_k * 3
+    baseline_candidate_limit = top_k * 3
+    candidate_limit = (
+        baseline_candidate_limit
+        if candidate_sql_limit is None
+        else max(top_k, int(candidate_sql_limit))
+    )
+    fusion_limit = (
+        candidate_limit
+        if fusion_candidate_limit is None
+        else max(top_k, int(fusion_candidate_limit))
+    )
     sql_filter, params = _build_turn_filters(
         project_id=project_id, since=since, until=until,
         episode_ids=episode_ids,
     )
 
-    db = get_db(pool)
+    # When an explicit executor (connection) is provided, use it directly
+    # so both vector and keyword halves run on the SAME connection. This
+    # is critical for diagnostics: a 0-return on connection A cannot be
+    # diagnosed by a retry on connection B. When omitted, fall back to
+    # get_db(pool) which returns the ContextVar connection (inside
+    # acquire()) or the raw pool (outside).
+    db = executor if executor is not None else get_db(pool)
+
+    def _emit_sql_diag(
+        *,
+        phase: str,
+        sql: str,
+        started: float,
+        status: str,
+        row_count: int | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        if sql_diag_callback is None:
+            return
+        event: dict[str, object] = {
+            "phase": phase,
+            "status": status,
+            "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+            "sql": sql.strip()[:8192],
+            "query": query[:512],
+            "candidate_limit": candidate_limit,
+            "limit_parameter": len(params) + 2,
+            "filter_sql": sql_filter.strip()[:4096],
+            "filters": {
+                "project_scoped": project_id is not None,
+                "since_present": since is not None,
+                "until_present": until is not None,
+                "episode_ids_count": len(episode_ids) if episode_ids is not None else None,
+            },
+        }
+        if row_count is not None:
+            event["row_count"] = row_count
+        if error_type is not None:
+            event["error_type"] = error_type
+        try:
+            sql_diag_callback(event)
+        except Exception:
+            logger.warning(
+                "turn recall SQL diagnostic callback failed; preserving retrieval result",
+                exc_info=True,
+            )
 
     # --- Vector half (skipped if embedding is None) ---
     vector_rows: list[asyncpg.Record] = []
     if embedding is not None:
         vector_sql = f"""
-            SELECT t.*
-              FROM episode_turns t
-              {_join_episodes_if_needed(project_id)}
-              WHERE t.embedding IS NOT NULL
-                {sql_filter}
-              ORDER BY t.embedding <=> $1::vector
-              LIMIT ${len(params) + 2}
+            SELECT candidates.*
+              FROM (
+                SELECT t.*, t.embedding <=> $1::vector AS _distance
+                  FROM episode_turns t
+                  {_join_episodes_if_needed(project_id)}
+                  WHERE t.embedding IS NOT NULL
+                    {sql_filter}
+                  ORDER BY t.embedding <=> $1::vector
+                  LIMIT ${len(params) + 2}
+              ) AS candidates
+              ORDER BY candidates._distance, candidates.id
         """
-        vector_rows = await db.fetch(vector_sql, embedding, *params, candidate_limit)
+        started = time.perf_counter() if sql_diag_callback is not None else 0.0
+        try:
+            vector_rows = await db.fetch(vector_sql, embedding, *params, candidate_limit)
+        except Exception as exc:
+            _emit_sql_diag(
+                phase="vector", sql=vector_sql, started=started,
+                status="failed", error_type=type(exc).__name__,
+            )
+            raise
+        _emit_sql_diag(
+            phase="vector", sql=vector_sql, started=started,
+            status="ok", row_count=len(vector_rows),
+        )
 
     # --- Keyword half ---
+    # ``search_tsv`` is a generated column, so the opted-in expression is
+    # equivalent to the historical inline form while allowing PostgreSQL to
+    # use the benchmark snapshot's GIN index. Keep the default inline SQL for
+    # production callers until the gated migration is universally applied.
+    keyword_vector = "t.search_tsv" if use_stored_search_tsv else "to_tsvector('english', t.content)"
     keyword_sql = f"""
         SELECT t.*
           FROM episode_turns t
           {_join_episodes_if_needed(project_id)}
-          WHERE to_tsvector('english', t.content)
+          WHERE {keyword_vector}
                 @@ websearch_to_tsquery('english', $1)
             {sql_filter}
           ORDER BY ts_rank(
-              to_tsvector('english', t.content),
+              {keyword_vector},
               websearch_to_tsquery('english', $1)
-          ) DESC
+          ) DESC, t.id
           LIMIT ${len(params) + 2}
     """
-    keyword_rows = await db.fetch(keyword_sql, query, *params, candidate_limit)
+    started = time.perf_counter() if sql_diag_callback is not None else 0.0
+    try:
+        keyword_rows = await db.fetch(keyword_sql, query, *params, candidate_limit)
+    except Exception as exc:
+        _emit_sql_diag(
+            phase="keyword", sql=keyword_sql, started=started,
+            status="failed", error_type=type(exc).__name__,
+        )
+        raise
+    _emit_sql_diag(
+        phase="keyword", sql=keyword_sql, started=started,
+        status="ok", row_count=len(keyword_rows),
+    )
+
+    # Diagnostic callback: exposes the raw per-half candidate lists (with
+    # their natural ordering) before RRF fusion. Used by the benchmark's
+    # miss-diagnostic path to log where gold turns ranked in each half.
+    if diag_callback is not None:
+        try:
+            diag_callback(vector_rows, keyword_rows)
+        except Exception:
+            logger.warning(
+                "turn recall diagnostic callback failed; preserving retrieval result",
+                exc_info=True,
+            )
 
     # --- RRF fuse → rerank by usefulness × recency (P1.A3) ---
     fused = _rrf_fuse_turn_rows(
         vector_rows, keyword_rows,
-        candidate_limit=candidate_limit,
-        top_k=top_k,
+        candidate_limit=fusion_limit,
+        top_k=max(top_k, int(result_limit or top_k)),
         vector_weight=vector_weight,
         keyword_weight=keyword_weight,
     )
@@ -608,12 +813,61 @@ async def recall_turns(
     # on the same warmed dataset without needing a code revert.
     import os as _os
     if _os.environ.get("WEFT_TURN_RERANK_DISABLE") == "1":
-        return [t for t, _ in fused]
-    # Late import: relevance imports models, which we already loaded.
-    # Done at call time to keep the store layer's import graph minimal.
-    from weft.relevance import rank_turns
-    ranked = rank_turns(fused)
-    return [s.turn for s in ranked]
+        ranked_turns = [t for t, _ in fused]
+    else:
+        # Late import: relevance imports models, which we already loaded.
+        # Done at call time to keep the store layer's import graph minimal.
+        from weft.relevance import rank_turns
+        ranked_turns = [s.turn for s in rank_turns(fused, now=as_of)]
+
+    if retrieval_policy == "session_diverse":
+        from weft.session_selection import select_session_diverse
+        pool_ids = [turn.id for turn in ranked_turns[:result_limit]]
+        validate_retrieval_policy_contract(
+            retrieval_policy=retrieval_policy,
+            top_k=top_k,
+            result_limit=result_limit,
+            ordered_pool=pool_ids,
+            turn_session_map=turn_session_map,
+        )
+        ranked_turns = select_session_diverse(
+            ranked_turns[:result_limit], top_k=top_k,
+            session_by_id=turn_session_map or {}, id_of=lambda turn: turn.id,
+        )
+
+    if raw_row_callback is not None:
+        # Capture only the representation probe's narrow contract.  The
+        # EpisodeTurn model intentionally does not carry the stored vector,
+        # and this callback is never used by ordinary callers.  Preserve the
+        # first candidate-row representation for each turn: vector_rows are
+        # ordered by vector distance and keyword_rows by FTS rank, while the
+        # callback's rank is assigned below from the final fused/reranked order.
+        vector_by_turn_id: dict[str, object] = {}
+        for row in (*vector_rows, *keyword_rows):
+            try:
+                turn_id = str(row["id"])
+                vector = row["embedding"]
+            except (KeyError, IndexError):
+                continue
+            vector_by_turn_id.setdefault(turn_id, vector)
+
+        raw_rows = [
+            {
+                "turn_id": turn.id,
+                "vector": vector_by_turn_id.get(turn.id),
+                "rank": rank,
+            }
+            for rank, turn in enumerate(ranked_turns)
+        ]
+        try:
+            raw_row_callback(raw_rows)
+        except Exception:
+            logger.warning(
+                "turn recall raw-row callback failed; preserving retrieval result",
+                exc_info=True,
+            )
+
+    return ranked_turns[: int(result_limit or top_k)]
 
 
 # --- Hierarchical descent: episodes → turns ---
@@ -632,6 +886,7 @@ async def recall_turns_hierarchical(
     user_id: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
+    use_stored_search_tsv: bool = False,
 ) -> list[EpisodeTurn]:
     """Hierarchical retrieval: rank episodes first, then descend to turns.
 
@@ -709,6 +964,7 @@ async def recall_turns_hierarchical(
             until=until,
             top_k=top_k_turns,
             embedding=embedding,
+            use_stored_search_tsv=use_stored_search_tsv,
         )
 
     episode_id_set = [e.id for e in episodes]
@@ -720,6 +976,7 @@ async def recall_turns_hierarchical(
         top_k=top_k_turns,
         embedding=embedding,
         episode_ids=episode_id_set,
+        use_stored_search_tsv=use_stored_search_tsv,
     )
 
 
@@ -730,6 +987,7 @@ async def list_recent_turns(
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = 20,
+    executor: asyncpg.Connection | None = None,
 ) -> list[EpisodeTurn]:
     """Time-ordered recent turns — used as a fallback when query has no
     keyword/vector signal (e.g., a temporal-anchor probe with anchor
@@ -738,7 +996,7 @@ async def list_recent_turns(
         project_id=project_id, since=since, until=until,
         leading_args=0,
     )
-    db = get_db(pool)
+    db = executor if executor is not None else get_db(pool)
     sql = f"""
         SELECT t.*
           FROM episode_turns t
@@ -842,19 +1100,20 @@ def _rrf_fuse_turn_rows(
         scores[tid] = (
             vector_weight / (_RRF_K + v) + keyword_weight / (_RRF_K + k)
         )
-    sorted_ids = sorted(scores, key=lambda i: scores[i], reverse=True)[:top_k]
+    sorted_ids = sorted(scores, key=lambda i: (-scores[i], i))[:top_k]
     return [(_row_to_turn(all_rows[tid]), scores[tid]) for tid in sorted_ids]
 
 
 def _short_id() -> str:
-    """Generate a short suffix for et-* IDs.
+    """Generate a collision-resistant suffix for ``et-*`` IDs.
 
-    Lives here (not in models.py) so the same generator can be used by
-    callers that need to pre-allocate an ID before insert (rare, but useful
-    for trace correlation).
+    The function name is retained for compatibility with benchmark ingest
+    callers, but the full UUID hex value is used.  The previous 10-character
+    truncation made collisions plausible during multi-million-turn benchmark
+    materialization and could abort an otherwise healthy run.
     """
     import uuid
-    return uuid.uuid4().hex[:10]
+    return uuid.uuid4().hex
 
 
 def _row_to_turn(row: asyncpg.Record) -> EpisodeTurn:
