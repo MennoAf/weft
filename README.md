@@ -128,7 +128,7 @@ Current numbers and reproduction harness: [docs/benchmarks.md](docs/benchmarks.m
 - **Ingest a codebase** — `weft ingest .` for grounded recall against your own source
 - **Inspect state** — `weft status` for counts, `weft config show` for resolved config
 - **Mint API tokens** — `weft tokens issue` for hosted-server auth ([guide](docs/user-identity.md))
-- **Back up + restore** — `weft backup` / `weft restore` ([playbook](docs/disaster-recovery.md))
+- **Back up + restore** — `weft backup` / `weft restore` ([guide](docs/disaster-recovery.md))
 
 Full CLI: [docs/cli.md](docs/cli.md).
 

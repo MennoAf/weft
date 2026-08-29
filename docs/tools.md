@@ -16,7 +16,9 @@ A zero count means **not observed**, not valueless. Removal recommendations
 require at least 30 valid coverage days with no gaps; 30 elapsed calendar days
 are insufficient. The checked-in public-tool manifest also rejects removals
 without an approved deprecation record. See `inventory/` and
-[`validation-findings-2026-07.md`](validation-findings-2026-07.md).
+[`tool-profiles.json`](../inventory/tool-profiles.json) for the public discovery
+profiles. Maintainer-only validation evidence is intentionally kept outside the
+public candidate.
 
 `weft_up_next` is deprecated but remains available as a compatibility alias.
 Use `weft_board` for the canonical unified open-items view. It will remain

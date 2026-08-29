@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-18T18:41:48.466910+00:00",
+  "generated_at": "2026-08-28T02:15:11.443064+00:00",
   "tools": [
     "weft_alert_create",
     "weft_alert_dismiss",
@@ -29,6 +29,7 @@
     "weft_context",
     "weft_cost_record",
     "weft_cost_summary",
+    "weft_count_occurrences",
     "weft_daily_brief",
     "weft_degradation_check",
     "weft_degradation_list",

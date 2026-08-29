@@ -2764,19 +2764,13 @@ name = "weft-memory"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiohttp" },
-    { name = "anthropic" },
     { name = "asyncpg" },
     { name = "authlib" },
     { name = "click" },
     { name = "cryptography" },
-    { name = "discord-py" },
     { name = "fastembed" },
     { name = "fastmcp" },
-    { name = "google-api-python-client" },
-    { name = "google-auth-oauthlib" },
     { name = "itsdangerous" },
-    { name = "openai" },
     { name = "pydantic" },
     { name = "pyjwt" },
     { name = "python-dateutil" },
@@ -2785,9 +2779,36 @@ dependencies = [
     { name = "pyyaml" },
     { name = "redis", extra = ["hiredis"] },
     { name = "rich" },
-    { name = "slack-sdk" },
     { name = "starlette" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "aiohttp" },
+    { name = "anthropic" },
+    { name = "discord-py" },
+    { name = "google-api-python-client" },
+    { name = "google-auth-oauthlib" },
+    { name = "openai" },
+    { name = "slack-sdk" },
+]
+anthropic = [
+    { name = "anthropic" },
+]
+discord = [
+    { name = "aiohttp" },
+    { name = "discord-py" },
+]
+google = [
+    { name = "google-api-python-client" },
+    { name = "google-auth-oauthlib" },
+]
+openai = [
+    { name = "openai" },
+]
+slack = [
+    { name = "slack-sdk" },
 ]
 
 [package.dev-dependencies]
@@ -2800,19 +2821,25 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.13.3" },
-    { name = "anthropic", specifier = ">=0.42.0" },
+    { name = "aiohttp", marker = "extra == 'all'", specifier = ">=3.13.3" },
+    { name = "aiohttp", marker = "extra == 'discord'", specifier = ">=3.13.3" },
+    { name = "anthropic", marker = "extra == 'all'", specifier = ">=0.42.0" },
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.42.0" },
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "authlib", specifier = ">=1.3,<2" },
     { name = "click", specifier = ">=8.1.0" },
     { name = "cryptography", specifier = ">=42" },
-    { name = "discord-py", specifier = ">=2.4.0" },
+    { name = "discord-py", marker = "extra == 'all'", specifier = ">=2.4.0" },
+    { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4.0" },
     { name = "fastembed", specifier = ">=0.4.0" },
     { name = "fastmcp", specifier = ">=2.0.0" },
-    { name = "google-api-python-client", specifier = ">=2.100.0" },
-    { name = "google-auth-oauthlib", specifier = ">=1.1.0" },
+    { name = "google-api-python-client", marker = "extra == 'all'", specifier = ">=2.100.0" },
+    { name = "google-api-python-client", marker = "extra == 'google'", specifier = ">=2.100.0" },
+    { name = "google-auth-oauthlib", marker = "extra == 'all'", specifier = ">=1.1.0" },
+    { name = "google-auth-oauthlib", marker = "extra == 'google'", specifier = ">=1.1.0" },
     { name = "itsdangerous", specifier = ">=2.2" },
-    { name = "openai", specifier = ">=1.0.0" },
+    { name = "openai", marker = "extra == 'all'", specifier = ">=1.0.0" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
     { name = "pyjwt", specifier = ">=2.8.0" },
     { name = "python-dateutil", specifier = ">=2.9.0" },
@@ -2821,10 +2848,12 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", extras = ["hiredis"], specifier = ">=5.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "slack-sdk", specifier = ">=3.30.0" },
+    { name = "slack-sdk", marker = "extra == 'all'", specifier = ">=3.30.0" },
+    { name = "slack-sdk", marker = "extra == 'slack'", specifier = ">=3.30.0" },
     { name = "starlette", specifier = ">=0.37.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
 ]
+provides-extras = ["anthropic", "openai", "slack", "discord", "google", "all"]
 
 [package.metadata.requires-dev]
 dev = [

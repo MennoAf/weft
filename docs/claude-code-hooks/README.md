@@ -66,4 +66,6 @@ The text inside `additionalContext` is the entire interface between the hook and
 ### Related
 
 - [`docs/CLAUDE_example.md`](../CLAUDE_example.md) — the global `CLAUDE.md` template that points the auto-memory protocol at Weft.
-- [`docs/wick-handoff.md`](../wick-handoff.md) — context on how handoffs are consumed downstream.
+- The public [`templates/commands/handoff.md`](../../templates/commands/handoff.md)
+  documents the supported handoff lifecycle. Maintainer-specific handoff
+  evidence is intentionally kept outside the public candidate.

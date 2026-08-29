@@ -1,0 +1,13 @@
+{
+  "schema_version": "retrieval-recovery-pilot-cases-v1",
+  "cases": [
+    {"case_id": "pilot-procedural", "category": "procedural", "query": "How do I configure export?", "scope": {"user": "fixture-user", "project": "fixture-project", "retrieval_mode": "face"}, "gold_evidence_ids": ["memory:pilot-procedural-gold"], "expected_outcome": "sufficient", "mandatory_branches": ["branch-direct"], "retrieval_limit": 1},
+    {"case_id": "pilot-identifier", "category": "exact_identifier", "query": "Where is pilot_config.yaml configured?", "scope": {"user": "fixture-user", "project": "fixture-project", "retrieval_mode": "code"}, "gold_evidence_ids": ["memory:pilot-identifier-gold"], "expected_outcome": "sufficient", "retrieval_limit": 1},
+    {"case_id": "pilot-turn-only", "category": "turn_only", "query": "What did I say about the pilot?", "scope": {"user": "fixture-user", "project": null, "retrieval_mode": "all"}, "gold_evidence_ids": ["turn:pilot-turn-gold"], "expected_outcome": "sufficient", "mandatory_branches": ["branch-direct"], "retrieval_limit": 1},
+    {"case_id": "pilot-comparison", "category": "comparison", "query": "Compare Alpha and Beta", "scope": {"user": "fixture-user", "project": "fixture-project", "retrieval_mode": "face"}, "gold_evidence_ids": ["memory:pilot-alpha-gold", "memory:pilot-beta-gold"], "expected_outcome": "sufficient", "mandatory_branches": ["branch-1", "branch-2"], "retrieval_limit": 1},
+    {"case_id": "pilot-chronology", "category": "chronology", "query": "What happened between the demo and the retro?", "scope": {"user": "fixture-user", "project": "fixture-project", "retrieval_mode": "all"}, "gold_evidence_ids": ["turn:pilot-demo-gold", "turn:pilot-retro-gold"], "expected_outcome": "sufficient", "mandatory_branches": ["anchor-1", "anchor-2"], "retrieval_limit": 1},
+    {"case_id": "pilot-unknown", "category": "unknown", "query": "What is the pilot's undisclosed launch date?", "scope": {"user": "fixture-user", "project": "fixture-project", "retrieval_mode": "face"}, "gold_evidence_ids": [], "expected_outcome": "unknown", "retrieval_limit": 1},
+    {"case_id": "pilot-conflict", "category": "conflict", "query": "When was the pilot approved?", "scope": {"user": "fixture-user", "project": "fixture-project", "retrieval_mode": "face"}, "gold_evidence_ids": ["memory:pilot-conflict-a", "memory:pilot-conflict-b"], "expected_outcome": "incomplete", "retrieval_limit": 2},
+    {"case_id": "pilot-scope-control", "category": "scope", "query": "What is in this project?", "scope": {"user": "fixture-user", "project": "fixture-project", "retrieval_mode": "code"}, "gold_evidence_ids": ["memory:pilot-scope-gold"], "expected_outcome": "sufficient"}
+  ]
+}
