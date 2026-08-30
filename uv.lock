@@ -2832,7 +2832,7 @@ requires-dist = [
     { name = "discord-py", marker = "extra == 'all'", specifier = ">=2.4.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4.0" },
     { name = "fastembed", specifier = ">=0.4.0" },
-    { name = "fastmcp", specifier = ">=2.0.0" },
+    { name = "fastmcp", specifier = ">=3.0.2,<4" },
     { name = "google-api-python-client", marker = "extra == 'all'", specifier = ">=2.100.0" },
     { name = "google-api-python-client", marker = "extra == 'google'", specifier = ">=2.100.0" },
     { name = "google-auth-oauthlib", marker = "extra == 'all'", specifier = ">=1.1.0" },
