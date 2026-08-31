@@ -9,7 +9,8 @@ intermittent ``prime``/``recall`` hangs under concurrency.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, call
+import ssl
+from unittest.mock import AsyncMock, call, patch
 
 import asyncpg
 import pytest
@@ -23,8 +24,95 @@ from weft.db.connection import (
 )
 
 
+_SUPABASE_DSN = "postgresql://weft_app:secret@db.example.supabase.co:5432/postgres"
+_CA_PLACEHOLDER = "configured-ca-material"
+
+
 def _config(dsn: str, **db_overrides) -> WeftConfig:
     return WeftConfig(database=DatabaseConfig(url=dsn, **db_overrides))
+
+
+class TestSupabaseTLS:
+    async def test_configured_ca_file_is_passed_as_cadata(self, tmp_path):
+        pool = object()
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ca_file = tmp_path / "supabase-ca.crt"
+        ca_file.write_text(_CA_PLACEHOLDER, encoding="utf-8")
+        with (
+            patch(
+                "weft.db.connection.ssl.create_default_context",
+                return_value=ssl_context,
+            ) as create_context,
+            patch(
+                "weft.db.connection.asyncpg.create_pool",
+                new=AsyncMock(return_value=pool),
+            ),
+        ):
+            result = await create_pool(
+                _config(_SUPABASE_DSN, ca_cert_file=ca_file)
+            )
+
+        assert result is pool
+        create_context.assert_called_once_with(cadata=_CA_PLACEHOLDER)
+
+    async def test_configured_ca_is_passed_as_cadata(self):
+        pool = object()
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if hasattr(ssl, "VERIFY_X509_STRICT"):
+            ssl_context.verify_flags |= ssl.VERIFY_X509_STRICT
+        with (
+            patch(
+                "weft.db.connection.ssl.create_default_context",
+                return_value=ssl_context,
+            ) as create_context,
+            patch(
+                "weft.db.connection.asyncpg.create_pool",
+                new=AsyncMock(return_value=pool),
+            ) as create_pool_mock,
+        ):
+            result = await create_pool(
+                _config(_SUPABASE_DSN, ca_cert=_CA_PLACEHOLDER)
+            )
+
+        assert result is pool
+        create_context.assert_called_once_with(cadata=_CA_PLACEHOLDER)
+        assert create_pool_mock.await_args.kwargs["ssl"] is ssl_context
+        assert ssl_context.verify_mode is ssl.CERT_REQUIRED
+        assert ssl_context.check_hostname is True
+        if hasattr(ssl, "VERIFY_X509_STRICT"):
+            assert not ssl_context.verify_flags & ssl.VERIFY_X509_STRICT
+
+    async def test_unconfigured_ca_uses_system_trust_store(self):
+        pool = object()
+        ssl_context = object()
+        with (
+            patch(
+                "weft.db.connection.ssl.create_default_context",
+                return_value=ssl_context,
+            ) as create_context,
+            patch(
+                "weft.db.connection.asyncpg.create_pool",
+                new=AsyncMock(return_value=pool),
+            ) as create_pool_mock,
+        ):
+            result = await create_pool(_config(_SUPABASE_DSN))
+
+        assert result is pool
+        create_context.assert_called_once_with()
+        assert create_pool_mock.await_args.kwargs["ssl"] is ssl_context
+
+    async def test_malformed_ca_raises_clear_error(self):
+        with patch(
+            "weft.db.connection.ssl.create_default_context",
+            side_effect=ssl.SSLError("malformed certificate"),
+        ):
+            with pytest.raises(
+                ValueError,
+                match="WEFT_DATABASE_CA_CERT is not a valid PEM certificate bundle",
+            ):
+                await create_pool(
+                    _config(_SUPABASE_DSN, ca_cert=_CA_PLACEHOLDER)
+                )
 
 
 async def test_pool_init_sets_extensions_search_path_before_vector_codec():

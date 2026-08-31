@@ -142,11 +142,38 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
     # Supabase pooler requires statement_cache_size=0 (no prepared statements)
     elif ":6543/" in dsn or "pooler.supabase.com" in dsn:
         kwargs["statement_cache_size"] = 0
-    # Enable certificate- and hostname-verified SSL for Supabase and other
     # cloud Postgres providers. Do not weaken TLS verification for pooler
     # compatibility: a public deployment must authenticate the database peer.
+    # A deployment may provide the provider's CA bundle when it is not present
+    # in the runtime image trust store.
     if "supabase.co" in dsn or "supabase.com" in dsn or "sslmode=require" in dsn:
-        kwargs["ssl"] = ssl.create_default_context()
+        ca_cert = config.database.ca_cert
+        if config.database.ca_cert_file:
+            try:
+                ca_cert = config.database.ca_cert_file.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(
+                    f"Database CA certificate file is unreadable: {config.database.ca_cert_file}"
+                ) from exc
+        if ca_cert:
+            try:
+                ssl_context = ssl.create_default_context(
+                    cadata=ca_cert,
+                )
+                # Python 3.13 enables VERIFY_X509_STRICT by default. The
+                # documented Supabase prod-ca-2021 root predates RFC 5280's
+                # required CA key-usage extension, so strict mode rejects the
+                # otherwise valid chain. Keep CERT_REQUIRED and hostname
+                # verification; relax only this compatibility check.
+                if hasattr(ssl, "VERIFY_X509_STRICT"):
+                    ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+                kwargs["ssl"] = ssl_context
+            except ssl.SSLError as exc:
+                raise ValueError(
+                    "WEFT_DATABASE_CA_CERT is not a valid PEM certificate bundle"
+                ) from exc
+        else:
+            kwargs["ssl"] = ssl.create_default_context()
 
     try:
         pool = await asyncpg.create_pool(dsn, **kwargs)

@@ -84,18 +84,8 @@ def up(global_: bool):
         sys.exit(1)
     click.echo("Weft containers started.")
 
-    # Run migrations
-    async def _migrate():
-        import asyncpg
-        from weft.db.migrations import run_migrations
-
-        config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        applied = await run_migrations(pool)
-        await pool.close()
-        return applied
-
-    applied = asyncio.run(_migrate())
+    # Run migrations through the same owner-safe path used by deployments.
+    applied = asyncio.run(_run_owner_migrations(load_config()))
     if applied:
         click.echo(f"Applied {len(applied)} migration(s).")
     else:
@@ -106,6 +96,122 @@ def up(global_: bool):
         _register_mcp()
     else:
         _register_mcp(Path.cwd())
+
+
+def _migration_config(ca_cert_file: str | None, database_url: str | None):
+    """Load an owner-migration config from explicit owner-only inputs."""
+    owner_url = database_url or os.environ.get("WEFT_OWNER_DATABASE_URL")
+    if not owner_url:
+        raise click.ClickException(
+            "Owner migration requires WEFT_OWNER_DATABASE_URL or --database-url; "
+            "the generic DATABASE_URL may point at restricted weft_app."
+        )
+    if ca_cert_file:
+        os.environ["WEFT_DATABASE_CA_CERT_FILE"] = ca_cert_file
+    os.environ["DATABASE_URL"] = owner_url
+    os.environ["WEFT_MIGRATION_MODE"] = "apply"
+    return load_config()
+
+
+async def _run_owner_migrations(config):
+    from weft.db.connection import create_pool
+    from weft.db.migrations import run_migrations
+
+    pool = await create_pool(config)
+    try:
+        role = await pool.fetchval("SELECT current_user")
+        if role == "weft_app":
+            raise RuntimeError(
+                "refusing owner migration as restricted runtime role weft_app; "
+                "use the Supabase owner/migration connection"
+            )
+        return await run_migrations(pool)
+    finally:
+        await pool.close()
+
+
+@cli.command(name="migrate")
+@click.option(
+    "--ca-cert-file",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    default=None,
+    help="Path to the trusted database CA PEM file.",
+)
+@click.option(
+    "--database-url",
+    default=None,
+    help="Owner connection URL; prefer WEFT_OWNER_DATABASE_URL.",
+)
+def migrate_cmd(ca_cert_file: Path | None, database_url: str | None):
+    """Apply pending owner-managed database migrations safely.
+
+    This command is for the migration/owner role only. Fly production uses
+    WEFT_MIGRATION_MODE=verify and the restricted weft_app role.
+    """
+    config = _migration_config(
+        str(ca_cert_file) if ca_cert_file else None,
+        database_url,
+    )
+
+    try:
+        applied = asyncio.run(_run_owner_migrations(config))
+    except Exception as exc:
+        raise click.ClickException(f"Owner migration failed: {exc}") from exc
+
+    if applied:
+        click.echo(f"Applied migration(s): {', '.join(map(str, applied))}")
+    else:
+        click.echo("Migrations up to date.")
+
+
+@cli.command(name="deploy")
+@click.option("--app", default="weft-mcp", show_default=True, help="Fly app name.")
+@click.option("--wait-timeout", default="10m", show_default=True, help="Fly machine health wait timeout.")
+@click.option(
+    "--ca-cert-file",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    default=None,
+    help="Path to the owner database CA PEM file for preflight.",
+)
+@click.option("--skip-preflight", is_flag=True, help="Skip the read-only migration preflight (not recommended).")
+def deploy_cmd(app: str, wait_timeout: str, ca_cert_file: Path | None, skip_preflight: bool):
+    """Preflight and deploy the current Weft release to Fly.io."""
+    if not skip_preflight:
+        if not os.environ.get("WEFT_OWNER_DATABASE_URL"):
+            raise click.ClickException(
+                "Deploy preflight needs WEFT_OWNER_DATABASE_URL; set the owner connection "
+                "in the environment or use --skip-preflight only after a separate check."
+            )
+        os.environ["DATABASE_URL"] = os.environ["WEFT_OWNER_DATABASE_URL"]
+        if ca_cert_file:
+            os.environ["WEFT_DATABASE_CA_CERT_FILE"] = str(ca_cert_file)
+        config = load_config()
+
+        async def _preflight():
+            from weft.db.connection import create_pool
+            from weft.db.migrations._runner import verify_migration_ledger
+
+            pool = await create_pool(config)
+            try:
+                await verify_migration_ledger(pool)
+            finally:
+                await pool.close()
+
+        try:
+            asyncio.run(_preflight())
+        except Exception as exc:
+            raise click.ClickException(
+                "Deployment preflight failed. Apply owner migrations with "
+                "'weft migrate' before deploying: " + str(exc)
+            ) from exc
+        click.echo("Migration preflight passed.")
+
+    result = subprocess.run(
+        ["fly", "deploy", "-a", app, "--wait-timeout", wait_timeout],
+        check=False,
+    )
+    if result.returncode:
+        raise click.ClickException(f"Fly deploy failed with exit code {result.returncode}.")
 
 
 @cli.command()
@@ -956,6 +1062,7 @@ def show():
 
     env_keys: dict[str, str] = {
         "database.url": "WEFT_DATABASE_URL",
+        "database.ca_cert_file": "WEFT_DATABASE_CA_CERT_FILE",
         "redis.url": "WEFT_REDIS_URL",
         "embedding.provider": "WEFT_EMBEDDING_PROVIDER",
         "embedding.model": "WEFT_EMBEDDING_MODEL",
@@ -974,6 +1081,7 @@ def show():
         ("project_name", cfg.project_name),
         ("log_level", cfg.log_level),
         ("database.url", cfg.database.url),
+        ("database.ca_cert_file", str(cfg.database.ca_cert_file or "")),
         ("database.pool_min_size", str(cfg.database.pool_min_size)),
         ("database.pool_max_size", str(cfg.database.pool_max_size)),
         ("redis.url", cfg.redis.url),
