@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# generate_oauth_secrets.sh — mint the OAuth secrets for a Weft Route 1
-# deploy (staging or prod).
+# generate_oauth_secrets.sh — generate local OAuth secrets for a Weft
+# self-hosted deployment.
 #
 # Produces:
 #   OAUTH_JWT_PRIVATE_KEY_PEM  — RSA-2048 PKCS8 PEM for access/refresh
@@ -9,19 +9,15 @@
 #                                itsdangerous-signed /oauth/authorize
 #                                pending cookie.
 #
-# Writes both to a temporary file under $HOME/.weft/ (gitignored via
-# repo convention) AND prints the Fly `fly secrets set` lines you need
-# to paste. This script does NOT call fly itself — Jason runs every
-# secret mutation by hand.
+# Writes both secrets to a chmod-600 env file under $HOME/.weft/ by default.
+# The output path can be overridden for an operator-managed secret store. This
+# script never contacts a deployment provider or uploads a secret.
 #
 # Usage:
-#   ./scripts/generate_oauth_secrets.sh                    # staging app
-#   ./scripts/generate_oauth_secrets.sh weft-mcp           # prod app
-#   ./scripts/generate_oauth_secrets.sh --output <path>    # custom output
+#   ./scripts/generate_oauth_secrets.sh
+#   ./scripts/generate_oauth_secrets.sh --output <path>
 #
-# The output file is a bash-sourceable env file:
-#   source .oauth-staging-secrets.env
-#   fly secrets import < .oauth-staging-secrets.env -a weft-mcp-staging
+# The output file is a bash-sourceable env file for the operator's deployment.
 #
 # Security: the file contains a private RSA key. `chmod 600` is applied.
 # DO NOT commit it. The standard .gitignore entry for `.oauth-*.env` keeps
@@ -29,7 +25,6 @@
 
 set -euo pipefail
 
-APP="${1:-weft-mcp-staging}"
 OUTPUT_DIR="${HOME}/.weft"
 OUTPUT_FILE=""
 
@@ -44,15 +39,15 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         *)
-            APP="$1"
-            shift
+            echo "error: unknown argument: $1" >&2
+            exit 2
             ;;
     esac
 done
 
 if [ -z "$OUTPUT_FILE" ]; then
     mkdir -p "$OUTPUT_DIR"
-    OUTPUT_FILE="${OUTPUT_DIR}/.oauth-${APP}-secrets.env"
+    OUTPUT_FILE="${OUTPUT_DIR}/.oauth-secrets.env"
 fi
 
 # --- openssl check --------------------------------------------------------
@@ -79,14 +74,8 @@ SESSION_SECRET="$(openssl rand -base64 48 | tr -d '=' | tr '/+' '_-')"
 # --- Write the env file ---------------------------------------------------
 umask 077
 cat > "$OUTPUT_FILE" <<EOF
-# Weft OAuth 2.1 staging secrets — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
-# APP: $APP
-#
-# Source this file to get the variables into your shell:
-#     source "$OUTPUT_FILE"
-# Or import all at once:
-#     fly secrets import < "$OUTPUT_FILE" -a $APP
-#
+# Weft OAuth 2.1 secrets — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Source this file only in the operator's protected deployment environment.
 # DO NOT COMMIT THIS FILE.
 
 OAUTH_JWT_PRIVATE_KEY_PEM='$PRIVATE_PEM'
@@ -97,33 +86,19 @@ chmod 600 "$OUTPUT_FILE"
 # --- Print the runbook ----------------------------------------------------
 cat <<EOF
 =========================================================================
-OAuth secrets generated for Fly app: $APP
+Weft OAuth secrets generated
 =========================================================================
 
 Output file:  $OUTPUT_FILE  (chmod 600)
 
 Next steps:
 
-1. Inspect the file:
-       cat "$OUTPUT_FILE"
-
-2. Load into Fly (preferred — single atomic import):
-       fly secrets import < "$OUTPUT_FILE" -a $APP
-
-   OR set individually:
-       source "$OUTPUT_FILE"
-       fly secrets set OAUTH_JWT_PRIVATE_KEY_PEM="\$OAUTH_JWT_PRIVATE_KEY_PEM" -a $APP
-       fly secrets set OAUTH_SESSION_SECRET="\$OAUTH_SESSION_SECRET" -a $APP
-
-3. Set the remaining OAuth env vars that DON'T need to be secret, but
-   must still point at the right URLs for \$APP:
-       fly secrets set OAUTH_ISSUER="https://${APP}.fly.dev" -a $APP
-       fly secrets set SUPABASE_URL="https://YOUR_PROJECT.supabase.co" -a $APP
-       # For single-user mode only (leave unset for multi-user):
-       fly secrets set OAUTH_SOLE_USER_SUB="<your Supabase sub UUID>" -a $APP
-
-4. Shred the local file after the secrets are live:
+1. Load the variables into your protected deployment secret store.
+2. Configure the OAuth issuer, redirect URLs, and deployment-specific values.
+3. Delete the local file after the secrets are stored securely:
        rm -P "$OUTPUT_FILE"   # or use 'shred -u' on Linux
 
+Never commit this file or pass its contents through logs, chat, or a shell
+history that is shared with other users.
 =========================================================================
 EOF

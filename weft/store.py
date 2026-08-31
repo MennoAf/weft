@@ -20,6 +20,7 @@ from weft.models import (
     MemoryCreate,
     MemoryRecall,
     MemoryRelationship,
+    MemorySource,
     MemoryStatus,
     MemoryType,
     RelationType,
@@ -80,6 +81,10 @@ async def store_memory(
     memory_id = _weft_id()
     now = datetime.now(timezone.utc)
     token_count = estimate_tokens(create.content)
+    normalized_facets = {str(facet).lower() for facet in create.project_facets}
+    if create.project_id:
+        normalized_facets.add(create.project_id.lower())
+    project_facets = sorted(normalized_facets)
     write_provenance = get_caller_mode()
     review_status = "active"
     if write_provenance == "agent" and looks_like_instruction(create.content):
@@ -97,13 +102,13 @@ async def store_memory(
             token_count, created_at, updated_at, accessed_at,
             access_count, project_id, agent_id, embedding, status, pinned,
             review_after, workspace_id, user_id, write_provenance, review_status,
-            preference_metadata, embed_composition_version
+            project_facets, preference_metadata, embed_composition_version
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $8, $8,
             0, $9, $10, $11::vector, 'active', $12,
             $13, $14, nullif(current_setting('app.user_id', true), ''), $15, $16,
-            $17::jsonb, $18
+            $17, $18::jsonb, $19
         )
         """,
         memory_id,
@@ -122,6 +127,7 @@ async def store_memory(
         create.workspace_id,
         write_provenance,
         review_status,
+        project_facets,
         create.preference_metadata.model_dump_json() if create.preference_metadata else None,
         embed_composition_version,
     )
@@ -168,6 +174,7 @@ async def store_memory(
         review_after=create.review_after,
         write_provenance=write_provenance,
         review_status=review_status,
+        project_facets=project_facets,
         preference_metadata=create.preference_metadata,
     )
 
@@ -1238,7 +1245,8 @@ async def log_recall_query(
     mode: str | None = None,
     retrieval_mode: str | None = None,
     result_count: int | None = None,
-) -> None:
+    query_id: str | None = None,
+) -> str | None:
     """Record one weft_recall / weft_search_all invocation in weft_recall_queries.
 
     Step 1.5 of the compounding loop (v50). The 2-week observation window
@@ -1257,7 +1265,7 @@ async def log_recall_query(
     break a user-facing query. Callers should treat this as fire-and-forget.
     """
     import uuid
-    query_id = f"rq-{uuid.uuid4().hex[:8]}"
+    query_id = query_id or f"rq-{uuid.uuid4().hex[:8]}"
     user_token = current_user_id.set(user_id) if user_id is not None else None
     try:
         # Fire-and-forget callers run after the request-scoped connection has
@@ -1290,6 +1298,7 @@ async def log_recall_query(
     finally:
         if user_token is not None:
             current_user_id.reset(user_token)
+    return query_id
 
 
 async def record_feedback(
@@ -1752,6 +1761,17 @@ async def get_memory_changes_since(
 
 def _row_to_memory(row: asyncpg.Record) -> Memory:
     """Convert a database row to a Memory model."""
+    # ``asyncpg.Record`` supports mapping subscription but intentionally does
+    # not implement ``dict.get``. Keep required columns strict while retaining
+    # the old ``None`` defaults for optional columns missing from older rows or
+    # narrow test fixtures.
+    def _value(key: str, default=None):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+
+    preference_metadata = _value("preference_metadata")
     return Memory(
         id=row["id"],
         type=MemoryType(row["type"]),
@@ -1766,19 +1786,25 @@ def _row_to_memory(row: asyncpg.Record) -> Memory:
         access_count=row["access_count"],
         project_id=row["project_id"],
         agent_id=row["agent_id"],
-        workspace_id=row["workspace_id"] if row.get("workspace_id") is not None else None,
+        workspace_id=_value("workspace_id"),
         status=MemoryStatus(row["status"]),
-        pinned=bool(row["pinned"]) if row.get("pinned") is not None else False,
-        usefulness_score=float(row["usefulness_score"]) if row["usefulness_score"] is not None else 1.0,
-        usefulness_count=row["usefulness_count"] if row["usefulness_count"] is not None else 0,
-        last_boosted_at=row.get("last_boosted_at"),
-        review_after=row["review_after"] if row.get("review_after") is not None else None,
-        write_provenance=row["write_provenance"] if row.get("write_provenance") is not None else "supervisor",
-        review_status=row["review_status"] if row.get("review_status") is not None else "active",
-        project_facets=list(row["project_facets"]) if row.get("project_facets") else [],
+        pinned=bool(_value("pinned")) if _value("pinned") is not None else False,
+        usefulness_score=(
+            float(_value("usefulness_score"))
+            if _value("usefulness_score") is not None else 1.0
+        ),
+        usefulness_count=(
+            _value("usefulness_count")
+            if _value("usefulness_count") is not None else 0
+        ),
+        last_boosted_at=_value("last_boosted_at"),
+        review_after=_value("review_after"),
+        write_provenance=_value("write_provenance", "supervisor"),
+        review_status=_value("review_status", "active"),
+        project_facets=list(_value("project_facets")) if _value("project_facets") else [],
         preference_metadata=(
-            json.loads(row["preference_metadata"])
-            if isinstance(row.get("preference_metadata"), str)
-            else row.get("preference_metadata")
+            json.loads(preference_metadata)
+            if isinstance(preference_metadata, str)
+            else preference_metadata
         ),
     )

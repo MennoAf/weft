@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-18T18:41:48.466910+00:00",
+  "generated_at": "2026-08-28T02:15:11.443064+00:00",
   "status": "preliminary",
   "warning": "Zero means not observed. No deprecation recommendation is valid until telemetry reports 30 valid coverage days.",
   "tools": [
@@ -19,9 +19,7 @@
         "tests/baseline_signatures.json",
         "tests/test_alert_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -202,9 +200,7 @@
         "tests/baseline_signatures.json",
         "tests/test_autonomy_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -232,7 +228,6 @@
         "tests/test_behaviors_store.py"
       ],
       "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md",
         "docs/tools.md",
         "docs/wiring-your-agent.md"
       ],
@@ -282,7 +277,6 @@
         "tests/test_mcp_tools.py"
       ],
       "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md",
         "docs/tools.md"
       ],
       "migrations_or_tables": [],
@@ -307,7 +301,6 @@
         "tests/test_agent_readiness.py"
       ],
       "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md",
         "docs/tools.md"
       ],
       "migrations_or_tables": [],
@@ -410,9 +403,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [
         "weft/db/migrations/v62_calibration_record_origin.py"
       ],
@@ -435,9 +426,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -460,9 +449,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -484,9 +471,7 @@
         "tests/baseline_signatures.json",
         "tests/test_capability_mcp_tool.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -515,7 +500,6 @@
         "tests/test_replay.py"
       ],
       "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md",
         "docs/tools.md"
       ],
       "migrations_or_tables": [],
@@ -640,9 +624,7 @@
         "tests/baseline_signatures.json",
         "tests/test_cost_tracking.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -666,9 +648,28 @@
         "tests/baseline_signatures.json",
         "tests/test_cost_tracking.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
+      "docs_or_public_contracts": [],
+      "migrations_or_tables": [],
+      "recovery_or_admin_purpose": "UNCONFIRMED",
+      "owner_intent": "UNCONFIRMED",
+      "replacement_path": "UNCONFIRMED",
+      "rollback_plan": "UNCONFIRMED"
+    },
+    {
+      "mcp_name": "weft_count_occurrences",
+      "lifecycle": "default-user-facing",
+      "external_call_count": null,
+      "observation_window": {
+        "status": "PENDING-30-VALID-DAYS",
+        "valid_days_required": 30,
+        "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
+      },
+      "internal_callers": [],
+      "hooks_or_scheduler_references": [],
+      "tests": [
+        "tests/test_turn_recall.py"
       ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -716,9 +717,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -741,9 +740,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -764,9 +761,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -819,9 +814,7 @@
         "benchmarks/personal_agent/__main__.py",
         "benchmarks/personal_agent/seed.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -867,9 +860,7 @@
         "tests/test_agent_readiness.py",
         "tests/test_mcp_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -937,9 +928,7 @@
         "benchmarks/personal_agent/continuity_seed.py",
         "benchmarks/personal_agent/seed.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -982,9 +971,7 @@
         "tests/baseline_signatures.json",
         "tests/test_agent_readiness.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -1088,11 +1075,10 @@
       "hooks_or_scheduler_references": [],
       "tests": [
         "tests/baseline_signatures.json",
-        "tests/test_focus.py"
+        "tests/test_focus.py",
+        "tests/test_mcp_tools.py"
       ],
       "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md",
-        "docs/internal/PRIMER_REFACTOR.md",
         "docs/memory-v2-council-synthesis.md",
         "docs/tools.md"
       ],
@@ -1182,8 +1168,6 @@
       ],
       "docs_or_public_contracts": [
         "docs/claude-code-hooks/README.md",
-        "docs/findings-2026-07-16-prime-hang.md",
-        "docs/internal/BRANDON.md",
         "docs/tools.md",
         "docs/wiring-your-agent.md"
       ],
@@ -1207,9 +1191,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -1238,8 +1220,6 @@
         "tests/test_primer.py"
       ],
       "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md",
-        "docs/internal/BRANDON.md",
         "docs/tools.md",
         "docs/wiring-your-agent.md"
       ],
@@ -1395,9 +1375,7 @@
         "tests/baseline_signatures.json",
         "tests/test_mode_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -1439,7 +1417,6 @@
         "source": "weft_tool_usage_daily + weft_tool_usage_coverage"
       },
       "internal_callers": [
-        "weft/.claude/settings.local.json",
         "weft/data/seeds.yaml",
         "weft/focus.py",
         "weft/skills.py"
@@ -1452,18 +1429,12 @@
         "tests/test_mcp_tools.py",
         "tests/test_phase4_e2e.py",
         "tests/test_prime_streamable_http.py",
-        "tests/test_primer_query.py"
+        "tests/test_primer_query.py",
+        "tests/test_rls_user_id_paths.py"
       ],
       "docs_or_public_contracts": [
         "docs/claude-code-hooks/README.md",
-        "docs/connection-recovery.md",
-        "docs/findings-2026-07-16-prime-hang.md",
-        "docs/internal/BRANDON.md",
-        "docs/internal/KNOWN_GOOD_CONFIG.md",
-        "docs/internal/ROUTE_1_MERGE_CHECKLIST.md",
-        "docs/production-release-gates.md",
         "docs/tools.md",
-        "docs/validation-findings-2026-07.md",
         "docs/wiring-your-agent.md"
       ],
       "migrations_or_tables": [],
@@ -1486,9 +1457,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -1507,7 +1476,8 @@
       "internal_callers": [],
       "hooks_or_scheduler_references": [],
       "tests": [
-        "tests/baseline_signatures.json"
+        "tests/baseline_signatures.json",
+        "tests/test_rls_user_id_paths.py"
       ],
       "docs_or_public_contracts": [],
       "migrations_or_tables": [],
@@ -1534,9 +1504,7 @@
         "tests/baseline_signatures.json"
       ],
       "docs_or_public_contracts": [
-        "docs/connection-recovery.md",
-        "docs/user-identity.md",
-        "docs/wick-handoff.md"
+        "docs/user-identity.md"
       ],
       "migrations_or_tables": [
         "weft/db/migrations/v39_provenance_review_status.py"
@@ -1603,8 +1571,6 @@
         "benchmarks/enumeration_eval/tests/test_cl1_mint.py",
         "benchmarks/enumeration_eval/tests/test_smoke.py",
         "benchmarks/longmemeval/reader.py",
-        "benchmarks/longmemeval/results/phase2_hierarchical_diagnosis_2026_05_22.md",
-        "benchmarks/longmemeval/results/phase2_hierarchical_postmortem_2026_05_16.md",
         "benchmarks/longmemeval/router.py",
         "benchmarks/longmemeval/tests/test_belief_view_integration.py",
         "benchmarks/personal_agent/README.md",
@@ -1625,10 +1591,6 @@
       ],
       "docs_or_public_contracts": [
         "docs/architecture/belief_view.md",
-        "docs/connection-recovery.md",
-        "docs/disaster-recovery.md",
-        "docs/findings-2026-07-16-prime-hang.md",
-        "docs/internal/ROUTE_1_MERGE_CHECKLIST.md",
         "docs/memory-v2-council-synthesis.md",
         "docs/memory-v2-redesign.md",
         "docs/retrieval-and-scope.md",
@@ -1721,11 +1683,6 @@
       ],
       "docs_or_public_contracts": [
         "docs/architecture/belief_view.md",
-        "docs/connection-recovery.md",
-        "docs/disaster-recovery.md",
-        "docs/findings-2026-07-16-prime-hang.md",
-        "docs/internal/BRANDON.md",
-        "docs/internal/V2_BACKLOG.md",
         "docs/memory-v2-council-synthesis.md",
         "docs/memory-v2-redesign.md",
         "docs/tools.md",
@@ -1755,6 +1712,7 @@
       "tests": [
         "tests/baseline_signatures.json",
         "tests/test_agent_readiness.py",
+        "tests/test_mcp_tools.py",
         "tests/test_revise.py"
       ],
       "docs_or_public_contracts": [
@@ -1864,8 +1822,6 @@
         "tests/test_truncation_propagation.py"
       ],
       "docs_or_public_contracts": [
-        "docs/disaster-recovery.md",
-        "docs/findings-2026-07-16-prime-hang.md",
         "docs/tools.md"
       ],
       "migrations_or_tables": [
@@ -1890,12 +1846,11 @@
       "hooks_or_scheduler_references": [],
       "tests": [
         "tests/baseline_signatures.json",
+        "tests/test_check_health.py",
         "tests/test_token_tools.py"
       ],
       "docs_or_public_contracts": [
-        "docs/connection-recovery.md",
-        "docs/user-identity.md",
-        "docs/wick-handoff.md"
+        "docs/user-identity.md"
       ],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
@@ -1918,9 +1873,7 @@
         "tests/baseline_signatures.json",
         "tests/test_token_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/connection-recovery.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -1942,9 +1895,7 @@
         "tests/baseline_signatures.json",
         "tests/test_token_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/connection-recovery.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -2173,9 +2124,7 @@
         "tests/baseline_signatures.json",
         "tests/test_trigger_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -2223,9 +2172,7 @@
         "tests/baseline_signatures.json",
         "tests/test_trigger_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -2277,9 +2224,7 @@
         "tests/baseline_signatures.json",
         "tests/test_trigger_tools.py"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",
@@ -2358,9 +2303,7 @@
       "tests": [
         "tests/baseline_signatures.json"
       ],
-      "docs_or_public_contracts": [
-        "docs/findings-2026-07-16-prime-hang.md"
-      ],
+      "docs_or_public_contracts": [],
       "migrations_or_tables": [],
       "recovery_or_admin_purpose": "UNCONFIRMED",
       "owner_intent": "UNCONFIRMED",

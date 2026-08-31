@@ -106,9 +106,9 @@ async def test_input_error_response_format():
 class TestDetectProjectId:
     """Auto-detect project_id from MCP client roots."""
 
-    def test_extracts_directory_name(self):
+    @pytest.mark.asyncio
+    async def test_extracts_directory_name(self):
         from weft.mcp.tools import _detect_project_id
-        import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         ctx = MagicMock()
@@ -116,12 +116,12 @@ class TestDetectProjectId:
         root.uri = "file:///Users/jason/Projects/Weft"
         ctx.list_roots = AsyncMock(return_value=[root])
 
-        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        result = await _detect_project_id(ctx)
         assert result == "weft"
 
-    def test_lowercases_name(self):
+    @pytest.mark.asyncio
+    async def test_lowercases_name(self):
         from weft.mcp.tools import _detect_project_id
-        import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         ctx = MagicMock()
@@ -129,51 +129,49 @@ class TestDetectProjectId:
         root.uri = "file:///Users/jason/Projects/MyProject"
         ctx.list_roots = AsyncMock(return_value=[root])
 
-        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        result = await _detect_project_id(ctx)
         assert result == "myproject"
 
-    def test_empty_roots_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_empty_roots_returns_none(self):
         from weft.mcp.tools import _detect_project_id
-        import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         ctx = MagicMock()
         ctx.list_roots = AsyncMock(return_value=[])
 
-        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        result = await _detect_project_id(ctx)
         assert result is None
 
-    def test_exception_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_exception_returns_none(self):
         from weft.mcp.tools import _detect_project_id
-        import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         ctx = MagicMock()
         ctx.list_roots = AsyncMock(side_effect=Exception("not supported"))
 
-        result = asyncio.get_event_loop().run_until_complete(_detect_project_id(ctx))
+        result = await _detect_project_id(ctx)
         assert result is None
 
 
 class TestResolveProjectId:
     """Explicit project_id takes precedence over auto-detect."""
 
-    def test_explicit_wins(self):
+    @pytest.mark.asyncio
+    async def test_explicit_wins(self):
         from weft.mcp.tools import _resolve_project_id
-        import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         ctx = MagicMock()
         ctx.list_roots = AsyncMock(return_value=[])
 
-        result = asyncio.get_event_loop().run_until_complete(
-            _resolve_project_id(ctx, "my-project")
-        )
+        result = await _resolve_project_id(ctx, "my-project")
         assert result == "my-project"
 
-    def test_falls_back_to_detect(self):
+    @pytest.mark.asyncio
+    async def test_falls_back_to_detect(self):
         from weft.mcp.tools import _resolve_project_id
-        import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         ctx = MagicMock()
@@ -181,46 +179,36 @@ class TestResolveProjectId:
         root.uri = "file:///Users/jason/Projects/Weft"
         ctx.list_roots = AsyncMock(return_value=[root])
 
-        result = asyncio.get_event_loop().run_until_complete(
-            _resolve_project_id(ctx, None)
-        )
+        result = await _resolve_project_id(ctx, None)
         assert result == "weft"
 
-    def test_rejects_uuid_project_id(self):
+    @pytest.mark.asyncio
+    async def test_rejects_uuid_project_id(self):
         from weft.mcp.tools import _resolve_project_id
-        import asyncio
-        import pytest
         from unittest.mock import MagicMock
 
         ctx = MagicMock()
         with pytest.raises(ValueError, match="looks like a UUID"):
-            asyncio.get_event_loop().run_until_complete(
-                _resolve_project_id(ctx, "49d60a99-5a5f-4f02-a545-18f8a9bb51d5")
-            )
+            await _resolve_project_id(ctx, "49d60a99-5a5f-4f02-a545-18f8a9bb51d5")
 
-    def test_rejects_uppercase_uuid(self):
+    @pytest.mark.asyncio
+    async def test_rejects_uppercase_uuid(self):
         from weft.mcp.tools import _resolve_project_id
-        import asyncio
-        import pytest
         from unittest.mock import MagicMock
 
         ctx = MagicMock()
         with pytest.raises(ValueError, match="looks like a UUID"):
-            asyncio.get_event_loop().run_until_complete(
-                _resolve_project_id(ctx, "49D60A99-5A5F-4F02-A545-18F8A9BB51D5")
-            )
+            await _resolve_project_id(ctx, "49D60A99-5A5F-4F02-A545-18F8A9BB51D5")
 
-    def test_allows_normal_project_names(self):
+    @pytest.mark.asyncio
+    async def test_allows_normal_project_names(self):
         from weft.mcp.tools import _resolve_project_id
-        import asyncio
         from unittest.mock import MagicMock
 
         ctx = MagicMock()
         # These should all pass without error
         for name in ["delphi", "loom", "weft", "my-project", "pitch_room"]:
-            result = asyncio.get_event_loop().run_until_complete(
-                _resolve_project_id(ctx, name)
-            )
+            result = await _resolve_project_id(ctx, name)
             assert result == name
 
 
@@ -299,3 +287,14 @@ class TestParseReviewAfter:
         assert result is not None
         assert result.year == 2026
         assert result.month == 6
+
+
+def test_compose_project_name_defaults_and_allows_isolation(monkeypatch):
+    """Local infrastructure can be isolated without changing the default."""
+    from weft.cli import _compose_project_name
+
+    monkeypatch.delenv("WEFT_COMPOSE_PROJECT", raising=False)
+    assert _compose_project_name() == "weft"
+
+    monkeypatch.setenv("WEFT_COMPOSE_PROJECT", "weft-rc-smoke")
+    assert _compose_project_name() == "weft-rc-smoke"

@@ -11,6 +11,8 @@ from fastembed import TextEmbedding
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+# Native output width of BAAI/bge-small-en-v1.5; configured vectors may be padded.
+NATIVE_DIMENSIONS = 384
 DEFAULT_DIMENSIONS = 768
 
 
@@ -25,15 +27,16 @@ class FastEmbedProvider:
     """Local embedding provider using FastEmbed (ONNX runtime).
 
     If ``dimensions`` exceeds the model's native output (384), vectors are
-    zero-padded so they fit wider pgvector columns without a schema change.
+    zero-padded so they fit the existing 768-wide pgvector columns without a
+    schema change.
     Cosine similarity is unaffected because the extra zeros contribute nothing
     to dot-product or magnitude.
     """
 
     def __init__(self, model_name: str = DEFAULT_MODEL, dimensions: int = DEFAULT_DIMENSIONS, **_kwargs):
         self._model_name = model_name
-        self._native_dimensions = DEFAULT_DIMENSIONS
-        self._dimensions = max(dimensions, DEFAULT_DIMENSIONS)
+        self._native_dimensions = NATIVE_DIMENSIONS
+        self._dimensions = max(dimensions, NATIVE_DIMENSIONS)
 
     @property
     def dimensions(self) -> int:

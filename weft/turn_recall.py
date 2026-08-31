@@ -26,10 +26,12 @@ Spec: weft-d3a2ef78. Loom task: loom-d9ac7e18.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import logging
 import re
-from datetime import datetime
-from typing import Any, Literal
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Callable, Literal
 
 import asyncpg
 
@@ -158,17 +160,191 @@ _ANCHOR_PATTERNS: tuple[re.Pattern, ...] = (
 )
 
 
-def temporal_query_variants(query: str) -> list[str]:
-    """Return the original query plus an event-focused temporal variant.
+@dataclass(frozen=True, slots=True)
+class TemporalWindow:
+    """A UTC calendar window used by the benchmark temporal probe."""
 
-    Temporal scaffolding (``how many weeks ago did I`` / ``when did we``)
-    often dominates keyword ranking while the event name carries the useful
-    retrieval signal. Keep the original for semantic recall, and add a
-    conservative lexical variant only when removing the scaffolding leaves a
-    meaningful event phrase. Variants are ordered original-first and are
-    deduplicated case-insensitively.
+    since: datetime
+    until: datetime
+
+
+_RELATIVE_QUANTITY_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+_WEEKDAY_NAMES = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+_RELATIVE_DATE_PATTERN = re.compile(
+    r"\b(?P<quantity>\d+|(?:a\s+)?couple\s+of|"
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+    r"(?P<unit>days?|weeks?|months?|years?)\s+ago\b",
+    re.IGNORECASE,
+)
+_LAST_WEEKDAY_PATTERN = re.compile(
+    r"\blast\s+(?P<weekday>monday|tuesday|wednesday|thursday|"
+    r"friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+_RECURRING_WEEKDAY_PATTERN = re.compile(
+    r"\b(?:every|each)\s+(?:monday|tuesday|wednesday|thursday|"
+    r"friday|saturday|sunday)s?\b|"
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?"
+    r"\s*(?:,|and|&)\s*(?:monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday)s?\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_question_date(value: str | date | datetime) -> date | None:
+    """Parse the date formats used by LongMemEval without guessing."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().replace("/", "-")
+    if not normalized:
+        return None
+    try:
+        if "T" in normalized:
+            return datetime.fromisoformat(normalized.replace("Z", "+00:00")).date()
+        return date.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _relative_quantity(value: str) -> int | None:
+    normalized = " ".join(value.casefold().split())
+    if normalized.isdigit():
+        return int(normalized)
+    if normalized in _RELATIVE_QUANTITY_WORDS:
+        return _RELATIVE_QUANTITY_WORDS[normalized]
+    if normalized in {"couple of", "a couple of"}:
+        return 2
+    return None
+
+
+def _subtract_calendar_months(value: date, months: int) -> date:
+    """Subtract calendar months, clamping an end-of-month day."""
+    month_index = value.year * 12 + value.month - 1 - months
+    year, month_zero_based = divmod(month_index, 12)
+    month = month_zero_based + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _window_for_center(center: date, margin_days: int) -> TemporalWindow:
+    if margin_days < 0:
+        raise ValueError("margin_days must be non-negative")
+    start = center - timedelta(days=margin_days)
+    end = center + timedelta(days=margin_days)
+    return TemporalWindow(
+        since=datetime.combine(start, time.min, tzinfo=timezone.utc),
+        until=datetime.combine(end, time.max, tzinfo=timezone.utc),
+    )
+
+
+def parse_temporal_window(
+    query: str,
+    question_date: str | date | datetime,
+    *,
+    margin_days: int = 1,
+) -> TemporalWindow | None:
+    """Infer one conservative UTC calendar window from a relative-time query.
+
+    The helper is deliberately pure and conservative. It recognizes one
+    unambiguous relative expression (``N days/weeks/months/years ago``,
+    ``a couple of days ago``, or ``last <weekday>``) relative to the supplied
+    benchmark ``question_date``. Recurring weekday expressions, multiple time
+    expressions, malformed dates, and unsupported wording return ``None`` so
+    callers can leave the normal unfiltered retrieval path unchanged.
     """
-    variants = [query.strip()]
+    reference = _parse_question_date(question_date)
+    if reference is None or not isinstance(query, str):
+        return None
+    if _RECURRING_WEEKDAY_PATTERN.search(query):
+        return None
+
+    matches: list[tuple[str, re.Match[str]]] = [
+        ("relative", match) for match in _RELATIVE_DATE_PATTERN.finditer(query)
+    ]
+    matches.extend(
+        ("weekday", match) for match in _LAST_WEEKDAY_PATTERN.finditer(query)
+    )
+    if len(matches) != 1:
+        return None
+
+    kind, match = matches[0]
+    if kind == "relative":
+        quantity = _relative_quantity(match.group("quantity"))
+        if quantity is None:
+            return None
+        unit = match.group("unit").casefold()
+        if unit.startswith("day"):
+            center = reference - timedelta(days=quantity)
+        elif unit.startswith("week"):
+            center = reference - timedelta(weeks=quantity)
+        elif unit.startswith("month"):
+            center = _subtract_calendar_months(reference, quantity)
+        else:
+            center = _subtract_calendar_months(reference, quantity * 12)
+    else:
+        weekday = _WEEKDAY_NAMES[match.group("weekday").casefold()]
+        days_ago = (reference.weekday() - weekday) % 7 or 7
+        center = reference - timedelta(days=days_ago)
+
+    return _window_for_center(center, margin_days)
+
+
+def temporal_query_variants(
+    query: str,
+    *,
+    include_embedded_temporal_variant: bool = False,
+) -> list[str]:
+    """Return conservative event-focused variants for a temporal query.
+
+    The historical variants remove temporal scaffolding at the *start* of a
+    query (``how many weeks ago did I ...`` / ``when did we ...``).  The
+    benchmark miss matrix also contains questions where the time expression
+    is embedded in, or trails, the event clause (``what did I buy 10 days
+    ago?``).  Those are opt-in because removing a time phrase can discard a
+    useful retrieval signal for ordinary callers.
+
+    Variants are deduplicated case-insensitively.  The embedded variant is
+    placed first when requested so it is actually probed even when the
+    original query already fills the per-probe output budget; the original
+    query remains immediately available as the fallback variant.
+    """
+    original = query.strip()
+    variants = [original]
+
+    def append_variant(value: str) -> None:
+        value = re.sub(r"\s+([?.!,])", r"\1", value)
+        value = re.sub(r"\s{2,}", " ", value).strip(" ?.,")
+        if len(value) < 4:
+            return
+        if value.casefold() in {variant.casefold() for variant in variants}:
+            return
+        variants.append(value)
+
     cleaned = re.sub(
         r"^\s*how\s+many\s+times\s+(?:have|has)\s+(?:i|we|you|we\s+all)\s+",
         "",
@@ -189,9 +365,7 @@ def temporal_query_variants(query: str) -> list[str]:
         r"^\s*(?:did\s+)?(?:i|we|you)\s+", "", cleaned,
         count=1, flags=re.IGNORECASE,
     )
-    cleaned = cleaned.strip(" ?.,")
-    if len(cleaned) >= 4 and cleaned.casefold() != query.strip().casefold():
-        variants.append(cleaned)
+    append_variant(cleaned)
 
     chronology = re.sub(
         r"^\s*(?:what\s+is\s+the\s+order\s+of|order\s+of|what\s+was\s+the\s+order\s+of)\s+"
@@ -204,14 +378,123 @@ def temporal_query_variants(query: str) -> list[str]:
     chronology = re.sub(
         r"\s+from\s+earliest\s+to\s+latest\s*\??$", "", chronology,
         flags=re.IGNORECASE,
-    ).strip(" ?.,")
-    if (
-        len(chronology) >= 4
-        and chronology.casefold() not in {variant.casefold() for variant in variants}
-        and chronology.casefold() != query.strip(" ?.,").casefold()
-    ):
-        variants.append(chronology)
+    )
+    # A chronology rewrite that only removes terminal punctuation is not a
+    # distinct probe. Preserve the historical contract: the punctuation-
+    # stripped original is useful for the legacy scaffolding case, but do not
+    # add it as a redundant third variant for ordinary event questions.
+    if chronology.strip(" ?.,").casefold() != original.strip(" ?.,").casefold():
+        append_variant(chronology)
+
+    if include_embedded_temporal_variant:
+        event_focused = query
+        # Relative durations: ``10 days ago``, ``four weeks ago``, and
+        # ``a couple of days ago``.  Keep the surrounding event wording.
+        event_focused = re.sub(
+            r"\b(?:a\s+couple\s+of|a\s+few|one|two|three|four|five|six|"
+            r"seven|eight|nine|ten|\d+)\s+"
+            r"(?:days?|weeks?|months?|years?|hours?|minutes?)\s+ago\b",
+            " ",
+            event_focused,
+            flags=re.IGNORECASE,
+        )
+        # A weekday plus its relative duration is one temporal unit; remove
+        # it together so ``on the Wednesday two months ago`` does not leave
+        # malformed residue in the event query.
+        event_focused = re.sub(
+            r"\b(?:on\s+(?:the\s+)?)?(?:last\s+)?"
+            r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+            r"(?:s\s+and\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))?"
+            r"(?:\s+(?:a\s+couple\s+of|a\s+few|one|two|three|four|five|six|"
+            r"seven|eight|nine|ten|\d+)\s+(?:days?|weeks?|months?|years?)\s+ago)?\b",
+            " ",
+            event_focused,
+            flags=re.IGNORECASE,
+        )
+        # Relative named days/weeks and recurring weekday qualifiers.
+        event_focused = re.sub(
+            r"\b(?:last|this|next)\s+(?:monday|tuesday|wednesday|thursday|"
+            r"friday|saturday|sunday|week|month|year)\b",
+            " ",
+            event_focused,
+            flags=re.IGNORECASE,
+        )
+        event_focused = re.sub(
+            r"\bon\s+(?:mondays?|tuesdays?|wednesdays?|thursdays?|"
+            r"fridays?|saturdays?|sundays?)\s+and\s+"
+            r"(?:mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|"
+            r"saturdays?|sundays?)\b",
+            " ",
+            event_focused,
+            flags=re.IGNORECASE,
+        )
+        event_focused = re.sub(r"\s+", " ", event_focused).strip()
+        if event_focused.casefold() != original.casefold():
+            event_focused = re.sub(r"\s+([?.!,])", r"\1", event_focused)
+            event_focused = event_focused.strip(" ?.,")
+            if len(event_focused) >= 4 and event_focused.casefold() not in {
+                variant.casefold() for variant in variants
+            }:
+                variants.insert(0, event_focused)
+
     return variants
+
+
+# Stopwords for the benchmark-only multi-session representation. These words
+# express question framing, aggregation, or temporal scaffolding rather than
+# the entity/event being enumerated. Keep this list deliberately small and
+# deterministic: the treatment is opt-in and must not rewrite production
+# queries or silently remove named entities.
+_MULTI_SESSION_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "an", "about", "after", "am", "and", "are", "as", "at",
+        "be", "been", "before", "between", "but", "by", "can", "could",
+        "count", "days", "day", "different", "did", "do", "does", "during",
+        "each", "few", "for", "from", "had", "has", "have", "how", "i",
+        "in", "into", "is", "it", "last", "long", "many", "me", "months",
+        "month", "much", "my", "next", "number", "of", "on", "or", "our",
+        "out", "over", "past", "please", "should", "the", "their", "them",
+        "these", "this", "those", "three", "through", "times", "to", "total",
+        "two", "typical", "us", "was", "we", "were", "what", "whats", "when",
+        "where", "which", "with", "would", "years", "year", "you", "your",
+        "weeks", "week", "one", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "eleven", "twelve",
+    }
+)
+_MULTI_SESSION_QUERY_TOKEN_PATTERN = re.compile(
+    r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*"
+)
+
+
+def multi_session_query_variant(query: str) -> str | None:
+    """Build one entity/event-focused representation for multi-session recall.
+
+    This is a conservative, benchmark-only query transformation. It removes
+    aggregation framing (``how many``, ``total``), first-person glue, and
+    obvious relative-time scaffolding while retaining the nouns and event
+    verbs that identify the sessions to enumerate. It returns ``None`` when
+    the query is not a string, has no usable content token, or would be
+    unchanged. Callers must keep the original query as the primary probe.
+    """
+    if not isinstance(query, str):
+        return None
+    original = " ".join(query.strip().split())
+    if not original:
+        return None
+
+    tokens = _MULTI_SESSION_QUERY_TOKEN_PATTERN.findall(original)
+    kept = [
+        token for token in tokens
+        if token.casefold() not in _MULTI_SESSION_QUERY_STOPWORDS
+        and not token.isdigit()
+    ]
+    if not kept:
+        return None
+
+    variant = " ".join(kept).strip()
+    if len(variant) < 3 or variant.casefold() == original.casefold():
+        return None
+    return variant
 
 
 def extract_anchors(query: str) -> list[str]:
@@ -237,6 +520,44 @@ def extract_anchors(query: str) -> list[str]:
     return []
 
 
+def event_focused_anchor_query(anchor: str) -> str | None:
+    """Return one conservative event-focused representation of an anchor.
+
+    This is deliberately deterministic and lexical. It removes only temporal
+    scaffolding that can crowd the event out of a per-anchor probe, while
+    retaining the anchor's event words and named entities. ``None`` means the
+    representation would be unchanged (or too short to be useful).
+    """
+    if not isinstance(anchor, str):
+        return None
+    original = " ".join(anchor.strip().split())
+    if not original:
+        return None
+    def remove_first_person_glue(value: str) -> str:
+        # Only remove a leading pronoun. Internal ``I``/``we`` tokens can be
+        # part of the event wording and are intentionally preserved.
+        return re.sub(
+            r"^\s*(?:i|we|you)\s+", "", value,
+            count=1, flags=re.IGNORECASE,
+        ).strip(" ?.,")
+
+    variants = temporal_query_variants(
+        original, include_embedded_temporal_variant=True,
+    )
+    for variant in variants:
+        focused = remove_first_person_glue(variant)
+        if focused.casefold() != original.casefold() and len(focused) >= 4:
+            return focused
+    stripped = re.sub(
+        r"^\s*(?:the|a|an)\s+(?:time|day|week|month|year)\s+",
+        "", original, count=1, flags=re.IGNORECASE,
+    ).strip(" ?.,")
+    focused = remove_first_person_glue(stripped)
+    if len(focused) >= 4 and focused.casefold() != original.casefold():
+        return focused
+    return None
+
+
 # --- Multi-anchor recall ---
 
 
@@ -249,6 +570,19 @@ async def temporal_anchor(
     embedder: EmbeddingProvider | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
+    executor: asyncpg.Connection | None = None,
+    as_of: datetime | None = None,
+    diag_callback: Callable[[str, list, list, list[EpisodeTurn]], None] | None = None,
+    probe_diag_callback: Callable[[dict[str, Any]], None] | None = None,
+    sql_diag_callback: Callable[[dict[str, Any]], None] | None = None,
+    candidate_sql_limit: int | None = None,
+    fusion_candidate_limit: int | None = None,
+    use_anchor_local_variant: bool = True,
+    anchor_candidate_sql_limit: int | None = None,
+    anchor_result_limit: int | None = None,
+    include_embedded_temporal_variant: bool = False,
+    use_event_focused_anchor_representation: bool = False,
+    use_stored_search_tsv: bool = False,
 ) -> dict[str, list[EpisodeTurn]]:
     """Per-anchor turn recall for multi-anchor temporal questions.
 
@@ -267,6 +601,23 @@ async def temporal_anchor(
             sub-queries. If None, anchor sub-queries are keyword-only
             (still useful — anchor strings tend to contain the rare
             keywords that BM25 hits cleanly).
+        executor: optional connection shared by every probe and fallback.
+        as_of: fixed timestamp forwarded to relevance reranking.
+        diag_callback: observational callback receiving ``(anchor, vector,
+            keyword, final_turns)`` for each probe. Callback failures are
+            swallowed so diagnostics cannot alter retrieval.
+        candidate_sql_limit: optional raw candidate width for each probe.
+        anchor_candidate_sql_limit: optional temporal-only raw candidate width;
+            applied independently to each anchor and variant probe. When None,
+            ``candidate_sql_limit`` is used.
+        anchor_result_limit: optional per-anchor fused/merged output cap. This
+            widens only the output/merge budget; ``top_k_per_anchor`` remains
+            the SQL-width basis and the caller still owns the final Reader cap.
+        fusion_candidate_limit: optional RRF absent-half penalty width.
+        include_embedded_temporal_variant: opt-in removal of embedded or
+            trailing relative-time wording before the original query probe.
+        use_stored_search_tsv: benchmark-only opt-in forwarded to
+            ``recall_turns`` for the generated FTS column.
 
     Returns:
         ``{anchor_text: [EpisodeTurn, ...]}`` ordered as anchors appear
@@ -274,48 +625,248 @@ async def temporal_anchor(
         anchor extraction failed.
     """
     anchors = extract_anchors(query)
+    requested_anchor_result_limit = (
+        top_k_per_anchor if anchor_result_limit is None else int(anchor_result_limit)
+    )
+    effective_anchor_result_limit = max(
+        top_k_per_anchor, requested_anchor_result_limit,
+    )
     if not anchors:
         # No multi-anchor pattern — search the original question and, for
         # temporal scaffolding, an event-focused lexical variant. Unioning
         # these result sets prevents words like "how many weeks ago" from
         # crowding the actual event (e.g. "friends and family sale at
         # Nordstrom") out of the candidate pool.
-        variants = temporal_query_variants(query)
+        variants = temporal_query_variants(
+            query,
+            include_embedded_temporal_variant=include_embedded_temporal_variant,
+        )
         seen: set[str] = set()
         merged: list[EpisodeTurn] = []
         for variant in variants:
             embedding = await embedder.embed(variant) if embedder else None
+            vector_rows: list = []
+            keyword_rows: list = []
+
+            def _probe_diag(vec: list, kw: list) -> None:
+                vector_rows.extend(vec)
+                keyword_rows.extend(kw)
+
+            def _sql_diag(event: dict[str, Any]) -> None:
+                if sql_diag_callback is None:
+                    return
+                payload = dict(event)
+                payload.update({
+                    "anchor": query,
+                    "query_variant": variant,
+                    "representation": (
+                        "original" if variant.casefold() == query.casefold()
+                        else "event_focused"
+                    ),
+                })
+                try:
+                    sql_diag_callback(payload)
+                except Exception:
+                    logger.warning(
+                        "temporal SQL diagnostic callback failed; preserving retrieval result",
+                        exc_info=True,
+                    )
+
             turns = await recall_turns(
                 pool, variant,
                 project_id=project_id, since=since, until=until,
                 top_k=top_k_per_anchor, embedding=embedding,
+                executor=executor, as_of=as_of,
+                candidate_sql_limit=candidate_sql_limit,
+                fusion_candidate_limit=fusion_candidate_limit,
+                result_limit=effective_anchor_result_limit,
+                diag_callback=_probe_diag,
+                sql_diag_callback=(
+                    _sql_diag if sql_diag_callback is not None else None
+                ),
+                use_stored_search_tsv=use_stored_search_tsv,
             )
+            if diag_callback is not None:
+                try:
+                    diag_callback(variant, vector_rows, keyword_rows, turns)
+                except Exception:
+                    logger.warning(
+                        "temporal anchor diagnostic callback failed; preserving retrieval result",
+                        exc_info=True,
+                    )
+            if probe_diag_callback is not None:
+                try:
+                    probe_diag_callback({
+                        "anchor": query,
+                        "query": variant,
+                        "representation": "original" if variant.casefold() == query.casefold() else "event_focused",
+                        "vector_candidate_count": len(vector_rows),
+                        "keyword_candidate_count": len(keyword_rows),
+                        "candidate_count": len({row["id"] for row in vector_rows} | {row["id"] for row in keyword_rows}),
+                        "candidate_ids": sorted({row["id"] for row in vector_rows} | {row["id"] for row in keyword_rows}),
+                        "retrieved_turn_ids": [turn.id for turn in turns],
+                        "requested_output_cap": requested_anchor_result_limit,
+                        "effective_output_cap": effective_anchor_result_limit,
+                    })
+                except Exception:
+                    logger.warning(
+                        "temporal probe diagnostic callback failed; preserving retrieval result",
+                        exc_info=True,
+                    )
             for turn in turns:
                 if turn.id in seen:
                     continue
                 seen.add(turn.id)
                 merged.append(turn)
-                if len(merged) >= top_k_per_anchor:
+                if len(merged) >= effective_anchor_result_limit:
                     break
-            if len(merged) >= top_k_per_anchor:
+            if len(merged) >= effective_anchor_result_limit:
                 break
         if not merged:
             # Empty hybrid hit — try a temporal-only fallback so the
-            # Reader at least sees recent dialogue.
+            # Reader at least sees recent dialogue. Keep it on the same
+            # executor when benchmark diagnostics provide one.
             merged = await list_recent_turns(
                 pool, project_id=project_id, since=since, until=until,
-                limit=top_k_per_anchor,
+                limit=effective_anchor_result_limit, executor=executor,
             )
-        return {query: merged[:top_k_per_anchor]}
+        return {query: merged[:effective_anchor_result_limit]}
 
     out: dict[str, list[EpisodeTurn]] = {}
+    probe_candidate_sql_limit = (
+        anchor_candidate_sql_limit
+        if anchor_candidate_sql_limit is not None
+        else candidate_sql_limit
+    )
     for anchor in anchors:
-        embedding = await embedder.embed(anchor) if embedder else None
-        out[anchor] = await recall_turns(
-            pool, anchor,
-            project_id=project_id, since=since, until=until,
-            top_k=top_k_per_anchor, embedding=embedding,
-        )
+        # Probe the original anchor first. Optionally add one conservative
+        # event-focused local variant and union locally, preserving the
+        # per-anchor budget and output order. The benchmark A/B harness can
+        # disable this exact variant to provide a genuine baseline arm;
+        # production callers retain the historical default (enabled).
+        anchor_variants = [(anchor, "original")]
+        if use_event_focused_anchor_representation:
+            focused = event_focused_anchor_query(anchor)
+            if focused is not None and focused.casefold() not in {
+                variant.casefold() for variant, _ in anchor_variants
+            }:
+                anchor_variants.append((focused, "event_focused"))
+        if use_anchor_local_variant:
+            stripped = re.sub(
+                r"^\s*(?:the|a|an)\s+(?:time|day|week|month|year)\s+",
+                "", anchor, count=1, flags=re.IGNORECASE,
+            ).strip(" ?.,")
+            if len(stripped) >= 4 and stripped.casefold() != anchor.casefold():
+                anchor_variants.append((stripped, "anchor_local"))
+
+        if include_embedded_temporal_variant:
+            # ``extract_anchors`` can capture an event together with an
+            # embedded/trailing relative-time phrase.  Reuse the same
+            # conservative event-focused transform as the no-anchor path,
+            # but add only its first (event-focused) variant here.  Put it
+            # first so the opt-in treatment is exercised even when the
+            # original anchor fills the per-anchor output budget.
+            embedded_variants = temporal_query_variants(
+                anchor, include_embedded_temporal_variant=True,
+            )
+            if embedded_variants and (
+                embedded_variants[0].casefold() != anchor.casefold()
+                and embedded_variants[0].casefold() not in {
+                    variant.casefold() for variant, _ in anchor_variants
+                }
+            ):
+                anchor_variants.insert(0, (embedded_variants[0], "embedded_event_focused"))
+
+        merged_anchor: list[EpisodeTurn] = []
+        seen_anchor: set[str] = set()
+        for anchor_variant, representation in anchor_variants:
+            embedding = await embedder.embed(anchor_variant) if embedder else None
+            vector_rows: list = []
+            keyword_rows: list = []
+
+            def _probe_diag(vec: list, kw: list) -> None:
+                vector_rows.extend(vec)
+                keyword_rows.extend(kw)
+
+            def _sql_diag(event: dict[str, Any]) -> None:
+                if sql_diag_callback is None:
+                    return
+                payload = dict(event)
+                payload.update({
+                    "anchor": anchor,
+                    "query_variant": anchor_variant,
+                    "representation": representation,
+                })
+                try:
+                    sql_diag_callback(payload)
+                except Exception:
+                    logger.warning(
+                        "temporal SQL diagnostic callback failed; preserving retrieval result",
+                        exc_info=True,
+                    )
+
+            turns = await recall_turns(
+                pool, anchor_variant,
+                project_id=project_id, since=since, until=until,
+                top_k=top_k_per_anchor, embedding=embedding,
+                executor=executor, as_of=as_of,
+                candidate_sql_limit=probe_candidate_sql_limit,
+                fusion_candidate_limit=fusion_candidate_limit,
+                result_limit=effective_anchor_result_limit,
+                diag_callback=_probe_diag,
+                sql_diag_callback=(
+                    _sql_diag if sql_diag_callback is not None else None
+                ),
+                use_stored_search_tsv=use_stored_search_tsv,
+            )
+            if diag_callback is not None:
+                try:
+                    diag_callback(anchor_variant, vector_rows, keyword_rows, turns)
+                except Exception:
+                    logger.warning(
+                        "temporal anchor diagnostic callback failed; preserving retrieval result",
+                        exc_info=True,
+                    )
+            if probe_diag_callback is not None:
+                try:
+                    vector_ids = [str(row["id"]) for row in vector_rows]
+                    keyword_ids = [str(row["id"]) for row in keyword_rows]
+                    candidate_ids = sorted(set(vector_ids) | set(keyword_ids))
+                    probe_diag_callback({
+                        "anchor": anchor,
+                        "query": anchor_variant,
+                        "representation": representation,
+                        "vector_candidate_count": len(vector_rows),
+                        "keyword_candidate_count": len(keyword_rows),
+                        "candidate_count": len(candidate_ids),
+                        "candidate_ids": candidate_ids,
+                        "retrieved_turn_ids": [str(turn.id) for turn in turns],
+                        "requested_output_cap": requested_anchor_result_limit,
+                        "effective_output_cap": effective_anchor_result_limit,
+                    })
+                except Exception:
+                    logger.warning(
+                        "temporal probe diagnostic callback failed; preserving retrieval result",
+                        exc_info=True,
+                    )
+            for turn in turns:
+                if turn.id in seen_anchor:
+                    continue
+                seen_anchor.add(turn.id)
+                merged_anchor.append(turn)
+                if len(merged_anchor) >= effective_anchor_result_limit:
+                    break
+            # The benchmark event-focused treatment must execute every
+            # declared representation probe so diagnostics measure the arm,
+            # even when the original probe already fills the output cap. Keep
+            # the historical short-circuit for the baseline and production
+            # callers that do not opt into that treatment.
+            if (
+                len(merged_anchor) >= effective_anchor_result_limit
+                and not use_event_focused_anchor_representation
+            ):
+                break
+        out[anchor] = merged_anchor[:effective_anchor_result_limit]
     return out
 
 
@@ -338,6 +889,7 @@ async def recall_both(
     topic: str | None = None,
     sources: list[str] | None = None,
     include_agent_provenance: bool = True,
+    use_stored_search_tsv: bool = False,
 ) -> list[dict[str, Any]]:
     """Run belief + turn recall in parallel, fuse via RRF, return unified list.
 
@@ -437,6 +989,7 @@ async def recall_both(
                 top_k_episodes=10,
                 top_k_turns=half_k,
                 embedding=embedding,
+                use_stored_search_tsv=use_stored_search_tsv,
             )
         return await recall_turns(
             pool, query,
@@ -445,6 +998,7 @@ async def recall_both(
             until=until,
             top_k=half_k,
             embedding=embedding,
+            use_stored_search_tsv=use_stored_search_tsv,
         )
 
     # Parallel by default. When the caller has activated an RLS-scoped

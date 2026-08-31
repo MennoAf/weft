@@ -15,6 +15,13 @@ import click
 from weft.config import CONFIG_PATH, load_config, load_config_file, save_config_value
 
 COMPOSE_FILE = Path(__file__).parent.parent / "docker-compose.weft.yml"
+_COMPOSE_PROJECT_ENV = "WEFT_COMPOSE_PROJECT"
+
+
+def _compose_project_name() -> str:
+    """Return the Docker Compose project name for local infrastructure."""
+    return os.environ.get(_COMPOSE_PROJECT_ENV, "weft")
+
 
 # MCP server entry for Claude Code
 _MCP_ENTRY = {
@@ -68,7 +75,7 @@ def up(global_: bool):
     """Start Weft infrastructure (Postgres + Redis) and run migrations."""
     click.echo("Starting Weft containers...")
     result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", "weft", "up", "-d"],
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", _compose_project_name(), "up", "-d"],
         capture_output=True,
         text=True,
     )
@@ -212,7 +219,7 @@ def down():
     """Stop Weft infrastructure."""
     click.echo("Stopping Weft containers...")
     result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", "weft", "down"],
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", _compose_project_name(), "down"],
         capture_output=True,
         text=True,
     )
