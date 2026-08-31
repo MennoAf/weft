@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'rc-*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.x'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Verify package metadata
+        run: |
+          uv run --python ${{ matrix.python-version }} python -c \
+            'import importlib.metadata, weft; assert weft.__version__ == importlib.metadata.version("weft-memory") == "1.0.0rc1"; print(weft.__version__)'
+
+      - name: Run provider-free test suite
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ -q
+
+  wheel-smoke:
+    name: Wheel install and Docker smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.x'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Build wheel
+        run: uv build
+
+      - name: Install wheel in clean environment
+        run: |
+          uv venv --python 3.13 /tmp/weft-wheel-smoke
+          uv pip install --python /tmp/weft-wheel-smoke/bin/python dist/*.whl
+          /tmp/weft-wheel-smoke/bin/python -c \
+            'import importlib.metadata, weft; assert weft.__version__ == importlib.metadata.version("weft-memory") == "1.0.0rc1"; print(weft.__version__)'
+
+      - name: Build RC Docker image
+        run: docker build --tag weft-rc-ci:${{ github.sha }} .
+
+      - name: Run bounded migration and persistence smoke
+        run: python scripts/rc_smoke.py --image weft-rc-ci:${{ github.sha }}
