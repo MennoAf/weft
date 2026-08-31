@@ -12,7 +12,9 @@ jobs:
   tests:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Python 3.12 completes the full suite materially slower than 3.13.
+    # Keep the suite intact; this is a wall-clock allowance, not a test skip.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
