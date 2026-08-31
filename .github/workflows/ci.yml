@@ -12,6 +12,7 @@ jobs:
   tests:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -42,8 +43,9 @@ jobs:
         run: uv run --python ${{ matrix.python-version }} pytest tests/ -q
 
   wheel-smoke:
-    name: Wheel install and Docker smoke
+    name: Wheel install and Docker image smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@v4
