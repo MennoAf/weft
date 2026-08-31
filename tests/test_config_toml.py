@@ -113,7 +113,7 @@ def test_load_config_with_toml(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
 
     # Clear env vars that might interfere
-    for var in ["WEFT_DATABASE_URL", "WEFT_REDIS_URL", "WEFT_EMBEDDING_PROVIDER",
+    for var in ["WEFT_DATABASE_URL", "WEFT_DATABASE_CA_CERT_FILE", "WEFT_REDIS_URL", "WEFT_EMBEDDING_PROVIDER",
                 "WEFT_EMBEDDING_MODEL", "WEFT_LOG_LEVEL"]:
         monkeypatch.delenv(var, raising=False)
 
@@ -203,6 +203,16 @@ def test_db_timeout_defaults_are_bounded():
     assert db.pool_max_size >= 16
 
 
+def test_db_ca_cert_file_env_override(tmp_path: Path, monkeypatch):
+    ca_file = tmp_path / "supabase-ca.crt"
+    ca_file.write_text("configured-ca-material", encoding="utf-8")
+    monkeypatch.setenv("WEFT_DATABASE_CA_CERT_FILE", str(ca_file))
+
+    config = load_config()
+
+    assert config.database.ca_cert_file == ca_file
+
+
 def test_db_pool_and_timeout_env_overrides(tmp_path: Path, monkeypatch):
     """Pool sizing and timeouts are tunable in prod without a redeploy."""
     toml_path = tmp_path / ".weft" / "config.toml"
@@ -219,6 +229,72 @@ def test_db_pool_and_timeout_env_overrides(tmp_path: Path, monkeypatch):
 
 
 # --- CLI tests ---
+
+
+def test_migrate_command_uses_ca_file_and_owner_runner(monkeypatch, tmp_path: Path):
+    from unittest.mock import AsyncMock
+
+    from weft.cli import _run_owner_migrations
+
+    ca_file = tmp_path / "supabase-ca.crt"
+    ca_file.write_text("configured-ca-material", encoding="utf-8")
+    monkeypatch.setenv("WEFT_DATABASE_CA_CERT_FILE", str(ca_file))
+    monkeypatch.setenv("WEFT_OWNER_DATABASE_URL", "postgresql://postgres:owner@db.example.supabase.co/postgres")
+    monkeypatch.setenv("WEFT_MIGRATION_MODE", "apply")
+
+    config = load_config()
+    pool = AsyncMock()
+    pool.fetchval.return_value = "postgres"
+    pool.close = AsyncMock()
+
+    async def fake_create_pool(_config):
+        return pool
+
+    async def fake_run_migrations(_pool):
+        return [73]
+
+    monkeypatch.setattr("weft.db.connection.create_pool", fake_create_pool)
+    monkeypatch.setattr("weft.db.migrations.run_migrations", fake_run_migrations)
+
+    import asyncio
+    assert asyncio.run(_run_owner_migrations(config)) == [73]
+    pool.close.assert_awaited_once()
+
+
+def test_migrate_cli_reports_applied_versions(monkeypatch, tmp_path: Path):
+    from unittest.mock import AsyncMock
+
+    runner = CliRunner()
+    ca_file = tmp_path / "supabase-ca.crt"
+    ca_file.write_text("configured-ca-material", encoding="utf-8")
+    monkeypatch.setenv("WEFT_OWNER_DATABASE_URL", "postgresql://postgres:owner@db.example.supabase.co/postgres")
+    monkeypatch.setenv("WEFT_MIGRATION_MODE", "apply")
+    monkeypatch.setattr("weft.cli._run_owner_migrations", AsyncMock(return_value=[73]))
+
+    result = runner.invoke(cli, ["migrate", "--ca-cert-file", str(ca_file)])
+
+    assert result.exit_code == 0
+    assert "Applied migration(s): 73" in result.output
+
+
+def test_owner_runner_refuses_runtime_role(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from weft.cli import _run_owner_migrations
+
+    pool = AsyncMock()
+    pool.fetchval.return_value = "weft_app"
+    pool.close = AsyncMock()
+
+    async def fake_create_pool(_config):
+        return pool
+
+    monkeypatch.setattr("weft.db.connection.create_pool", fake_create_pool)
+
+    import asyncio
+    with pytest.raises(RuntimeError, match="refusing owner migration"):
+        asyncio.run(_run_owner_migrations(WeftConfig()))
+    pool.close.assert_awaited_once()
 
 
 def test_config_show_runs(monkeypatch, tmp_path: Path):

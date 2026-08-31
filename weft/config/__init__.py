@@ -35,6 +35,7 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "api_key": ("", "api_key"),
     "log_level": ("", "log_level"),
     "database.url": ("database", "url"),
+    "database.ca_cert_file": ("database", "ca_cert_file"),
     "database.pool_min_size": ("database", "pool_min_size"),
     "database.pool_max_size": ("database", "pool_max_size"),
     "database.statement_cache_size": ("database", "statement_cache_size"),
@@ -83,6 +84,13 @@ class MigrationMode(str, Enum):
 
 class DatabaseConfig(BaseModel):
     url: str = "postgresql://weft:weft_local@localhost:5433/weft"
+    # Optional PEM-encoded CA certificate for providers whose root is not in
+    # the runtime image trust store (for example Supabase Root 2021 CA).
+    # When unset, create_pool uses the operating system trust store.
+    ca_cert: str | None = None
+    # Preferred deployment-safe form: path to a PEM bundle, avoiding certificate
+    # contents in shell history and process listings.
+    ca_cert_file: Path | None = None
     pool_min_size: int = 2
     pool_max_size: int = 20
     statement_cache_size: int | None = None  # Set to 0 for pgbouncer/Supabase pooler
@@ -658,6 +666,10 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
     # DATABASE_URL is the standard convention (Fly.io, Supabase, etc.)
     if url := os.environ.get("WEFT_DATABASE_URL") or os.environ.get("DATABASE_URL"):
         config.database.url = _encode_dsn_password(url)
+    if ca_cert := os.environ.get("WEFT_DATABASE_CA_CERT"):
+        config.database.ca_cert = ca_cert
+    if ca_cert_file := os.environ.get("WEFT_DATABASE_CA_CERT_FILE"):
+        config.database.ca_cert_file = Path(ca_cert_file).expanduser()
     # Pool sizing and timeouts are env-overridable so prod can be tuned without a
     # redeploy (e.g. shrink pool_max_size below the Supabase pooler's ceiling).
     if pool_max := os.environ.get("WEFT_DB_POOL_MAX_SIZE"):
