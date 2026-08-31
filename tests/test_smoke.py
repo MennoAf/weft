@@ -299,3 +299,14 @@ class TestParseReviewAfter:
         assert result is not None
         assert result.year == 2026
         assert result.month == 6
+
+
+def test_compose_project_name_defaults_and_allows_isolation(monkeypatch):
+    """Local infrastructure can be isolated without changing the default."""
+    from weft.cli import _compose_project_name
+
+    monkeypatch.delenv("WEFT_COMPOSE_PROJECT", raising=False)
+    assert _compose_project_name() == "weft"
+
+    monkeypatch.setenv("WEFT_COMPOSE_PROJECT", "weft-rc-smoke")
+    assert _compose_project_name() == "weft-rc-smoke"
