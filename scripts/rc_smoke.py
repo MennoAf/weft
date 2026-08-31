@@ -52,7 +52,7 @@ import asyncpg
 import weft
 from weft.auth import current_user_id
 from weft.db.connection import acquire
-from weft.db.migrations import run_migrations
+from weft.db.migrations import MIGRATIONS, run_migrations
 from weft.models import MemoryCreate, MemorySource, MemoryType
 from weft.store import search_by_keyword, store_memory
 
@@ -68,7 +68,7 @@ async def main():
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     applied = await run_migrations(pool)
     if PHASE == "init":
-        assert len(applied) == 72, len(applied)
+        assert len(applied) == len(MIGRATIONS), (len(applied), len(MIGRATIONS))
         current_user_id.set(UID)
         async with acquire(pool):
             await store_memory(
