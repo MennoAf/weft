@@ -180,6 +180,21 @@ class TestPollDueAlerts:
         assert total == 1
 
     @pytest.mark.asyncio
+    async def test_poll_reclaims_stale_processing_reservation(self, pool):
+        """A scheduler crash must not strand an alert in processing forever."""
+        past = datetime.now(timezone.utc) - timedelta(minutes=1)
+        alert = await create_alert(pool, _make_create(title="Recover me", trigger_at=past))
+        await pool.execute(
+            "UPDATE alerts SET status = 'processing', processing_at = now() - interval '10 minutes' WHERE id = $1",
+            alert.id,
+        )
+
+        alerts = await poll_due_alerts(pool)
+
+        assert [item.id for item in alerts] == [alert.id]
+        assert await pool.fetchval("SELECT status FROM alerts WHERE id = $1", alert.id) == "processing"
+
+    @pytest.mark.asyncio
     async def test_poll_respects_batch_size(self, pool):
         past = datetime.now(timezone.utc) - timedelta(minutes=1)
         for i in range(5):
@@ -274,6 +289,7 @@ class TestSchedulerLoop:
             patch("weft.scheduler.poll_due_alerts", new_callable=AsyncMock, return_value=[alert]) as mock_poll,
             patch("weft.scheduler.dispatch_alert", new_callable=AsyncMock) as mock_dispatch,
             patch("weft.scheduler.mark_alert_fired", new_callable=AsyncMock) as mock_mark,
+            patch("weft.scheduler.release_alert", new_callable=AsyncMock) as mock_release,
             patch("asyncio.sleep", side_effect=mock_sleep),
         ):
             with pytest.raises(asyncio.CancelledError):
@@ -302,16 +318,18 @@ class TestSchedulerLoop:
                 raise asyncio.CancelledError()
 
         with (
-            patch("weft.scheduler.poll_due_alerts", new_callable=AsyncMock, return_value=[alert]),
-            patch("weft.scheduler.dispatch_alert", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            patch("weft.scheduler.poll_due_alerts", new_callable=AsyncMock, return_value=[alert]) as mock_poll,
+            patch("weft.scheduler.dispatch_alert", new_callable=AsyncMock, side_effect=RuntimeError("boom")) as mock_dispatch,
             patch("weft.scheduler.mark_alert_fired", new_callable=AsyncMock) as mock_mark,
+            patch("weft.scheduler.release_alert", new_callable=AsyncMock) as mock_release,
             patch("asyncio.sleep", side_effect=mock_sleep),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await scheduler_loop(AsyncMock(), interval=1)
 
-            # mark_alert_fired should NOT be called because dispatch raised
+            # Failed dispatch must release the durable reservation for retry.
             mock_mark.assert_not_called()
+            mock_release.assert_awaited_once_with(mock_poll.call_args.args[0], alert.id)
 
     @pytest.mark.asyncio
     async def test_poll_error_does_not_crash(self):

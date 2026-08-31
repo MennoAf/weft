@@ -45,6 +45,7 @@ async def gather_topic_memories(
     tags: list[str],
     user_id: str,
     budget_tokens: int = 2000,
+    project_id: str | None = None,
 ) -> TopicGatherResult:
     """Gather ALL active memories under the given topic tags (V1 completeness).
 
@@ -76,7 +77,7 @@ async def gather_topic_memories(
 
     token = current_user_id.set(user_id)
     try:
-        return await _gather(pool, tags, user_id, budget_tokens)
+        return await _gather(pool, tags, user_id, budget_tokens, project_id)
     finally:
         current_user_id.reset(token)
 
@@ -86,6 +87,7 @@ async def _gather(
     tags: list[str],
     user_id: str,
     budget_tokens: int,
+    project_id: str | None,
 ) -> TopicGatherResult:
     """Inner gather — runs inside the user_id contextvar already set."""
     if not tags:
@@ -124,6 +126,11 @@ async def _gather(
         params.append(user_id)
         params.append(SYSTEM_GLOBAL_USER_ID)
         idx += 2
+
+        if project_id is not None:
+            conditions.append(f"(project_id = ${idx} OR project_id IS NULL)")
+            params.append(project_id)
+            idx += 1
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -172,6 +179,7 @@ async def _gather(
                     JOIN entity_mentions em ON m.id = em.memory_id
                     WHERE em.entity_id = $1
                       AND m.status = 'active'
+                      AND ($5::text IS NULL OR m.project_id = $5 OR m.project_id IS NULL)
                       AND (
                         m.user_id = $2
                         OR m.user_id = $3
@@ -191,6 +199,7 @@ async def _gather(
                     user_id,
                     SYSTEM_GLOBAL_USER_ID,
                     _ENTITY_MEMORIES_LIMIT,
+                    project_id,
                 )
                 entity_mems = [_row_to_memory(r) for r in entity_mem_rows]
 

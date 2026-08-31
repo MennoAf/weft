@@ -869,7 +869,10 @@ def build_reformulations(query: str, *, shape: RecoveryShape | None = None, max_
             for variant in temporal_query_variants(normalized, include_embedded_temporal_variant=True):
                 add(variant, "temporal_variant")
         except Exception:
-            pass
+            logger.warning(
+                "recovery temporal query variant expansion failed",
+                exc_info=True,
+            )
     # Exact repository identifiers and filenames are preserved as-is, never
     # generated from a guessed path.  This catches ``foo_bar.py`` / ``--flag``
     # misses without turning a provider into a scope authority.

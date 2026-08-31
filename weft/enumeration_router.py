@@ -144,6 +144,7 @@ async def gather_enumeration(
     target: str,
     user_id: str,
     budget_tokens: int = 2000,
+    project_id: str | None = None,
 ) -> tuple[list[str], "TopicGatherResult | None"]:
     """Resolve ``target`` to canonical tags and run the deterministic gather.
 
@@ -157,7 +158,11 @@ async def gather_enumeration(
 
         resolved_tags = await resolve_topic(target, user_id, pool)
         gather_result = await gather_topic_memories(
-            pool, tags=resolved_tags, user_id=user_id, budget_tokens=budget_tokens
+            pool,
+            tags=resolved_tags,
+            user_id=user_id,
+            budget_tokens=budget_tokens,
+            project_id=project_id,
         )
         return (resolved_tags, gather_result)
     except Exception as exc:  # noqa: BLE001 - best-effort augmentation
