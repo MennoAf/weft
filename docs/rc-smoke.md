@@ -33,8 +33,9 @@ resources, including after a failed assertion.
 
 ## Clean wheel check
 
-The CI job also proves the artifact users install rather than only importing a
-source checkout:
+The CI job separately proves the artifact users install rather than only importing a
+source checkout. The Docker image smoke below is an additional runtime check of the
+container artifact; it is not a substitute for the wheel check:
 
 ```bash
 uv build
