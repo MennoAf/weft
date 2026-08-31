@@ -21,7 +21,7 @@ from typing import Awaitable, Callable
 
 import asyncpg
 
-from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts
+from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts, release_alert
 from weft.models import Alert
 
 logger = logging.getLogger(__name__)
@@ -231,7 +231,14 @@ async def scheduler_loop(
                         "scheduler.dispatch_error",
                         extra={"alert_id": alert.id},
                     )
-                    # Alert stays pending — will be retried next cycle
+                    # Release the durable reservation so the next cycle can retry.
+                    try:
+                        await release_alert(pool, alert.id)
+                    except Exception:
+                        logger.exception(
+                            "scheduler.release_error",
+                            extra={"alert_id": alert.id},
+                        )
 
             # Backpressure: if we got a full batch, poll again immediately
             if len(alerts) >= batch_size:
