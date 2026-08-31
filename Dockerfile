@@ -14,7 +14,7 @@ RUN useradd -m -s /bin/bash appuser
 WORKDIR /app
 
 # Copy dependency files first (layer caching)
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md docker-compose.weft.yml ./
 
 # Install dependencies (no dev deps) and build the package
 RUN uv sync --no-dev --frozen
