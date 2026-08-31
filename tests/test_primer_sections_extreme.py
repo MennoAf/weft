@@ -38,17 +38,23 @@ from weft.models import (
     MemoryType,
 )
 from weft.primer import build_primer
-from weft.primer_sections.anti_patterns import build_anti_patterns_section
-from weft.primer_sections.autonomy import build_autonomy_section
-from weft.primer_sections.behaviors import build_behaviors_section
+from weft.primer_sections.anti_patterns import (
+    fetch_anti_patterns_section,
+    pack_anti_patterns_section,
+)
+from weft.primer_sections.autonomy import fetch_autonomy_section, pack_autonomy_section
+from weft.primer_sections.behaviors import fetch_behaviors_section, pack_behaviors_section
 from weft.primer_sections.context import PrimerContext
-from weft.primer_sections.decisions import build_decisions_section
-from weft.primer_sections.entities import build_entities_section
-from weft.primer_sections.grounding import build_grounding_section
-from weft.primer_sections.handoff import build_handoff_section
-from weft.primer_sections.issues import build_issues_section
-from weft.primer_sections.recent_work import build_recent_work_section
-from weft.primer_sections.rules import build_rules_section
+from weft.primer_sections.decisions import (
+    fetch_decisions_section,
+    pack_decisions_section,
+)
+from weft.primer_sections.entities import fetch_entities_section, pack_entities_section
+from weft.primer_sections.grounding import fetch_grounding_section, pack_grounding_section
+from weft.primer_sections.handoff import fetch_handoff_section, pack_handoff_section
+from weft.primer_sections.issues import fetch_issues_section, pack_issues_section
+from weft.primer_sections.recent_work import fetch_recent_work_section, pack_recent_work_section
+from weft.primer_sections.rules import fetch_rules_section, pack_rules_section
 from weft.store import store_memory
 
 
@@ -61,27 +67,41 @@ def _make_ctx(pool, *, project_id=None, budget_tokens=2400):
 
 
 async def _run_all_sections(ctx):
-    """Run all budget-packed sections in parallel — matches the orchestrator's
-    execution model in weft.primer.build_primer (asyncio.gather with shared ctx).
-    Running sections sequentially here would produce a different row set than
-    the orchestrator at tight budgets because sequential execution depletes
-    ctx.used_tokens / ctx.seen_ids in a specific order.
+    """Run sections with the same two-phase model as ``build_primer``.
+
+    Fetches are independent I/O and run concurrently.  Packing mutates the
+    shared context (especially ``seen_ids``), so it must then happen
+    sequentially in priority order.  Running the ``build_*_section`` wrappers
+    concurrently incorrectly lets a lower-priority section pack before rules
+    have marked pinned IDs as seen.
     """
     (
-        grounding, rules, behaviors, handoff, recent_work,
-        issues, anti_patterns, decisions, entities, autonomy,
+        grounding_fetch, rules_fetch, behaviors_fetch, handoff_fetch,
+        recent_work_fetch, issues_fetch, anti_patterns_fetch, decisions_fetch,
+        entities_fetch, autonomy_fetch,
     ) = await asyncio.gather(
-        build_grounding_section(ctx),
-        build_rules_section(ctx),
-        build_behaviors_section(ctx),
-        build_handoff_section(ctx),
-        build_recent_work_section(ctx),
-        build_issues_section(ctx),
-        build_anti_patterns_section(ctx),
-        build_decisions_section(ctx),
-        build_entities_section(ctx),
-        build_autonomy_section(ctx),
+        fetch_grounding_section(ctx),
+        fetch_rules_section(ctx),
+        fetch_behaviors_section(ctx),
+        fetch_handoff_section(ctx),
+        fetch_recent_work_section(ctx),
+        fetch_issues_section(ctx),
+        fetch_anti_patterns_section(ctx),
+        fetch_decisions_section(ctx),
+        fetch_entities_section(ctx),
+        fetch_autonomy_section(ctx),
     )
+
+    grounding = pack_grounding_section(ctx, grounding_fetch)
+    rules = pack_rules_section(ctx, rules_fetch)
+    behaviors = pack_behaviors_section(ctx, behaviors_fetch)
+    handoff = pack_handoff_section(ctx, handoff_fetch)
+    recent_work = pack_recent_work_section(ctx, recent_work_fetch)
+    issues = pack_issues_section(ctx, issues_fetch)
+    anti_patterns = pack_anti_patterns_section(ctx, anti_patterns_fetch)
+    decisions = pack_decisions_section(ctx, decisions_fetch)
+    entities = pack_entities_section(ctx, entities_fetch)
+    autonomy = pack_autonomy_section(ctx, autonomy_fetch)
     return {
         "grounding": grounding, "rules": rules, "behaviors": behaviors,
         "handoff": handoff, "recent_work": recent_work, "issues": issues,

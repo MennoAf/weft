@@ -88,6 +88,10 @@ async def test_seed_memories_inserts_when_empty(pool, provider):
 
     mems = await list_memories(pool)
     assert len(mems) == len(seeds)
+    owners = await pool.fetch(
+        "SELECT DISTINCT user_id FROM memories WHERE source = 'seed'"
+    )
+    assert {row["user_id"] for row in owners} == {"__system_global_zathras__"}
 
 
 async def test_seed_memories_skips_when_not_empty(pool, provider):

@@ -8,6 +8,7 @@ import re
 import tomllib
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 import yaml
@@ -49,6 +50,8 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "retrieval.similarity_threshold": ("retrieval", "similarity_threshold"),
     "retrieval.context_budget_tokens": ("retrieval", "context_budget_tokens"),
     "retrieval.contradiction_check_on_write": ("retrieval", "contradiction_check_on_write"),
+    "retrieval.recovery_mode": ("retrieval", "recovery_mode"),
+    "retrieval.recovery_planner_enabled": ("retrieval", "recovery_planner_enabled"),
     "retrieval.facet_boost": ("retrieval", "facet_boost"),
     "retrieval.facet_auto_merge_threshold": ("retrieval", "facet_auto_merge_threshold"),
     "retrieval.facet_candidate_threshold": ("retrieval", "facet_candidate_threshold"),
@@ -105,8 +108,12 @@ class RedisConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    provider: str = "openai"
-    model: str = "text-embedding-3-small"
+    """Embedding profile; local FastEmbed is the zero-key default."""
+
+    provider: str = "fastembed"
+    model: str = "BAAI/bge-small-en-v1.5"
+    # Keep the existing pgvector schema contract; FastEmbed's native 384-vector
+    # output is padded to this width by the provider.
     dimensions: int = 768
     batch_size: int = 64
 
@@ -116,6 +123,8 @@ class RetrievalConfig(BaseModel):
     similarity_threshold: float = 0.5
     context_budget_tokens: int = 4000
     contradiction_check_on_write: bool = True
+    recovery_mode: Literal["off", "deterministic", "model"] = "off"
+    recovery_planner_enabled: bool = False
     cross_project_search: bool = True
     cross_project_limit: int = 3
     # Facet-based recall (Memory v2 Phase 1). Single source of truth for the
@@ -572,37 +581,19 @@ def _flatten_yaml(data: dict) -> dict:
         weft = data["weft"]
         if "project_name" in weft:
             flat["project_name"] = weft["project_name"]
-    if "database" in data:
-        flat["database"] = DatabaseConfig(**data["database"])
-    if "redis" in data:
-        flat["redis"] = RedisConfig(**data["redis"])
-    if "embedding" in data:
-        flat["embedding"] = EmbeddingConfig(**data["embedding"])
-    if "retrieval" in data:
-        flat["retrieval"] = RetrievalConfig(**data["retrieval"])
-    if "decay" in data:
-        flat["decay"] = DecayConfig(**data["decay"])
-    if "alert" in data:
-        flat["alert"] = AlertConfig(**data["alert"])
-    if "slack_sync" in data:
-        flat["slack_sync"] = SlackSyncConfig(**data["slack_sync"])
-    if "daily_brief" in data:
-        flat["daily_brief"] = DailyBriefConfig(**data["daily_brief"])
-    if "quarantine_review" in data:
-        flat["quarantine_review"] = QuarantineReviewConfig(**data["quarantine_review"])
-    if "cost_enforcement" in data:
-        ce = data["cost_enforcement"]
-        if isinstance(ce.get("thresholds"), list):
-            ce = dict(ce)
-            ce["thresholds"] = [
-                CostThreshold(**t) if isinstance(t, dict) else t
-                for t in ce["thresholds"]
-            ]
-        flat["cost_enforcement"] = CostEnforcementConfig(**ce)
-    if "alert_cooldowns" in data:
-        flat["alert_cooldowns"] = AlertCooldownConfig(**data["alert_cooldowns"])
-    if "primer" in data:
-        flat["primer"] = PrimerConfig(**data["primer"])
+    # Keep nested YAML sections partial. The final config merge supplies
+    # omitted fields from lower-precedence layers and model defaults.
+    for section in (
+        "database", "redis", "embedding", "retrieval", "decay", "alert",
+        "slack_sync", "daily_brief", "quarantine_review", "primer",
+    ):
+        value = data.get(section)
+        if isinstance(value, dict):
+            flat[section] = value
+    if isinstance(data.get("cost_enforcement"), dict):
+        flat["cost_enforcement"] = data["cost_enforcement"]
+    if isinstance(data.get("alert_cooldowns"), dict):
+        flat["alert_cooldowns"] = data["alert_cooldowns"]
     if "logging" in data and "level" in data["logging"]:
         flat["log_level"] = data["logging"]["level"]
     return flat
@@ -631,31 +622,47 @@ def _encode_dsn_password(dsn: str) -> str:
 # --- Main loader ---
 
 
+def _merge_config_data(config: WeftConfig, data: dict) -> WeftConfig:
+    """Apply one partial config layer without discarding nested defaults."""
+    def merge_mapping(base: dict, override: dict) -> dict:
+        merged = dict(base)
+        for key, value in override.items():
+            if isinstance(value, BaseModel):
+                value = value.model_dump(mode="python")
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = merge_mapping(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    return WeftConfig(**merge_mapping(config.model_dump(mode="python"), data))
+
+
 def load_config(project_dir: str | Path | None = None) -> WeftConfig:
     """Load config merging: defaults → TOML config file → project YAML → env vars.
 
     Precedence (highest wins): env vars > project YAML > TOML file > defaults.
     """
-    # Layer 1: global YAML defaults (legacy)
-    global_path = Path.home() / ".weft" / "config.yaml"
-    global_data = _flatten_yaml(_load_yaml(global_path))
-
-    # Layer 2: project YAML overrides
-    project_data: dict = {}
-    if project_dir:
-        project_path = Path(project_dir) / ".weft" / "config.yaml"
-        project_data = _flatten_yaml(_load_yaml(project_path))
-
-    # Merge YAML layers: project overrides global
-    merged = {**global_data, **project_data}
-    config = WeftConfig(**merged)
-
-    # Layer 3: TOML config file (~/.weft/config.toml)
+    # Layer 1: defaults, then user-wide TOML.
+    config = WeftConfig()
     toml_data = load_config_file()
     if toml_data:
         _apply_toml_to_config(toml_data, config)
 
-    # Layer 4: env var overrides (highest precedence)
+    # Layer 2: global YAML defaults (legacy), then project YAML overrides.
+    global_path = Path.home() / ".weft" / "config.yaml"
+    global_data = _flatten_yaml(_load_yaml(global_path))
+    if global_data:
+        config = _merge_config_data(config, global_data)
+
+    project_data: dict = {}
+    if project_dir:
+        project_path = Path(project_dir) / ".weft" / "config.yaml"
+        project_data = _flatten_yaml(_load_yaml(project_path))
+    if project_data:
+        config = _merge_config_data(config, project_data)
+
+    # Layer 3: env var overrides (highest precedence)
     # DATABASE_URL is the standard convention (Fly.io, Supabase, etc.)
     if url := os.environ.get("WEFT_DATABASE_URL") or os.environ.get("DATABASE_URL"):
         config.database.url = _encode_dsn_password(url)
@@ -679,6 +686,15 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.embedding.provider = provider
     if model := os.environ.get("WEFT_EMBEDDING_MODEL"):
         config.embedding.model = model
+    if recovery_mode := os.environ.get("WEFT_RETRIEVAL_RECOVERY_MODE"):
+        config.retrieval = RetrievalConfig.model_validate(
+            {
+                **config.retrieval.model_dump(mode="python"),
+                "recovery_mode": recovery_mode.strip(),
+            }
+        )
+    if recovery_planner := os.environ.get("WEFT_RETRIEVAL_RECOVERY_PLANNER_ENABLED"):
+        config.retrieval.recovery_planner_enabled = recovery_planner.lower() in ("1", "true", "yes")
     if level := os.environ.get("WEFT_LOG_LEVEL"):
         config.log_level = level
     if env := os.environ.get("WEFT_ENV"):

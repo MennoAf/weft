@@ -9,6 +9,7 @@ import asyncpg
 import yaml
 
 from weft.auth import current_user_id
+from weft.db.connection import acquire
 from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemoryCreate, MemorySource, MemoryType
 from weft.schema import SYSTEM_GLOBAL_USER_ID
@@ -81,7 +82,8 @@ async def seed_memories(
                 vec = await embedding.embed(
                     embed_text_for_memory(create.content, create.topic)
                 )
-                await store_memory(pool, create, embedding=vec)
+                async with acquire(pool):
+                    await store_memory(pool, create, embedding=vec)
                 stored += 1
             except Exception as exc:
                 logger.warning("Failed to seed memory: %s", exc)

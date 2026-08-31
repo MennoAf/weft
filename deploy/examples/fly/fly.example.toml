@@ -1,4 +1,6 @@
-app = "weft-mcp"
+# Sanitized reference configuration. Replace the app name and secrets in a
+# private deployment environment; do not commit production topology here.
+app = "weft-mcp-example"
 primary_region = "iad"
 
 [deploy]

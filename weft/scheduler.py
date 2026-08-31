@@ -20,14 +20,15 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 import asyncpg
-from slack_sdk.web.async_client import AsyncWebClient
 
-from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts
+from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts, release_alert
 from weft.models import Alert
 
 logger = logging.getLogger(__name__)
 
 _SLACK_TIMEOUT = 10  # seconds for Slack API calls
+# Kept as a patch seam for tests; the optional Slack SDK is loaded on first use.
+AsyncWebClient = None
 
 # Default settings — overridden by config in production
 DEFAULT_POLL_INTERVAL = 60  # seconds
@@ -133,6 +134,11 @@ async def dispatch_slack(alert: Alert) -> None:
 
         import certifi
 
+        global AsyncWebClient
+        if AsyncWebClient is None:
+            from slack_sdk.web.async_client import AsyncWebClient as slack_client
+
+            AsyncWebClient = slack_client
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         client = AsyncWebClient(token=token, ssl=ssl_ctx)
         trigger_str = (
@@ -225,7 +231,14 @@ async def scheduler_loop(
                         "scheduler.dispatch_error",
                         extra={"alert_id": alert.id},
                     )
-                    # Alert stays pending — will be retried next cycle
+                    # Release the durable reservation so the next cycle can retry.
+                    try:
+                        await release_alert(pool, alert.id)
+                    except Exception:
+                        logger.exception(
+                            "scheduler.release_error",
+                            extra={"alert_id": alert.id},
+                        )
 
             # Backpressure: if we got a full batch, poll again immediately
             if len(alerts) >= batch_size:
@@ -1097,14 +1110,20 @@ async def _run_canary_audit_pass(
 
 async def _post_brief_to_slack(channel: str, brief_result) -> None:
     """Post the assembled brief to Slack via Block Kit."""
-    import ssl
-
-    import certifi
-
     token = os.environ.get("SLACK_BOT_TOKEN", "")
     if not token:
         logger.warning("daily_brief.slack.no_token")
         return
+
+    import ssl
+
+    import certifi
+
+    global AsyncWebClient
+    if AsyncWebClient is None:
+        from slack_sdk.web.async_client import AsyncWebClient as slack_client
+
+        AsyncWebClient = slack_client
 
     ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     client = AsyncWebClient(token=token, ssl=ssl_ctx)

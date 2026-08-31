@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
@@ -110,15 +110,18 @@ async def dismiss_alert(pool: asyncpg.Pool, alert_id: str) -> bool:
     return result.split()[-1] != "0"
 
 
+_PROCESSING_LEASE = timedelta(minutes=5)
+
+
 async def poll_due_alerts(
     pool: asyncpg.Pool,
     batch_size: int = 50,
 ) -> list[Alert]:
     """Poll for pending alerts whose trigger_at has passed.
 
-    Uses SELECT FOR UPDATE SKIP LOCKED to prevent double-firing when
-    multiple scheduler instances are running. The connection is released
-    after fetching — dispatch happens outside the transaction.
+    Uses SELECT FOR UPDATE SKIP LOCKED to reserve rows atomically while
+    multiple scheduler instances are running. Reservation persists after the
+    transaction ends because dispatch happens outside the transaction.
 
     Returns up to batch_size alerts as Python objects (connection-free).
     """
@@ -126,28 +129,55 @@ async def poll_due_alerts(
         async with conn.transaction():
             rows = await conn.fetch(
                 """
-                SELECT * FROM alerts
-                WHERE status = 'pending'
-                  AND trigger_at <= now()
-                ORDER BY trigger_at ASC
-                LIMIT $1
-                FOR UPDATE SKIP LOCKED
+                WITH due AS (
+                    SELECT id
+                    FROM alerts
+                    WHERE (
+                        status = 'pending'
+                        AND trigger_at <= now()
+                    ) OR (
+                        status = 'processing'
+                        AND processing_at < now() - $2::interval
+                    )
+                    ORDER BY trigger_at ASC
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE alerts AS a
+                SET status = 'processing', processing_at = now()
+                FROM due
+                WHERE a.id = due.id
+                RETURNING a.*
                 """,
                 batch_size,
+                _PROCESSING_LEASE,
             )
             return [_row_to_alert(r) for r in rows]
 
 
 async def mark_alert_fired(pool: asyncpg.Pool, alert_id: str) -> bool:
-    """Mark an alert as fired. Idempotent — only updates if still pending.
+    """Mark a reserved alert as fired.
 
     Returns True if the alert was updated, False if already fired/dismissed.
     """
     result = await pool.execute(
         """
         UPDATE alerts
-        SET status = 'fired', fired_at = now()
-        WHERE id = $1 AND status = 'pending'
+        SET status = 'fired', fired_at = now(), processing_at = NULL
+        WHERE id = $1 AND status IN ('pending', 'processing')
+        """,
+        alert_id,
+    )
+    return result.split()[-1] != "0"
+
+
+async def release_alert(pool: asyncpg.Pool, alert_id: str) -> bool:
+    """Return a reserved alert to pending after dispatch failure."""
+    result = await pool.execute(
+        """
+        UPDATE alerts
+        SET status = 'pending', processing_at = NULL
+        WHERE id = $1 AND status = 'processing'
         """,
         alert_id,
     )
@@ -202,6 +232,12 @@ def _row_to_alert(row: asyncpg.Record) -> Alert:
     if isinstance(payload, str):
         payload = json.loads(payload)
 
+    # ``processing`` is an internal durable reservation state; callers see
+    # reserved alerts as still pending until dispatch marks them fired.
+    status = row["status"]
+    if status == "processing":
+        status = AlertStatus.pending
+
     return Alert(
         id=row["id"],
         user_id=row["user_id"],
@@ -209,7 +245,7 @@ def _row_to_alert(row: asyncpg.Record) -> Alert:
         title=row["title"],
         body=row["body"],
         trigger_at=row["trigger_at"],
-        status=row["status"],
+        status=status,
         channel=row["channel"],
         channel_target=row["channel_target"],
         payload=payload or {},

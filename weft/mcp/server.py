@@ -410,6 +410,15 @@ async def lifespan(server: FastMCP):
 
     config = load_config()
 
+    # Stdio has no HTTP middleware to bind a caller identity. Use the local
+    # installation identity for startup seeding and local MCP writes; hosted
+    # HTTP requests override this context in UserIdentityMiddleware.
+    from weft.config.user_identity import get_user_id
+
+    local_identity_token = None
+    if current_user_id.get() is None:
+        local_identity_token = current_user_id.set(get_user_id())
+
     # Validate WEFT_OUTBOUND_CONNECTOR at startup
     _validate_outbound_connector_env()
 
@@ -663,6 +672,8 @@ async def lifespan(server: FastMCP):
             finally:
                 if r is not None:
                     await r.aclose()
+            if local_identity_token is not None:
+                current_user_id.reset(local_identity_token)
 
 
 class _AppCtxRef:
