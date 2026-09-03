@@ -82,8 +82,9 @@ def check_fly_config(repo_root: Path) -> None:
     config = repo_root / "fly.toml"
     if not config.is_file():
         raise GuardError(
-            "private production fly.toml is missing; do not deploy the sanitized "
-            "deploy/examples/fly/fly.example.toml"
+            "private production fly.toml is missing from this clone; restore it "
+            "from the deployment secret store or operator backup, and do not deploy "
+            "the sanitized deploy/examples/fly/fly.example.toml"
         )
     text = config.read_text(encoding="utf-8")
     for label, setting in REQUIRED_FLY_SETTINGS.items():
