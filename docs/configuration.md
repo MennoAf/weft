@@ -67,3 +67,15 @@ Switch providers with `weft config set embedding.provider <name>`. Note that swi
 Both services include health checks. Data persists in named Docker volumes (`weft-postgres-data`, `weft-redis-data`) — these survive `weft down` and `docker compose down`. They're cleared only by `docker volume rm`.
 
 If you want to run against externally-managed Postgres + Redis, set `WEFT_DATABASE_URL` and `WEFT_REDIS_URL` and skip `weft up`. Migrations still run automatically on first MCP-server boot if the database is reachable.
+
+## Production deployment boundary
+
+Production Fly deploys must come from a clean checkout of the canonical `main` branch, synchronized with `origin/main`. Do not deploy from an RC, benchmark, recovery, or dirty development worktree.
+
+Run the guarded wrapper from the repository root:
+
+```bash
+./scripts/deploy_production.sh
+```
+
+The guard requires the exact `weft-mcp` Fly app configuration, checks that the local `main` matches `origin/main`, rejects dirty or untracked deploy-ref content, rejects generated benchmark data/snapshots/runs/results, rejects Git blobs over GitHub's 100 MB limit, and confirms that the Dockerfile does not copy benchmark content into the image. Internal benchmark source and RC work belong on separate branches or worktrees and must never be the production deploy ref.
