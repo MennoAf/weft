@@ -46,6 +46,8 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "embedding.model": ("embedding", "model"),
     "embedding.dimensions": ("embedding", "dimensions"),
     "embedding.batch_size": ("embedding", "batch_size"),
+    "text_generation.provider": ("text_generation", "provider"),
+    "text_generation.models": ("text_generation", "models"),
     "retrieval.default_top_k": ("retrieval", "default_top_k"),
     "retrieval.similarity_threshold": ("retrieval", "similarity_threshold"),
     "retrieval.context_budget_tokens": ("retrieval", "context_budget_tokens"),
@@ -215,6 +217,17 @@ class QuarantineReviewConfig(BaseModel):
     model: str = "claude-haiku-4-5-20251001"
 
 
+class TextGenerationConfig(BaseModel):
+    """Provider and logical-role model selection for text generation.
+
+    The role map is deliberately abstract: feature code asks for a role such
+    as ``ingest_classifier`` rather than assuming a provider-specific model.
+    """
+
+    provider: str = "anthropic"
+    models: dict[str, str] = Field(default_factory=dict)
+
+
 # Cost-enforcement config types live here (not in weft.cost_enforcement)
 # because weft.db.connection imports WeftConfig at module-load time, which
 # is loaded by every cost_enforcement dependency — a circular cycle if
@@ -323,6 +336,7 @@ class WeftConfig(BaseModel):
     quarantine_review: QuarantineReviewConfig = Field(
         default_factory=QuarantineReviewConfig
     )
+    text_generation: TextGenerationConfig = Field(default_factory=TextGenerationConfig)
     cost_enforcement: CostEnforcementConfig = Field(
         default_factory=CostEnforcementConfig
     )
@@ -468,6 +482,7 @@ def _coerce_value(key: str, value: str) -> object:
         ("database", DatabaseConfig),
         ("redis", RedisConfig),
         ("embedding", EmbeddingConfig),
+        ("text_generation", TextGenerationConfig),
         ("retrieval", RetrievalConfig),
         ("decay", DecayConfig),
         ("alert", AlertConfig),
@@ -539,6 +554,10 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
         for k, v in data["quarantine_review"].items():
             if hasattr(config.quarantine_review, k):
                 setattr(config.quarantine_review, k, v)
+    if "text_generation" in data and isinstance(data["text_generation"], dict):
+        for k, v in data["text_generation"].items():
+            if hasattr(config.text_generation, k):
+                setattr(config.text_generation, k, v)
     if "cost_enforcement" in data and isinstance(data["cost_enforcement"], dict):
         # ``thresholds`` is a list of structured dicts; everything else is scalar.
         for k, v in data["cost_enforcement"].items():
@@ -686,6 +705,19 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.embedding.provider = provider
     if model := os.environ.get("WEFT_EMBEDDING_MODEL"):
         config.embedding.model = model
+    if provider := os.environ.get("WEFT_TEXT_PROVIDER"):
+        config.text_generation.provider = provider
+    for role in (
+        "ingest_classifier",
+        "codebase_summary",
+        "codebase_architecture",
+        "quarantine_review",
+        "belief_detector",
+        "topic_synthesis",
+        "replay_aggregate",
+    ):
+        if model := os.environ.get(f"WEFT_TEXT_MODEL_{role.upper()}"):
+            config.text_generation.models[role] = model
     if recovery_mode := os.environ.get("WEFT_RETRIEVAL_RECOVERY_MODE"):
         config.retrieval = RetrievalConfig.model_validate(
             {

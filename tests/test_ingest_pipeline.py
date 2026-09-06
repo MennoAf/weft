@@ -17,6 +17,7 @@ from weft.ingest_pipeline import (
     Intent,
     classify,
 )
+from weft.text_generation import GenerationResponse
 
 
 # --- Date parser ---
@@ -290,6 +291,28 @@ def _mock_llm_response(json_data):
 
 
 class TestClassify:
+    @pytest.mark.asyncio
+    async def test_injected_provider_drives_classifier_without_anthropic_client(self):
+        class FakeProvider:
+            def __init__(self):
+                self.requests = []
+
+            async def generate(self, request):
+                self.requests.append(request)
+                return GenerationResponse(
+                    text='[{"type":"general_note","content":"from fake provider",'
+                    '"confidence":0.9,"entities":[],"dates":[]}]',
+                    model=request.model,
+                )
+
+        provider = FakeProvider()
+        with patch("weft.ingest_pipeline._get_client", side_effect=AssertionError("client constructed")):
+            result = await classify("a note for the fake provider", generation_provider=provider)
+
+        assert [(item.type, item.content) for item in result] == [("general_note", "from fake provider")]
+        assert provider.requests[0].model == "claude-haiku-4-5-20251001"
+        assert provider.requests[0].max_tokens == 512
+
     @pytest.mark.asyncio
     async def test_empty_text_returns_empty(self):
         assert await classify("") == []

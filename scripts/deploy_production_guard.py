@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Refuse unsafe production deployments from this repository.
 
-Production deploys must come from a clean, synchronized ``main`` checkout.
-Internal benchmark source is allowed in the repository, but generated datasets,
-snapshots, runs, and oversized Git blobs are not allowed on the deploy ref.
+Production deploys must come from a clean checkout at an approved remote
+production tag. Internal benchmark source is allowed in the repository, but
+generated datasets, snapshots, runs, and oversized Git blobs are not allowed
+on the deploy ref.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import sys
 from pathlib import Path
 
 
+APPROVED_PRODUCTION_TAG = re.compile(r"production-\d{4}-\d{2}-\d{2}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\Z")
 MAX_BLOB_BYTES = 100 * 1024 * 1024
 REQUIRED_FLY_SETTINGS = {
     "app": 'app = "weft-mcp"',
@@ -47,21 +49,63 @@ def tracked_paths() -> list[str]:
     return run("git", "ls-files").splitlines()
 
 
-def check_branch_and_sync() -> None:
-    branch = run("git", "branch", "--show-current")
-    if branch != "main":
-        raise GuardError(f"production deploy requires branch 'main' (found {branch!r})")
+def check_approved_production_ref() -> None:
+    """Require an approved production tag at HEAD and on the origin remote.
 
-    try:
-        remote_head = run("git", "rev-parse", "--verify", "origin/main")
-    except subprocess.CalledProcessError as exc:
-        raise GuardError("origin/main is unavailable; run 'git fetch origin main' first") from exc
-
-    local_head = run("git", "rev-parse", "HEAD")
-    if local_head != remote_head:
+    Tags are the explicit operator approval boundary. The remote check prevents
+    a locally-created or moved tag from authorizing a deployment.
+    """
+    head = run("git", "rev-parse", "HEAD")
+    local_tags = run("git", "tag", "--points-at", "HEAD").splitlines()
+    approved_tags = [tag for tag in local_tags if APPROVED_PRODUCTION_TAG.fullmatch(tag)]
+    if not approved_tags:
         raise GuardError(
-            "local main is not synchronized with origin/main; "
-            "run 'git fetch origin && git reset --hard origin/main' only after preserving work"
+            "production deploy requires an approved tag matching "
+            "production-YYYY-MM-DD[-suffix] at HEAD"
+        )
+    if len(approved_tags) > 1:
+        raise GuardError(
+            "production deploy requires exactly one approved tag at HEAD; "
+            f"found {', '.join(sorted(approved_tags))}"
+        )
+
+    tag = approved_tags[0]
+    try:
+        advertised = run(
+            "git",
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            f"refs/tags/{tag}",
+            f"refs/tags/{tag}^{{}}",
+        )
+    except subprocess.CalledProcessError as exc:
+        raise GuardError(
+            f"approved production tag {tag!r} is not available on origin; "
+            f"run 'git fetch origin refs/tags/{tag}:refs/tags/{tag}' first"
+        ) from exc
+    remote_hashes = {
+        fields[0]
+        for line in advertised.splitlines()
+        if len(fields := line.split()) == 2
+        and fields[1] in {f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}"}
+    }
+    if not remote_hashes:
+        raise GuardError(f"origin returned no usable hash for production tag {tag!r}")
+
+    if head not in remote_hashes:
+        raise GuardError(
+            f"approved production tag {tag!r} does not resolve to HEAD on origin"
+        )
+
+
+def check_checkout_ref() -> None:
+    """Allow main or a detached checkout, with approval enforced by the tag check."""
+    branch = run("git", "branch", "--show-current")
+    if branch not in ("main", ""):
+        raise GuardError(
+            "production deploy requires main or a detached approved-tag checkout "
+            f"(found {branch!r})"
         )
 
 
@@ -148,7 +192,8 @@ def check_docker_boundary(repo_root: Path) -> None:
 def main() -> int:
     try:
         repo_root = Path(run("git", "rev-parse", "--show-toplevel"))
-        check_branch_and_sync()
+        check_checkout_ref()
+        check_approved_production_ref()
         check_worktree()
         check_fly_config(repo_root)
         paths = tracked_paths()
@@ -159,7 +204,7 @@ def main() -> int:
         print(f"PRODUCTION DEPLOY BLOCKED: {exc}", file=sys.stderr)
         return 1
 
-    print("Production deploy guard passed: clean synchronized main, safe history, and production config.")
+    print("Production deploy guard passed: approved production tag, clean ref, safe history, and production config.")
     return 0
 
 

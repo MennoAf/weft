@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 
 from weft.date_parser import parse_dates
 from weft.db.connection import acquire
+from weft.text_generation import (
+    GenerationRequest,
+    TextGenerationProvider,
+    model_for_role,
+    provider_for_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +243,7 @@ async def classify(
     *,
     metadata: dict[str, Any] | None = None,
     tz_name: str = "America/New_York",
+    generation_provider: TextGenerationProvider | None = None,
 ) -> list[Intent]:
     """Classify text into structured intents via LLM.
 
@@ -257,14 +264,23 @@ async def classify(
         logger.warning("classify.truncated text to %d chars", _MAX_TEXT_LENGTH)
 
     try:
-        client = _get_client()
-        response = await client.messages.create(
-            model=_CLASSIFIER_MODEL,
-            max_tokens=512,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": normalized}],
+        provider = generation_provider
+        if provider is None:
+            client = _get_client()
+            provider = provider_for_role("ingest_classifier", client)
+        response = await provider.generate(
+            GenerationRequest(
+                model=model_for_role("ingest_classifier", _CLASSIFIER_MODEL),
+                max_tokens=512,
+                system=_SYSTEM_PROMPT,
+                messages=({"role": "user", "content": normalized},),
+            )
         )
-        content = getattr(response, "content", None)
+        content_text = response.text
+        if not content_text.strip():
+            logger.warning("classify.abstained reason=empty_content")
+            return []
+        content = [type("TextBlock", (), {"text": content_text})()]
         if not content:
             logger.warning("classify.abstained reason=empty_content")
             return []

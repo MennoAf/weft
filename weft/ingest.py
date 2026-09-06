@@ -14,6 +14,7 @@ from anthropic import AsyncAnthropic
 from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemorySource, MemoryType
 from weft.store import upsert_by_topic
+from weft.text_generation import GenerationRequest, TextGenerationProvider, model_for_role, provider_for_role
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,9 @@ def build_file_tree(files: list[str]) -> str:
 async def summarize_file(
     relative_path: str,
     content: str,
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None = None,
+    *,
+    generation_provider: TextGenerationProvider | None = None,
 ) -> str:
     """Ask Claude Haiku for a 1-2 sentence summary of a source file."""
     # Truncate to first _MAX_LINES lines
@@ -180,29 +183,36 @@ async def summarize_file(
             + f"\n\n[... truncated at {_MAX_FILE_CHARS} characters ...]"
         )
 
-    response = await client.messages.create(
-        model=_MODEL,
-        max_tokens=256,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Summarize the following source file in 1-2 sentences. "
-                    f"Describe what it does, its role in the project, and any key "
-                    f"exports or interfaces.\n\n"
-                    f"File: {relative_path}\n\n"
-                    f"```\n{truncated}\n```"
-                ),
-            }
-        ],
+    if generation_provider is None and client is None:
+        raise ValueError("client or generation_provider is required")
+    provider = generation_provider or provider_for_role("codebase_summary", client)
+    response = await provider.generate(
+        GenerationRequest(
+            model=model_for_role("codebase_summary", _MODEL),
+            max_tokens=256,
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Summarize the following source file in 1-2 sentences. "
+                        f"Describe what it does, its role in the project, and any key "
+                        f"exports or interfaces.\n\n"
+                        f"File: {relative_path}\n\n"
+                        f"```\n{truncated}\n```"
+                    ),
+                },
+            ),
+        )
     )
-    return response.content[0].text
+    return response.text
 
 
 async def generate_architecture_overview(
     tree: str,
     summaries: dict[str, str],
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None = None,
+    *,
+    generation_provider: TextGenerationProvider | None = None,
 ) -> str:
     """Generate a concise project architecture overview from bounded evidence."""
     evidence_parts: list[str] = []
@@ -225,26 +235,31 @@ async def generate_architecture_overview(
         )
     summary_text = "\n\n".join(evidence_parts)
 
-    response = await client.messages.create(
-        model=_MODEL,
-        max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Based on the following project file tree and file summaries, "
-                    f"write a concise architecture overview. Cover:\n"
-                    f"- What the project does\n"
-                    f"- How it's organized (key directories/modules)\n"
-                    f"- Key modules and their relationships\n"
-                    f"- Notable conventions or patterns\n\n"
-                    f"## File Tree\n```\n{tree}\n```\n\n"
-                    f"## File Summaries\n{summary_text}"
-                ),
-            }
-        ],
+    if generation_provider is None and client is None:
+        raise ValueError("client or generation_provider is required")
+    provider = generation_provider or provider_for_role("codebase_architecture", client)
+    response = await provider.generate(
+        GenerationRequest(
+            model=model_for_role("codebase_architecture", _MODEL),
+            max_tokens=1024,
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Based on the following project file tree and file summaries, "
+                        f"write a concise architecture overview. Cover:\n"
+                        f"- What the project does\n"
+                        f"- How it's organized (key directories/modules)\n"
+                        f"- Key modules and their relationships\n"
+                        f"- Notable conventions or patterns\n\n"
+                        f"## File Tree\n```\n{tree}\n```\n\n"
+                        f"## File Summaries\n{summary_text}"
+                    ),
+                },
+            ),
+        )
     )
-    return response.content[0].text
+    return response.text
 
 
 async def run_ingest(
@@ -255,6 +270,7 @@ async def run_ingest(
     pool: asyncpg.Pool,
     client: AsyncAnthropic,
     embedding_provider: EmbeddingProvider | None = None,
+    generation_provider: TextGenerationProvider | None = None,
 ) -> dict:
     """Orchestrate the full codebase ingestion pipeline.
 
@@ -298,7 +314,9 @@ async def run_ingest(
                     logger.warning("Could not read %s: %s", rel, exc)
                     return rel, None
                 try:
-                    summary = await summarize_file(rel, content, client)
+                    summary = await summarize_file(
+                        rel, content, client, generation_provider=generation_provider
+                    )
                     return rel, summary
                 except Exception as exc:
                     logger.warning("Failed to summarize %s: %s", rel, exc)
@@ -313,7 +331,9 @@ async def run_ingest(
     tree = build_file_tree(filtered)
 
     # 5. Generate architecture overview
-    overview = await generate_architecture_overview(tree, summaries, client)
+    overview = await generate_architecture_overview(
+        tree, summaries, client, generation_provider=generation_provider
+    )
 
     # 6. Store architecture overview
     arch_embedding = None

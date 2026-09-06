@@ -53,7 +53,7 @@ commands, elapsed time to first write and recall, restart persistence, and any
 undocumented intervention. Redact credentials and personal memory content.
 
 ```bash
-uv sync
+uv sync --all-extras --all-groups
 uv run pytest tests/ -q
 uv run python -m weft up
 uv run python -m weft status
