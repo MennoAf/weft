@@ -442,17 +442,36 @@ def recall(query: str, limit: int, topic: str | None):
     from rich.console import Console
 
     async def _recall():
-        import asyncpg
+        from weft.auth import current_user_id
+        from weft.config.user_identity import get_user_id
+        from weft.db.connection import acquire, create_pool
         from weft.embeddings import get_provider
         from weft.store import search_by_vector
 
         config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
-        embedding = await provider.embed(query)
-        results = await search_by_vector(pool, embedding, limit=limit, topic=topic)
-        await pool.close()
-        return results
+        pool = await create_pool(config)
+        identity_token = None
+        try:
+            caller_uid = get_user_id()
+            identity_token = current_user_id.set(caller_uid)
+            provider = get_provider(
+                config.embedding.provider,
+                model_name=config.embedding.model,
+                dimensions=config.embedding.dimensions,
+            )
+            embedding = await provider.embed(query)
+            async with acquire(pool):
+                return await search_by_vector(
+                    pool,
+                    embedding,
+                    limit=limit,
+                    topic=topic,
+                    user_id=caller_uid,
+                )
+        finally:
+            if identity_token is not None:
+                current_user_id.reset(identity_token)
+            await pool.close()
 
     results = asyncio.run(_recall())
     console = Console()

@@ -23,7 +23,7 @@ python scripts/rc_smoke.py --image weft-rc-local:1.0.0rc1
 Expected output includes:
 
 ```text
-phase=init version=1.0.0rc1 migrations=72 write=ok
+phase=init version=1.0.0rc1 migrations=73 write=ok
 phase=verify version=1.0.0rc1 migrations=0 recall=ok
 RC Docker smoke passed
 ```
@@ -71,7 +71,7 @@ uv run python -m weft down
 
 - [ ] The image builds from a clean checkout context.
 - [ ] Runtime and installed package versions both report `1.0.0rc1`.
-- [ ] Fresh Postgres applies exactly 72 migrations.
+- [ ] Fresh Postgres applies exactly 73 migrations (versions 1–50 and 52–74; draft `pending_v51_episode_turns_fts.py` is intentionally not discovered).
 - [ ] A second migration pass applies zero migrations.
 - [ ] An owner-scoped memory is written and recalled by keyword.
 - [ ] Recall survives a Postgres restart.
