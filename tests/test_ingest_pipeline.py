@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -290,6 +292,20 @@ def _mock_llm_response(json_data):
     return mock_response
 
 
+def _anthropic_config():
+    return SimpleNamespace(
+        text_generation=SimpleNamespace(provider="anthropic", models={})
+    )
+
+
+@contextmanager
+def _managed_anthropic_client(client):
+    with patch("weft.config.load_config", return_value=_anthropic_config()), patch(
+        "anthropic.AsyncAnthropic", return_value=client
+    ):
+        yield
+
+
 class TestClassify:
     @pytest.mark.asyncio
     async def test_injected_provider_drives_classifier_without_anthropic_client(self):
@@ -306,7 +322,7 @@ class TestClassify:
                 )
 
         provider = FakeProvider()
-        with patch("weft.ingest_pipeline._get_client", side_effect=AssertionError("client constructed")):
+        with patch("anthropic.AsyncAnthropic", side_effect=AssertionError("client constructed")):
             result = await classify("a note for the fake provider", generation_provider=provider)
 
         assert [(item.type, item.content) for item in result] == [("general_note", "from fake provider")]
@@ -340,7 +356,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_response))
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("I need to remember to buy eggs Saturday")
 
         assert len(result) == 1
@@ -366,7 +382,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_response))
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("Bob is the CEO of TechCorp")
 
         assert len(result) == 1
@@ -387,7 +403,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_response))
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("Bob is the CEO. He wants a demo next week.")
 
         assert len(result) == 2
@@ -402,7 +418,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_response))
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("some note about something")
 
         assert len(result) == 1
@@ -413,7 +429,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(side_effect=Exception("API down"))
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("some important text here")
 
         assert result == []
@@ -427,7 +443,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("something worth remembering here")
 
         assert result == []
@@ -443,7 +459,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("we decided to use Postgres")
 
         assert result == []
@@ -469,7 +485,7 @@ class TestClassify:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         raw = "the entire raw input must never become a fallback memory"
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify(raw)
 
         assert result == []
@@ -490,7 +506,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("we decided to use Postgres")
 
         assert [(intent.type, intent.content) for intent in result] == [
@@ -505,7 +521,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("we decided something important")
 
         assert result == []
@@ -522,7 +538,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("We decided to use Postgres and follow up later")
 
         assert [(item.type, item.content) for item in result] == [
@@ -537,7 +553,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("something worth remembering here")
 
         assert result == []
@@ -561,7 +577,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("a long conversation about Bob the CEO")
 
         assert len(result) == 1
@@ -585,7 +601,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("something worth noting")
 
         assert len(result) == 1
@@ -600,7 +616,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_response))
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("this is a test message for classification")
 
         assert len(result) == 1
@@ -615,7 +631,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_response))
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("remind me to do stuff tomorrow")
 
         assert len(result) == 1

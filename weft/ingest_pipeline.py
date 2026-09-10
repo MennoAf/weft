@@ -17,8 +17,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
-from anthropic import AsyncAnthropic
-
 if TYPE_CHECKING:
     import asyncpg
 
@@ -27,8 +25,8 @@ from weft.db.connection import acquire
 from weft.text_generation import (
     GenerationRequest,
     TextGenerationProvider,
+    managed_provider_for_role,
     model_for_role,
-    provider_for_role,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,19 +150,6 @@ class IngestResult:
     errors: list[str] = field(default_factory=list)
 
 
-# --- LLM client ---
-
-_client: AsyncAnthropic | None = None
-
-
-def _get_client() -> AsyncAnthropic:
-    """Lazy singleton for the Anthropic client."""
-    global _client
-    if _client is None:
-        _client = AsyncAnthropic()
-    return _client
-
-
 def _normalize_text(text: str) -> str:
     """Strip and collapse whitespace."""
     return re.sub(r"\s+", " ", text.strip())
@@ -245,6 +230,33 @@ async def classify(
     tz_name: str = "America/New_York",
     generation_provider: TextGenerationProvider | None = None,
 ) -> list[Intent]:
+    """Classify text with an injected or per-operation managed provider."""
+    effective_metadata = metadata or {}
+    if _should_skip(text, effective_metadata):
+        return []
+    if generation_provider is not None:
+        return await _classify_with_provider(
+            text,
+            metadata=metadata,
+            tz_name=tz_name,
+            generation_provider=generation_provider,
+        )
+    async with managed_provider_for_role("ingest_classifier") as provider:
+        return await _classify_with_provider(
+            text,
+            metadata=metadata,
+            tz_name=tz_name,
+            generation_provider=provider,
+        )
+
+
+async def _classify_with_provider(
+    text: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+    tz_name: str = "America/New_York",
+    generation_provider: TextGenerationProvider | None = None,
+) -> list[Intent]:
     """Classify text into structured intents via LLM.
 
     Returns a list of Intent objects. Complete items may be salvaged from a
@@ -263,19 +275,18 @@ async def classify(
         normalized = normalized[:_MAX_TEXT_LENGTH]
         logger.warning("classify.truncated text to %d chars", _MAX_TEXT_LENGTH)
 
+    provider = generation_provider
+    if provider is None:
+        raise RuntimeError("classifier provider was not supplied")
+    request = GenerationRequest(
+        model=model_for_role("ingest_classifier", _CLASSIFIER_MODEL),
+        max_tokens=512,
+        system=_SYSTEM_PROMPT,
+        messages=({"role": "user", "content": normalized},),
+    )
+
     try:
-        provider = generation_provider
-        if provider is None:
-            client = _get_client()
-            provider = provider_for_role("ingest_classifier", client)
-        response = await provider.generate(
-            GenerationRequest(
-                model=model_for_role("ingest_classifier", _CLASSIFIER_MODEL),
-                max_tokens=512,
-                system=_SYSTEM_PROMPT,
-                messages=({"role": "user", "content": normalized},),
-            )
-        )
+        response = await provider.generate(request)
         content_text = response.text
         if not content_text.strip():
             logger.warning("classify.abstained reason=empty_content")
@@ -740,6 +751,7 @@ async def process(
     *,
     project_id: str | None = None,
     tz_name: str = "America/New_York",
+    generation_provider: TextGenerationProvider | None = None,
 ) -> IngestResult:
     """Process a single IngestItem through the full pipeline.
 
@@ -750,6 +762,7 @@ async def process(
         item.text,
         metadata=item.metadata,
         tz_name=tz_name,
+        generation_provider=generation_provider,
     )
 
     if not intents:
