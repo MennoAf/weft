@@ -7,7 +7,10 @@ provider SDK and return a normalized response. This keeps future providers
 """
 from __future__ import annotations
 
+import inspect
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 
@@ -89,7 +92,10 @@ class OpenAITextGenerationProvider:
         *,
         timeout: float | None = None,
         max_retries: int | None = None,
-    ):
+        owns_client: bool | None = None,
+    ) -> None:
+        self.owns_client = client is None if owns_client is None else owns_client
+        self._closed = False
         if client is not None:
             self.client = client
             return
@@ -121,6 +127,19 @@ class OpenAITextGenerationProvider:
             timeout=timeout,
             max_retries=max_retries,
         )
+
+    async def aclose(self) -> None:
+        """Close an internally owned SDK client at most once."""
+        if not self.owns_client or self._closed:
+            return
+        self._closed = True
+        close = getattr(self.client, "aclose", None)
+        if not callable(close):
+            close = getattr(self.client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         """Translate a normalized request to ``responses.create``."""
@@ -169,8 +188,23 @@ class AnthropicTextGenerationProvider:
 
     provider_name = "anthropic"
 
-    def __init__(self, client: Any):
+    def __init__(self, client: Any, *, owns_client: bool = False) -> None:
         self.client = client
+        self.owns_client = owns_client
+        self._closed = False
+
+    async def aclose(self) -> None:
+        """Close an internally owned SDK client at most once."""
+        if not self.owns_client or self._closed:
+            return
+        self._closed = True
+        close = getattr(self.client, "aclose", None)
+        if not callable(close):
+            close = getattr(self.client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         """Translate a normalized request to ``messages.create``."""
@@ -255,12 +289,68 @@ def provider_for_role(
     )
 
 
+@asynccontextmanager
+async def managed_provider_for_role(
+    role: str,
+    *,
+    config: Any | None = None,
+    client: Any | None = None,
+    anthropic_api_key: str | None = None,
+) -> AsyncIterator[TextGenerationProvider]:
+    """Lazily select one provider and manage an internally owned SDK client.
+
+    Provider selection is validated before optional SDK imports or constructors.
+    Injected clients are borrowed; clients constructed on context entry are
+    owned and closed by the scope on every exit path.
+    """
+    if config is None:
+        from weft.config import load_config
+
+        config = load_config()
+    provider_name = getattr(
+        getattr(config, "text_generation", None), "provider", "anthropic"
+    )
+    if provider_name not in {"anthropic", "openai"}:
+        raise ValueError(
+            f"Text-generation provider {provider_name!r} is unavailable for role {role!r}; "
+            "install/register an adapter before selecting it"
+        )
+
+    if client is not None:
+        if provider_name == "anthropic":
+            provider = AnthropicTextGenerationProvider(client)
+        else:
+            provider = OpenAITextGenerationProvider(client=client)
+    elif provider_name == "anthropic":
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise ValueError(
+                "The Anthropic text-generation adapter requires the 'anthropic' extra. "
+                "Install it with: pip install weft-memory[anthropic]"
+            ) from exc
+        sdk_client = (
+            AsyncAnthropic(api_key=anthropic_api_key)
+            if anthropic_api_key is not None
+            else AsyncAnthropic()
+        )
+        provider = AnthropicTextGenerationProvider(sdk_client, owns_client=True)
+    else:
+        provider = OpenAITextGenerationProvider(owns_client=True)
+
+    try:
+        yield provider
+    finally:
+        await provider.aclose()  # type: ignore[attr-defined]
+
+
 __all__ = [
     "AnthropicTextGenerationProvider",
     "OpenAITextGenerationProvider",
     "GenerationRequest",
     "GenerationResponse",
     "TextGenerationProvider",
+    "managed_provider_for_role",
     "model_for_role",
     "provider_for_role",
 ]
