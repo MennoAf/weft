@@ -570,28 +570,57 @@ def ingest(path: str | None, project_id: str, depth: str):
 
     async def _ingest():
         import asyncpg
-        from anthropic import AsyncAnthropic
 
         from weft.embeddings import get_provider
         from weft.ingest import run_ingest
+        from weft.text_generation import managed_provider_for_role
 
+        # Resolve configuration once for this operation. Provider selection is
+        # handled by the managed scope, so alternate providers never need an
+        # Anthropic key or constructor.
         config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        # Use WEFT_API_KEY / config.api_key if ANTHROPIC_API_KEY isn't set
-        api_key = os.environ.get("ANTHROPIC_API_KEY") or config.api_key
-        if not api_key:
-            click.echo("Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.", err=True)
-            sys.exit(1)
-        client = AsyncAnthropic(api_key=api_key)
-        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
-        result = await run_ingest(
-            target, project_id, depth=depth, pool=pool, client=client,
-            embedding_provider=provider,
+        provider_name = config.text_generation.provider
+        api_key = (
+            os.environ.get("ANTHROPIC_API_KEY") or config.api_key
+            if provider_name == "anthropic"
+            else None
         )
-        await pool.close()
-        return result
+        if provider_name == "anthropic" and not api_key:
+            click.echo(
+                "Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
 
-    result = asyncio.run(_ingest())
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        try:
+            embedding_provider = get_provider(
+                config.embedding.provider,
+                model_name=config.embedding.model,
+                dimensions=config.embedding.dimensions,
+            )
+            async with managed_provider_for_role(
+                "codebase_summary",
+                config=config,
+                anthropic_api_key=api_key,
+            ) as generation_provider:
+                return await run_ingest(
+                    target,
+                    project_id,
+                    depth=depth,
+                    pool=pool,
+                    client=None,
+                    embedding_provider=embedding_provider,
+                    generation_provider=generation_provider,
+                    generation_config=config,
+                )
+        finally:
+            await pool.close()
+
+    try:
+        result = asyncio.run(_ingest())
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"\nIngest complete for {target}")
     click.echo(f"  Project: {project_id}")
     click.echo(f"  Depth: {depth}")

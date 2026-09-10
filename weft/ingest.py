@@ -7,9 +7,12 @@ import logging
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
-from anthropic import AsyncAnthropic
+
+if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
 
 from weft.embeddings.base import EmbeddingProvider
 from weft.models import MemorySource, MemoryType
@@ -168,6 +171,7 @@ async def summarize_file(
     client: AsyncAnthropic | None = None,
     *,
     generation_provider: TextGenerationProvider | None = None,
+    config: Any | None = None,
 ) -> str:
     """Ask Claude Haiku for a 1-2 sentence summary of a source file."""
     # Truncate to first _MAX_LINES lines
@@ -188,7 +192,7 @@ async def summarize_file(
     provider = generation_provider or provider_for_role("codebase_summary", client)
     response = await provider.generate(
         GenerationRequest(
-            model=model_for_role("codebase_summary", _MODEL),
+            model=model_for_role("codebase_summary", _MODEL, config=config),
             max_tokens=256,
             messages=(
                 {
@@ -213,6 +217,7 @@ async def generate_architecture_overview(
     client: AsyncAnthropic | None = None,
     *,
     generation_provider: TextGenerationProvider | None = None,
+    config: Any | None = None,
 ) -> str:
     """Generate a concise project architecture overview from bounded evidence."""
     evidence_parts: list[str] = []
@@ -240,7 +245,7 @@ async def generate_architecture_overview(
     provider = generation_provider or provider_for_role("codebase_architecture", client)
     response = await provider.generate(
         GenerationRequest(
-            model=model_for_role("codebase_architecture", _MODEL),
+            model=model_for_role("codebase_architecture", _MODEL, config=config),
             max_tokens=1024,
             messages=(
                 {
@@ -268,9 +273,10 @@ async def run_ingest(
     *,
     depth: str = "full",
     pool: asyncpg.Pool,
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None = None,
     embedding_provider: EmbeddingProvider | None = None,
     generation_provider: TextGenerationProvider | None = None,
+    generation_config: Any | None = None,
 ) -> dict:
     """Orchestrate the full codebase ingestion pipeline.
 
@@ -315,7 +321,11 @@ async def run_ingest(
                     return rel, None
                 try:
                     summary = await summarize_file(
-                        rel, content, client, generation_provider=generation_provider
+                        rel,
+                        content,
+                        client,
+                        generation_provider=generation_provider,
+                        config=generation_config,
                     )
                     return rel, summary
                 except Exception as exc:
@@ -332,7 +342,11 @@ async def run_ingest(
 
     # 5. Generate architecture overview
     overview = await generate_architecture_overview(
-        tree, summaries, client, generation_provider=generation_provider
+        tree,
+        summaries,
+        client,
+        generation_provider=generation_provider,
+        config=generation_config,
     )
 
     # 6. Store architecture overview
