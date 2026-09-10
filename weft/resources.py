@@ -86,7 +86,16 @@ def compose_file_path() -> Iterator[Path]:
             "install package data or run from an anchored weft-memory checkout"
         ) from exc
 
-    if resource.is_file():
+    try:
+        resource_present = resource.is_file()
+    except OSError as exc:
+        raise ComposeResourceError(
+            f"Unable to inspect packaged {_RESOURCE_NAME!r}; "
+            "verify package data is readable or run from an anchored "
+            "weft-memory checkout"
+        ) from exc
+
+    if resource_present:
         stack = ExitStack()
         try:
             try:

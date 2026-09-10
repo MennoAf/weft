@@ -130,6 +130,40 @@ def test_package_caller_exception_is_identical_and_cleanup_runs(
     assert cleanup
 
 
+def test_package_presence_probe_error_is_actionable_and_stops_setup(
+    tmp_path: Path,
+) -> None:
+    """A failing presence probe preserves its cause and stops resolution setup."""
+    package = _TraversablePackage(
+        _TraversableResource(tmp_path / "package-resource", present=False)
+    )
+    probe_error = OSError("stat denied")
+    body_entered = False
+
+    with (
+        patch("weft.resources.importlib.resources.files", return_value=package),
+        patch(
+            "weft.resources.importlib.resources.as_file",
+            side_effect=AssertionError("materialization must not run"),
+        ) as as_file,
+        patch(
+            "weft.resources._source_fallback",
+            side_effect=AssertionError("source fallback must not run"),
+        ) as source_fallback,
+        patch.object(package.resource, "is_file", side_effect=probe_error),
+    ):
+        with pytest.raises(
+            ComposeResourceError, match="Unable to inspect packaged"
+        ) as caught:
+            with compose_file_path():
+                body_entered = True
+
+    assert caught.value.__cause__ is probe_error
+    assert not body_entered
+    as_file.assert_not_called()
+    source_fallback.assert_not_called()
+
+
 def test_package_materialization_setup_error_is_actionable(tmp_path: Path) -> None:
     """Only an as_file setup failure is translated to ComposeResourceError."""
     package = _TraversablePackage(
