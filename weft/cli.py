@@ -13,8 +13,8 @@ from pathlib import Path
 import click
 
 from weft.config import CONFIG_PATH, load_config, load_config_file, save_config_value
+from weft.resources import compose_file_path
 
-COMPOSE_FILE = Path(__file__).parent.parent / "docker-compose.weft.yml"
 _COMPOSE_PROJECT_ENV = "WEFT_COMPOSE_PROJECT"
 
 
@@ -74,28 +74,29 @@ def _register_mcp(project_dir: Path | None = None) -> None:
 def up(global_: bool):
     """Start Weft infrastructure (Postgres + Redis) and run migrations."""
     click.echo("Starting Weft containers...")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", _compose_project_name(), "up", "-d"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Error: {result.stderr}", err=True)
-        sys.exit(1)
-    click.echo("Weft containers started.")
+    with compose_file_path() as compose_file:
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "-p", _compose_project_name(), "up", "-d"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            click.echo(f"Error: {result.stderr}", err=True)
+            sys.exit(1)
+        click.echo("Weft containers started.")
 
-    # Run migrations through the same owner-safe path used by deployments.
-    applied = asyncio.run(_run_owner_migrations(load_config()))
-    if applied:
-        click.echo(f"Applied {len(applied)} migration(s).")
-    else:
-        click.echo("Migrations up to date.")
+        # Run migrations through the same owner-safe path used by deployments.
+        applied = asyncio.run(_run_owner_migrations(load_config()))
+        if applied:
+            click.echo(f"Applied {len(applied)} migration(s).")
+        else:
+            click.echo("Migrations up to date.")
 
-    # Register MCP server
-    if global_:
-        _register_mcp()
-    else:
-        _register_mcp(Path.cwd())
+        # Register MCP server
+        if global_:
+            _register_mcp()
+        else:
+            _register_mcp(Path.cwd())
 
 
 def _migration_config(ca_cert_file: str | None, database_url: str | None):
@@ -218,15 +219,16 @@ def deploy_cmd(app: str, wait_timeout: str, ca_cert_file: Path | None, skip_pref
 def down():
     """Stop Weft infrastructure."""
     click.echo("Stopping Weft containers...")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", _compose_project_name(), "down"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Error: {result.stderr}", err=True)
-        sys.exit(1)
-    click.echo("Weft containers stopped.")
+    with compose_file_path() as compose_file:
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "-p", _compose_project_name(), "down"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            click.echo(f"Error: {result.stderr}", err=True)
+            sys.exit(1)
+        click.echo("Weft containers stopped.")
 
 
 @cli.command()
