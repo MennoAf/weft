@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,7 @@ from fastmcp import Context
 
 from capability_registry.lookup import format_lookup_results, lookup_capabilities
 from weft.auth import current_user_id, resolve_canary_user_id, resolve_caller_user_id
+from weft.config import configured_project_name, load_config
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
 from weft.fsck import list_orphan_memories
@@ -404,7 +406,7 @@ async def _detect_project_id(ctx: Context) -> str | None:
         if isinstance(context_transport, str)
         else os.environ.get("WEFT_TRANSPORT", "stdio")
     ).strip().lower()
-    if transport in {"streamable-http", "streamable_http", "sse"}:
+    if transport in _HTTP_TRANSPORTS:
         logger.debug(
             "detect_project_id skipped roots reverse RPC on transport=%s",
             transport,
@@ -430,13 +432,33 @@ _UUID_RE = re.compile(
 )
 
 
-async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
-    """Return the explicit project_id if provided, otherwise auto-detect.
+@dataclass(frozen=True)
+class ProjectResolution:
+    """Resolved project scope and the source that authorized it."""
 
-    Raises ValueError if the explicit value looks like a UUID — project_ids
-    should be human-readable directory names (e.g. 'delphi', not a Loom
-    project UUID).
-    """
+    project_id: str | None
+    source: str
+
+    @property
+    def resolved(self) -> bool:
+        return self.project_id is not None
+
+
+_HTTP_TRANSPORTS = {"streamable-http", "streamable_http", "sse"}
+
+
+def _context_transport(ctx: Context) -> str:
+    """Return the active request transport, using env only outside a request."""
+    context_transport = getattr(ctx, "transport", None)
+    if isinstance(context_transport, str) and context_transport.strip():
+        return context_transport.strip().lower()
+    return os.environ.get("WEFT_TRANSPORT", "stdio").strip().lower()
+
+
+async def _resolve_project_scope(
+    ctx: Context, explicit: str | None
+) -> ProjectResolution:
+    """Resolve project scope: explicit, configured, bounded stdio roots, unresolved."""
     if explicit is not None:
         if _UUID_RE.match(explicit):
             raise ValueError(
@@ -445,8 +467,34 @@ async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
                 "UUIDs are Loom project IDs — Weft project_ids should be "
                 "human-readable names that match the working directory."
             )
-        return explicit
-    return await _detect_project_id(ctx)
+        return ProjectResolution(explicit, "explicit")
+
+    app = getattr(getattr(ctx, "request_context", None), "lifespan_context", None)
+    configured = configured_project_name(getattr(getattr(app, "config", None), "project_name", None))
+    if configured is None:
+        try:
+            configured = configured_project_name(load_config().project_name)
+        except Exception:
+            configured = None
+    if configured is not None:
+        return ProjectResolution(configured, "configured")
+
+    if _context_transport(ctx) in _HTTP_TRANSPORTS:
+        logger.debug(
+            "resolve_project_scope skipped roots reverse RPC on transport=%s",
+            _context_transport(ctx),
+        )
+        return ProjectResolution(None, "unresolved")
+
+    detected = await _detect_project_id(ctx)
+    if detected is not None:
+        return ProjectResolution(detected, "roots")
+    return ProjectResolution(None, "unresolved")
+
+
+async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
+    """Return the resolved project name while retaining the legacy API shape."""
+    return (await _resolve_project_scope(ctx, explicit)).project_id
 
 
 def _input_error_response(tool_name: str, error: Exception) -> dict:
@@ -2331,7 +2379,8 @@ async def weft_prime(
         from weft.primer import build_primer
 
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
 
         # Compute query embedding if provided (best-effort).
         query_vec: list[float] | None = None
@@ -2357,6 +2406,7 @@ async def weft_prime(
         if resolved_project is None:
             result["project_resolution"] = {
                 "resolved": False,
+                "source": resolution.source,
                 "scope": "user-wide",
                 "warning": (
                     "No project_id resolved. Prime is user-wide: project filters "

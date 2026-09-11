@@ -321,10 +321,23 @@ class AlertCooldownConfig(BaseModel):
         return self.by_type.get(str(key), self.default_minutes)
 
 
+DEFAULT_PROJECT_NAME = "default"
+
+
+def configured_project_name(value: object) -> str | None:
+    """Return a usable configured scope name, excluding the default sentinel."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or name.casefold() == DEFAULT_PROJECT_NAME:
+        return None
+    return name
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     migration_mode: MigrationMode = MigrationMode.apply
-    project_name: str = "default"
+    project_name: str = DEFAULT_PROJECT_NAME
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
