@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -54,6 +57,169 @@ def app(pool):
 @pytest.fixture
 def ctx(app):
     return _make_ctx(app)
+
+
+class _IngestSdkClient:
+    def __init__(self, *, text: str = '[{"type":"general_note","content":"public ingest","confidence":0.9,"entities":[],"dates":[]}]', error: BaseException | None = None, wait: asyncio.Event | None = None):
+        self.text = text
+        self.error = error
+        self.wait = wait
+        self.close_calls = 0
+        self.models: list[str] = []
+        self.messages = SimpleNamespace(create=self._create)
+        self.responses = SimpleNamespace(create=self._responses_create)
+
+    async def _create(self, **kwargs):
+        self.models.append(kwargs["model"])
+        if self.wait is not None:
+            await self.wait.wait()
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=self.text)],
+            model=kwargs["model"],
+            stop_reason="end_turn",
+        )
+
+    async def _responses_create(self, **kwargs):
+        self.models.append(kwargs["model"])
+        if self.wait is not None:
+            await self.wait.wait()
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(output_text=self.text, model=kwargs["model"], status="completed")
+
+    async def aclose(self):
+        self.close_calls += 1
+
+
+@asynccontextmanager
+async def _fake_ingest_acquire(_pool):
+    yield SimpleNamespace()
+
+
+class TestWeftIngestProviderConfig:
+    """Public ingest exercises the real process/classify/provider path."""
+
+    @staticmethod
+    def _patch_boundaries(monkeypatch, intents=None):
+        from weft.ingest_pipeline import IngestResult, Intent
+
+        captured = {"project_id": None}
+        intents = intents or [Intent(type="general_note", content="public ingest")]
+
+        async def fake_route(_intents, _pool, _embedding, *, project_id, source):
+            captured["project_id"] = project_id
+            return IngestResult(intents=list(_intents))
+
+        monkeypatch.setattr("weft.mcp.tools.acquire", _fake_ingest_acquire)
+        monkeypatch.setattr("weft.ingest_pipeline.route", fake_route)
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_configured_default_provider_model_and_project(self, ctx, app, monkeypatch):
+        client = _IngestSdkClient()
+        app.config.text_generation.models["ingest_classifier"] = "configured-ingest-model"
+        monkeypatch.setattr("anthropic.AsyncAnthropic", lambda **_: client)
+        captured = self._patch_boundaries(monkeypatch)
+
+        from weft.mcp.tools import weft_ingest
+        result = await weft_ingest(ctx, "a public ingest note", project_id="explicit-project")
+
+        assert result == {
+            "memories_created": 0,
+            "entities_created": 0,
+            "entities_linked": 0,
+            "alerts_created": 0,
+            "intents": 1,
+            "errors": [],
+        }
+        assert client.models == ["configured-ingest-model"]
+        assert client.close_calls == 1
+        assert captured["project_id"] == "explicit-project"
+
+    @pytest.mark.asyncio
+    async def test_alternate_provider_does_not_construct_wrong_sdk(self, ctx, app, monkeypatch):
+        client = _IngestSdkClient()
+        app.config.text_generation.provider = "openai"
+        monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+        monkeypatch.setitem(__import__("sys").modules, "openai", SimpleNamespace(AsyncOpenAI=lambda **_: client))
+        monkeypatch.setattr("anthropic.AsyncAnthropic", lambda **_: (_ for _ in ()).throw(AssertionError("anthropic constructed")))
+        self._patch_boundaries(monkeypatch)
+
+        from weft.mcp.tools import weft_ingest
+        result = await weft_ingest(ctx, "an alternate provider note")
+
+        assert result["intents"] == 1
+        assert client.models == ["claude-haiku-4-5-20251001"]
+        assert client.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_invalid_provider_is_visible_before_sdk_construction(self, ctx, app, monkeypatch):
+        app.config.text_generation.provider = "not-registered"
+        constructors = []
+        monkeypatch.setattr("anthropic.AsyncAnthropic", lambda **_: constructors.append("anthropic"))
+        monkeypatch.setitem(__import__("sys").modules, "openai", SimpleNamespace(AsyncOpenAI=lambda **_: constructors.append("openai")))
+        self._patch_boundaries(monkeypatch)
+
+        from weft.mcp.tools import weft_ingest
+        result = await weft_ingest(ctx, "an invalid provider note")
+
+        assert result["error"] == "Invalid input"
+        assert "unavailable" in result["detail"]
+        assert constructors == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text,metadata", [("hi", {}), ("👍", {}), ("bot note", {"is_bot": True})])
+    async def test_skip_before_generation_allocation(self, ctx, app, monkeypatch, text, metadata):
+        constructors = []
+        monkeypatch.setattr("anthropic.AsyncAnthropic", lambda **_: constructors.append("anthropic"))
+        self._patch_boundaries(monkeypatch)
+
+        from weft.mcp.tools import weft_ingest
+        result = await weft_ingest(ctx, text, metadata=metadata)
+
+        assert result["intents"] == 0
+        assert set(result) == {"memories_created", "entities_created", "entities_linked", "alerts_created", "intents", "errors"}
+        assert constructors == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text,error", [("provider error", RuntimeError("provider down")), ("empty", None), ("malformed", None)])
+    async def test_owned_provider_cleanup_on_error_or_abstention(self, ctx, app, monkeypatch, text, error):
+        response = "" if text == "empty" else ("{malformed" if text == "malformed" else '[{"type":"general_note","content":"ok"}]')
+        client = _IngestSdkClient(text=response, error=error)
+        monkeypatch.setattr("anthropic.AsyncAnthropic", lambda **_: client)
+        self._patch_boundaries(monkeypatch)
+
+        from weft.mcp.tools import weft_ingest
+        result = await weft_ingest(ctx, text)
+
+        assert result["intents"] == 0
+        assert result["errors"] == []
+        assert client.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_owned_provider_cleanup_on_actual_task_cancellation(self, ctx, app, monkeypatch):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        client = _IngestSdkClient(wait=release)
+
+        async def create(**kwargs):
+            started.set()
+            await release.wait()
+            return await client._create(**kwargs)
+
+        client.messages = SimpleNamespace(create=create)
+        monkeypatch.setattr("anthropic.AsyncAnthropic", lambda **_: client)
+        self._patch_boundaries(monkeypatch)
+
+        from weft.mcp.tools import weft_ingest
+        task = asyncio.create_task(weft_ingest(ctx, "cancel this ingest task"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert client.close_calls == 1
 
 
 # ---------------------------------------------------------------------------

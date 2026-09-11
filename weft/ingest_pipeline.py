@@ -229,6 +229,7 @@ async def classify(
     metadata: dict[str, Any] | None = None,
     tz_name: str = "America/New_York",
     generation_provider: TextGenerationProvider | None = None,
+    config: Any | None = None,
 ) -> list[Intent]:
     """Classify text with an injected or per-operation managed provider."""
     effective_metadata = metadata or {}
@@ -240,13 +241,15 @@ async def classify(
             metadata=metadata,
             tz_name=tz_name,
             generation_provider=generation_provider,
+            config=config,
         )
-    async with managed_provider_for_role("ingest_classifier") as provider:
+    async with managed_provider_for_role("ingest_classifier", config=config) as provider:
         return await _classify_with_provider(
             text,
             metadata=metadata,
             tz_name=tz_name,
             generation_provider=provider,
+            config=config,
         )
 
 
@@ -256,6 +259,7 @@ async def _classify_with_provider(
     metadata: dict[str, Any] | None = None,
     tz_name: str = "America/New_York",
     generation_provider: TextGenerationProvider | None = None,
+    config: Any | None = None,
 ) -> list[Intent]:
     """Classify text into structured intents via LLM.
 
@@ -279,7 +283,7 @@ async def _classify_with_provider(
     if provider is None:
         raise RuntimeError("classifier provider was not supplied")
     request = GenerationRequest(
-        model=model_for_role("ingest_classifier", _CLASSIFIER_MODEL),
+        model=model_for_role("ingest_classifier", _CLASSIFIER_MODEL, config=config),
         max_tokens=512,
         system=_SYSTEM_PROMPT,
         messages=({"role": "user", "content": normalized},),
@@ -752,6 +756,7 @@ async def process(
     project_id: str | None = None,
     tz_name: str = "America/New_York",
     generation_provider: TextGenerationProvider | None = None,
+    config: Any | None = None,
 ) -> IngestResult:
     """Process a single IngestItem through the full pipeline.
 
@@ -763,6 +768,7 @@ async def process(
         metadata=item.metadata,
         tz_name=tz_name,
         generation_provider=generation_provider,
+        config=config,
     )
 
     if not intents:

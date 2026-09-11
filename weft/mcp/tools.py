@@ -4592,6 +4592,7 @@ async def weft_ingest(
                 app.pool,
                 app.embedding,
                 project_id=resolved_project,
+                config=app.config,
             )
 
         return {
