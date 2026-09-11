@@ -580,7 +580,8 @@ async def weft_remember(
                 ),
             )
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
         if workspace_id is not None:
             from weft.workspaces import is_member as _ws_is_member
             caller_uid = resolve_caller_user_id()
@@ -751,6 +752,7 @@ async def _weft_recall_turns(
     query: str,
     project_id: str | None,
     limit: int,
+    resolution: ProjectResolution | None = None,
     as_of: datetime | None = None,
     use_stored_search_tsv: bool = False,
 ) -> dict:
@@ -778,7 +780,11 @@ async def _weft_recall_turns(
         from weft.turn_recall import temporal_anchor
 
         hierarchical = os.environ.get("WEFT_HIERARCHICAL") == "1"
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolved_project = (
+            resolution.project_id
+            if resolution is not None
+            else (await _resolve_project_scope(ctx, project_id)).project_id
+        )
         async with acquire(app.pool):
             if hierarchical:
                 from weft.episode_turns import recall_turns_hierarchical
@@ -870,6 +876,7 @@ async def _weft_recall_both(
     agent_id: str | None,
     user_id: str | None,
     limit: int,
+    resolution: ProjectResolution | None = None,
     retrieval_mode: str,
     memory_status: MemoryStatus,
     memory_type: MemoryType | None,
@@ -896,7 +903,11 @@ async def _weft_recall_both(
 
         sources = sources_for_mode(retrieval_mode)
         agent_provenance_ok = include_agent_provenance(retrieval_mode)
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolved_project = (
+            resolution.project_id
+            if resolution is not None
+            else (await _resolve_project_scope(ctx, project_id)).project_id
+        )
 
         async with acquire(app.pool):
             fused = await recall_both(
@@ -997,7 +1008,8 @@ async def weft_count_occurrences(
         return {"error": "since must be before or equal to until"}
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
         variants = temporal_query_variants(query)
         seen: set[str] = set()
         turns = []
@@ -1523,15 +1535,15 @@ async def weft_recall(
             }
         return response
 
-    # Resolve structured authority once. Baseline retrieval retains its existing
-    # face/code/all semantics; only this explicit scope may authorize a complete
-    # deterministic sidecar result.
-    if opt_n_supplement or structured_recall_mode != "off" or tier == "belief":
-        try:
-            resolved_structured_project = await _resolve_project_id(ctx, project_id)
-        except BaseException:
-            await _finish_enum_task()
-            raise
+    # Resolve project authority exactly once for every recall request. Baseline
+    # retrieval retains its existing face/code/all semantics; the structured
+    # resolution is threaded through every scope-bearing branch below.
+    try:
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_structured_project = resolution.project_id
+    except _INPUT_ERRORS as e:
+        await _finish_enum_task()
+        return _input_error_response("weft_recall", e)
     if tier == "belief":
         try:
             from weft.enumeration_router import detect_enumeration_intent, gather_enumeration
@@ -1544,11 +1556,7 @@ async def weft_recall(
                         app_enum.pool,
                         enum_target,
                         user_id,
-                        project_id=(
-                            resolved_structured_project
-                            if opt_n_supplement or structured_recall_mode != "off"
-                            else None
-                        ),
+                        project_id=resolved_structured_project,
                     ),
                     name="weft-recall-enumeration-gather",
                 )
@@ -1570,7 +1578,7 @@ async def weft_recall(
             tool_name="recall",
             query_text=query,
             user_id=user_id,
-            project_id=project_id,
+            project_id=resolved_structured_project,
             tier=tier,
             mode=mode,
             retrieval_mode=retrieval_mode,
@@ -1590,7 +1598,8 @@ async def weft_recall(
         turns_response = await _weft_recall_turns(
             ctx,
             query=query,
-            project_id=project_id,
+            project_id=resolved_structured_project,
+            resolution=resolution,
             limit=limit,
             as_of=parsed_opt_n_as_of,
             use_stored_search_tsv=use_stored_search_tsv,
@@ -1620,9 +1629,10 @@ async def weft_recall(
         both_response = await _weft_recall_both(
             ctx,
             query=query,
-            project_id=project_id,
+            project_id=resolved_structured_project,
             agent_id=agent_id,
             user_id=user_id,
+            resolution=resolution,
             limit=limit,
             retrieval_mode=retrieval_mode,
             memory_status=MemoryStatus(status) if status else MemoryStatus.active,
@@ -1731,11 +1741,14 @@ async def weft_recall(
         # preserved unchanged — ingest scoping must not leak across repos.
         facet_boost_project_id: str | None = None
         if retrieval_mode == "face":
-            _raw_boost_id = await _resolve_project_id(ctx, project_id)
-            facet_boost_project_id = _raw_boost_id.lower() if _raw_boost_id else None
+            facet_boost_project_id = (
+                resolved_structured_project.lower()
+                if resolved_structured_project else None
+            )
 
         # When facet boost is active, suppress the project wall in search calls.
-        _search_project_id = None if retrieval_mode == "face" else project_id
+        # The resolved scope still drives facet ranking in face mode.
+        _search_project_id = None if retrieval_mode == "face" else resolved_structured_project
 
         async with acquire(app.pool):
             if mode == "keyword":
@@ -1819,7 +1832,7 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=resolved_structured_project,
                     agent_id=agent_id,
                     sources=sources,
                     include_agent_provenance=agent_provenance_ok,
@@ -1836,8 +1849,7 @@ async def weft_recall(
             # Face mode uses facet-boost in the primary query (above), so
             # cross-project beliefs already surface there — no separate pass.
             if embedding is not None and retrieval_mode != "face":
-                resolved_project = await _resolve_project_id(ctx, project_id)
-                if resolved_project is not None:
+                if resolved_structured_project is not None:
                     try:
                         from weft.config import load_config
                         cfg = load_config()
@@ -1845,7 +1857,7 @@ async def weft_recall(
                             main_ids = {r.memory.id for r in results}
                             cross_results = await search_cross_project(
                                 app.pool, embedding,
-                                exclude_project_id=resolved_project,
+                                exclude_project_id=resolved_structured_project,
                                 limit=cfg.retrieval.cross_project_limit,
                                 threshold=threshold,
                                 status=memory_status,
@@ -2509,7 +2521,8 @@ async def weft_focus(
         from weft.focus import build_focus
 
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
 
         async with acquire(app.pool):
             result = await build_focus(
@@ -2970,7 +2983,8 @@ async def weft_handoff(
     - open_questions: unresolved decisions or things to investigate"""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
         if resolved_project is None:
             return _input_error_response(
                 "weft_handoff",
