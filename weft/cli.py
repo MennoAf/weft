@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from weft.config import CONFIG_PATH, load_config, load_config_file, save_config_value
+from weft.doctor import load_doctor_dependencies, run_doctor
 from weft.resources import compose_file_path
 
 _COMPOSE_PROJECT_ENV = "WEFT_COMPOSE_PROJECT"
@@ -41,6 +42,19 @@ def mcp_server():
     """Start the Weft MCP server (stdio transport)."""
     from weft.mcp import mcp
     mcp.run()
+
+
+@cli.command(name="doctor")
+@click.option("--json", "as_json", is_flag=True, help="Emit the stable JSON Doctor schema.")
+def doctor_cmd(as_json: bool) -> None:
+    """Inspect configuration and dependencies without making changes."""
+    report = run_doctor(dependencies=load_doctor_dependencies())
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":")))
+    else:
+        for check in report.checks:
+            click.echo(f"{check.id} {check.status.upper()}: {check.name} — {check.remedy}")
+    raise click.exceptions.Exit(report.exit_code)
 
 
 def _register_mcp(project_dir: Path | None = None) -> None:
