@@ -23,6 +23,7 @@ import asyncpg
 
 from weft.alerts import is_daily_brief_due, mark_alert_fired, poll_due_alerts, release_alert
 from weft.models import Alert
+from weft.worker_lease import LeaseLostError, WorkerLease
 
 logger = logging.getLogger(__name__)
 
@@ -205,18 +206,27 @@ async def scheduler_loop(
     *,
     interval: int = DEFAULT_POLL_INTERVAL,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    lease: WorkerLease | None = None,
 ) -> None:
-    """Main scheduler loop. Runs until cancelled.
+    """Main scheduler loop, optionally owned by a durable worker lease.
 
     Polls for due alerts, dispatches each one, and marks fired on success.
-    If dispatch fails, the alert stays pending and will be retried next cycle.
-    If a full batch is returned, polls again immediately (backpressure).
+    When *lease* is supplied, only the winner runs and every side effect is
+    fenced by its token/generation.  Existing alert ``processing_at`` rows
+    remain independent per-alert reservations.
     """
     logger.info("scheduler.started", extra={"interval": interval, "batch_size": batch_size})
+    if lease is not None and await lease.acquire() is None:
+        logger.info("scheduler.duplicate_worker_suppressed")
+        return
     try:
         while True:
             try:
+                await (lease.assert_owner() if lease is not None else _noop())
                 alerts = await poll_due_alerts(pool, batch_size=batch_size)
+            except LeaseLostError:
+                logger.warning("scheduler.lease_lost")
+                return
             except Exception:
                 logger.exception("scheduler.poll_error")
                 await asyncio.sleep(interval)
@@ -224,14 +234,20 @@ async def scheduler_loop(
 
             for alert in alerts:
                 try:
-                    await dispatch_alert(alert)
-                    await mark_alert_fired(pool, alert.id)
+                    if lease is not None:
+                        await lease.run_fenced(lambda: dispatch_alert(alert))
+                        await lease.run_fenced(lambda: mark_alert_fired(pool, alert.id))
+                    else:
+                        await dispatch_alert(alert)
+                        await mark_alert_fired(pool, alert.id)
+                except LeaseLostError:
+                    logger.warning("scheduler.lease_lost", extra={"alert_id": alert.id})
+                    return
                 except Exception:
                     logger.exception(
                         "scheduler.dispatch_error",
                         extra={"alert_id": alert.id},
                     )
-                    # Release the durable reservation so the next cycle can retry.
                     try:
                         await release_alert(pool, alert.id)
                     except Exception:
@@ -240,7 +256,6 @@ async def scheduler_loop(
                             extra={"alert_id": alert.id},
                         )
 
-            # Backpressure: if we got a full batch, poll again immediately
             if len(alerts) >= batch_size:
                 continue
 
@@ -248,6 +263,13 @@ async def scheduler_loop(
     except asyncio.CancelledError:
         logger.info("scheduler.stopped")
         raise
+    finally:
+        if lease is not None:
+            await lease.release()
+
+
+async def _noop() -> None:
+    """Awaitable used to keep the lease check branch explicit."""
 
 
 # --- Slack sync loop ---
