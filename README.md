@@ -140,6 +140,7 @@ Full CLI: [docs/cli.md](docs/cli.md).
 | **[MCP tool reference](docs/tools.md)** | Every tool, every parameter |
 | **[CLI reference](docs/cli.md)** | Every command |
 | **[Configuration](docs/configuration.md)** | Environment variables, TOML keys, infrastructure |
+| **[Database and schema guide](docs/database-schema.md)** | 47 public tables, ownership/RLS, migrations, vectors, and export boundaries |
 | **[Authentication + identity](docs/user-identity.md)** | Tokens, caller modes, agent floor |
 | **[Retrieval + scope](docs/retrieval-and-scope.md)** | How `weft_recall` decides what comes back |
 | **[Benchmarks](docs/benchmarks.md)** | LongMemEval methodology + current numbers |
