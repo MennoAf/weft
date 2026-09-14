@@ -473,18 +473,54 @@ def save_config_value(key: str, value: str, path: Path | None = None) -> None:
     """
     p = path or CONFIG_PATH
     data = load_config_file(p)
-
-    # Coerce value to the right type
-    coerced: object = _coerce_value(key, value)
-
-    parts = key.split(".", 1)
-    if len(parts) == 2:
-        section, field = parts
-        data.setdefault(section, {})[field] = coerced
-    else:
-        data[key] = coerced
-
+    data = config_data_with_updates(data, {key: value})
     _write_toml(data, p)
+
+
+def config_data_with_updates(data: dict, updates: dict[str, str]) -> dict:
+    """Return *data* with validated/coerced dotted-key updates applied.
+
+    This is deliberately side-effect free so callers can produce a plan before
+    writing.  Unknown keys are rejected instead of being silently persisted.
+    """
+    result = dict(data)
+    for key, value in updates.items():
+        if key not in _KEY_MAP and not key.startswith("text_generation.models."):
+            raise ValueError(f"Unknown config key: {key}")
+        coerced: object = _coerce_value(key, value)
+        parts = key.split(".", 1)
+        if len(parts) == 2:
+            section, field = parts
+            section_data = dict(result.get(section, {}))
+            section_data[field] = coerced
+            result[section] = section_data
+        else:
+            result[key] = coerced
+    return result
+
+
+def initialize_config(path: Path | None = None) -> bool:
+    """Create the minimal local config once; return whether it was created.
+
+    Existing files are never opened for writing.  Credentials, infrastructure,
+    migrations, and provider setup are intentionally outside this helper.
+    """
+    p = path or CONFIG_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with p.open("x", encoding="utf-8") as config_file:
+            config_file.write(
+                '# Weft configuration; use ``weft config set`` for explicit changes.\n'
+                'project_name = "default"\n'
+            )
+    except FileExistsError:
+        return False
+    return True
+
+
+def write_config_data(data: dict, path: Path | None = None) -> None:
+    """Write already validated config data to *path* (the only write seam)."""
+    _write_toml(data, path or CONFIG_PATH)
 
 
 def _coerce_value(key: str, value: str) -> object:
