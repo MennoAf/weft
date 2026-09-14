@@ -881,18 +881,23 @@ def restore(file: str, dry_run: bool, no_skip_duplicates: bool):
     click.echo(f"  With embeddings: {report['memories_with_embeddings']}")
 
     async def _restore():
+        from weft.backup import verify_backup_preconditions
         from weft.db.connection import create_pool
-        from weft.db.migrations import run_migrations
 
         config = load_config()
         pool = await create_pool(config)
-        await run_migrations(pool)
-        result = await restore_all(
-            pool, data,
-            dry_run=dry_run,
-            skip_duplicates=not no_skip_duplicates,
-        )
-        await pool.close()
+        try:
+            # Restore is an owner-managed logical-data operation.  Preflight is
+            # read-only and deliberately does not apply pending migrations;
+            # operators must run the explicit owner migration command first.
+            await verify_backup_preconditions(pool)
+            result = await restore_all(
+                pool, data,
+                dry_run=dry_run,
+                skip_duplicates=not no_skip_duplicates,
+            )
+        finally:
+            await pool.close()
         return result
 
     result = asyncio.run(_restore())

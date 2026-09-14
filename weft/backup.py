@@ -35,12 +35,32 @@ from typing import Any
 import asyncpg
 
 from weft.db.migrations import MIGRATIONS
+from weft.db.migrations._runner import verify_migration_ledger
 
 logger = logging.getLogger(__name__)
 
 # Current backup format version — bump when the schema changes
 BACKUP_VERSION = "1.2"
 _LEGACY_VERSIONS = ("1.0", "1.1")
+
+# Logical export is deliberately an allow-list.  In particular, never infer
+# exportability from the set of tables visible to a database role: auth,
+# migration, lease, telemetry, and infrastructure tables are not portable user
+# data even when a role can read them.
+_PORTABLE_TOP_LEVEL_KEYS = frozenset({
+    "version", "schema_version", "exported_at", "checksum",
+    "memory_count", "relationship_count", "memories", "relationships",
+    "workspaces", "workspace_members", "behaviors", "entities",
+    "entity_mentions", "episodes", "episode_memories", "modes", "trackers",
+    "counts",
+})
+_NON_PORTABLE_SECTIONS = frozenset({
+    "weft_tokens", "oauth_sessions", "oauth_clients", "oauth_codes",
+    "schema_migrations", "weft_metadata", "leases", "worker_leases",
+    "alerts", "check_ins", "cost_entries", "calibration_records",
+    "autonomy_policies", "degradation_policies", "policy_calibration_events",
+    "memory_access_log", "audit_backfill_user_id", "infrastructure",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +264,55 @@ def _insert_sql(spec: _TableSpec, columns: list[str], col_kinds: dict[str, str])
 # ---------------------------------------------------------------------------
 
 
+async def verify_backup_preconditions(pool: asyncpg.Pool) -> None:
+    """Require an owner-capable connection and an exact, ready schema.
+
+    Export/restore is an operator operation over every owner's rows.  It must
+    not be reachable through the restricted application role, and it must not
+    turn a restore into an implicit schema-upgrade operation.  This check is
+    intentionally read-only and does not inspect or return credentials.
+    """
+    role = await pool.fetchrow(
+        """
+        SELECT current_user AS role, r.rolsuper, r.rolbypassrls,
+               EXISTS (
+                   SELECT 1 FROM pg_class c
+                   JOIN pg_roles owner ON owner.oid = c.relowner
+                   WHERE c.oid = 'public.memories'::regclass
+                     AND owner.rolname = current_user
+               ) AS owns_memories
+        FROM pg_roles r
+        WHERE r.rolname = current_user
+        """
+    )
+    if role is None:
+        raise PermissionError("backup/restore requires an owner-capable database role")
+    role_name = role.get("role") or ""
+    if role_name == "weft_app":
+        raise PermissionError(
+            "backup/restore requires an owner-capable database role; refusing restricted runtime role"
+        )
+    if not (
+        role.get("rolsuper")
+        or role.get("rolbypassrls")
+        or role.get("owns_memories")
+    ):
+        raise PermissionError("backup/restore requires an owner-capable database role")
+
+    # The ledger check is read-only and fails on missing/pending/unknown
+    # migrations.  The CLI must direct operators to the owner migration command
+    # rather than silently applying anything as part of restore.
+    await verify_migration_ledger(pool)
+
+
 async def backup_all(pool: asyncpg.Pool) -> dict:
     """Export user data as a self-contained JSON-friendly dict.
 
     Bypasses RLS to ensure ALL rows (across all user_ids) are exported.
-    Requires the connection role to be the table owner.
+    Requires the connection role to be the table owner and the schema ledger
+    to be complete.  Preconditions are read-only and never expose secrets.
     """
+    await verify_backup_preconditions(pool)
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SET LOCAL row_security = off")
@@ -334,6 +397,12 @@ async def restore_all(
     the legacy ``memories_restored`` / ``relationships_restored`` keys for
     backward compat with CLI consumers.
     """
+    if not isinstance(data, dict):
+        raise ValueError("backup payload must be an object")
+    # Dry-run is non-mutating, but still requires the same owner/schema gate so
+    # it cannot be used to probe a restricted or partially migrated database.
+    await verify_backup_preconditions(pool)
+
     version = data.get("version")
     if version not in (BACKUP_VERSION,) + _LEGACY_VERSIONS:
         logger.warning(
@@ -410,7 +479,15 @@ async def restore_all(
                         if result.split()[-1] != "0":
                             report[f"{spec.section}_restored"] += 1
                         else:
+                            if not skip_duplicates:
+                                pk_repr = {c: row_dict.get(c) for c in spec.pk}
+                                raise ValueError(
+                                    f"restore collision in {spec.name}: {pk_repr}; "
+                                    "rerun with duplicate skipping enabled"
+                                )
                             report[f"{spec.section}_skipped"] += 1
+                    except ValueError:
+                        raise
                     except Exception as e:
                         pk_repr = {c: row_dict.get(c) for c in spec.pk}
                         report["errors"].append(f"{spec.name} {pk_repr}: {e}")
@@ -438,6 +515,24 @@ def verify_backup(data: dict) -> dict:
     """Verify a backup file's integrity without connecting to a database."""
     issues: list[str] = []
 
+    if not isinstance(data, dict):
+        return {
+            "valid": False,
+            "issues": ["Backup payload must be an object"],
+            "memory_count": 0,
+            "relationship_count": 0,
+            "memories_with_embeddings": 0,
+            "exported_at": None,
+            "schema_version": None,
+        }
+
+    unexpected = set(data) - _PORTABLE_TOP_LEVEL_KEYS
+    for key in sorted(unexpected):
+        if key in _NON_PORTABLE_SECTIONS or key.startswith(("oauth_", "auth_")):
+            issues.append(f"Non-portable section rejected: {key}")
+        else:
+            issues.append(f"Unknown top-level section rejected: {key}")
+
     if "version" not in data:
         issues.append("Missing 'version' field")
     elif data["version"] not in (BACKUP_VERSION,) + _LEGACY_VERSIONS:
@@ -450,19 +545,38 @@ def verify_backup(data: dict) -> dict:
     elif not isinstance(data["memories"], list):
         issues.append("'memories' is not a list")
 
+    if "relationships" in data and not isinstance(data["relationships"], list):
+        issues.append("'relationships' is not a list")
+
     memories = data.get("memories", [])
     relationships = data.get("relationships", [])
+    if not isinstance(memories, list):
+        memories = []
+    if not isinstance(relationships, list):
+        relationships = []
 
-    if data.get("checksum") and memories:
-        computed = hashlib.sha256(
-            json.dumps(
-                [m["id"] + m["content"] for m in memories], sort_keys=True
-            ).encode()
-        ).hexdigest()
-        if computed != data["checksum"]:
-            issues.append(
-                f"Checksum mismatch: expected {data['checksum']}, computed {computed}"
-            )
+    valid_memory_rows: list[dict[str, Any]] = []
+    for i, memory in enumerate(memories):
+        if not isinstance(memory, dict):
+            issues.append(f"memories[{i}] must be an object")
+            continue
+        valid_memory_rows.append(memory)
+
+    if data.get("checksum") and valid_memory_rows:
+        checksum_parts: list[str] = []
+        for i, memory in enumerate(valid_memory_rows):
+            if not isinstance(memory.get("id"), str) or not isinstance(memory.get("content"), str):
+                issues.append(f"memories[{i}] id and content must be strings")
+                continue
+            checksum_parts.append(memory["id"] + memory["content"])
+        if len(checksum_parts) == len(valid_memory_rows):
+            computed = hashlib.sha256(
+                json.dumps(checksum_parts, sort_keys=True).encode()
+            ).hexdigest()
+            if computed != data["checksum"]:
+                issues.append(
+                    f"Checksum mismatch: expected {data['checksum']}, computed {computed}"
+                )
 
     if data.get("memory_count") is not None and len(memories) != data["memory_count"]:
         issues.append(
@@ -479,13 +593,16 @@ def verify_backup(data: dict) -> dict:
         )
 
     required_fields = {"id", "type", "content"}
-    for i, m in enumerate(memories):
+    for i, m in enumerate(valid_memory_rows):
         missing = required_fields - set(m.keys())
         if missing:
             issues.append(f"Memory [{i}] missing fields: {missing}")
 
-    memory_ids = {m["id"] for m in memories}
+    memory_ids = {m.get("id") for m in valid_memory_rows if isinstance(m.get("id"), str)}
     for i, rel in enumerate(relationships):
+        if not isinstance(rel, dict):
+            issues.append(f"relationships[{i}] must be an object")
+            continue
         if rel.get("source_id") not in memory_ids:
             issues.append(
                 f"Relationship [{i}] references unknown source_id: {rel.get('source_id')}"
@@ -498,11 +615,30 @@ def verify_backup(data: dict) -> dict:
     # New v1.2 sections — verify only if present and only the FK edges that
     # legacy backups don't carry. ``entity_mentions``/``episode_memories``
     # reference memory_ids; ``workspace_members`` references workspaces.
-    workspace_ids = {w["id"] for w in data.get("workspaces", [])}
-    entity_ids = {e["id"] for e in data.get("entities", [])}
-    episode_ids = {e["id"] for e in data.get("episodes", [])}
+    def _section_rows(name: str) -> list[dict[str, Any]]:
+        rows = data.get(name, [])
+        if not isinstance(rows, list):
+            issues.append(f"'{name}' is not a list")
+            return []
+        valid: list[dict[str, Any]] = []
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict):
+                issues.append(f"{name}[{i}] must be an object")
+                continue
+            valid.append(row)
+        return valid
 
-    for i, em in enumerate(data.get("entity_mentions", [])):
+    workspaces = _section_rows("workspaces")
+    entities = _section_rows("entities")
+    episodes = _section_rows("episodes")
+    entity_mentions = _section_rows("entity_mentions")
+    episode_memories = _section_rows("episode_memories")
+    workspace_members = _section_rows("workspace_members")
+    workspace_ids = {w.get("id") for w in workspaces}
+    entity_ids = {e.get("id") for e in entities}
+    episode_ids = {e.get("id") for e in episodes}
+
+    for i, em in enumerate(entity_mentions):
         if em.get("entity_id") not in entity_ids:
             issues.append(
                 f"entity_mentions[{i}] references unknown entity_id: {em.get('entity_id')}"
@@ -511,7 +647,7 @@ def verify_backup(data: dict) -> dict:
             issues.append(
                 f"entity_mentions[{i}] references unknown memory_id: {em.get('memory_id')}"
             )
-    for i, em in enumerate(data.get("episode_memories", [])):
+    for i, em in enumerate(episode_memories):
         if em.get("episode_id") not in episode_ids:
             issues.append(
                 f"episode_memories[{i}] references unknown episode_id: {em.get('episode_id')}"
@@ -520,14 +656,14 @@ def verify_backup(data: dict) -> dict:
             issues.append(
                 f"episode_memories[{i}] references unknown memory_id: {em.get('memory_id')}"
             )
-    for i, wm in enumerate(data.get("workspace_members", [])):
+    for i, wm in enumerate(workspace_members):
         if wm.get("workspace_id") not in workspace_ids:
             issues.append(
                 f"workspace_members[{i}] references unknown workspace_id: "
                 f"{wm.get('workspace_id')}"
             )
 
-    with_embeddings = sum(1 for m in memories if m.get("embedding"))
+    with_embeddings = sum(1 for m in valid_memory_rows if m.get("embedding"))
 
     counts = {
         "memory_count": len(memories),
