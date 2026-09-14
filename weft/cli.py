@@ -1168,14 +1168,17 @@ def slack_sync(bot_token: str, limit_per_channel: int, state_path: str | None):
 
 
 @cli.command(name="re-embed")
-@click.option("--batch-size", default=64, help="Number of memories to embed per batch")
+@click.option("--batch-size", default=64, help="Number of rows to embed per batch")
 @click.option("--dry-run", is_flag=True, help="Show counts without re-embedding")
 @click.option("--table", "tables", multiple=True, default=("memories", "behaviors", "entities"),
               help="Tables to re-embed (default: all three)")
-def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
-    """Re-embed all memories/behaviors/entities with the current embedding provider.
+@click.option("--resume-run", default=None, metavar="RUN_ID", help="Resume a persisted interrupted run")
+def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...], resume_run: str | None):
+    """Run a resumable maintenance-window embedding migration.
 
-    Use after switching embedding providers or dimensions.
+    Existing vectors remain authoritative until a complete, verified run is
+    promoted atomically. An interrupted or failed run is never reported as
+    successful; pass its RUN_ID to resume it after the provider is available.
     """
     from rich.console import Console
 
@@ -1183,50 +1186,60 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
 
     async def _re_embed():
         from weft.db.connection import create_pool
-        from weft.db.reembed import reembed_table
+        from weft.db.reembed import reembed_table, run_reembed, resume_reembed
         from weft.embeddings import get_provider
+        from weft.db.migrations import run_migrations
 
         config = load_config()
         pool = await create_pool(config)
-        provider = get_provider(
-            config.embedding.provider,
-            model_name=config.embedding.model,
-            dimensions=config.embedding.dimensions,
-        )
+        try:
+            provider = get_provider(
+                config.embedding.provider,
+                model_name=config.embedding.model,
+                dimensions=config.embedding.dimensions,
+            )
 
-        # Run migrations first to ensure schema is up to date
-        from weft.db.migrations import run_migrations
-        applied = await run_migrations(pool)
-        if applied:
-            console.print(f"Applied {len(applied)} pending migration(s)")
+            applied = await run_migrations(pool)
+            if applied:
+                console.print(f"Applied {len(applied)} pending migration(s)")
+            console.print(
+                f"Provider: [bold]{provider.provider_name}[/bold] ({provider.dimensions} dims)"
+            )
 
-        console.print(f"Provider: [bold]{provider.provider_name}[/bold] ({provider.dimensions} dims)")
+            if dry_run:
+                for table in tables:
+                    count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+                    console.print(f"\n[bold]{table}[/bold]: {count} rows")
+                return {"status": "dry-run", "completed": True, "embedded_rows": 0}
 
-        if dry_run:
-            for table in tables:
-                count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
-                console.print(f"\n[bold]{table}[/bold]: {count} rows")
+            if resume_run:
+                report = await resume_reembed(pool, provider, resume_run)
+            else:
+                report = await run_reembed(
+                    pool, provider, tables=list(tables), batch_size=batch_size, max_batches=None,
+                )
+            console.print(
+                "Run status: "
+                f"[bold]{report['status']}[/bold] "
+                f"run_id={report['run_id']} "
+                f"cursor={report['cursor']} "
+                f"rows={report['embedded_rows']}/{report['total_rows']}"
+            )
+            return report
+        finally:
             await pool.close()
-            return 0
 
-        total_updated = 0
-        for table in tables:
-            count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
-            console.print(f"\n[bold]{table}[/bold]: {count} rows")
-            if count == 0:
-                continue
-            updated = await reembed_table(pool, table, provider, batch_size, force=True)
-            console.print(f"  {updated} rows re-embedded")
-            total_updated += updated
-
-        await pool.close()
-        return total_updated
-
-    total = asyncio.run(_re_embed())
+    report = asyncio.run(_re_embed())
     if dry_run:
         console.print("\n[dim](dry run — no changes made)[/dim]")
-    else:
-        console.print(f"\n[bold]Re-embedded {total} rows.[/bold]")
+        return
+    if report["status"] != "promoted" or not report["completed"]:
+        click.echo(
+            "Re-embed incomplete; authoritative profile was not promoted.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    console.print(f"\n[bold]Re-embedded {report['embedded_rows']} rows.[/bold]")
 
 
 @cli.command(name="calendar-auth")
