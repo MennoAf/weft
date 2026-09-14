@@ -265,7 +265,12 @@ async def scheduler_loop(
         raise
     finally:
         if lease is not None:
-            await lease.release()
+            try:
+                await lease.release()
+            except Exception as exc:
+                # Lease cleanup must remain visible but cannot replace a primary
+                # cancellation or scheduler failure.
+                logger.error("scheduler lease release failed: %s", exc)
 
 
 async def _noop() -> None:
