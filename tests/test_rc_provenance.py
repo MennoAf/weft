@@ -8,7 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from scripts.capture_rc_provenance import collect_provenance
+from scripts.capture_rc_provenance import _status_records, collect_provenance
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,15 +43,30 @@ def test_receipt_captures_exact_candidate_boundary() -> None:
     assert receipt["release_boundary"]["candidate_status"] == "dirty-worktree"
 
 
-def test_receipt_hashes_dirty_and_untracked_content_without_reading_it() -> None:
-    receipt = collect_provenance(ROOT)
-    hashes = receipt["source_control"]["file_hashes"]
-    test_path = "tests/test_rc_provenance.py"
+def test_receipt_hashes_dirty_and_untracked_content_without_reading_it(tmp_path: Path) -> None:
+    tracked = tmp_path / "tracked.txt"
+    untracked = tmp_path / "untracked.txt"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    untracked.write_text("untracked\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "RC Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    tracked.write_text("dirty\n", encoding="utf-8")
 
-    assert test_path in hashes
-    assert hashes[test_path]["status"] == "untracked"
-    expected = hashlib.sha256((ROOT / test_path).read_bytes()).hexdigest()
-    assert hashes[test_path]["sha256"] == expected
+    dirty, untracked_state, hashes = _status_records(tmp_path, None)
+
+    assert dirty is True
+    assert untracked_state is True
+    assert hashes["tracked.txt"] == {
+        "status": " M",
+        "sha256": hashlib.sha256(tracked.read_bytes()).hexdigest(),
+    }
+    assert hashes["untracked.txt"] == {
+        "status": "untracked",
+        "sha256": hashlib.sha256(untracked.read_bytes()).hexdigest(),
+    }
     assert all(
         re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
         for entry in hashes.values()
