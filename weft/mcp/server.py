@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -52,11 +55,28 @@ from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
 
+# Lifecycle budgets are deliberately below the platform's health grace period.
+STARTUP_READINESS_TIMEOUT_SECONDS = 45.0
+SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
 # Pool health check interval in seconds
 _KEEPALIVE_INTERVAL = 300  # 5 minutes
 # Startup retry config
 _STARTUP_MAX_RETRIES = 5
 _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
+
+# Startup resources are tracked before the application context exists so a
+# failure at any acquisition point can close everything acquired so far.
+_startup_resources: ContextVar[list[object] | None] = ContextVar(
+    "weft_startup_resources", default=None
+)
+
+
+def _track_startup_resource(resource: object | None) -> object | None:
+    resources = _startup_resources.get()
+    if resource is not None and resources is not None:
+        resources.append(resource)
+    return resource
 
 # Valid outbound connector values
 _VALID_OUTBOUND_CONNECTORS = {"slack", "discord", "none", ""}
@@ -217,6 +237,11 @@ class AppContext:
     cache: Cache | NullCache
     embedding: EmbeddingProvider
     config: WeftConfig
+    # Optional resources owned by this process (for example a text provider or
+    # an SDK client) and subprocess handles registered by integrations.
+    text_provider: object | None = None
+    owned_resources: tuple[object, ...] = ()
+    subprocesses: tuple[object, ...] = ()
     # Episode-tier embedder. Resolved once at startup via
     # ``resolve_episode_embedder`` (honours ``WEFT_EPISODE_EMBEDDER`` env
     # override, falls back to ``embedding``). Stored on AppContext so the
@@ -357,19 +382,151 @@ def _validate_outbound_connector_env() -> None:
 
 async def _cancel_background_tasks(
     tasks: tuple[asyncio.Task, ...],
-) -> None:
-    """Cancel and observe every lifespan task without short-circuiting cleanup."""
+    *,
+    timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+) -> list[BaseException]:
+    """Cancel and observe every lifespan task within a shared deadline."""
+    tasks = tuple(task for task in tasks if task is not None)
+    if not tasks:
+        return []
     for task in tasks:
-        task.cancel()
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for result in results:
-        if isinstance(result, BaseException) and not isinstance(
-            result, asyncio.CancelledError
-        ):
-            logger.warning(
-                "background task failed before shutdown cleanup",
-                exc_info=(type(result), result, result.__traceback__),
+        if not task.done():
+            task.cancel()
+    done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+    errors: list[BaseException] = []
+    for task in done:
+        if task.cancelled():
+            continue
+        try:
+            error = task.exception()
+        except BaseException as exc:  # pragma: no cover - defensive task API
+            error = exc
+        if error is not None:
+            errors.append(error)
+            logger.error(
+                "background task failed before shutdown cleanup (during shutdown): %s",
+                error,
             )
+    for task in pending:
+        error = TimeoutError("background task did not stop before shutdown deadline")
+        errors.append(error)
+        task.cancel()
+        logger.error("background task cleanup timed out after %.1fs", timeout)
+    return errors
+
+
+async def _close_one_resource(resource: object, deadline: float) -> None:
+    """Close one resource using one absolute monotonic deadline."""
+    if resource is None:
+        return
+
+    def remaining() -> float:
+        return max(0.0, deadline - asyncio.get_running_loop().time())
+
+    wait = getattr(resource, "wait", None)
+    returncode = getattr(resource, "returncode", None)
+    if callable(wait) and returncode is None:
+        terminate = getattr(resource, "terminate", None)
+        if callable(terminate):
+            terminate()
+        try:
+            await asyncio.wait_for(wait(), timeout=remaining())
+        except asyncio.TimeoutError:
+            kill = getattr(resource, "kill", None)
+            if not callable(kill):
+                raise
+            kill()
+            # Do not reset the budget after kill: a stubborn child can consume
+            # at most the one shutdown deadline across both waits.
+            await asyncio.wait_for(wait(), timeout=remaining())
+        return
+    close = getattr(resource, "aclose", None)
+    if not callable(close):
+        close = getattr(resource, "close", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await asyncio.wait_for(result, timeout=remaining())
+        return
+    # Some embedding adapters own an SDK client but intentionally expose only
+    # the embedding protocol. Close that client without requiring a protocol
+    # expansion or reaching into it from every provider implementation.
+    client = getattr(resource, "_client", None)
+    if client is None:
+        client = getattr(resource, "client", None)
+    if client is not None and client is not resource:
+        await _close_one_resource(client, deadline)
+
+
+async def _cleanup_resources(
+    resources: tuple[object, ...],
+    *,
+    timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+) -> list[BaseException]:
+    """Close each owned resource, continuing after failures and timeouts."""
+    errors: list[BaseException] = []
+    seen: set[int] = set()
+    deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+    for resource in resources:
+        if resource is None or id(resource) in seen:
+            continue
+        seen.add(id(resource))
+        try:
+            await _close_one_resource(resource, deadline)
+        except BaseException as exc:
+            errors.append(exc)
+            logger.error("resource cleanup failed: %s", exc)
+    return errors
+
+
+async def _run_startup_cleanup(
+    primary_error: BaseException,
+    *,
+    resources: tuple[object, ...],
+) -> None:
+    """Clean startup acquisitions and re-raise the startup failure unchanged."""
+    await _cleanup_resources(resources, timeout=SHUTDOWN_TIMEOUT_SECONDS)
+    raise primary_error
+
+
+async def _shutdown_app(
+    ctx: AppContext,
+    *,
+    redis: object | None = None,
+    lifespan_tasks: tuple[asyncio.Task, ...] = (),
+    primary_error: BaseException | None = None,
+) -> list[BaseException]:
+    """Bounded, best-effort shutdown that never masks a primary exception."""
+    deadline = asyncio.get_running_loop().time() + SHUTDOWN_TIMEOUT_SECONDS
+    remaining = lambda: max(0.0, deadline - asyncio.get_running_loop().time())
+    errors = await _cancel_background_tasks(
+        lifespan_tasks + tuple(getattr(ctx, "_background_tasks", ())),
+        timeout=remaining(),
+    )
+    try:
+        drain_report = await asyncio.wait_for(
+            tool_usage_middleware.drain(ctx.pool), timeout=remaining()
+        )
+        if not drain_report["shutdown_drained"]:
+            logger.warning("tool usage telemetry did not drain cleanly: %s", drain_report)
+    except BaseException as exc:
+        errors.append(exc)
+        logger.error("shutdown telemetry drain failed: %s", exc)
+
+    resources = tuple(getattr(ctx, "owned_resources", ())) + (
+        ctx.pool,
+        redis,
+        getattr(getattr(ctx, "cache", None), "_redis", None),
+        getattr(ctx, "embedding", None),
+        getattr(ctx, "episode_embedding", None),
+        getattr(ctx, "text_provider", None),
+    ) + tuple(getattr(ctx, "subprocesses", ()))
+    errors.extend(await _cleanup_resources(resources, timeout=remaining()))
+    if errors:
+        logger.error("shutdown completed with %d cleanup error(s)", len(errors))
+    if primary_error is not None:
+        raise primary_error
+    return errors
 
 
 async def _prepare_database_schema(
@@ -404,7 +561,7 @@ async def _prepare_database_schema(
 
 
 @asynccontextmanager
-async def lifespan(server: FastMCP):
+async def _lifespan_impl(server: FastMCP):
     """Initialize database, Redis, and embedding provider."""
     from weft.correlation import CorrelationFilter
 
@@ -434,11 +591,12 @@ async def lifespan(server: FastMCP):
         handler.addFilter(corr_filter)
 
     # Database (with retry)
-    pool = await _connect_with_retry(
+    pool = _track_startup_resource(await _connect_with_retry(
         lambda: create_pool(config),
         "Postgres",
-    )
+    ))
     pool, migrated_tables = await _prepare_database_schema(pool, config)
+    _track_startup_resource(pool)
 
     # Phase 2.5 L3: bootstrap a credential row for the legacy
     # WEFT_API_KEY env var so existing clients keep working when L4
@@ -467,7 +625,9 @@ async def lifespan(server: FastMCP):
                 await client.ping()
                 return client
 
-            r = await _connect_with_retry(_connect_redis, "Redis", max_retries=1, base_delay=0.5)
+            r = _track_startup_resource(
+                await _connect_with_retry(_connect_redis, "Redis", max_retries=1, base_delay=0.5)
+            )
             cache = Cache(r)
         except Exception as exc:
             logger.warning("Redis unavailable, using NullCache: %s", exc)
@@ -478,11 +638,11 @@ async def lifespan(server: FastMCP):
         cache = NullCache()
 
     # Embedding provider (validate eagerly to catch config errors at startup)
-    embedding = get_provider(
+    embedding = _track_startup_resource(get_provider(
         config.embedding.provider,
         model_name=config.embedding.model,
         dimensions=config.embedding.dimensions,
-    )
+    ))
     try:
         test_vec = await embedding.embed("startup validation")
         logger.info(
@@ -522,7 +682,7 @@ async def lifespan(server: FastMCP):
             reembed_table,
             resolve_episode_embedder,
         )
-        episode_embedder = resolve_episode_embedder(config)
+        episode_embedder = _track_startup_resource(resolve_episode_embedder(config))
         backfilled = await reembed_table(pool, "episodes", episode_embedder)
         if backfilled:
             logger.info("Backfilled episode embeddings for %d rows", backfilled)
@@ -630,50 +790,75 @@ async def lifespan(server: FastMCP):
             config.supabase_url or "<unset>",
         )
 
+    tasks = tuple(
+        task
+        for task in (
+            ctx._keepalive_task,
+            ctx._tool_usage_heartbeat_task,
+            _redis_task,
+            ctx._scheduler_task,
+            ctx._slack_sync_task,
+            ctx._daily_brief_task,
+            ctx._discord_bot_task,
+            ctx._loom_awareness_task,
+            ctx._memory_hygiene_task,
+            ctx._trigger_eval_task,
+            ctx._reask_feedback_task,
+            ctx._canary_audit_task,
+            ctx._quarantine_review_task,
+            ctx._cost_enforcement_task,
+        )
+        if task is not None
+    )
     try:
         yield ctx
-    finally:
+    except BaseException as exc:
         _app_ctx_ref.ctx = None
-        tasks = tuple(
-            task
-            for task in (
-                ctx._keepalive_task,
-                ctx._tool_usage_heartbeat_task,
-                _redis_task,
-                ctx._scheduler_task,
-                ctx._slack_sync_task,
-                ctx._daily_brief_task,
-                ctx._discord_bot_task,
-                ctx._loom_awareness_task,
-                ctx._memory_hygiene_task,
-                ctx._trigger_eval_task,
-                ctx._reask_feedback_task,
-                ctx._canary_audit_task,
-                ctx._quarantine_review_task,
-                ctx._cost_enforcement_task,
-            )
-            if task is not None
+        await _shutdown_app(
+            ctx,
+            redis=r,
+            lifespan_tasks=tasks,
+            primary_error=exc,
         )
-        request_tasks = tuple(ctx._background_tasks)
-        await _cancel_background_tasks(tasks + request_tasks)
+        raise
+    else:
+        _app_ctx_ref.ctx = None
+        await _shutdown_app(ctx, redis=r, lifespan_tasks=tasks)
+    finally:
+        if local_identity_token is not None:
+            current_user_id.reset(local_identity_token)
 
-        # Keepalive may replace the original pool. AppContext is the live owner;
-        # drain telemetry and close that current pool rather than a stale local.
-        # Resource closure remains guaranteed even if drain or pool close fails.
+
+@asynccontextmanager
+async def lifespan(server: FastMCP):
+    """Run startup with acquisition tracking and a bounded shutdown."""
+    resources: list[object] = []
+    token = _startup_resources.set(resources)
+    manager = _lifespan_impl(server)
+    entered = False
+    try:
         try:
-            drain_report = await tool_usage_middleware.drain(ctx.pool)
-            if not drain_report["shutdown_drained"]:
-                logger.warning(
-                    "tool usage telemetry did not drain cleanly: %s", drain_report
-                )
-        finally:
+            ctx = await asyncio.wait_for(
+                manager.__aenter__(), timeout=STARTUP_READINESS_TIMEOUT_SECONDS
+            )
+            entered = True
+            # Startup acquisitions are now owned by the context. Keep the
+            # tuple immutable so integrations cannot mutate ownership while
+            # shutdown is in progress.
+            ctx.owned_resources = tuple(resources)
             try:
-                await ctx.pool.close()
-            finally:
-                if r is not None:
-                    await r.aclose()
-            if local_identity_token is not None:
-                current_user_id.reset(local_identity_token)
+                yield ctx
+            except BaseException as exc:
+                await manager.__aexit__(type(exc), exc, exc.__traceback__)
+                raise
+            else:
+                await manager.__aexit__(None, None, None)
+        except BaseException as exc:
+            if not entered and resources:
+                await _run_startup_cleanup(exc, resources=tuple(resources))
+            raise
+    finally:
+        _startup_resources.reset(token)
 
 
 class _AppCtxRef:
