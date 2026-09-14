@@ -1,0 +1,1192 @@
+{
+  "schema": "weft.public-schema-manifest.v1",
+  "migration_head": 74,
+  "migration_discovery": {
+    "discovery_rule": "weft/db/migrations/vNN_*.py",
+    "ordering": "ascending numeric version",
+    "ownership": "owner-managed migrations only",
+    "runtime_migration_writes": false
+  },
+  "runtime_policy": {
+    "role": "restricted application runtime role",
+    "ledger_writes": false,
+    "table_ownership": false,
+    "superuser_or_bypassrls": false,
+    "migration_owner": "database owner/operator outside the application runtime"
+  },
+  "migrations": [
+    {
+      "version": 1,
+      "description": "Create memories table with pgvector",
+      "module": "v01_create_memories"
+    },
+    {
+      "version": 2,
+      "description": "Create memory_relationships table",
+      "module": "v02_memory_relationships"
+    },
+    {
+      "version": 3,
+      "description": "Create schema_migrations tracking table",
+      "module": "v03_schema_migrations"
+    },
+    {
+      "version": 4,
+      "description": "Add usefulness_score and usefulness_count to memories",
+      "module": "v04_usefulness_columns"
+    },
+    {
+      "version": 5,
+      "description": "Add pinned column to memories",
+      "module": "v05_pinned_column"
+    },
+    {
+      "version": 6,
+      "description": "Add review_after column to memories",
+      "module": "v06_review_after_column"
+    },
+    {
+      "version": 7,
+      "description": "Set embedding dimension and add HNSW index for vector search",
+      "module": "v07_hnsw_vector_index"
+    },
+    {
+      "version": 8,
+      "description": "Lower default usefulness_score to 0.7 and backfill existing rows",
+      "module": "v08_lower_default_usefulness"
+    },
+    {
+      "version": 9,
+      "description": "Add index on agent_id for scoped queries",
+      "module": "v09_agent_id_index"
+    },
+    {
+      "version": 10,
+      "description": "Create behaviors table for persistent agent rules and strategies",
+      "module": "v10_behaviors_table"
+    },
+    {
+      "version": 11,
+      "description": "Create episodes and episode_memories tables for episodic timeline",
+      "module": "v11_episodes_tables"
+    },
+    {
+      "version": 12,
+      "description": "Create entities and entity_mentions tables for entity graph",
+      "module": "v12_entities_tables"
+    },
+    {
+      "version": 13,
+      "description": "Add user_id column to all user-scoped tables (RLS prerequisite)",
+      "module": "v13_user_id_columns"
+    },
+    {
+      "version": 14,
+      "description": "Widen embedding columns from vector(384) to vector(768) for OpenAI provider",
+      "module": "v14_widen_embedding_768"
+    },
+    {
+      "version": 15,
+      "description": "Add weft_metadata table for system-level key-value storage",
+      "module": "v15_weft_metadata"
+    },
+    {
+      "version": 16,
+      "description": "Add memory_access_log for session-scoped access tracking",
+      "module": "v16_memory_access_log"
+    },
+    {
+      "version": 17,
+      "description": "Add last_boosted_at to memories for usefulness time decay",
+      "module": "v17_last_boosted_at"
+    },
+    {
+      "version": 18,
+      "description": "Enable RLS and create user_id isolation policies on all user-scoped tables",
+      "module": "v18_rls_user_id_policies"
+    },
+    {
+      "version": 19,
+      "description": "Add tsvector column for full-text search (hybrid BM25 + vector)",
+      "module": "v19_tsvector_fts"
+    },
+    {
+      "version": 20,
+      "description": "Create modes table for named retrieval personas with weight overrides",
+      "module": "v20_modes_table"
+    },
+    {
+      "version": 21,
+      "description": "Create alerts table for proactive push notifications",
+      "module": "v21_alerts_table"
+    },
+    {
+      "version": 22,
+      "description": "Create check_ins table for mood/sleep/energy tracking",
+      "module": "v22_check_ins_table"
+    },
+    {
+      "version": 23,
+      "description": "Enable RLS on system tables (schema_migrations, weft_metadata, memory_access_log)",
+      "module": "v23_rls_system_tables"
+    },
+    {
+      "version": 24,
+      "description": "Create autonomy_policies and policy_calibration_events tables",
+      "module": "v24_autonomy_tables"
+    },
+    {
+      "version": 25,
+      "description": "Create cost_entries table for token/cost tracking",
+      "module": "v25_cost_entries"
+    },
+    {
+      "version": 26,
+      "description": "Add expires_at column to episodes for working memory TTL",
+      "module": "v26_episodes_expires_at"
+    },
+    {
+      "version": 27,
+      "description": "Add graduated_memory_id column to episodes for graduation path",
+      "module": "v27_episodes_graduated_memory"
+    },
+    {
+      "version": 28,
+      "description": "Create triggers table for proactive condition-driven rules",
+      "module": "v28_triggers_table"
+    },
+    {
+      "version": 29,
+      "description": "Create calibration_records table for agent action outcome tracking",
+      "module": "v29_calibration_records"
+    },
+    {
+      "version": 30,
+      "description": "Create degradation_policies table",
+      "module": "v30_degradation_policies"
+    },
+    {
+      "version": 31,
+      "description": "Ensure user_id column exists and is nullable on all user-scoped tables",
+      "module": "v31_ensure_user_id_columns"
+    },
+    {
+      "version": 32,
+      "description": "Create audit_backfill_user_id table for Phase 1 backfill audit trail",
+      "module": "v32_audit_backfill_user_id"
+    },
+    {
+      "version": 33,
+      "description": "Create OAuth 2.1 tables (clients, codes, refresh tokens, revocations)",
+      "module": "v33_oauth_tables"
+    },
+    {
+      "version": 34,
+      "description": "Schema v1: add federated-future columns to memories (additive)",
+      "module": "v34_federated_columns"
+    },
+    {
+      "version": 35,
+      "description": "Schema v1: workspaces + workspace_members tables",
+      "module": "v35_workspaces_tables"
+    },
+    {
+      "version": 36,
+      "description": "Schema v1: SYSTEM_GLOBAL sentinel + NOT NULL user_id + RLS rewrite",
+      "module": "v36_system_global_sentinel"
+    },
+    {
+      "version": 37,
+      "description": "Schema v1: smart default for memories.author_identity",
+      "module": "v37_author_identity_default"
+    },
+    {
+      "version": 38,
+      "description": "Trackers v1: open-loop primitive (Wick Phase 3)",
+      "module": "v38_trackers_table"
+    },
+    {
+      "version": 39,
+      "description": "Phase 2: provenance + review_status (poisoning-defense Layer 1/3)",
+      "module": "v39_provenance_review_status"
+    },
+    {
+      "version": 40,
+      "description": "Phase 2.5: weft_tokens \u2014 credential-bound caller mode",
+      "module": "v40_weft_tokens_table"
+    },
+    {
+      "version": 41,
+      "description": "Phase 2 follow-on: read-side audit columns on memory_access_log",
+      "module": "v41_read_side_audit_log"
+    },
+    {
+      "version": 42,
+      "description": "RLS audit follow-up: enable RLS on weft_tokens with a service policy",
+      "module": "v42_weft_tokens_rls"
+    },
+    {
+      "version": 43,
+      "description": "autonomy_overrides + cost_enforcement_state tables for the cost-to-autonomy/degradation enforcement feedback loop",
+      "module": "v43_cost_enforcement"
+    },
+    {
+      "version": 44,
+      "description": "alert_state table for per-(alert_type, dedup_key) cooldown + suppression",
+      "module": "v44_alert_state"
+    },
+    {
+      "version": 45,
+      "description": "episode_turns: turn-tier dialogue trace + RLS + HNSW",
+      "module": "v45_episode_turns"
+    },
+    {
+      "version": 46,
+      "description": "turn_access_log table + episode_turns usefulness columns for boost loop",
+      "module": "v46_turn_access_log"
+    },
+    {
+      "version": 47,
+      "description": "episodes.embedding vector(768) column + HNSW index",
+      "module": "v47_episode_embedding"
+    },
+    {
+      "version": 48,
+      "description": "belief_claims table: FK-provenance anchor for belief-view",
+      "module": "v48_belief_claims"
+    },
+    {
+      "version": 49,
+      "description": "Retrieval telemetry columns on memories (compounding-loop Step 1)",
+      "module": "v49_retrieval_telemetry"
+    },
+    {
+      "version": 50,
+      "description": "weft_recall_queries: per-call query log for the compounding-loop observation window",
+      "module": "v50_recall_queries_log"
+    },
+    {
+      "version": 52,
+      "description": "weft_recall_queries: is_reask_miss + reask_satisfying_memory_id columns",
+      "module": "v52_reask_miss_signal"
+    },
+    {
+      "version": 53,
+      "description": "replay_queue: episode replay cache + RLS",
+      "module": "v53_replay_queue"
+    },
+    {
+      "version": 54,
+      "description": "weft_counters: global named telemetry counters + service RLS",
+      "module": "v54_weft_counters"
+    },
+    {
+      "version": 55,
+      "description": "replay_queue: add 'failed' terminal status to the status CHECK",
+      "module": "v55_replay_queue_failed_status"
+    },
+    {
+      "version": 56,
+      "description": "memories GIN index on topic[] + topic_resolution_aliases table",
+      "module": "v56_topic_digest_gin_and_aliases"
+    },
+    {
+      "version": 57,
+      "description": "topic_digests cache table",
+      "module": "v57_topic_digests"
+    },
+    {
+      "version": 58,
+      "description": "shuttle_claims table: Shuttle observer/synthesis current-value blackboard",
+      "module": "v58_shuttle_claims"
+    },
+    {
+      "version": 59,
+      "description": "weft_recall_queries.tool_name: allow 'status' (weft_status ratchet feed)",
+      "module": "v59_recall_queries_status_tool"
+    },
+    {
+      "version": 60,
+      "description": "canonicalize entity:* tags in memories.topic[] to lowercase",
+      "module": "v60_lowercase_entity_tags"
+    },
+    {
+      "version": 61,
+      "description": "add auto_originated provenance column to policy_calibration_events",
+      "module": "v61_calibration_event_auto_originated"
+    },
+    {
+      "version": 62,
+      "description": "add origin trust dimension to calibration_records",
+      "module": "v62_calibration_record_origin"
+    },
+    {
+      "version": 63,
+      "description": "recall_canary: enrollment + audit table for retrieval health monitoring",
+      "module": "v63_recall_canary"
+    },
+    {
+      "version": 64,
+      "description": "Add project_facets TEXT[] column + GIN index + backfill to memories",
+      "module": "v64_add_project_facets"
+    },
+    {
+      "version": 65,
+      "description": "Add embed_composition_version SMALLINT to memories (RC2)",
+      "module": "v65_embed_composition_version"
+    },
+    {
+      "version": 66,
+      "description": "recall_canary_audit: per-run outcome log for a windowed canary miss rate",
+      "module": "v66_recall_canary_audit"
+    },
+    {
+      "version": 67,
+      "description": "board_triage_events + board_feedback_proposals: L1 triage correction loop substrate",
+      "module": "v67_board_triage_events"
+    },
+    {
+      "version": 68,
+      "description": "daily aggregate MCP tool usage telemetry",
+      "module": "v68_tool_usage_daily"
+    },
+    {
+      "version": 69,
+      "description": "tool usage recorder coverage, failures, and shutdown drain",
+      "module": "v69_tool_usage_coverage"
+    },
+    {
+      "version": 70,
+      "description": "nullable preference metadata JSONB on memories",
+      "module": "v70_preference_metadata"
+    },
+    {
+      "version": 71,
+      "description": "provider-namespaced source identity on episode turns",
+      "module": "v71_source_session_identity"
+    },
+    {
+      "version": 72,
+      "description": "weft_recovery_attempts: bounded retrieval-recovery stage telemetry",
+      "module": "v72_retrieval_recovery_attempts"
+    },
+    {
+      "version": 73,
+      "description": "Restrict weft_tokens RLS policy to hosted application role",
+      "module": "v73_harden_token_rls"
+    },
+    {
+      "version": 74,
+      "description": "alerts: add processing_at for recoverable scheduler reservations",
+      "module": "v74_alert_processing_lease"
+    }
+  ],
+  "tables": [
+    {
+      "name": "alert_state",
+      "category": "operational_data",
+      "purpose": "Alert cooldown, deduplication, and suppression state.",
+      "ownership_rls": {
+        "owner": "user scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "ephemeral scheduler state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "alerts",
+      "category": "operational_data",
+      "purpose": "Scheduled proactive push notifications.",
+      "ownership_rls": {
+        "owner": "user scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "scheduler state is not portable user memory"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "audit_backfill_user_id",
+      "category": "migration_metadata",
+      "purpose": "Audit trail for historical user-id backfill.",
+      "ownership_rls": {
+        "owner": "migration owner",
+        "rls": "not enabled by source migration"
+      },
+      "export": {
+        "included": false,
+        "reason": "migration audit metadata"
+      },
+      "runtime_contract": {
+        "access": "none",
+        "privilege": "restricted runtime does not use migration audit state"
+      }
+    },
+    {
+      "name": "autonomy_overrides",
+      "category": "operational_data",
+      "purpose": "Temporary cost-to-autonomy overrides.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "ephemeral operational state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "autonomy_policies",
+      "category": "operational_data",
+      "purpose": "Per-user autonomy and action policy configuration.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational policy state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "behaviors",
+      "category": "user_data",
+      "purpose": "Persistent agent rules and strategies.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable agent configuration"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "belief_claims",
+      "category": "continuity_data",
+      "purpose": "Versioned belief claims anchored to evidence turns.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "derived retrieval view substrate"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "board_feedback_proposals",
+      "category": "telemetry",
+      "purpose": "Board feedback-engine proposal log.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational correction telemetry"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "board_triage_events",
+      "category": "telemetry",
+      "purpose": "Board triage correction-loop event log.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational correction telemetry"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "calibration_records",
+      "category": "operational_data",
+      "purpose": "Agent action outcome calibration records.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational calibration history"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "check_ins",
+      "category": "user_data",
+      "purpose": "User mood, sleep, and energy check-ins.",
+      "ownership_rls": {
+        "owner": "user scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "not part of the current portable export sections"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "cost_enforcement_state",
+      "category": "operational_data",
+      "purpose": "Daily cost enforcement state.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "ephemeral operational state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses service policy"
+      }
+    },
+    {
+      "name": "cost_entries",
+      "category": "operational_data",
+      "purpose": "Provider token and cost accounting entries.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational accounting state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "degradation_policies",
+      "category": "operational_data",
+      "purpose": "Provider/cost degradation policy rules.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational policy state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "entities",
+      "category": "user_data",
+      "purpose": "Entity graph nodes extracted from memory.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable entity data"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "entity_mentions",
+      "category": "user_data",
+      "purpose": "Links entities to source memories.",
+      "ownership_rls": {
+        "owner": "user scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable entity edges"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "episode_memories",
+      "category": "continuity_data",
+      "purpose": "Links episodes to memories.",
+      "ownership_rls": {
+        "owner": "user scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable continuity edges"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "episode_turns",
+      "category": "continuity_data",
+      "purpose": "Append-oriented conversational turn trace.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational conversation trace is not in the portable export contract"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "episodes",
+      "category": "continuity_data",
+      "purpose": "Episodic timeline containers.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable continuity data"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "memories",
+      "category": "user_data",
+      "purpose": "Canonical durable memories and embeddings.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; sentinel or user/project policies"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable logical memory export"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "memory_access_log",
+      "category": "telemetry",
+      "purpose": "Memory access audit trail.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "audit and ephemeral access state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses service policy"
+      }
+    },
+    {
+      "name": "memory_relationships",
+      "category": "user_data",
+      "purpose": "Directed relationships between memories.",
+      "ownership_rls": {
+        "owner": "user scope",
+        "rls": "enabled; sentinel or user policies"
+      },
+      "export": {
+        "included": true,
+        "reason": "relationship fidelity"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "modes",
+      "category": "user_data",
+      "purpose": "Named retrieval personas and weight overrides.",
+      "ownership_rls": {
+        "owner": "user scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable retrieval configuration"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "oauth_access_revocations",
+      "category": "auth_credentials",
+      "purpose": "OAuth access-token revocation records.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "credential and ephemeral auth state excluded"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "auth path only; not portable data"
+      }
+    },
+    {
+      "name": "oauth_authorization_codes",
+      "category": "auth_credentials",
+      "purpose": "Short-lived OAuth authorization codes.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "credential and ephemeral auth state excluded"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "auth path only; not portable data"
+      }
+    },
+    {
+      "name": "oauth_clients",
+      "category": "auth_credentials",
+      "purpose": "OAuth dynamic-client registrations.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "credential and auth state excluded"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "auth path only; not portable data"
+      }
+    },
+    {
+      "name": "oauth_refresh_tokens",
+      "category": "auth_credentials",
+      "purpose": "Rotated OAuth refresh tokens.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "credentials excluded"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "auth path only; not portable data"
+      }
+    },
+    {
+      "name": "policy_calibration_events",
+      "category": "operational_data",
+      "purpose": "Autonomy policy calibration event history.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational calibration history"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "recall_canary",
+      "category": "telemetry",
+      "purpose": "Retrieval health canary enrollment and probes.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "health-monitoring state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "recall_canary_audit",
+      "category": "telemetry",
+      "purpose": "Per-run canary outcome log.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "health-monitoring telemetry"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "replay_queue",
+      "category": "operational_data",
+      "purpose": "Pending episode replay work queue.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "ephemeral queue state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "schema_migrations",
+      "category": "migration_metadata",
+      "purpose": "Append-only applied migration ledger.",
+      "ownership_rls": {
+        "owner": "migration owner",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "recreated by migrations"
+      },
+      "runtime_contract": {
+        "access": "read-only",
+        "privilege": "restricted role may SELECT but never write"
+      }
+    },
+    {
+      "name": "shuttle_claims",
+      "category": "continuity_data",
+      "purpose": "Current-value observer and synthesis blackboard.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "derived operational blackboard"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "topic_digests",
+      "category": "continuity_data",
+      "purpose": "Cached topic digest materialization.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "rebuildable cache"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "topic_resolution_aliases",
+      "category": "continuity_data",
+      "purpose": "Topic-resolution aliases for recall.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "derived recall index state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "trackers",
+      "category": "user_data",
+      "purpose": "Open-loop tracker state and nudges.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable tracker state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "triggers",
+      "category": "operational_data",
+      "purpose": "Proactive condition-driven rules.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "operational scheduler configuration"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "turn_access_log",
+      "category": "telemetry",
+      "purpose": "Session and turn read-access audit trail.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "audit and ephemeral access state"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses service policy"
+      }
+    },
+    {
+      "name": "weft_counters",
+      "category": "telemetry",
+      "purpose": "Global named telemetry counters.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "aggregate telemetry"
+      },
+      "runtime_contract": {
+        "access": "write",
+        "privilege": "restricted role records aggregate telemetry"
+      }
+    },
+    {
+      "name": "weft_metadata",
+      "category": "migration_metadata",
+      "purpose": "System-level key/value metadata.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "system metadata"
+      },
+      "runtime_contract": {
+        "access": "read-only",
+        "privilege": "restricted role has no migration ownership"
+      }
+    },
+    {
+      "name": "weft_recall_queries",
+      "category": "telemetry",
+      "purpose": "Per-call recall query observation log.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "telemetry is not portable memory data"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "weft_recovery_attempts",
+      "category": "telemetry",
+      "purpose": "Bounded retrieval-recovery stage telemetry.",
+      "ownership_rls": {
+        "owner": "user/project scope",
+        "rls": "enabled; scoped CRUD"
+      },
+      "export": {
+        "included": false,
+        "reason": "telemetry is not portable memory data"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses scoped CRUD"
+      }
+    },
+    {
+      "name": "weft_tokens",
+      "category": "auth_credentials",
+      "purpose": "Hashed Weft API tokens and caller modes.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy before user context"
+      },
+      "export": {
+        "included": false,
+        "reason": "credentials excluded; operator reissues them"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "auth lookup only; restricted runtime never exports token material"
+      }
+    },
+    {
+      "name": "weft_tool_usage_coverage",
+      "category": "telemetry",
+      "purpose": "Tool usage recorder coverage and drain health.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "aggregate telemetry"
+      },
+      "runtime_contract": {
+        "access": "write",
+        "privilege": "restricted role records aggregate telemetry"
+      }
+    },
+    {
+      "name": "weft_tool_usage_daily",
+      "category": "telemetry",
+      "purpose": "Daily aggregate MCP tool usage counts.",
+      "ownership_rls": {
+        "owner": "service policy",
+        "rls": "enabled; service policy"
+      },
+      "export": {
+        "included": false,
+        "reason": "aggregate telemetry"
+      },
+      "runtime_contract": {
+        "access": "write",
+        "privilege": "restricted role records aggregate telemetry"
+      }
+    },
+    {
+      "name": "workspace_members",
+      "category": "user_data",
+      "purpose": "Workspace membership and identity edges.",
+      "ownership_rls": {
+        "owner": "workspace membership",
+        "rls": "enabled; service and member policies"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable workspace membership"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses workspace policies"
+      }
+    },
+    {
+      "name": "workspaces",
+      "category": "user_data",
+      "purpose": "Collaborative workspace definitions.",
+      "ownership_rls": {
+        "owner": "workspace membership",
+        "rls": "enabled; service and member policies"
+      },
+      "export": {
+        "included": true,
+        "reason": "portable workspace context"
+      },
+      "runtime_contract": {
+        "access": "read-write",
+        "privilege": "restricted role uses workspace policies"
+      }
+    }
+  ],
+  "pending_files": [
+    {
+      "path": "weft/db/migrations/pending_v51_episode_turns_fts.py",
+      "status": "dormant",
+      "disposition": "tracked draft; not discovered or applied; promote by renaming only after the documented episode-turn volume gate"
+    }
+  ]
+}
