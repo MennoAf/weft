@@ -4656,6 +4656,7 @@ async def weft_ingest(
                 app.pool,
                 app.embedding,
                 project_id=resolved_project,
+                generation_provider=getattr(app, "generation_provider", None),
                 config=app.config,
             )
 
