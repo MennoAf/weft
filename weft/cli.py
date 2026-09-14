@@ -12,7 +12,15 @@ from pathlib import Path
 
 import click
 
-from weft.config import CONFIG_PATH, load_config, load_config_file, save_config_value
+from weft.config import (
+    CONFIG_PATH,
+    config_data_with_updates,
+    initialize_config,
+    load_config,
+    load_config_file,
+    save_config_value,
+    write_config_data,
+)
 from weft.doctor import load_doctor_dependencies, run_doctor
 from weft.resources import compose_file_path
 
@@ -55,6 +63,152 @@ def doctor_cmd(as_json: bool) -> None:
         for check in report.checks:
             click.echo(f"{check.id} {check.status.upper()}: {check.name} — {check.remedy}")
     raise click.exceptions.Exit(report.exit_code)
+
+
+def _redacted_lifecycle_value(key: str, value: str) -> str:
+    """Return an evidence-safe value for setup receipts."""
+    lowered = key.casefold()
+    if any(part in lowered for part in ("key", "token", "secret", "password", "credential", "url")):
+        return "[redacted]"
+    return value
+
+
+def _parse_config_updates(values: tuple[str, ...]) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise click.UsageError("--set values must use KEY=VALUE")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key or not value:
+            raise click.UsageError("--set values must use non-empty KEY=VALUE")
+        updates[key] = value
+    return updates
+
+
+@cli.command(name="init")
+@click.option("--json", "as_json", is_flag=True, help="Emit a stable JSON setup receipt.")
+def init_cmd(as_json: bool) -> None:
+    """Create missing local configuration without starting infrastructure."""
+    created = initialize_config()
+    payload = {
+        "command": "init",
+        "created": created,
+        "status": "initialized" if created else "already configured",
+        "read_only": not created,
+        "infrastructure_started": False,
+        "migrations_applied": False,
+        "credentials_rotated": False,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    elif created:
+        click.echo("Initialized local Weft configuration.")
+        click.echo("No infrastructure started; no migrations or credentials changed.")
+    else:
+        click.echo("Weft is already configured; no changes made.")
+
+
+@cli.command(name="repair")
+@click.option("--json", "as_json", is_flag=True, help="Emit the stable JSON Doctor schema.")
+def repair_cmd(as_json: bool) -> None:
+    """Diagnose setup issues without repairing or mutating anything."""
+    report = run_doctor(dependencies=load_doctor_dependencies())
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":")))
+    else:
+        click.echo("Repair is diagnostic-only; no changes made.")
+        for check in report.checks:
+            click.echo(f"{check.id} {check.status.upper()}: {check.name} — {check.remedy}")
+    raise click.exceptions.Exit(report.exit_code)
+
+
+@cli.command(name="reconfigure")
+@click.option("--set", "set_values", multiple=True, help="Explicit KEY=VALUE configuration change (repeatable).")
+@click.option("--confirm", is_flag=True, help="Authorize the planned configuration change.")
+@click.option("--backup", is_flag=True, help="Back up the current config before changing it.")
+@click.option("--stage", is_flag=True, help="Stage and atomically install the planned config.")
+@click.option("--plan", is_flag=True, help="Print the plan without changing configuration (default).")
+@click.option("--backup-path", type=click.Path(path_type=Path), default=None, hidden=True)
+def reconfigure_cmd(
+    set_values: tuple[str, ...],
+    confirm: bool,
+    backup: bool,
+    stage: bool,
+    plan: bool,
+    backup_path: Path | None,
+) -> None:
+    """Plan a configuration change, then require confirm/backup/stage to apply it."""
+    updates = _parse_config_updates(set_values)
+    try:
+        current = load_config_file(CONFIG_PATH)
+        proposed = config_data_with_updates(current, updates)
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("Reconfigure plan:")
+    if not updates:
+        click.echo("  (no changes requested)")
+    for key, value in updates.items():
+        old_value = current.get(key, "<default>") if "." not in key else "<configured>"
+        click.echo(
+            f"  {key}: {_redacted_lifecycle_value(key, str(old_value))} -> "
+            f"{_redacted_lifecycle_value(key, value)}"
+        )
+
+    # Planning is the safe default.  A caller must provide every gate; --plan
+    # explicitly documents the no-op intent but is not required for compatibility.
+    if plan or not (confirm and backup and stage):
+        if not plan and (confirm or backup or stage):
+            missing = [name for name, enabled in (("--confirm", confirm), ("--backup", backup), ("--stage", stage)) if not enabled]
+            raise click.ClickException("Refusing to mutate: also require " + ", ".join(missing) + ".")
+        click.echo("Plan only; no changes made.")
+        return
+    if not updates:
+        click.echo("No changes requested; no changes made.")
+        return
+
+    target = CONFIG_PATH
+    had_existing_config = target.exists()
+    backup_target = backup_path or target.with_suffix(target.suffix + ".bak")
+    if had_existing_config:
+        backup_target.parent.mkdir(parents=True, exist_ok=True)
+        backup_target.write_bytes(target.read_bytes())
+    staging = target.with_suffix(target.suffix + ".stage")
+    try:
+        write_config_data(proposed, staging)
+        staging.replace(target)
+    finally:
+        if staging.exists():
+            staging.unlink()
+    backup_label = str(backup_target) if had_existing_config else "[none]"
+    click.echo(f"Reconfigured safely; backup saved to {backup_label}.")
+
+
+def run_package_update() -> dict[str, str]:
+    """Package-update seam; installation is intentionally operator-controlled."""
+    return {"status": "package update delegated to the operator"}
+
+
+def run_schema_upgrade() -> dict[str, str]:
+    """Schema-upgrade seam; owner migration remains a separately authorized action."""
+    return {"status": "schema upgrade delegated to the owner migration command"}
+
+
+@cli.command(name="upgrade")
+@click.option("--confirm", is_flag=True, help="Explicitly authorize the selected upgrade.")
+@click.option("--package-update", is_flag=True, help="Perform only the package update operation.")
+@click.option("--schema-upgrade", is_flag=True, help="Perform only the schema upgrade operation.")
+def upgrade_cmd(confirm: bool, package_update: bool, schema_upgrade: bool) -> None:
+    """Run one explicitly confirmed upgrade operation, never both at once."""
+    selected = int(package_update) + int(schema_upgrade)
+    if selected != 1:
+        raise click.UsageError("Select exactly one of --package-update or --schema-upgrade.")
+    if not confirm:
+        raise click.ClickException("Upgrade is not implicit; rerun with --confirm.")
+    result = run_package_update() if package_update else run_schema_upgrade()
+    label = "package update" if package_update else "schema upgrade"
+    click.echo(f"{label}: {result.get('status', 'completed')}")
 
 
 def _register_mcp(project_dir: Path | None = None) -> None:
