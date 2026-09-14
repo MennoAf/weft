@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import site
+import subprocess
+import sys
+import textwrap
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +18,142 @@ from weft.resources import ComposeResourceError, compose_file_path
 
 
 _RESOURCE = "docker-compose.weft.yml"
+_RESOURCE_MEMBER = "weft/data/docker-compose.weft.yml"
+_ROOT_MEMBER = "docker-compose.weft.yml"
+
+
+def _venv_python(venv: Path) -> Path:
+    return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def _venv_script(venv: Path, name: str) -> Path:
+    return venv / ("Scripts" if os.name == "nt" else "bin") / name
+
+
+def _build_wheel(output_dir: Path) -> Path:
+    output_dir.mkdir()
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(output_dir)],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheels = sorted(output_dir.glob("*.whl"))
+    assert len(wheels) == 1, f"expected exactly one wheel, found {wheels!r}"
+    return wheels[0]
+
+
+def _install_wheel_without_dependencies(
+    wheel: Path, root: Path
+) -> tuple[Path, Path, Path, Path]:
+    venv = root / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(venv)],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python = _venv_python(venv)
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--offline",
+            "--python",
+            str(python),
+            "--no-deps",
+            str(wheel),
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel_site = next(
+        path for path in venv.rglob("site-packages") if path.is_dir()
+    )
+    dependency_site = Path(site.getsitepackages()[0]).resolve()
+    return venv, python, wheel_site, dependency_site
+
+
+def test_installed_wheel_cli_and_resource_are_independent_of_checkout(
+    tmp_path: Path,
+) -> None:
+    """A wheel-installed CLI resolves resources from its own package only."""
+    repo_root = Path(__file__).resolve().parents[1]
+    wheel = _build_wheel(tmp_path / "dist")
+    with zipfile.ZipFile(wheel) as archive:
+        members = set(archive.namelist())
+    assert _RESOURCE_MEMBER in members
+    assert _ROOT_MEMBER not in members
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    venv, python, wheel_site, dependency_site = _install_wheel_without_dependencies(
+        wheel, install_root
+    )
+    isolated_cwd = tmp_path / "cwd"
+    isolated_home = tmp_path / "home"
+    isolated_cwd.mkdir()
+    isolated_home.mkdir()
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(isolated_home),
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": os.pathsep.join((str(wheel_site), str(dependency_site))),
+            "REPO_ROOT": str(repo_root),
+            "WHEEL_SITE": str(wheel_site),
+        }
+    )
+    cli = subprocess.run(
+        [str(_venv_script(venv, "weft")), "--help"],
+        cwd=isolated_cwd,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert cli.returncode == 0, cli.stdout + cli.stderr
+    assert "Weft — Persistent agent memory system." in cli.stdout
+
+    probe = textwrap.dedent(
+        """
+        import os
+        from pathlib import Path
+
+        import weft
+        from weft.resources import compose_file_path
+
+        repo = Path(os.environ["REPO_ROOT"]).resolve()
+        cwd = Path.cwd().resolve()
+        home = Path(os.environ["HOME"]).resolve()
+        package = Path(weft.__file__).resolve()
+        wheel_site = Path(os.environ["WHEEL_SITE"]).resolve()
+        assert cwd.name == "cwd"
+        assert home.name == "home"
+        assert repo not in package.parents
+        assert package.is_relative_to(wheel_site)
+        with compose_file_path() as resource:
+            resource = resource.resolve()
+            assert resource.is_file()
+            assert resource.read_bytes().startswith(b"services:")
+            assert repo not in resource.parents
+            assert "site-packages" in resource.parts
+        """
+    )
+    installed = subprocess.run(
+        [str(python), "-c", probe],
+        cwd=isolated_cwd,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
 
 
 class _TraversableResource:
@@ -190,10 +332,6 @@ def test_package_materialization_setup_error_is_actionable(tmp_path: Path) -> No
 def test_real_anchored_source_fallback(tmp_path: Path) -> None:
     """A source checkout is accepted from the filesystem-backed package origin."""
     package_origin = _write_source_layout(tmp_path)
-    package = _TraversablePackage(
-        _TraversableResource(package_origin / _RESOURCE, present=False)
-    )
-
     with patch("weft.resources.importlib.resources.files", return_value=package_origin):
         with compose_file_path() as resolved:
             assert resolved == tmp_path / _RESOURCE
