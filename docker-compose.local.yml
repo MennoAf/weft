@@ -28,11 +28,36 @@ services:
       timeout: 5s
       retries: 15
 
-  app:
+  migrate:
     image: ${WEFT_LOCAL_IMAGE:-weft-rc-local:1.0.0rc1}
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      # Owner credentials exist only in this one-shot migration container. The
+      # long-running app never receives this DSN.
+      WEFT_OWNER_DATABASE_URL: postgresql://weft:${WEFT_LOCAL_DB_PASSWORD:-weft_local}@postgres:5432/weft
+    command: ["/app/.venv/bin/python", "-m", "weft", "migrate"]
+    restart: "no"
+
+  bootstrap:
+    image: ${WEFT_LOCAL_IMAGE:-weft-rc-local:1.0.0rc1}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # Bootstrap connects as the owner only to provision weft_app after all
+      # migrations. The app receives only the runtime DSN below.
+      WEFT_DATABASE_URL: postgresql://weft:${WEFT_LOCAL_DB_PASSWORD:-weft_local}@postgres:5432/weft
+      WEFT_LOCAL_RUNTIME_DB_PASSWORD: ${WEFT_LOCAL_RUNTIME_DB_PASSWORD:-weft_app_local}
+    command: ["/app/.venv/bin/python", "-m", "weft.local_bootstrap", "provision"]
+    restart: "no"
+
+  app:
+    image: ${WEFT_LOCAL_IMAGE:-weft-rc-local:1.0.0rc1}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     environment:
@@ -42,8 +67,10 @@ services:
       WEFT_DEFAULT_USER_ID: ${WEFT_LOCAL_USER_ID:?WEFT_LOCAL_USER_ID must be supplied at runtime}
       WEFT_ENV: production
       WEFT_TRANSPORT: streamable-http
-      WEFT_MIGRATION_MODE: apply
-      WEFT_DATABASE_URL: postgresql://weft:${WEFT_LOCAL_DB_PASSWORD:-weft_local}@postgres:5432/weft
+      # Migrations run in the owner-only one-shot service above. The app must
+      # remain verify-only so its non-owning role can never mutate schema.
+      WEFT_MIGRATION_MODE: verify
+      WEFT_DATABASE_URL: postgresql://weft_app:${WEFT_LOCAL_RUNTIME_DB_PASSWORD:-weft_app_local}@postgres:5432/weft
       WEFT_REDIS_URL: redis://redis:6379
       WEFT_OUTBOUND_CONNECTOR: none
       WEFT_QUARANTINE_REVIEW_ENABLED: "0"
