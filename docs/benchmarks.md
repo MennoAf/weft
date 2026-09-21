@@ -2,6 +2,42 @@
 
 Weft is benchmarked against [LongMemEval](https://github.com/xiaowu0162/LongMemEval), a multi-session memory evaluation dataset for chat assistants. Numbers below are reproducible from the harness in `benchmarks/longmemeval/`.
 
+## Qualification evidence classes
+
+The public benchmark contract leads with the shipped local FastEmbed profile:
+`BAAI/bge-small-en-v1.5` (provider `fastembed`, model
+`BAAI/bge-small-en-v1.5`). Its native/signal width is **384**; Weft stores and
+emits **768** dimensions for the local pgvector contract, with zero padding that
+adds no semantic information. Dimensions describe the vector interface, not
+parameter count.
+
+Every future arm manifest and report MUST identify provider, model,
+native/signal dimensions, storage/output dimensions, profile/snapshot identity,
+and fixed controls. Controls include dataset split/checksum, question IDs and
+order, ingest representation, routing, retrieval tier and `top_k`, Reader
+model and prompt, judge/scoring, and retry behavior. This is a requirement for
+new qualification evidence, not a claim that every historical artifact already
+contains all fields.
+
+Evidence classes are deliberately separate:
+
+1. **Provider-free contract tests** use deterministic fake/spy providers. They
+   prove label-blind task shape and runtime traces, artifact/output contracts,
+   and fail-closed coverage accounting. They make no provider calls and do not
+   prove answer quality.
+2. **Labeled live-provider smoke tests** are an operator-authorized, separately
+   labeled small-fixture check against a live provider. They are not
+   provider-free evidence and do not establish a qualification lift.
+3. **Paid qualification** is a separately authorized repeated run with frozen
+   inputs/configuration, raw artifacts, judge results, costs, and failure
+   categories. It remains **HOLD** here; no paid execution is performed by
+   this repository's contract tests.
+
+Historical runs remain historical evidence. Their summaries must not be
+promoted into a current lift claim or used to hide missing hypotheses/judge
+results. Hosted OpenAI arms are optional later comparisons only, after explicit
+authorization; they are not executed here.
+
 ## What we measure
 
 LongMemEval ships two haystack tiers:
