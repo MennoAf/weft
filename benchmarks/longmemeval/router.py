@@ -62,6 +62,7 @@ from weft.turn_recall import (
     temporal_anchor,
 )
 from weft.views.belief_query import BeliefClaimResult, search_belief_claims
+from benchmarks.longmemeval.task_shape import TaskShape, derive_task_shape
 
 logger = logging.getLogger(__name__)
 
@@ -1112,8 +1113,9 @@ async def retrieve(
     embedder: EmbeddingProvider,
     *,
     question: str,
-    question_type: str,
     project_id: str,
+    question_type: str | None = None,
+    task_shape: TaskShape | None = None,
     policy: RetrievalPolicy | None = None,
     tier: Tier = "belief",
     user_id: str = _BENCHMARK_USER_ID,
@@ -1179,28 +1181,66 @@ async def retrieve(
     path. It requires the manifest's source-session mapping and overfetches
     ``session_selector_pool_limit`` fused turns before restoring ``top_k``.
     """
-    policy = policy or policy_for(question_type)
+    explicit_task_shape = task_shape is not None
+    task_shape = task_shape or derive_task_shape(question)
+    runtime_shape = task_shape.task_shape
+    shape_question_type = {
+        "temporal": "temporal-reasoning",
+        "temporal-multi": "temporal-reasoning",
+        "multi-session": "multi-session",
+        "single-session": "single-session-user",
+    }.get(runtime_shape, "single-session-user")
+    if explicit_task_shape:
+        # The adapter always supplies task_shape. From this boundary onward,
+        # runtime policy is shape/content-derived and question_type is ignored.
+        question_type = shape_question_type
+    else:
+        # Compatibility for direct standalone integrations that still call
+        # retrieve(question_type=...). This branch is intentionally unreachable
+        # from the adapter, which passes task_shape on every runtime path.
+        question_type = question_type or shape_question_type
+    if policy is None:
+        policy = (
+            RetrievalPolicy(top_k=task_shape.top_k, overfetch_multiplier=4)
+            if explicit_task_shape
+            else policy_for(question_type)
+        )
     if candidate_sql_limit is None:
         candidate_sql_limit = policy.candidate_sql_limit
     if fusion_candidate_limit is None:
         fusion_candidate_limit = policy.fusion_candidate_limit
 
-    # The validated policy is active only when the caller has the source-session
-    # map needed to make the selector meaningful. Explicit False remains a safe
-    # escape hatch for controlled baseline comparisons; unsupported types are
-    # always forced back to baseline.
+    # The selector is shape-derived for explicit runtime calls and retains the
+    # legacy question_type gate only for no-shape standalone callers. In both
+    # cases a source-session map is required for a meaningful selection.
     if use_session_selector is None:
-        use_session_selector = bool(
-            turn_session_map and session_rerank_enabled_for(question_type)
-        )
-    elif not session_rerank_enabled_for(question_type):
+        if explicit_task_shape:
+            use_session_selector = bool(
+                turn_session_map and runtime_shape in {"multi-session", "single-session"}
+            )
+        else:
+            use_session_selector = bool(
+                turn_session_map and session_rerank_enabled_for(question_type)
+            )
+    elif not explicit_task_shape and not session_rerank_enabled_for(question_type):
         use_session_selector = False
     if use_session_selector and session_selector_pool_limit is None:
-        session_selector_pool_limit = session_rerank_pool_limit_for(question_type)
+        session_selector_pool_limit = (
+            SESSION_RERANK_POOL_LIMIT
+            if not explicit_task_shape
+            else max(policy.top_k, SESSION_RERANK_POOL_LIMIT)
+        )
 
     if tier == "auto":
-        base_type = question_type.removesuffix("_abs")
-        tier = "turns" if base_type in ("multi-session", "temporal-reasoning") else "belief"
+        if explicit_task_shape:
+            tier = task_shape.routing_class
+        else:
+            tier = (
+                "turns"
+                if question_type.removesuffix("_abs")
+                in ("multi-session", "temporal-reasoning")
+                else "belief"
+            )
 
     if tier in ("belief-view", "replay"):
         # 'replay' reads the SAME claim view as 'belief-view' — the difference is

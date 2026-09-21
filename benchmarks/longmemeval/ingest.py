@@ -109,6 +109,16 @@ def project_id_for(question_id: str) -> str:
     return f"lme_{question_id}"
 
 
+def expected_turn_count(instance: Instance) -> int:
+    """Count turns that turn-mode ingestion will actually persist."""
+    return sum(
+        1
+        for session in instance.sessions
+        for turn in session.turns
+        if turn.role in _ROLE_MAP
+    )
+
+
 _WEEKDAY_PAREN = re.compile(r"\s*\([A-Za-z]+\)\s*")
 
 

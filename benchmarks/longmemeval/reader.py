@@ -27,11 +27,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from anthropic import AsyncAnthropic
+try:
+    from anthropic import AsyncAnthropic
+except ImportError:  # Provider-injected tests and alternate providers need no SDK.
+    AsyncAnthropic = None  # type: ignore[assignment,misc]
 
 from weft.models import MemoryRecall
-
-from benchmarks.longmemeval.dataset import ABSTENTION_TYPES
+from weft.text_generation import GenerationRequest, TextGenerationProvider
 
 logger = logging.getLogger(__name__)
 
@@ -132,21 +134,29 @@ _ABSTENTION_SUFFIX = (
 )
 
 
-def _system_prompt_for(question_type: str) -> str:
-    """Build the Reader's system prompt for a given question type.
+def _system_prompt_for(task_shape: str = "single-session") -> str:
+    """Build a prompt from a runtime shape or legacy family name.
 
-    Stable for any given (question_type) input — important so the prompt
-    cache can reuse the same hash across the run. Suffix for abstention
-    types is appended deterministically.
+    Runtime calls pass an explicit task shape. Legacy family names remain
+    supported here for direct prompt-unit callers, but are not used by
+    ``Reader.read_answer`` to select a model or runtime policy.
     """
-    base_type = question_type.removesuffix("_abs")
-    type_block = _TYPE_INSTRUCTIONS.get(
-        base_type, "Answer the question from the supplied memories.",
-    )
-    prompt = f"{_BASE_INSTRUCTIONS}\n{type_block}"
-    if question_type in ABSTENTION_TYPES:
-        prompt += _ABSTENTION_SUFFIX
-    return prompt
+    task_shape = getattr(task_shape, "task_shape", task_shape)
+    abstention = isinstance(task_shape, str) and task_shape.endswith("_abs")
+    family = task_shape.removesuffix("_abs") if isinstance(task_shape, str) else task_shape
+    type_block = {
+        "multi-session": _TYPE_INSTRUCTIONS["multi-session"],
+        "temporal": _TYPE_INSTRUCTIONS["temporal-reasoning"],
+        "temporal-multi": _TYPE_INSTRUCTIONS["temporal-reasoning"],
+        "temporal-reasoning": _TYPE_INSTRUCTIONS["temporal-reasoning"],
+        "single-session": "Answer the question from the supplied memories.",
+        "single-session-user": _TYPE_INSTRUCTIONS["single-session-user"],
+        "single-session-assistant": _TYPE_INSTRUCTIONS["single-session-assistant"],
+        "single-session-preference": _TYPE_INSTRUCTIONS["single-session-preference"],
+        "knowledge-update": _TYPE_INSTRUCTIONS["knowledge-update"],
+    }.get(family, "Answer the question from the supplied memories.")
+    suffix = _ABSTENTION_SUFFIX if abstention else ""
+    return f"{_BASE_INSTRUCTIONS}\n{type_block}{suffix}"
 
 
 def _format_memories(memories: list[MemoryRecall]) -> str:
@@ -246,8 +256,14 @@ class Reader:
         *,
         model: str = DEFAULT_MODEL,
         abstention_model: str = ABSTENTION_MODEL,
+        provider: TextGenerationProvider | None = None,
     ):
-        self._client = client or AsyncAnthropic()
+        self._client = client if provider is None else None
+        self._provider = provider
+        if self._client is None and self._provider is None:
+            if AsyncAnthropic is None:
+                raise ValueError("Anthropic SDK is required when no Reader provider is injected")
+            self._client = AsyncAnthropic()
         self._model = model
         self._abstention_model = abstention_model
 
@@ -256,8 +272,9 @@ class Reader:
         *,
         question: str,
         question_date: str,
-        question_type: str,
-        memories: list[MemoryRecall],
+        question_type: str | None = None,
+        task_shape: object = "single-session",
+        memories: list[MemoryRecall] | None = None,
         top_k: int | None = 10,
     ) -> ReaderResponse:
         """Produce one hypothesis string for one benchmark question.
@@ -277,17 +294,33 @@ class Reader:
         Returns:
             ReaderResponse with the hypothesis and token accounting.
         """
+        memories = list(memories or ())
         if top_k is not None and len(memories) > top_k:
             memories = memories[:top_k]
 
-        system_prompt = _system_prompt_for(question_type)
-        model = (
-            self._abstention_model
-            if question_type in ABSTENTION_TYPES
-            else self._model
+        system_prompt = _system_prompt_for(task_shape)
+        model = self._model
+        user_content = (
+            f"Today's date: {question_date}\n\n"
+            f"Question: {question}\n\n"
+            f"Memories:\n{_format_memories(memories)}"
         )
+        if self._provider is not None:
+            generated = await self._provider.generate(
+                GenerationRequest(
+                    model=model,
+                    system=system_prompt,
+                    messages=({"role": "user", "content": user_content},),
+                    max_tokens=MAX_TOKENS_OUT,
+                )
+            )
+            return ReaderResponse(
+                hypothesis=generated.text.strip(), model=generated.model,
+                input_tokens=generated.input_tokens, cached_input_tokens=0,
+                output_tokens=generated.output_tokens,
+            )
 
-        # System prompt is stable per question_type → cacheable. The
+        # System prompt is stable per runtime task shape → cacheable. The
         # `cache_control` marker tells Anthropic to keep the prefix warm
         # across calls for the 5-minute TTL window.
         system_blocks = [

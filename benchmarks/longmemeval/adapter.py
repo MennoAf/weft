@@ -67,9 +67,43 @@ from benchmarks.longmemeval.materialize import (
 )
 from benchmarks.longmemeval.reader import Reader
 from benchmarks.longmemeval.replay_drive import ReplayExecutorKind, drive_replay
-from benchmarks.longmemeval.router import RetrievalDiagnostics, Tier, policy_for, retrieve
+from benchmarks.longmemeval.task_shape import derive_task_shape
+from benchmarks.longmemeval.router import RetrievalDiagnostics, Tier, RetrievalPolicy, retrieve
 
 logger = logging.getLogger(__name__)
+
+
+def summarize_recall_records(
+    records: list[dict],
+    *,
+    requested_question_ids: object,
+    mode: str = "turns",
+    tier: str = "turns",
+    recall_k: int = 10,
+) -> dict:
+    """Summarize recall over every requested question, including failures."""
+    requested = list(requested_question_ids)
+    by_id = {record.get("question_id"): record for record in records}
+    n_hits = sum(bool(by_id.get(question_id, {}).get("recall_at_k_hit", False)) for question_id in requested)
+    per_type: dict[str, dict[str, int | float]] = {}
+    for record in records:
+        question_type = record.get("question_type", "unknown")
+        slot = per_type.setdefault(question_type, {"n": 0, "hits": 0})
+        slot["n"] = int(slot["n"]) + 1
+        slot["hits"] = int(slot["hits"]) + int(bool(record.get("recall_at_k_hit", False)))
+    for slot in per_type.values():
+        n = int(slot["n"])
+        slot["recall_at_k"] = int(slot["hits"]) / n if n else 0.0
+    denominator = len(requested)
+    return {
+        "k": recall_k,
+        "n_questions": denominator,
+        "n_hits": n_hits,
+        "recall_at_k": n_hits / denominator if denominator else 0.0,
+        "per_question_type": per_type,
+        "mode": mode,
+        "tier": tier,
+    }
 
 
 def _answer_text_match(gold: object, content: str) -> bool:
@@ -407,6 +441,7 @@ async def _run_one(
         per-question recall fields ready to serialize to JSONL.
     """
     project_id = project_id_for(instance.question_id)
+    runtime_shape = derive_task_shape(instance.question, instance.sessions)
 
     # 1+2. Ingest haystack into a per-question project sandbox.
     # Allocate per-question side-maps only when recall@k capture is on
@@ -486,13 +521,10 @@ async def _run_one(
         )
         replay_telemetry = replay_stats.to_dict()
 
-    # 3. Recall — question-type-aware policy lives in router.policy_for().
-    # The CLI top_k acts as a floor: if a caller bumps top_k above the
-    # policy default (e.g. running ablations), honor that. Sandbox isolation
-    # (over-fetch + post-filter to project_id) is handled inside retrieve().
-    policy = policy_for(instance.question_type)
+    # 3. Recall — runtime policy is derived from permitted question/session text.
+    # The CLI top_k acts as a floor; gold labels never enter this boundary.
+    policy = RetrievalPolicy(top_k=runtime_shape.top_k, overfetch_multiplier=4)
     if top_k > policy.top_k:
-        from benchmarks.longmemeval.router import RetrievalPolicy
         policy = RetrievalPolicy(top_k=top_k, overfetch_multiplier=policy.overfetch_multiplier)
     # Ground-truth turn count for diagnostics: if the side-map was
     # populated during ingest, its length is the exact number of turns
@@ -507,7 +539,7 @@ async def _run_one(
     memories = await retrieve(
         pool, embedder,
         question=instance.question,
-        question_type=instance.question_type,
+        task_shape=runtime_shape,
         project_id=project_id,
         policy=policy,
         tier=tier,
@@ -521,7 +553,7 @@ async def _run_one(
     response = await reader.read_answer(
         question=instance.question,
         question_date=instance.question_date,
-        question_type=instance.question_type,
+        task_shape=runtime_shape.task_shape,
         memories=memories,
         top_k=policy.top_k,
     )
@@ -849,32 +881,18 @@ async def run_benchmark(
         if owns_pool:
             await pool.close()
 
-    # Roll up recall@k for turn-tier runs and emit a summary JSON next to
-    # the per-question JSONL. Print the headline number to stdout so smoke
-    # tests don't require opening a file to read it.
-    if capture_recall and recall_records:
-        n_total = len(recall_records)
-        n_hits = sum(1 for r in recall_records if r["recall_at_k_hit"])
-        per_type: dict[str, dict[str, int | float]] = {}
-        for r in recall_records:
-            qt = r["question_type"]
-            slot = per_type.setdefault(qt, {"n": 0, "hits": 0})
-            slot["n"] = int(slot["n"]) + 1
-            slot["hits"] = int(slot["hits"]) + (1 if r["recall_at_k_hit"] else 0)
-        for qt, slot in per_type.items():
-            n = int(slot["n"])
-            hits = int(slot["hits"])
-            slot["recall_at_k"] = (hits / n) if n else 0.0
-        summary = {
-            "k": recall_k,
-            "n_questions": n_total,
-            "n_hits": n_hits,
-            "recall_at_k": (n_hits / n_total) if n_total else 0.0,
-            "per_question_type": per_type,
-            "mode": mode,
-            "tier": tier,
-            "dataset": str(dataset_path),
-        }
+    # Roll up recall@k over the full requested set; failed questions are misses.
+    if capture_recall and instances:
+        summary = summarize_recall_records(
+            recall_records,
+            requested_question_ids=[instance.question_id for instance in instances],
+            mode=mode,
+            tier=tier,
+            recall_k=recall_k,
+        )
+        n_total = summary["n_questions"]
+        n_hits = summary["n_hits"]
+        summary["dataset"] = str(dataset_path)
         recall_summary_path.write_text(
             json.dumps(summary, indent=2), encoding="utf-8",
         )
@@ -1126,11 +1144,7 @@ async def _run_recall_only(
     or a prior --materialize-only run that left data in place).
     """
     from benchmarks.longmemeval.snapshot import Manifest, snapshot_dir as snap_dir_fn
-    from benchmarks.longmemeval.router import (
-        RetrievalDiagnostics,
-        policy_for,
-        retrieve,
-    )
+    from benchmarks.longmemeval.router import RetrievalDiagnostics, retrieve
 
     sdir = snap_dir_fn(snapshot_dir, snapshot_name)
     manifest_path = sdir / "manifest.json"
@@ -1159,14 +1173,12 @@ async def _run_recall_only(
 
     try:
         for idx, q in enumerate(qs):
-            policy = policy_for(q.question_type)
-            if top_k > policy.top_k:
-                from benchmarks.longmemeval.router import RetrievalPolicy
-                policy = RetrievalPolicy(
-                    top_k=top_k, overfetch_multiplier=policy.overfetch_multiplier,
-                )
-
             text = question_text_map.get(q.question_id, q.question_id)
+            runtime_shape = derive_task_shape(text)
+            policy = RetrievalPolicy(top_k=runtime_shape.top_k, overfetch_multiplier=4)
+            if top_k > policy.top_k:
+                policy = RetrievalPolicy(top_k=top_k, overfetch_multiplier=policy.overfetch_multiplier)
+
             diagnostics = RetrievalDiagnostics()
             indexed_turn_ids = list(q.turn_ids)
             gold_session_ids = set(q.gold_session_ids)
@@ -1179,7 +1191,7 @@ async def _run_recall_only(
             memories = await retrieve(
                 pool, embedder,
                 question=text,
-                question_type=q.question_type,
+                task_shape=runtime_shape,
                 project_id=q.project_id,
                 policy=policy,
                 tier="turns",
@@ -1217,17 +1229,14 @@ async def _run_recall_only(
     finally:
         await pool.close()
 
-    # Build summary
-    n_total = len(recall_records)
-    n_hits = sum(1 for r in recall_records if r["recall_at_k_hit"])
-    per_type: dict[str, dict[str, int | float]] = {}
-    for r in recall_records:
-        qt = r["question_type"]
-        slot = per_type.setdefault(qt, {"n": 0, "hits": 0})
-        slot["n"] += 1
-        slot["hits"] += 1 if r["recall_at_k_hit"] else 0
-    for qt, slot in per_type.items():
-        slot["recall_at_k"] = slot["hits"] / slot["n"] if slot["n"] else 0.0
+    # Build summary over every filtered/limited question; missing records are misses.
+    summary = summarize_recall_records(
+        recall_records,
+        requested_question_ids=[q.question_id for q in qs],
+        mode="turns",
+        tier="turns",
+        recall_k=recall_k,
+    )
 
     diagnostic_counts: dict[str, int] = {}
     diagnostic_by_type: dict[str, dict[str, int]] = {}
@@ -1249,20 +1258,15 @@ async def _run_recall_only(
         else:
             qt_counts["recall_misses"] = qt_counts.get("recall_misses", 0) + 1
 
-    summary = {
-        "k": recall_k,
-        "n_questions": n_total,
-        "n_hits": n_hits,
-        "recall_at_k": n_hits / n_total if n_total else 0.0,
-        "per_question_type": per_type,
-        "diagnostic_counts": diagnostic_counts,
-        "diagnostic_by_question_type": diagnostic_by_type,
-        "mode": "turns",
-        "tier": "turns",
-        "dataset": str(dataset_path),
-        "snapshot_name": snapshot_name,
-        "retrieval_as_of": manifest.retrieval_as_of,
-    }
+    summary.update(
+        {
+            "diagnostic_counts": diagnostic_counts,
+            "diagnostic_by_question_type": diagnostic_by_type,
+            "dataset": str(dataset_path),
+            "snapshot_name": snapshot_name,
+            "retrieval_as_of": manifest.retrieval_as_of,
+        }
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / f"{split_name}_recall_only_{snapshot_name}_{timestamp}_summary.json"
@@ -1415,13 +1419,10 @@ async def _run_snapshot_reader_only(
                 if q.question_id in completed_ids:
                     continue
                 instance = instance_by_id[q.question_id]
-                policy = policy_for(q.question_type)
+                runtime_shape = derive_task_shape(instance.question, instance.sessions)
+                policy = RetrievalPolicy(top_k=runtime_shape.top_k, overfetch_multiplier=4)
                 if top_k > policy.top_k:
-                    from benchmarks.longmemeval.router import RetrievalPolicy
-                    policy = RetrievalPolicy(
-                        top_k=top_k,
-                        overfetch_multiplier=policy.overfetch_multiplier,
-                    )
+                    policy = RetrievalPolicy(top_k=top_k, overfetch_multiplier=policy.overfetch_multiplier)
 
                 diagnostics = RetrievalDiagnostics()
                 indexed_turn_ids = list(q.turn_ids)
@@ -1450,7 +1451,7 @@ async def _run_snapshot_reader_only(
                         pool,
                         embedder,
                         question=instance.question,
-                        question_type=instance.question_type,
+                        task_shape=runtime_shape,
                         project_id=q.project_id,
                         policy=policy,
                         tier="turns",
@@ -1464,7 +1465,7 @@ async def _run_snapshot_reader_only(
                     response = await reader.read_answer(
                         question=instance.question,
                         question_date=instance.question_date,
-                        question_type=instance.question_type,
+                        task_shape=runtime_shape.task_shape,
                         memories=memories,
                         top_k=policy.top_k,
                     )
