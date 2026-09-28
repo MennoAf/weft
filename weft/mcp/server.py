@@ -55,8 +55,12 @@ from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
 
-# Lifecycle budgets are deliberately below the platform's health grace period.
-STARTUP_READINESS_TIMEOUT_SECONDS = 45.0
+# The strictest tracked Fly health grace is 30s. Startup gets an 18s total
+# budget, leaving 8s for failed-startup cleanup and 4s of probe margin.
+STARTUP_READINESS_TIMEOUT_SECONDS = 18.0
+STARTUP_CLEANUP_TIMEOUT_SECONDS = 8.0
+STARTUP_CONNECT_TIMEOUT_SECONDS = 5.0
+EMBEDDING_VALIDATION_TIMEOUT_SECONDS = 5.0
 SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 # Pool health check interval in seconds
@@ -69,6 +73,12 @@ _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
 # failure at any acquisition point can close everything acquired so far.
 _startup_resources: ContextVar[list[object] | None] = ContextVar(
     "weft_startup_resources", default=None
+)
+_startup_deadline: ContextVar[float | None] = ContextVar(
+    "weft_startup_deadline", default=None
+)
+_startup_cleanup_deadline: ContextVar[float | None] = ContextVar(
+    "weft_startup_cleanup_deadline", default=None
 )
 
 
@@ -280,20 +290,39 @@ async def _connect_with_retry(
     label: str,
     max_retries: int = _STARTUP_MAX_RETRIES,
     base_delay: float = _STARTUP_BASE_DELAY,
+    *,
+    deadline: float | None = None,
+    attempt_timeout: float | None = None,
 ):
-    """Call *connect_fn* with exponential backoff on failure.
+    """Retry a connection, keeping every attempt and delay within deadline.
 
-    Returns the result of *connect_fn()* on success.
-    Raises the last exception after exhausting retries.
+    A deadline is an absolute event-loop monotonic timestamp. When supplied,
+    ``connect_fn`` receives its remaining per-attempt timeout as a positional
+    argument; this lets pool creation bound both socket connects and restore
+    polling with the same remaining budget.
     """
     last_exc: Exception | None = None
+    loop = asyncio.get_running_loop()
     for attempt in range(max_retries + 1):
+        remaining = None if deadline is None else deadline - loop.time()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError(f"{label} startup deadline exhausted") from last_exc
+        timeout = attempt_timeout
+        if remaining is not None:
+            timeout = remaining if timeout is None else min(timeout, remaining)
         try:
-            return await connect_fn()
+            if timeout is None:
+                return await connect_fn()
+            return await asyncio.wait_for(connect_fn(timeout), timeout=timeout)
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
                 delay = base_delay * (2 ** attempt)
+                if deadline is not None:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError(f"{label} startup deadline exhausted") from exc
+                    delay = min(delay, remaining)
                 logger.warning(
                     "%s connection failed (attempt %d/%d): %s — retrying in %.1fs",
                     label, attempt + 1, max_retries + 1, exc, delay,
@@ -305,6 +334,23 @@ async def _connect_with_retry(
                     label, max_retries + 1, exc,
                 )
     raise last_exc  # type: ignore[misc]
+
+
+async def _validate_embedding_provider(
+    embedding: EmbeddingProvider,
+    *,
+    timeout: float = EMBEDDING_VALIDATION_TIMEOUT_SECONDS,
+) -> list[float]:
+    """Validate provider responsiveness before application readiness is exposed."""
+    try:
+        return await asyncio.wait_for(
+            embedding.embed("startup validation"), timeout=timeout
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"Embedding provider {embedding.provider_name} validation exceeded "
+            f"{timeout:.1f}s; startup aborted"
+        ) from exc
 
 
 async def _pool_keepalive(ctx: AppContext) -> None:
@@ -415,6 +461,26 @@ async def _cancel_background_tasks(
     return errors
 
 
+def _observe_finished_task(task: asyncio.Future) -> None:
+    """Retrieve late task errors after a bounded shutdown wait has returned."""
+    if task.cancelled():
+        return
+    task.exception()
+
+
+async def _await_until(awaitable, deadline: float) -> None:
+    """Wait only until an absolute deadline, cancelling without unbounded drain."""
+    task = asyncio.ensure_future(awaitable)
+    remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+    done, _ = await asyncio.wait((task,), timeout=remaining)
+    if task in done:
+        task.result()
+        return
+    task.cancel()
+    task.add_done_callback(_observe_finished_task)
+    raise TimeoutError("shutdown cleanup exceeded its shared deadline")
+
+
 async def _close_one_resource(resource: object, deadline: float) -> None:
     """Close one resource using one absolute monotonic deadline."""
     if resource is None:
@@ -430,15 +496,15 @@ async def _close_one_resource(resource: object, deadline: float) -> None:
         if callable(terminate):
             terminate()
         try:
-            await asyncio.wait_for(wait(), timeout=remaining())
-        except asyncio.TimeoutError:
+            await _await_until(wait(), deadline)
+        except TimeoutError:
             kill = getattr(resource, "kill", None)
             if not callable(kill):
                 raise
             kill()
             # Do not reset the budget after kill: a stubborn child can consume
             # at most the one shutdown deadline across both waits.
-            await asyncio.wait_for(wait(), timeout=remaining())
+            await _await_until(wait(), deadline)
         return
     close = getattr(resource, "aclose", None)
     if not callable(close):
@@ -446,7 +512,7 @@ async def _close_one_resource(resource: object, deadline: float) -> None:
     if callable(close):
         result = close()
         if inspect.isawaitable(result):
-            await asyncio.wait_for(result, timeout=remaining())
+            await _await_until(result, deadline)
         return
     # Some embedding adapters own an SDK client but intentionally expose only
     # the embedding protocol. Close that client without requiring a protocol
@@ -462,11 +528,13 @@ async def _cleanup_resources(
     resources: tuple[object, ...],
     *,
     timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> list[BaseException]:
     """Close each owned resource, continuing after failures and timeouts."""
     errors: list[BaseException] = []
     seen: set[int] = set()
-    deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+    if deadline is None:
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
     for resource in resources:
         if resource is None or id(resource) in seen:
             continue
@@ -484,8 +552,13 @@ async def _run_startup_cleanup(
     *,
     resources: tuple[object, ...],
 ) -> None:
-    """Clean startup acquisitions and re-raise the startup failure unchanged."""
-    await _cleanup_resources(resources, timeout=SHUTDOWN_TIMEOUT_SECONDS)
+    """Clean startup acquisitions within the Fly health-grace budget."""
+    cleanup_deadline = _startup_cleanup_deadline.get()
+    await _cleanup_resources(
+        resources,
+        timeout=STARTUP_CLEANUP_TIMEOUT_SECONDS,
+        deadline=cleanup_deadline,
+    )
     raise primary_error
 
 
@@ -504,9 +577,9 @@ async def _shutdown_app(
         timeout=remaining(),
     )
     try:
-        drain_report = await asyncio.wait_for(
-            tool_usage_middleware.drain(ctx.pool), timeout=remaining()
-        )
+        drain_task = asyncio.create_task(tool_usage_middleware.drain(ctx.pool))
+        await _await_until(drain_task, deadline)
+        drain_report = drain_task.result()
         if not drain_report["shutdown_drained"]:
             logger.warning("tool usage telemetry did not drain cleanly: %s", drain_report)
     except BaseException as exc:
@@ -547,7 +620,10 @@ async def _prepare_database_schema(
         # The first pool's connections may predate installation of vector.
         await pool.close()
         replacement = await _connect_with_retry(
-            lambda: create_pool(config), "Postgres"
+            lambda timeout: create_pool(config, connect_timeout=timeout),
+            "Postgres",
+            deadline=_startup_deadline.get(),
+            attempt_timeout=STARTUP_CONNECT_TIMEOUT_SECONDS,
         )
         owned_pool = replacement
         migrated_tables = await ensure_vector_dimensions(
@@ -556,7 +632,11 @@ async def _prepare_database_schema(
         return replacement, migrated_tables
     except BaseException:
         if not owned_pool.is_closing():
-            await owned_pool.close()
+            cleanup_deadline = _startup_cleanup_deadline.get()
+            if cleanup_deadline is None:
+                await owned_pool.close()
+            else:
+                await _await_until(owned_pool.close(), cleanup_deadline)
         raise
 
 
@@ -592,8 +672,10 @@ async def _lifespan_impl(server: FastMCP):
 
     # Database (with retry)
     pool = _track_startup_resource(await _connect_with_retry(
-        lambda: create_pool(config),
+        lambda timeout: create_pool(config, connect_timeout=timeout),
         "Postgres",
+        deadline=_startup_deadline.get(),
+        attempt_timeout=STARTUP_CONNECT_TIMEOUT_SECONDS,
     ))
     pool, migrated_tables = await _prepare_database_schema(pool, config)
     _track_startup_resource(pool)
@@ -644,7 +726,9 @@ async def _lifespan_impl(server: FastMCP):
         dimensions=config.embedding.dimensions,
     ))
     try:
-        test_vec = await embedding.embed("startup validation")
+        test_vec = await _validate_embedding_provider(
+            embedding, timeout=EMBEDDING_VALIDATION_TIMEOUT_SECONDS
+        )
         logger.info(
             "Embedding provider %s validated (%d dims)",
             embedding.provider_name, len(test_vec),
@@ -652,7 +736,7 @@ async def _lifespan_impl(server: FastMCP):
     except Exception as exc:
         logger.error(
             "Embedding provider %s failed validation: %s. "
-            "Check API keys and model configuration.",
+            "Check API keys and model configuration; startup aborted.",
             embedding.provider_name, exc,
         )
         raise
@@ -833,7 +917,12 @@ async def _lifespan_impl(server: FastMCP):
 async def lifespan(server: FastMCP):
     """Run startup with acquisition tracking and a bounded shutdown."""
     resources: list[object] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + STARTUP_READINESS_TIMEOUT_SECONDS
+    cleanup_deadline = deadline + STARTUP_CLEANUP_TIMEOUT_SECONDS
     token = _startup_resources.set(resources)
+    deadline_token = _startup_deadline.set(deadline)
+    cleanup_deadline_token = _startup_cleanup_deadline.set(cleanup_deadline)
     manager = _lifespan_impl(server)
     entered = False
     try:
@@ -858,6 +947,8 @@ async def lifespan(server: FastMCP):
                 await _run_startup_cleanup(exc, resources=tuple(resources))
             raise
     finally:
+        _startup_cleanup_deadline.reset(cleanup_deadline_token)
+        _startup_deadline.reset(deadline_token)
         _startup_resources.reset(token)
 
 

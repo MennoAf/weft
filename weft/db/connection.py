@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import ssl
 from contextlib import asynccontextmanager
@@ -113,7 +114,11 @@ async def register_pgvector_codec(pool: asyncpg.Pool) -> None:
             await pool.release(conn)
 
 
-async def create_pool(config: WeftConfig) -> asyncpg.Pool:
+async def create_pool(
+    config: WeftConfig,
+    *,
+    connect_timeout: float | None = None,
+) -> asyncpg.Pool:
     """Create an asyncpg connection pool from config.
 
     If the initial connection fails and the DSN points to Supabase, this
@@ -133,6 +138,10 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
         "max_size": config.database.pool_max_size,
         "init": _pgvector_codec_init,
     }
+    if connect_timeout is not None:
+        # asyncpg's timeout bounds initial pool connection establishment; it is
+        # separate from command_timeout and Pool.acquire wait timeouts.
+        kwargs["timeout"] = max(0.001, connect_timeout)
     # Per-query ceiling: a stuck query is cancelled instead of hanging forever
     # and holding its connection out of the pool.
     if config.database.command_timeout is not None:
@@ -219,7 +228,16 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
             "project %s",
             project_ref,
         )
-        restored = await restore_project(project_ref, token)
+        restore_timeout = connect_timeout or 30.0
+        restore_parameters = inspect.signature(restore_project).parameters
+        if "timeout" in restore_parameters:
+            restored = await restore_project(
+                project_ref, token, timeout=restore_timeout
+            )
+        else:
+            # Preserve compatibility with existing injected restore adapters;
+            # their enclosing create_pool call remains bounded by the caller.
+            restored = await restore_project(project_ref, token)
         if not restored:
             raise ConnectionError(
                 f"Failed to restore Supabase project '{project_ref}'. "
@@ -231,11 +249,16 @@ async def create_pool(config: WeftConfig) -> asyncpg.Pool:
             "Restore request accepted — waiting for project %s to come online…",
             project_ref,
         )
-        ready = await wait_for_restore(project_ref, token, timeout=120, poll_interval=5)
+        ready = await wait_for_restore(
+            project_ref,
+            token,
+            timeout=restore_timeout,
+            poll_interval=min(5.0, restore_timeout),
+        )
         if not ready:
             raise ConnectionError(
                 f"Supabase project '{project_ref}' restore was accepted but the "
-                "database did not become available within 120s. Check status at:\n"
+                f"database did not become available within {restore_timeout:.1f}s. Check status at:\n"
                 f"https://supabase.com/dashboard/project/{project_ref}"
             ) from exc
 
