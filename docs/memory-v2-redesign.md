@@ -1,6 +1,6 @@
 # Weft Memory v2 — TLDR
 
-*Status: design resolved 2026-06-27, not yet built. Next step: PRD. Full council synthesis in [`memory-v2-council-synthesis.md`](./memory-v2-council-synthesis.md). Canonical decision record: Weft memory `weft-5276bf05`.*
+*Status: design resolved 2026-06-27, not yet built. Next step: PRD.*
 
 ## The one-paragraph version
 

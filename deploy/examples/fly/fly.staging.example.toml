@@ -1,4 +1,4 @@
-# Staging Fly.io app — mirror of fly.toml with OAuth 2.1 enabled.
+# Staging Fly.io example — OAuth 2.1 enabled.
 #
 # Sanitized staging reference configuration. Replace the app name and
 # secrets in a private deployment environment; do not commit production
