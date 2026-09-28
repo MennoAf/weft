@@ -79,7 +79,6 @@ def _install_wheel_isolated(wheel: Path, root: Path) -> tuple[Path, Path]:
             "uv",
             "pip",
             "install",
-            "--offline",
             "--python",
             str(python),
             "click",
