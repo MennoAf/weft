@@ -65,3 +65,8 @@ benchmarks/longmemeval/snapshots/*/.complete
 
 # Polytoken local session/config state.
 .polytoken/
+
+# Local RC worktree checkouts.
+/.rc-*-worktree*/
+/.ci-rc-worktree/
+/.rc-candidate-worktree/
