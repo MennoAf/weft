@@ -149,7 +149,7 @@ done_when: After RC1+RC2 land, run_canary_audit with active_probing_enabled=True
 LOOP BLUEPRINT — Re-ask Correction (already live; this fix must move it)
 ══════════════════════════════
 Family:   Correction Pattern / Self-Calibration
-SIGNAL:   is_reask_miss — Jason or an agent re-issues a query because the first
+SIGNAL:   is_reask_miss — a user or agent re-issues a query because the first
           recall missed, and a satisfying memory is later recorded. EXISTS
           (weft_recall_queries.is_reask_miss; compute_reask_rate at reask.py:133).
 STORE:    weft_recall_queries rows; surfaced as reask_rate in weft_check_health
@@ -161,7 +161,7 @@ FEEDBACK: re-ask misses auto-enroll as reaREDACTED canary probes (PROVEN
 PROOF:    reask_rate over the window after the fix vs before. Tell-it's-dead:
           reask_rate flat across the fix → the fix moved a synthetic probe but
           not real-query behavior; the diagnosis was incomplete. This is the
-          honest falsifiable check that the fix helped *Jason*, not just the test.
+          honest falsifiable check that the fix improved real-query behavior, not just the test.
 Payback:  ~14 days of normal usage (enough re-ask events to compare windows).
 Cost:     none — pure measurement against an existing metric.
 done_when: reask_rate measured over the 14 days following the fix is strictly

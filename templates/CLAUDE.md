@@ -30,7 +30,7 @@ When your harness suggests writing memories to flat files (e.g. `MEMORY.md` or p
 | `feedback` (correction or confirmed approach) | `preference` (with **Why:** + **How to apply:** in body) | Pin most feedback — the whole point is future sessions follow it. |
 | `project` (active work, decisions, why) | `decision`, `milestone`, or `fact` | `decision` for "we chose X over Y," `milestone` for "we shipped X," `fact` for "X is true about the project." |
 | `reference` (where to find external info) | `fact` with topics naming the system | E.g. `topics=["linear", "external-system"]` for "bugs go in INGEST." |
-| solution / fix recipe | `solution` | Native type. |
+| solution / fix procedure | `solution` | Native type. |
 | anti-pattern | `anti_pattern` | Native type. |
 
 Call shape:

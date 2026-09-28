@@ -436,8 +436,8 @@ is the dominant failure shape.
 1. **Recall-hit-but-turn-miss** — gold session in retrieved set, but
    answer-bearing turn isn't (multi-session, temporal-reasoning).
 2. **Reader recency/update failure** — multiple values in context,
-   Reader picks the older or more-discussed one (e.g. Hawaii vs Paris
-   for "most recent family trip").
+   Reader picks the older or more-discussed one (e.g. Option A vs Option B
+   for "most recent trip").
 3. **Reader hallucination on `_abs` (should-abstain) questions** — gold
    context is silent on the asked detail, Reader fabricates from world
    knowledge (e.g. bus-cost estimate, vintage *films* answered with
@@ -490,7 +490,7 @@ session-level-only gap flagged in Ghost Audit finding `weft-496166ed`.
 ## Wick recall fixture (loom-efffb521)
 
 Hand-crafted fixture of 14 anticipated Wick recall use cases (n=14),
-sourced from Jason's personal-agent expectations and Finch council
+sourced from synthetic user expectations and the Finch council
 2026-05-09. Lives at `benchmarks/wick_eval/dataset.json`. Each entry
 specifies question text, shape-tag, expected-answer pattern,
 current-Weft-tier that should serve it, and belief-view scope flag.
@@ -563,7 +563,7 @@ types — no risk of collateral on already-passing classes.
 
 | Patch | Question type | Failure mode addressed | Source taxonomy item |
 | --- | --- | --- | --- |
-| Anti-frequency recency rule | `knowledge-update` | Reader picks older fact when discussed more (Hawaii vs Paris) | Failure mode #2 |
+| Anti-frequency recency rule | `knowledge-update` | Reader picks older fact when discussed more (Option A vs Option B) | Failure mode #2 |
 | Anti-fabrication abstention rule | all `_abs` types | Reader fills gaps from world knowledge (bus cost, vintage films vs cameras) | Failure mode #3 |
 | Extract-and-apply preference rule | `single-session-preference` | Reader gives generic answer when preference signal exists | Failure mode #4 |
 

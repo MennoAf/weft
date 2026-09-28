@@ -5,12 +5,12 @@ Project context lives in Weft itself — `weft_prime(project_id="weft")` loads i
 
 ## Default agent role: orchestrator
 
-Unless Jason explicitly directs otherwise, act as the orchestrator and communication layer—not as the hands-on implementer. Delegate research, code and document changes, and independent verification to appropriately scoped sub-agents. Keep delegated work bounded, track progress, resolve blockers with Jason when needed, and synthesize the agents' evidence into clear updates and recommendations. Do not personally implement code or produce project deliverables; coordinate, review, and report instead. Use direct tools for orchestration and communication, and make exceptions only when Jason explicitly asks you to do the work yourself or a higher-priority instruction requires it.
+Unless the operator explicitly directs otherwise, act as the orchestrator and communication layer—not as the hands-on implementer. Delegate research, code and document changes, and independent verification to appropriately scoped sub-agents. Keep delegated work bounded, track progress, resolve blockers with the project lead when needed, and synthesize the agents' evidence into clear updates and recommendations. Do not personally implement code or produce project deliverables; coordinate, review, and report instead. Use direct tools for orchestration and communication, and make exceptions only when the user explicitly asks you to do the work yourself or a higher-priority instruction requires it.
 
 ## Loom project
 Active build work tracks in **`weft-public`** (id: `aa3131c9-5ed6-49dd-b907-2e22f35691de`) —
 making Weft public-ready ("going all in"): hardening, packaging, docs, productization.
-Owned by Jason's user account, so it's accessible (unlike the old weft-wick). This repo is
+Owned by the project maintainer's account, so it's accessible (unlike the old weft-wick). This repo is
 **bound** to it: `.loom/config.yaml` carries the `project_id` and `.mcp.json` pins
 `LOOM_PROJECT_DIR` + `LOOM_PROJECT_ID`, so a reloaded session resolves here automatically —
 no `loom_switch_project` needed on boot. Lead agent: **Reed** (`reed`, role `lead`).
@@ -39,5 +39,5 @@ When using Weft for persistent memory, call `weft_prime(disclosure="progressive"
 
 The [README quickstart](README.md#quickstart) and [agent wiring guide](docs/wiring-your-agent.md) provide user-facing setup steps. Claude-specific options are in [CLAUDE.md](CLAUDE.md).
 
-## Owner
-Jason Bauman. Builder agent: Warp.
+## Maintainer
+Project lead: repository maintainers.

@@ -2,7 +2,7 @@
 
 > Shared persistent brain for you and your agents.
 
-Weft is the persistent brain you share with your agents. Conversations, decisions, recipes, plans — anything you'd write down so you and your agents can find it later. Queryable via semantic search (pgvector), structured memory types, confidence metadata, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity. Lifecycle scoring is review-only: consolidation can propose stale candidates, but it does not automatically hide or delete memories.
+Weft is the persistent brain you share with your agents. Conversations, decisions, plans, and other useful information can be saved for later retrieval by you and your agents. Queryable via semantic search (pgvector), structured memory types, confidence metadata, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity. Lifecycle scoring is review-only: consolidation can propose stale candidates, but it does not automatically hide or delete memories.
 
 Part of the trilogy: **Loom** (orchestration) → **Warp** (builder agent) → **Weft** (memory).
 

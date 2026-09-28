@@ -88,7 +88,7 @@ memory neighborhood and the detector is an LLM synthesis pass.
 
 ## Ground Truth
 
-CONFIRMED (prod read 2026-06-24 under Jason's user_id, + source greps):
+CONFIRMED (production read 2026-06-24 under the maintainer's user_id, plus source searches):
 - `belief_claims` and `episode_turns` are **empty on real data** (0 rows). The belief/turn/replay
   distillation layer runs only on benchmark haystacks, never on real memory. Source: direct prod
   `count(*)` reads, this session.
