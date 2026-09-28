@@ -269,8 +269,18 @@ def score_answer(case: QualityCase, arm: str, answer: Mapping[str, Any], baselin
     status_ok = expected_status is None and _status_matches_outcome(case.expected_outcome, status) or (expected_status == status)
     complete_ok = expected_complete is None and _completeness_matches_outcome(case.expected_outcome, completeness) or (expected_complete == completeness)
     expected_positive = case.expected_outcome == "sufficient"
+    gold_answer_match = _gold_answer_match(case, value)
+    longmemeval_quality_ok = (
+        case.source != "longmemeval"
+        or (
+            case.authoritative_ids_available
+            and bool(case.gold_evidence_ids)
+            and bool(set(case.gold_evidence_ids) & authoritative)
+            and gold_answer_match is True
+        )
+    )
     error_envelope = bool(diagnostic and ("error" in value or "detail" in value))
-    contract_correct = bool(status_ok and complete_ok and branches_ok and _evidence_status_ok(case, status, evidence_status) and _citation_ok(case, value, authoritative, cited) and (not expected_positive or bool(authoritative)))
+    contract_correct = bool(status_ok and complete_ok and branches_ok and _evidence_status_ok(case, status, evidence_status) and _citation_ok(case, value, authoritative, cited) and (not expected_positive or bool(authoritative)) and longmemeval_quality_ok)
     # Error/rejection envelopes are not answer envelopes. Do not manufacture a
     # scope or legacy mismatch from absent answer fields; retain the envelope
     # diagnostic so the failed seam is actionable instead.
@@ -443,7 +453,22 @@ def _legacy_projection(value: Mapping[str, Any]) -> str:
 
 
 def _safe_contract(value: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: _bounded_json(value.get(key)) for key in ("status", "completeness", "evidence_status", "typed_result", "answer", "cited_evidence_ids", "scope", "retrieval_mode", "branch_results")}
+    branch_results = _as_mapping(value.get("branch_results"))
+    legacy_branches = {
+        str(key): result
+        for key, result in branch_results.items()
+        if key not in {"recovery", "recovery_block", "retrieval_recovery", "diagnostics"}
+    }
+    contract = {
+        key: _bounded_json(value.get(key))
+        for key in (
+            "status", "completeness", "evidence_status", "typed_result", "answer",
+            "evidence", "cited_evidence_ids", "scope", "retrieval_mode",
+        )
+    }
+    contract["legacy_projection"] = _legacy_projection(value)
+    contract["branch_results"] = _bounded_json(legacy_branches)
+    return contract
 
 
 def _covered_branches(value: Mapping[str, Any], authoritative: set[str]) -> set[str]:

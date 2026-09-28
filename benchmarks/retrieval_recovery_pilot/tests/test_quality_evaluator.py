@@ -71,6 +71,30 @@ def test_baseline_control_regression_and_no_change_fail_closed() -> None:
     assert "no_change_controls_preserved" in report.materiality["reasons"]
 
 
+def test_no_change_ignores_additive_recovery_branch_and_diagnostics_but_checks_answer_contract() -> None:
+    control = case(case_id="recovery-metadata-control", expected_baseline="correct", expected_treatment="no_change")
+    baseline = answer()
+    treatment = {
+        **baseline,
+        "branch_results": {
+            **baseline["branch_results"],
+            "recovery": {"recovered_authoritative_ids": ["memory:gold"]},
+            "diagnostics": {"stage_count": 2},
+        },
+    }
+    row = score_answer(control, "deterministic", treatment, baseline)
+    assert row["no_change"] is True
+    assert row["legacy_drift"] == 0
+
+    changed_answer = {**treatment, "answer": "changed answer"}
+    changed_row = score_answer(control, "deterministic", changed_answer, baseline)
+    assert changed_row["no_change"] is False
+
+    changed_legacy_field = {**treatment, "shape": "compare"}
+    legacy_row = score_answer(control, "deterministic", changed_legacy_field, baseline)
+    assert legacy_row["no_change"] is False
+
+
 def test_unknown_conflict_false_sufficiency_and_preservation() -> None:
     unknown = case(case_id="unknown", expected_outcome="unknown", gold_evidence_ids=[], mandatory_branches=[], expected_baseline="correct", expected_treatment="no_change")
     unsafe = score_answer(unknown, "deterministic", answer(), answer(status="incomplete", completeness="incomplete_evidence", evidence_status="incomplete", cited=()))
@@ -136,6 +160,29 @@ def test_fixture_metadata_has_controls_rescues_and_negative_cases() -> None:
     assert lme.gold_answer == "Business Administration"
     assert lme.gold_session_ids == ("answer_280352e9",)
     assert lme.authoritative_ids_available is False
+    turn_only = next(case for case in cases if case.category == "turn_only")
+    assert turn_only.scope.to_dict() == {
+        "user": "fixture-user", "project": "fixture-project", "retrieval_mode": "all",
+    }
+    turn_answer = answer(
+        cited=turn_only.gold_evidence_ids,
+        scope={"user_id": "fixture-user", "project_id": "fixture-project"},
+    )
+    turn_answer["retrieval_mode"] = "all"
+    turn_answer["evidence"] = [{
+        "evidence_id": {"kind": "turn", "value": "pilot-turn-gold", "rendered": "turn:pilot-turn-gold"},
+        "authority": "authoritative", "branch_id": "branch-direct", "citation_text": "bounded",
+    }]
+    scoped_row = score_answer(turn_only, "off", turn_answer, turn_answer)
+    assert scoped_row["scope_violations"] == 0
+    assert scoped_row["contract_correct"] is True
+
+    unscoped_answer = {
+        **turn_answer,
+        "scope": {"user_id": "fixture-user", "project_id": None},
+    }
+    unscoped_row = score_answer(turn_only, "off", unscoped_answer, unscoped_answer)
+    assert unscoped_row["scope_violations"] == 1
     assert sum(case.expected_baseline == "correct" for case in cases) >= 3
     assert sum(case.expected_treatment == "rescue" for case in cases) >= 2
     assert {case.expected_outcome for case in cases} >= {"unknown", "incomplete", "sufficient"}
@@ -168,8 +215,42 @@ def test_longmemeval_metadata_without_authoritative_ids_blocks_materiality() -> 
     rows = [score_answer(embedded, "off", baseline, baseline), score_answer(embedded, "deterministic", baseline, baseline)]
     report = build_quality_report((embedded,), rows)
     assert report.metrics["longmemeval_cases"] == 1
+    assert all(row["contract_correct"] is False for row in rows)
     assert report.materiality["gates"]["longmemeval_authority_available"] is False
     assert report.materiality["decision"] == "not_material"
+
+
+def test_longmemeval_materialized_expectation_requires_authoritative_gold_and_correct_answer() -> None:
+    base = case(
+        case_id="lme-materialized", source="longmemeval", longmemeval_question_id="e47becba",
+        gold_answer="Business Administration", gold_session_ids=("answer_280352e9",),
+        authoritative_ids_available=True, expected_outcome="sufficient", expected_baseline="incorrect",
+        expected_treatment="rescue", gold_evidence_ids=["memory:gold"], mandatory_branches=[],
+    )
+    correct = answer(answer="Business Administration")
+    correct_row = score_answer(base, "deterministic", correct, answer(status="incomplete", completeness="incomplete_evidence", evidence_status="incomplete", cited=()))
+    assert correct_row["contract_correct"] is True
+    assert correct_row["gold_answer_match"] is True
+
+    wrong_answer = {**correct, "answer": "A different degree"}
+    wrong_row = score_answer(base, "deterministic", wrong_answer, answer(status="incomplete", completeness="incomplete_evidence", evidence_status="incomplete", cited=()))
+    assert wrong_row["contract_correct"] is False
+    assert wrong_row["gold_answer_match"] is False
+
+    non_authoritative = {**correct, "evidence": [{**correct["evidence"][0], "authority": "candidate"}]}
+    metadata_only_row = score_answer(base, "deterministic", non_authoritative, answer(status="incomplete", completeness="incomplete_evidence", evidence_status="incomplete", cited=()))
+    assert metadata_only_row["contract_correct"] is False
+
+
+def test_materialized_longmemeval_cases_reject_unverified_gold_ids(monkeypatch) -> None:
+    adapter = LiveQualityAdapter(LivePilotAdapter(object(), namespace=SnapshotNamespace("u", "p", "r")))
+    lme = case(source="longmemeval", longmemeval_question_id="q", gold_session_ids=("s",), gold_evidence_ids=[])
+    adapter.longmemeval_mapping["q"] = {
+        "authoritative_ids_available": True, "gold_evidence_ids": ["memory:not-verified"],
+        "verified_memory_ids": ["verified-id"], "user_id": "u", "project_id": "p-longmemeval",
+    }
+    with pytest.raises(QualityMappingError, match="verified authoritative mapping"):
+        adapter.materialize_cases((lme,))
 
 
 def test_report_round_trip_hash_and_materiality_denominator_gate() -> None:
@@ -215,15 +296,28 @@ def test_longmemeval_preflight_checksum_mismatch_blocks_before_materialization(t
 def test_longmemeval_preflight_materialization_is_bounded_and_selected(tmp_path: Path) -> None:
     lme = case(source="longmemeval", longmemeval_question_id="q", gold_session_ids=("s",), gold_evidence_ids=[])
     dataset = tmp_path / "dataset.json"
-    dataset.write_text(json.dumps([{
+    row = {
         "question_id": "q", "question_type": "single-session-user", "question": "What?", "answer": "yes", "question_date": "2026/01/01",
-        "answer_session_ids": ["s"], "haystack_session_ids": ["s"], "haystack_dates": ["2026/01/01"],
-        "haystack_sessions": [[{"role": "user", "content": "yes"}]],
-    }]), encoding="utf-8")
+        "answer_session_ids": ["s"], "haystack_session_ids": ["s", "s"],
+        "haystack_dates": ["2026/01/01", "2026/01/02"],
+        "haystack_sessions": [[{"role": "user", "content": "first occurrence"}], [{"role": "user", "content": "duplicate occurrence"}]],
+    }
+    dataset.write_text(json.dumps([row]), encoding="utf-8")
     result = _longmemeval_preflight((lme,), dataset=dataset, snapshot=tmp_path / "missing", allow_materialize=True)
     assert result["status"] == "materialize"
     assert result["source_turns"] == 1
     assert result["question_ids"] == ["q"]
+    assert result["data_quality"] == {
+        "haystack_dedupe_policy": "first_occurrence_wins_at_materialization",
+        "haystack_dedupe_events": [{"instance_id": "q", "session_id": "s", "occurrences": 2}],
+    }
+    instance = quality_run._longmemeval_instances((lme,), dataset)["q"]
+    assert instance.sessions[0].turns[0].content == "first occurrence"
+
+    row["answer_session_ids"] = ["s", "s"]
+    dataset.write_text(json.dumps([row]), encoding="utf-8")
+    with pytest.raises(QualityMappingError, match="duplicate answer_session_ids"):
+        quality_run._longmemeval_instances((lme,), dataset)
 
 
 @pytest.mark.asyncio
@@ -268,6 +362,10 @@ async def test_longmemeval_materialization_mapping_preserves_scope_and_provenanc
     materialized = adapter.materialize_cases((lme,))
     assert materialized[0].scope.to_dict() == {"user": "u", "project": "p-longmemeval", "retrieval_mode": "all"}
     assert materialized[0].authoritative_ids_available is True
+    assert materialized[0].gold_evidence_ids == ("memory:m0",)
+    assert materialized[0].expected_outcome == "sufficient"
+    assert materialized[0].expected_baseline == "correct"
+    assert materialized[0].expected_treatment == "no_change"
 
 
 def test_longmemeval_preflight_accepts_bounded_verified_mapping(tmp_path: Path) -> None:

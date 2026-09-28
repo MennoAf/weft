@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from benchmarks.longmemeval.dataset import Instance, load_split
+from benchmarks.longmemeval.dataset import Instance
 from weft.auth import current_user_id
 from weft.db.connection import acquire
 from weft.mcp.tools import weft_answer
@@ -43,6 +43,7 @@ LONGMEMEVAL_MAX_CASES = 8
 LONGMEMEVAL_MAX_SESSIONS_PER_CASE = 500
 LONGMEMEVAL_MAX_TURNS_PER_SESSION = 128
 LONGMEMEVAL_MAX_TOTAL_TURNS = 8000
+HAYSTACK_DEDUPE_POLICY = "first_occurrence_wins_at_materialization"
 
 
 def _sha256(path: Path) -> str:
@@ -54,14 +55,61 @@ def _source_turn_id(question_id: str, session_id: str, turn_index: int) -> str:
     return f"lme-turn-{digest}"
 
 
-def _longmemeval_instances(cases: tuple[QualityCase, ...], dataset: Path) -> dict[str, Instance]:
+def _read_longmemeval_instances(
+    cases: tuple[QualityCase, ...], dataset: Path,
+) -> tuple[dict[str, Instance], list[dict[str, Any]]]:
     selected = [case for case in cases if case.source == "longmemeval"]
     if len(selected) > LONGMEMEVAL_MAX_CASES:
         raise QualityMappingError(
             f"LongMemEval selection exceeds bounded pilot limit: {len(selected)}/{LONGMEMEVAL_MAX_CASES}"
         )
+    dedupe_events: list[dict[str, Any]] = []
     try:
-        instances = {instance.question_id: instance for instance in load_split(dataset)}
+        raw_instances = json.loads(dataset.read_text(encoding="utf-8"))
+        if not isinstance(raw_instances, list):
+            raise ValueError("LongMemEval cleaned dataset must contain a JSON array")
+        instances: dict[str, Instance] = {}
+        for raw in raw_instances:
+            normalized = raw
+            if isinstance(raw, dict):
+                ids = raw.get("haystack_session_ids")
+                dates = raw.get("haystack_dates")
+                haystacks = raw.get("haystack_sessions")
+                # Only normalize well-shaped parallel arrays. All invalid types,
+                # duplicate answer IDs, unknown answers, and length mismatches
+                # still pass unchanged to Instance.from_dict for strict rejection.
+                if (
+                    isinstance(ids, list)
+                    and all(isinstance(sid, str) and sid.strip() for sid in ids)
+                    and isinstance(dates, list)
+                    and isinstance(haystacks, list)
+                    and len(ids) == len(dates) == len(haystacks)
+                ):
+                    counts: dict[str, int] = {}
+                    keep_indexes: list[int] = []
+                    for index, session_id in enumerate(ids):
+                        counts[session_id] = counts.get(session_id, 0) + 1
+                        if counts[session_id] == 1:
+                            keep_indexes.append(index)
+                    if len(keep_indexes) != len(ids):
+                        instance_id = str(raw.get("question_id", ""))
+                        dedupe_events.extend(
+                            {
+                                "instance_id": instance_id,
+                                "session_id": session_id,
+                                "occurrences": occurrences,
+                            }
+                            for session_id, occurrences in counts.items()
+                            if occurrences > 1
+                        )
+                        normalized = {
+                            **raw,
+                            "haystack_session_ids": [ids[index] for index in keep_indexes],
+                            "haystack_dates": [dates[index] for index in keep_indexes],
+                            "haystack_sessions": [haystacks[index] for index in keep_indexes],
+                        }
+            instance = Instance.from_dict(normalized)
+            instances[instance.question_id] = instance
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise QualityMappingError(f"LongMemEval cleaned dataset is unreadable: {exc}") from exc
     missing = [case.longmemeval_question_id for case in selected if case.longmemeval_question_id not in instances]
@@ -80,7 +128,15 @@ def _longmemeval_instances(cases: tuple[QualityCase, ...], dataset: Path) -> dic
             total_turns += len(session.turns)
     if total_turns > LONGMEMEVAL_MAX_TOTAL_TURNS:
         raise QualityMappingError(f"LongMemEval selection exceeds bounded turn limit: {total_turns}/{LONGMEMEVAL_MAX_TOTAL_TURNS}")
-    return {str(case.longmemeval_question_id): instances[str(case.longmemeval_question_id)] for case in selected}
+    selected_instances = {
+        str(case.longmemeval_question_id): instances[str(case.longmemeval_question_id)]
+        for case in selected
+    }
+    return selected_instances, dedupe_events
+
+
+def _longmemeval_instances(cases: tuple[QualityCase, ...], dataset: Path) -> dict[str, Instance]:
+    return _read_longmemeval_instances(cases, dataset)[0]
 
 
 def _longmemeval_preflight(
@@ -120,23 +176,36 @@ def _longmemeval_preflight(
         reason = "canonical LongMemEval snapshot manifest or .complete marker is absent"
     if not allow_materialize:
         raise QualityMappingError(reason)
-    instances = _longmemeval_instances(cases, dataset)
-    return {"status": "materialize", "dataset_checksum": expected_checksum, "selected_cases": len(selected), "question_ids": [case.longmemeval_question_id for case in selected], "source_turns": sum(len(s.turns) for i in instances.values() for s in i.sessions), "snapshot": str(snapshot), "reason": reason}
+    instances, dedupe_events = _read_longmemeval_instances(cases, dataset)
+    return {
+        "status": "materialize", "dataset_checksum": expected_checksum,
+        "selected_cases": len(selected),
+        "question_ids": [case.longmemeval_question_id for case in selected],
+        "source_turns": sum(len(s.turns) for i in instances.values() for s in i.sessions),
+        "snapshot": str(snapshot), "reason": reason,
+        "data_quality": {
+            "haystack_dedupe_policy": HAYSTACK_DEDUPE_POLICY,
+            "haystack_dedupe_events": dedupe_events,
+        },
+    }
 
 
 def readiness(output: Path) -> dict[str, Any]:
     dsn = os.environ.get("RETRIEVAL_RECOVERY_QUALITY_DSN") or os.environ.get("RETRIEVAL_RECOVERY_PILOT_DSN")
     cases = load_quality_cases(FIXTURE)
     try:
-        longmemeval = _longmemeval_preflight(cases)
+        longmemeval = _longmemeval_preflight(cases, allow_materialize=True)
     except QualityMappingError as exc:
         longmemeval = {"status": "blocked", "blocker": str(exc)}
     return {
-        "status": "ready" if dsn and longmemeval.get("status") in {"verified", "not_selected"} else "blocked", "mode": "readiness", "writes": False,
+        "status": "ready" if dsn and longmemeval.get("status") in {"verified", "materialize", "not_selected"} else "blocked", "mode": "readiness", "writes": False,
         "longmemeval_mapping": longmemeval,
+        "dataset_found": LONGMEMEVAL_DATASET.exists(),
+        "dsn_bound": bool(dsn),
+        "haystack_dedupe_policy": HAYSTACK_DEDUPE_POLICY,
         "provider_calls": 0, "fixture": str(FIXTURE), "fixture_hash": fixture_hash(str(FIXTURE)),
         "source_fixture_hash": fixture_hash(str(SOURCE_FIXTURE)), "longmemeval_dataset": "benchmarks/longmemeval/data/longmemeval_s_cleaned.json",
-        "longmemeval_provenance": "bounded embedded subset; gold answer/session labels; authority IDs unavailable",
+        "longmemeval_provenance": "bounded source rows validated for live materialization; canonical authority IDs will be assigned and re-read during the isolated run" if longmemeval.get("status") == "materialize" else "canonical snapshot mapping" if longmemeval.get("status") == "verified" else "not selected",
         "config_hash": _sha256(CONFIG), "cases": len(cases), "expected_rows": len(cases) * 2, "database": "configured" if dsn else "not configured",
         "blocker": None if dsn else "RETRIEVAL_RECOVERY_QUALITY_DSN (or RETRIEVAL_RECOVERY_PILOT_DSN) is not set; readiness performs no writes",
         "recommendation": "Run with --seed-and-run only against an isolated test Postgres DSN" if dsn else "Start repository test Postgres and pass --dsn explicitly",
@@ -171,6 +240,7 @@ class LiveQualityAdapter:
         )
         self.longmemeval_mapping: dict[str, dict[str, Any]] = {}
         self.longmemeval_memory_ids: list[str] = []
+        self.longmemeval_dedupe_events: list[dict[str, Any]] = []
 
     async def cleanup(self) -> None:
         if self.longmemeval_memory_ids:
@@ -192,7 +262,8 @@ class LiveQualityAdapter:
         tags and content, and every inserted ID is re-read through ``get_memory``
         before it is admitted to the authoritative mapping.
         """
-        instances = _longmemeval_instances(cases, dataset)
+        instances, dedupe_events = _read_longmemeval_instances(cases, dataset)
+        self.longmemeval_dedupe_events = dedupe_events
         selected = [case for case in cases if case.source == "longmemeval"]
         mapping: dict[str, dict[str, Any]] = {}
         created_ids: list[str] = []
@@ -271,7 +342,29 @@ class LiveQualityAdapter:
                 mapped = self.longmemeval_mapping.get(question_id)
                 if mapped is None:
                     raise QualityMappingError("LongMemEval cases cannot execute against the synthetic LivePilotAdapter namespace")
-                result.append(QualityCase.from_mapping({**case.to_dict(), "gold_evidence_ids": mapped["gold_evidence_ids"], "authoritative_ids_available": True, "scope": {"user": mapped["user_id"], "project": mapped["project_id"], "retrieval_mode": "all"}}))
+                gold_ids = tuple(str(item) for item in mapped.get("gold_evidence_ids", ()))
+                verified_ids = {f"memory:{item}" for item in mapped.get("verified_memory_ids", ())}
+                if (
+                    mapped.get("authoritative_ids_available") is not True
+                    or not gold_ids
+                    or not set(gold_ids).issubset(verified_ids)
+                ):
+                    raise QualityMappingError(
+                        f"LongMemEval gold evidence is not a verified authoritative mapping for {case.case_id}"
+                    )
+                result.append(QualityCase.from_mapping({
+                    **case.to_dict(),
+                    "gold_evidence_ids": list(gold_ids),
+                    "expected_outcome": "sufficient",
+                    "expected_baseline": "correct",
+                    "expected_treatment": "no_change",
+                    "authoritative_ids_available": True,
+                    "scope": {
+                        "user": mapped["user_id"],
+                        "project": mapped["project_id"],
+                        "retrieval_mode": "all",
+                    },
+                }))
                 continue
             ids = tuple(self.snapshot.stable_id(label) for label in case.gold_evidence_ids)
             scope = self.snapshot.scope_for(case.frozen())
@@ -322,7 +415,11 @@ async def _run_live(output: Path, dsn: str) -> Path:
             "run_version": RUN_VERSION, "pilot_version": QUALITY_PILOT_VERSION,
             "snapshot": {"user_id": namespace.user_id, "project_id": namespace.project_id, "run_id": run_id},
             "longmemeval_mapping": lme_mapping,
-            "fixture_hash": fixture_hash(str(FIXTURE)), "source_fixture_hash": fixture_hash(str(SOURCE_FIXTURE)),
+            "data_quality": {
+                "haystack_dedupe_policy": HAYSTACK_DEDUPE_POLICY,
+                "haystack_dedupe_events": adapter.longmemeval_dedupe_events,
+            },
+            "fixture_hash": fixture_hash(str(FIXTURE)),  "source_fixture_hash": fixture_hash(str(SOURCE_FIXTURE)),
             "longmemeval_dataset": "benchmarks/longmemeval/data/longmemeval_s_cleaned.json",
             "longmemeval_provenance": "bounded source-session/turn materialization into canonical memories; IDs re-read through get_memory",
             "embedding_provider": "retrieval-recovery-pilot-frozen", "provider_calls": 0,
@@ -335,6 +432,10 @@ async def _run_live(output: Path, dsn: str) -> Path:
         payload["provider_calls"] = sum(int(row.get("provider_calls", 0)) for row in report.rows)
         payload["snapshot_ids"] = {"memory": list(base.snapshot.created_memory_ids), "turn": list(base.snapshot.created_turn_ids), "episode": list(base.snapshot.created_episode_ids)}
         payload["longmemeval_mapping"] = lme_mapping
+        payload["data_quality"] = {
+            "haystack_dedupe_policy": HAYSTACK_DEDUPE_POLICY,
+            "haystack_dedupe_events": adapter.longmemeval_dedupe_events,
+        }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return output
