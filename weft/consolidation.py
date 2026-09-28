@@ -20,7 +20,7 @@ import asyncpg
 
 from weft.auth import current_user_id
 from weft.config import RetrievalConfig
-from weft.db.connection import _current_conn, acquire, get_db
+from weft.db.connection import _current_conn, _validate_user_id, acquire, get_db
 from weft.models import (
     ContradictionWarning,
     Memory,
@@ -38,6 +38,28 @@ from weft.store import (
 logger = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
+
+
+class _ConsolidationIdentityError(RuntimeError):
+    """A relationship mutation was refused because the owner identity is unusable."""
+
+
+async def _require_relationship_identity(
+    pool: asyncpg.Pool, operation: str,
+) -> None:
+    """Fail closed before relationship writes without an effective owner GUC."""
+    user_id = await get_db(pool).fetchval(
+        "SELECT nullif(current_setting('app.user_id', true), '')"
+    )
+    if isinstance(user_id, str) and user_id and _validate_user_id(user_id):
+        return
+
+    message = (
+        f"{operation} relationship write skipped: "
+        "app.user_id is missing or invalid"
+    )
+    logger.warning("consolidation.relationship_write_skipped: %s", message)
+    raise _ConsolidationIdentityError(message)
 
 # Types that should never be decayed
 IMMORTAL_TYPES = frozenset({MemoryType.preference, MemoryType.user_model, MemoryType.decision})
@@ -277,6 +299,7 @@ async def _find_duplicates(
                     keep, archive = other, mem
 
                 if not dry_run:
+                    await _require_relationship_identity(pool, "duplicate")
                     uid = current_user_id.get(None)
                     async with acquire(pool) as conn:
                         async with conn.transaction():
@@ -381,6 +404,7 @@ async def _find_contradictions(
 
             if _content_conflicts(mem.content, other.content):
                 if not dry_run:
+                    await _require_relationship_identity(pool, "contradiction")
                     await add_relationship(
                         pool, mem.id, other.id, RelationType.contradicts,
                     )
@@ -663,6 +687,9 @@ async def consolidate(
                         pool, threshold=cfg.duplicate_threshold, dry_run=dry_run,
                     ),
                 )
+            except _ConsolidationIdentityError as e:
+                report.errors.append(f"Duplicate detection skipped: {e}")
+                logger.warning("Duplicate detection skipped: %s", e)
             except Exception as e:
                 report.errors.append(f"Duplicate detection failed: {e}")
                 logger.exception("Duplicate detection subsystem failed")
@@ -677,6 +704,9 @@ async def consolidate(
                         dry_run=dry_run,
                     ),
                 )
+            except _ConsolidationIdentityError as e:
+                report.errors.append(f"Contradiction detection skipped: {e}")
+                logger.warning("Contradiction detection skipped: %s", e)
             except Exception as e:
                 report.errors.append(f"Contradiction detection failed: {e}")
                 logger.exception("Contradiction detection subsystem failed")

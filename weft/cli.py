@@ -454,13 +454,20 @@ def consolidate(dry_run: bool):
 
     async def _consolidate():
         import asyncpg
+        from weft.auth import current_user_id
+        from weft.config.user_identity import get_user_id
         from weft.consolidation import consolidate as run_consolidation
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        report = await run_consolidation(pool, dry_run=dry_run)
-        await pool.close()
-        return report
+        identity_token = None
+        try:
+            identity_token = current_user_id.set(get_user_id())
+            return await run_consolidation(pool, dry_run=dry_run)
+        finally:
+            if identity_token is not None:
+                current_user_id.reset(identity_token)
+            await pool.close()
 
     report = asyncio.run(_consolidate())
     console = Console()
@@ -486,11 +493,15 @@ def auto_consolidate(dry_run: bool, force: bool):
 
     async def _run():
         import asyncpg
+        from weft.auth import current_user_id
+        from weft.config.user_identity import get_user_id
         from weft.consolidation import consolidate_if_due, should_consolidate, consolidate, record_consolidation_run
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        identity_token = None
         try:
+            identity_token = current_user_id.set(get_user_id())
             if dry_run:
                 due = await should_consolidate(pool)
                 return {"ran": False, "due": due, "dry_run": True}
@@ -505,10 +516,13 @@ def auto_consolidate(dry_run: bool, force: bool):
                     "decayed": len(report.decayed),
                     "duplicates_merged": len(report.duplicates_merged),
                     "contradictions_flagged": len(report.contradictions_flagged),
+                    "errors": report.errors,
                 }
 
             return await consolidate_if_due(pool)
         finally:
+            if identity_token is not None:
+                current_user_id.reset(identity_token)
             await pool.close()
 
     result = asyncio.run(_run())
