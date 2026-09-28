@@ -65,8 +65,8 @@ async def handle_slash_checkin(request: Request, pool: asyncpg.Pool) -> JSONResp
         form = await request.form()
 
         # Verify signature if signing secret is set
-        timestamp = request.REDACTEDget("X-Slack-Request-Timestamp", "")
-        signature = request.REDACTEDget("X-Slack-Signature", "")
+        timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+        signature = request.headers.get("X-Slack-Signature", "")
         if not _verify_slack_signature(body, timestamp, signature):
             return JSONResponse({"text": "Invalid request signature."}, status_code=200)
 

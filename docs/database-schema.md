@@ -1,8 +1,8 @@
 # Weft database and schema guide
 
-This is the GitHub-readable companion to [`docs/database-schema.json`](database-schema.json), the machine-readable public-schema manifest. It describes the **47 public tables** currently represented by the manifest: **11 exported** tables and **36 excluded** tables. The manifest is the inventory authority; this guide explains the boundaries a maintainer needs to understand without connecting to a database.
+This is the GitHub-readable companion to [`docs/database-schema.json`](database-schema.json), the machine-readable public-schema manifest. It describes the **52 public tables** currently represented by the manifest: **11 exported** tables and **41 excluded** tables. The manifest is the inventory authority; this guide explains the boundaries a maintainer needs to understand without connecting to a database.
 
-The manifest's migration head is **v74** at the time this guide was written. That is execution-time information, not a promise that a future checkout or installation has the same head. Refresh both the manifest and this guide's review when an additive migration lands.
+The manifest's migration head is **v76** at the time this guide was written. That is execution-time information, not a promise that a future checkout or installation has the same head. Refresh both the manifest and this guide's review when an additive migration lands.
 
 ## Table groups
 
@@ -35,7 +35,7 @@ The table names below are grouped by the manifest's `category`. Each row gives t
 | `topic_digests` | Cached topic digest materialization. | user/project scope; enabled, scoped CRUD | excluded: rebuildable cache | read-write, scoped CRUD |
 | `topic_resolution_aliases` | Topic-resolution aliases for recall. | user/project scope; enabled, scoped CRUD | excluded: derived recall index state | read-write, scoped CRUD |
 
-### Operational data (11)
+### Operational data (12)
 
 | Table | Purpose | Ownership / RLS | Export | Restricted runtime |
 |---|---|---|---|---|
@@ -47,9 +47,14 @@ The table names below are grouped by the manifest's `category`. Each row gives t
 | `cost_enforcement_state` | Daily cost enforcement state. | service policy; enabled, service policy | excluded: ephemeral operational state | read-write, service policy |
 | `cost_entries` | Provider token and cost accounting entries. | user/project scope; enabled, scoped CRUD | excluded: operational accounting state | read-write, scoped CRUD |
 | `degradation_policies` | Provider/cost degradation policy rules. | user/project scope; enabled, scoped CRUD | excluded: operational policy state | read-write, scoped CRUD |
+| `embedding_profile_state` | Singleton active/target embedding profile transition state. | migration and maintenance policy; not enabled by source migration; owner-controlled maintenance state | excluded: embedding maintenance control state is not portable user data | none; restricted runtime does not use maintenance transition state |
+| `embedding_profile_vectors` | Profile-specific staged embedding vectors during re-embedding. | migration and maintenance policy; not enabled by source migration; owner-controlled maintenance state | excluded: staged embedding materialization is rebuildable maintenance state | none; restricted runtime does not use staged profile vectors |
+| `embedding_profiles` | Embedding provider/model/profile identity and promotion state. | migration and maintenance policy; not enabled by source migration; owner-controlled maintenance state | excluded: provider profile metadata is operational configuration, not portable user data | none; restricted runtime does not manage embedding profiles |
+| `embedding_reembed_runs` | Resumable embedding maintenance run cursor and outcome state. | migration and maintenance policy; not enabled by source migration; owner-controlled maintenance state | excluded: re-embedding run state is ephemeral operational state | none; restricted runtime does not use re-embedding run state |
 | `policy_calibration_events` | Autonomy policy calibration event history. | user/project scope; enabled, scoped CRUD | excluded: operational calibration history | read-write, scoped CRUD |
 | `replay_queue` | Pending episode replay work queue. | user/project scope; enabled, scoped CRUD | excluded: ephemeral queue state | read-write, scoped CRUD |
 | `triggers` | Proactive condition-driven rules. | user/project scope; enabled, scoped CRUD | excluded: operational scheduler configuration | read-write, scoped CRUD |
+| `worker_leases` | Durable single-worker ownership and fencing leases. | migration and maintenance policy; not enabled by source migration; no runtime grant | excluded: worker coordination state is ephemeral operational state | none; restricted runtime has no implicit lease or DDL privilege |
 
 ### Telemetry and audit data (11)
 
@@ -97,7 +102,7 @@ These are boundaries, not production connection instructions. Configure the data
 
 Migrations are **append-only** Python modules under `weft/db/migrations/`. Discovery imports only sibling files matching `vNN_*.py`, orders them by ascending numeric version, rejects duplicate versions, and collects each module's `(version, description, sql)` tuple. To add schema, add the next numbered migration; do not edit an applied migration, rewrite the ledger, or change history in place.
 
-The current manifest head is **v74** at execution time. It records the discovered migration descriptions, but it is not a substitute for running the refresh/check workflow against a new checkout. The owner-managed process applies pending DDL under the migration runner's advisory lock and records it in `public.schema_migrations`. The restricted runtime instead verifies that the ledger exactly matches the discovered code set and fails closed when versions are missing or unknown. No production database is changed by this documentation.
+The current manifest head is **v76** at execution time. It records the discovered migration descriptions, but it is not a substitute for running the refresh/check workflow against a new checkout. The owner-managed process applies pending DDL under the migration runner's advisory lock and records it in `public.schema_migrations`. The restricted runtime instead verifies that the ledger exactly matches the discovered code set and fails closed when versions are missing or unknown. No production database is changed by this documentation.
 
 A normal startup in a local owner-managed installation may use apply mode. A restricted hosted runtime should use verify mode after the owner has migrated the database. This separation prevents startup code from silently becoming a schema administrator and makes migration ownership auditable.
 
@@ -111,13 +116,13 @@ The connection layer sets the search path, then registers the pgvector text code
 
 The portable JSON backup is logical memory data, not an infrastructure snapshot. The 11 included tables are `behaviors`, `entities`, `entity_mentions`, `episode_memories`, `episodes`, `memories`, `memory_relationships`, `modes`, `trackers`, `workspace_members`, and `workspaces`. They cover durable memories plus the supported relationships, continuity, entity, workspace, tracker, and retrieval-configuration sections.
 
-The other 36 tables are intentionally excluded. Exclusions cover scheduler and queue state, caches and derived indexes, audit/access and health telemetry, accounting/calibration/degradation state, the migration ledger/system metadata, and OAuth/API-token material. In particular, credentials, tokens, ephemeral leases, operational telemetry, and infrastructure state are never part of a portable memory backup. Follow [`docs/disaster-recovery.md`](disaster-recovery.md) for the backup/restore workflow, and treat an export as sensitive memory data even though it excludes credentials.
+The other 41 tables are intentionally excluded. Exclusions cover scheduler and queue state, caches and derived indexes, audit/access and health telemetry, accounting/calibration/degradation state, the migration ledger/system metadata, and OAuth/API-token material. In particular, credentials, tokens, ephemeral leases, operational telemetry, and infrastructure state are never part of a portable memory backup. Follow [`docs/disaster-recovery.md`](disaster-recovery.md) for the backup/restore workflow, and treat an export as sensitive memory data even though it excludes credentials.
 
 An excluded table may still be readable or writable by a restricted runtime path when its manifest contract allows that operation. “Excluded” describes portability, not a blanket SQL privilege decision; ownership/RLS and runtime access are the separate columns shown above.
 
 ## Dormant-file status
 
-`weft/db/migrations/pending_v51_episode_turns_fts.py` is a tracked **dormant** draft, not an applied migration. Its filename does **not** match `vNN_*.py`, so it is **not discovered** by the runner and is absent from the current v74 migration set. It must remain dormant until the documented episode-turn volume gate is reached (the draft names approximately 25,000 turns as the promotion trigger).
+`weft/db/migrations/pending_v51_episode_turns_fts.py` is a tracked **dormant** draft, not an applied migration. Its filename does **not** match `vNN_*.py`, so it is **not discovered** by the runner and is absent from the current v76 migration set. It must remain dormant until the documented episode-turn volume gate is reached (the draft names approximately 25,000 turns as the promotion trigger).
 
 Promotion is an explicit future decision: rename the file to `v51_episode_turns_fts.py`, then let the owner-managed migration process discover and apply it. Do not rename or edit it as part of ordinary runtime startup, and do not edit any already-applied `vNN_*.py` file. Until promotion, episode-turn keyword recall uses the existing inline text-search path; the dormant draft's generated `search_tsv`/GIN index is not an active schema promise.
 

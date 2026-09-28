@@ -63,9 +63,8 @@ Tips for getting started:
 - Call weft_handoff before ending sessions — the next primer surfaces it prominently
 - After completing tasks, call weft_learn to capture gotchas and patterns automatically
 
-Loom integration:
-- If Loom is available, run loom_create_project before decomposing work \
-to avoid tasks landing in the wrong project."""
+Task-management integration:
+- If available, initialize the project before decomposing work so tasks stay correctly scoped."""
 
 
 async def build_onboarding_section(
@@ -113,12 +112,11 @@ async def build_onboarding_section(
         except Exception as e:
             logger.debug("rls_diagnostic_check failed: %s", e, exc_info=True)
 
-    # Loom hint: only on cold start.
+    # Optional task-management hint: only on cold start.
     if is_cold_start:
-        hints["loom"] = (
-            "New project detected. If Loom is available, run "
-            "loom_create_project to set up a dedicated task space "
-            "before decomposing work with loom_decompose."
+        hints["task_management"] = (
+            "New project detected. If a task-management integration is available, "
+            "use its project setup and planning tools to organize the work."
         )
 
     result_data = {"hints": hints, "onboarding": onboarding_text}

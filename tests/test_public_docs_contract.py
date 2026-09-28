@@ -62,7 +62,7 @@ def test_guide_documents_every_manifest_table_and_count() -> None:
     tables = manifest["tables"]
     guide = GUIDE.read_text(encoding="utf-8")
 
-    assert len(tables) == 47
+    assert len(tables) == 52
     assert guide.count("## ") >= len(REQUIRED_HEADINGS)
     for table in tables:
         assert f"`{table['name']}`" in guide, table["name"]
@@ -70,9 +70,9 @@ def test_guide_documents_every_manifest_table_and_count() -> None:
 
     exported = [table for table in tables if table["export"]["included"]]
     assert len(exported) == 11
-    assert "47 public tables" in guide
+    assert "52 public tables" in guide
     assert "11 exported" in guide
-    assert "36 excluded" in guide
+    assert "41 excluded" in guide
 
 
 def test_guide_carries_security_and_runtime_policy_markers() -> None:

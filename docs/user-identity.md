@@ -63,7 +63,7 @@ Every token is bound at issuance to one of two trust tiers:
   the human in the loop) and the operator's CLI. Supervisor tokens may
   *downgrade* themselves to agent for testing by sending
   `X-Weft-Caller-Mode: agent` on the request.
-- **`agent`** — agent containers (e.g. Wick) running autonomously.
+- **`agent`** — autonomous agent clients.
   Writes flagged as instruction-shaped by Layer 3 land in
   `review_status='pending_review'` and stay invisible to recall until
   the supervisor approves them via `weft_quarantine_review`. Agent

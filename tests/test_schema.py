@@ -26,11 +26,9 @@ _pg_dsn: str | None = None
 
 
 @pytest.fixture
-async def schema_pool():
+async def schema_pool(pg_container):
     """Isolated pool for schema-destructive tests. Re-runs migrations on teardown."""
-    from tests.conftest import _pg_container
-
-    dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
+    dsn = pg_container.get_connection_url().replace("+psycopg2", "")
 
     async def _setup(conn):
         await conn.execute("SET app.user_id = 'test-user-default'")

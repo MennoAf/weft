@@ -117,7 +117,7 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
        adds a scope claim that distinguishes agent-issued tokens.
 
     Header narrowing: ``X-Weft-Caller-Mode`` is honoured **only** when
-    the resolved credential mode is ``supervisor`` — Jason can downgrade
+    the resolved credential mode is ``supervisor`` — an operator can downgrade
     himself to ``agent`` locally for testing without minting a real
     agent token. When the credential mode is ``agent``, the header is
     ignored. This is the change that closes the escalation path.
@@ -170,14 +170,14 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
           resolves to ``agent`` regardless of any header — that's the
           rule that closes the X-Weft-Caller-Mode escalation.
         * For supervisor credentials, the header is allowed to
-          downgrade the request (supervisor → agent) so Jason can
+          downgrade the request (supervisor → agent) so an operator can
           locally test agent code paths without minting an agent
           token.
         """
         if credential_mode != "supervisor":
             return credential_mode
         return parse_caller_mode_header(
-            request.REDACTEDget("x-weft-caller-mode"),
+            request.headers.get("x-weft-caller-mode"),
         )
 
     async def dispatch(self, request: Request, call_next):
@@ -186,7 +186,7 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
         is_mcp_path = request.url.path.startswith("/mcp")
 
         if self._auth_required and is_mcp_path:
-            auth_header = request.REDACTEDget("authorization", "")
+            auth_header = request.headers.get("authorization", "")
             if not auth_header.startswith("Bearer "):
                 return self._unauthorized("missing authorization header")
             bearer = auth_header[7:]
@@ -227,10 +227,10 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
         # Non-/mcp paths and unauthenticated mode: best-effort identity
         # extraction from a JWT if present, header-driven caller mode
         # (no credential to clamp against).
-        auth_header = request.REDACTEDget("authorization")
+        auth_header = request.headers.get("authorization")
         user_id = extract_user_id_from_header(auth_header)
         caller_mode = parse_caller_mode_header(
-            request.REDACTEDget("x-weft-caller-mode"),
+            request.headers.get("x-weft-caller-mode"),
         )
         token = current_user_id.set(user_id)
         mode_token = current_caller_mode.set(caller_mode)
@@ -1045,7 +1045,7 @@ async def slack_commands(request: Request) -> JSONResponse:
 @mcp.custom_route("/mcp/", methods=["GET", "POST", "DELETE"])
 async def mcp_trailing_slash(request: Request) -> Response:
     """Redirect /mcp/ → /mcp with correct scheme behind TLS-terminating proxies."""
-    scheme = request.REDACTEDget("x-forwarded-proto", request.url.scheme)
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
     url = request.url.replace(scheme=scheme, path="/mcp")
     return Response(status_code=307, headers={"Location": str(url)})
 

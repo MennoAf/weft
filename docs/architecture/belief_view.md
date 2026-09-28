@@ -9,8 +9,8 @@ belief tier for abstract, manually-tagged knowledge. The belief-view is
 *extracted* from raw dialogue; it captures facts that emerge from conversation
 without requiring the caller to explicitly classify and store them.
 
-Council decision reference: `weft-496166ed`. Scope expansion refinement:
-`weft-89e71528`. Wick use-case fixture: `benchmarks/wick_eval/dataset.json`.
+Design decisions: `weft-496166ed`, refined by `weft-89e71528`. Example
+use-case fixture in the evaluation dataset.
 
 ---
 
@@ -128,7 +128,7 @@ ORDER BY occurred_at ASC;
 
 The chain is the answer to trajectory queries ("compared to last time",
 "at last review") and is the primary mechanism for fixture rows 1, 2, 4, 6,
-11, and 14 in `benchmarks/wick_eval/dataset.json`.
+11, and 14 in the example evaluation dataset.
 
 Retraction is a distinct operation: `status = 'retracted'` is set when the
 user explicitly corrects a belief ("I was wrong about that"). The chain is
@@ -190,7 +190,7 @@ the existing belief-tier search over `memories`. The belief-view augments
 rather than gates — a user asking "what is my sleep situation" will get a
 belief-view result if one exists, and a legacy `memories` result otherwise.
 
-**Worked example — Wick fixture row 2 ("How is my sleep doing compared to
+**Worked example — evaluation fixture row 2 ("How is my sleep doing compared to
 last time we talked?"):**
 
 The query routes to `tier='belief-view'` via the auto-router (no
@@ -302,7 +302,7 @@ shape and the attribute naming convention.
 
 - `"recipe.simple-pasta"` (synthetic fixture example)
 - `"recipe.weeknight-pasta"` (synthetic fixture example)
-- `"workout.current-routine"` (Wick fixture row 12)
+- `"workout.current-routine"` (evaluation fixture row 12)
 
 The detector chooses the attribute name by slugifying the artifact's stated
 name. When a user names a weeknight pasta recipe, the detector emits
@@ -395,7 +395,7 @@ reward abstention: every training example set includes no-claim turns with
 explicit abstention output and a commentary explaining why the turn did not
 warrant a claim. Third, the eval harness measures the false-positive rate on a
 canary set of no-claim turns. The canary set is maintained separately from the
-main Wick fixture and should include greetings, clarifying questions, tool call
+main evaluation fixture and should include greetings, clarifying questions, tool call
 outputs, and narrative turns that contain facts about other people (not the
 user). If the false-positive rate on the canary set exceeds 15%, the detector
 version is classified as broken and is not deployed. This tripwire is the
@@ -451,7 +451,7 @@ to the originating dialogue.
 
 ## Out-of-Scope Rows — Fixture Coverage Notes
 
-The following Wick fixture rows are explicitly not addressed by the belief-view.
+The following evaluation fixture rows are explicitly not addressed by the belief-view.
 Each is deferred to a different shape-view.
 
 **Row 3 ("When was the last time I heard from Sarah?")** — `shape: event-anchored`.

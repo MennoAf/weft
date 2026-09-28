@@ -156,9 +156,8 @@ Tips for getting started:
 - Call weft_handoff before ending sessions — the next primer surfaces it prominently
 - After completing tasks, call weft_learn to capture gotchas and patterns automatically
 
-Loom integration:
-- If Loom is available, run loom_create_project before decomposing work \
-to avoid tasks landing in the wrong project."""
+Task-management integration:
+- If available, initialize the project before decomposing work so tasks stay correctly scoped."""
 
 
 def _newest_created_at(memories: list[dict], now: datetime) -> float | None:

@@ -165,7 +165,7 @@ latency, token cost, and infrastructure failures separately.
 
 ## RC-FL-20 qualification preparation
 
-`uv run python scripts/prepare_rc_qualification.py --output evidence/rc-finish-line/qualification.md --budget evidence/rc-finish-line/benchmark-budget.json` emits the deterministic qualification run card and budget. The generated status is always **`PREPARED — NOT AUTHORIZED`**. Preparation does not execute a provider, database, hosted arm, Reader, judge, or paid call; the budget is a non-authorizing spend guardrail, not permission to execute.
+`uv run python scripts/prepare_rc_qualification.py --output evidence/qualification.md --budget evidence/benchmark-budget.json` emits the deterministic qualification run card and budget. The generated status is always **`PREPARED — NOT AUTHORIZED`**. Preparation does not execute a provider, database, hosted arm, Reader, judge, or paid call; the budget is a non-authorizing spend guardrail, not permission to execute.
 
 The run card validates an immutable A/B/C matrix: required local FastEmbed `BAAI/bge-small-en-v1.5` primary (native/signal 384, stored/output 768), optional hosted OpenAI `text-embedding-3-small` controlled comparison (1536/768), and optional hosted `text-embedding-3-large` ceiling comparison (3072/3072). Every arm's role, provider/model, local/hosted state, execution state/text, credential requirement, comparison semantics, profile ID, snapshot ID, and dimension fields are canonical. Hosted profiles remain disabled until a separate dated operator authorization supplies scope, frozen prices, and a non-authorizing spend guardrail.
 

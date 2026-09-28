@@ -4,7 +4,7 @@
 
 Weft is the persistent brain you share with your agents. Conversations, decisions, plans, and other useful information can be saved for later retrieval by you and your agents. Queryable via semantic search (pgvector), structured memory types, confidence metadata, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity. Lifecycle scoring is review-only: consolidation can propose stale candidates, but it does not automatically hide or delete memories.
 
-Part of the trilogy: **Loom** (orchestration) → **Warp** (builder agent) → **Weft** (memory).
+Use Weft as a persistent memory service alongside the agent tools and workflows you already use.
 
 ## Why Weft
 
@@ -46,11 +46,11 @@ This launches Postgres 16 (with pgvector) on port 5433 and Redis 7 on port 6380,
 
 ### 3. Register Weft as an MCP server
 
-Register the Weft MCP server with your agent harness — see [AGENTS.md](AGENTS.md) for general setup (Claude-specific: [CLAUDE.md](CLAUDE.md)). Use the harness's own MCP documentation for its configuration format.
+Register the Weft MCP server with your agent harness — see [AGENTS.md](AGENTS.md) for a copy-paste memory protocol and [the wiring guide](docs/wiring-your-agent.md) for full setup. Claude-specific setup: [CLAUDE.md](CLAUDE.md). Use the harness's own MCP documentation for its configuration format.
 
 ### 4. Point your agent at Weft
 
-Use the MCP registration details in [AGENTS.md](AGENTS.md), then give your agent the repo-level instructions or equivalent context for your harness. The general memory workflow and Claude-specific options are in [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md), respectively. See the [agent wiring guide](docs/wiring-your-agent.md) for details.
+Use the MCP registration details in [AGENTS.md](AGENTS.md), then give your agent the copy-paste memory protocol or equivalent context for your harness. Claude-specific options are in [CLAUDE.md](CLAUDE.md). See the [agent wiring guide](docs/wiring-your-agent.md) for full connection steps.
 
 ### 5. First session
 
@@ -113,7 +113,7 @@ Full CLI: [docs/cli.md](docs/cli.md).
 | **[MCP tool reference](docs/tools.md)** | Every tool, every parameter |
 | **[CLI reference](docs/cli.md)** | Every command |
 | **[Configuration](docs/configuration.md)** | Environment variables, TOML keys, infrastructure |
-| **[Database and schema guide](docs/database-schema.md)** | 47 public tables, ownership/RLS, migrations, vectors, and export boundaries |
+| **[Database and schema guide](docs/database-schema.md)** | 52 public tables, ownership/RLS, migrations, vectors, and export boundaries |
 | **[Authentication + identity](docs/user-identity.md)** | Tokens, caller modes, agent floor |
 | **[Retrieval + scope](docs/retrieval-and-scope.md)** | How `weft_recall` decides what comes back |
 | **[Benchmarks](docs/benchmarks.md)** | LongMemEval methodology + current numbers |

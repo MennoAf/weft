@@ -154,6 +154,11 @@ def test_run_compose_kills_process_group_and_does_not_wait_for_held_pipe(tmp_pat
     fixture.write_text(textwrap.dedent(f"""
         import os, subprocess, sys, time
         subprocess.Popen([sys.executable, '-c', "import os,pathlib,time; pathlib.Path({str(child_pid)!r}).write_text(str(os.getpid())); time.sleep(30)"])
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not os.path.exists({str(child_pid)!r}):
+            time.sleep(0.01)
+        if not os.path.exists({str(child_pid)!r}):
+            raise RuntimeError('child did not start before timeout')
         print('WEFT_LOCAL_API_KEY=split-secret', flush=True)
         time.sleep(30)
     """), encoding="utf-8")

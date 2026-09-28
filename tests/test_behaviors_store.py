@@ -402,7 +402,7 @@ async def test_touch_behavior_increments_access_count(pool):
 # --- store_behavior user_id resolution ---
 
 
-async def test_store_behavior_falls_back_to_system_global_when_guc_empty():
+async def test_store_behavior_falls_back_to_system_global_when_guc_empty(pg_container):
     """When app.user_id GUC is empty AND no explicit user_id is supplied,
     store_behavior must default to the SYSTEM_GLOBAL sentinel — not NULL.
 
@@ -418,9 +418,8 @@ async def test_store_behavior_falls_back_to_system_global_when_guc_empty():
 
     from weft.db.connection import _pgvector_codec_init, register_pgvector_codec
     from weft.db.migrations import run_migrations
-    from tests.conftest import _pg_container
 
-    dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
+    dsn = pg_container.get_connection_url().replace("+psycopg2", "")
 
     async def _no_op_setup(conn):
         # Intentionally do NOT set app.user_id — leaves it at its

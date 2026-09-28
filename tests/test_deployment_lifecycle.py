@@ -120,7 +120,6 @@ async def test_shutdown_degrades_inside_shared_deadline(monkeypatch, caplog) -> 
 def test_fly_health_and_kill_budgets_cover_cleanup_margin() -> None:
     repo = Path(__file__).resolve().parents[1]
     configs = (
-        repo / "fly.toml",
         repo / "deploy/examples/fly/fly.example.toml",
         repo / "deploy/examples/fly/fly.staging.example.toml",
     )

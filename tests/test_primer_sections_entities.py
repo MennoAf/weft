@@ -30,7 +30,7 @@ async def test_empty_when_no_entities(pool):
 
 async def test_returns_entities(pool):
     await store_entity(pool, EntityCreate(
-        name="Jason", entity_type="person", description="Project owner",
+        name="Casey Example", entity_type="person", description="Project owner",
     ))
     await store_entity(pool, EntityCreate(
         name="Weft", entity_type="project", description="Memory system",
@@ -41,7 +41,7 @@ async def test_returns_entities(pool):
 
     assert len(result.items) == 2
     names = {e["name"] for e in result.items}
-    assert "Jason" in names
+    assert "Casey Example" in names
     assert "Weft" in names
     assert result.tokens_used > 0
 

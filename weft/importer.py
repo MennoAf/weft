@@ -137,7 +137,7 @@ def parse_memory_md_text(text: str) -> ParseResult:
     # Find all headers and their positions
     headers: list[tuple[int, int, str]] = []  # (start, end, header_text)
     for match in _HEADER_RE.finditer(text):
-        REDACTEDappend((match.start(), match.end(), match.group(2).strip()))
+        headers.append((match.start(), match.end(), match.group(2).strip()))
 
     if not headers:
         # No headers found — treat entire text as a single section if non-empty

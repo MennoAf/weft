@@ -51,9 +51,9 @@ async def _seed(pool, count: int = 3):
 
 
 @pytest.mark.asyncio
-async def test_v75_is_discovered_and_ledger_matches(pool):
-    assert max(version for version, _, _ in MIGRATIONS) == 75
-    assert sum(version == 75 for version, _, _ in MIGRATIONS) == 1
+async def test_latest_migration_is_discovered_and_ledger_matches(pool):
+    assert max(version for version, _, _ in MIGRATIONS) == 76
+    assert sum(version == 76 for version, _, _ in MIGRATIONS) == 1
     await verify_migration_ledger(pool)
     columns = await pool.fetch(
         "SELECT column_name FROM information_schema.columns "
