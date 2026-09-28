@@ -514,6 +514,79 @@ def _db_error_response(tool_name: str, error: Exception) -> dict:
     return {"error": "Database unavailable", "detail": detail, "degraded": True, "tool": tool_name}
 
 
+def _prime_degraded_response(
+    budget_tokens: int,
+    failed_sections: list[dict[str, str]],
+    *,
+    section_names: tuple[str, ...],
+    hint: str,
+    error_response: dict | None = None,
+) -> dict:
+    """Return an empty, explicitly degraded primer without false empty hints."""
+    return {
+        "grounding": None,
+        "rules": [],
+        "behaviors": [],
+        "handoff": [],
+        "recent_memories": [],
+        "recent_work": [],
+        "issues": {"count": 0, "items": []},
+        "anti_patterns": [],
+        "decisions": [],
+        "entities": [],
+        "autonomy": [],
+        "changes_since": None,
+        "total_tokens": 0,
+        "budget_tokens": budget_tokens,
+        "budget_remaining": budget_tokens,
+        "excluded": 0,
+        "section_tokens": {},
+        "section_status": {name: "failed" for name in section_names}
+        | {
+            failed["section"]: "failed"
+            for failed in failed_sections
+        },
+        "failed_sections": failed_sections,
+        "degraded": True,
+        "incomplete_evidence": True,
+        "hints": {"degraded": hint},
+        "onboarding": None,
+        **(error_response or {}),
+    }
+
+
+async def _project_memory_count(pool, project_id: str) -> int:
+    """Count active, caller-visible memories for one project key."""
+    async with acquire(pool) as conn:
+        count = await conn.fetchval(
+            """
+            SELECT count(*) FROM memories
+            WHERE status = 'active' AND review_status = 'active'
+              AND project_id = $1
+            """,
+            project_id,
+        )
+    return int(count or 0)
+
+
+async def _project_memory_census(pool) -> list[tuple[str | None, int]]:
+    """Count active, caller-visible project rows through an RLS connection."""
+    async with acquire(pool) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT project_id, count(*) AS active_memory_count
+            FROM memories
+            WHERE status = 'active' AND review_status = 'active'
+              AND project_id IS NOT NULL
+            GROUP BY 1
+            """
+        )
+    return [
+        (row["project_id"], int(row["active_memory_count"]))
+        for row in rows
+    ]
+
+
 def _extract_primer_memory_ids(result: dict) -> list[str]:
     """Extract memory IDs from all sections of a primer result."""
     ids: list[str] = []
@@ -2388,11 +2461,23 @@ async def weft_prime(
     mode: optional name of a retrieval mode/persona (e.g., 'research',
     'coding'). Adjusts section weights via ModeWeights — behavior_boost
     and entity_boost scale section token caps, recency_bias shifts
-    milestone ranking toward recency. Falls back to defaults if not found."""
+    milestone ranking toward recency. Falls back to defaults if not found.
+
+    Results preserve sections that completed successfully and always include
+    ``degraded``, ``incomplete_evidence``, ``failed_sections``, and per-section
+    ``section_status`` (``ok``, ``empty``, or ``failed``). A scoped project with
+    zero active memories includes a non-fatal ``project_warning`` even when
+    census suggestions are unavailable; for 1–4 memories, ``project_warning``
+    and ``suggestions`` are conditional on census evidence of a likely near-miss.
+    The requested project key is never rewritten."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_prime start [%s] project=%s", cid, project_id)
-        from weft.primer import build_primer
+        from weft.primer import (
+            _DEGRADED_HINT,
+            _PRIMER_SECTION_NAMES,
+            build_primer,
+        )
 
         app: AppContext = ctx.request_context.lifespan_context
         resolution = await _resolve_project_scope(ctx, project_id)
@@ -2406,19 +2491,35 @@ async def weft_prime(
             except Exception as exc:
                 logger.warning("Failed to embed primer query (non-fatal): %s", exc)
 
-        # NOTE: build_primer uses asyncio.gather for parallel section fetches,
-        # so we do NOT wrap it in acquire() — concurrent queries on a shared
+        # NOTE: build_primer uses structured concurrency for parallel section
+        # fetches, so we do NOT wrap it in acquire() — concurrent queries on a shared
         # connection would crash.  RLS SELECT policies handle NULL user_id
         # gracefully (showing global rows).
-        result = await build_primer(
-            app.pool,
-            project_id=resolved_project,
-            agent_id=agent_id,
-            budget_tokens=budget_tokens,
-            query_vec=query_vec,
-            disclosure=disclosure,
-            mode=mode,
-        )
+        prime_timeout = app.config.database.prime_timeout
+        try:
+            result = await asyncio.wait_for(
+                build_primer(
+                    app.pool,
+                    project_id=resolved_project,
+                    agent_id=agent_id,
+                    budget_tokens=budget_tokens,
+                    query_vec=query_vec,
+                    disclosure=disclosure,
+                    mode=mode,
+                ),
+                timeout=prime_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("weft_prime exceeded %.2fs wall-clock budget", prime_timeout)
+            return _prime_degraded_response(
+                budget_tokens,
+                [{
+                    "section": "prime_budget_exceeded",
+                    "error": "prime wall-clock budget exceeded",
+                }],
+                section_names=_PRIMER_SECTION_NAMES,
+                hint=_DEGRADED_HINT,
+            )
         if resolved_project is None:
             result["project_resolution"] = {
                 "resolved": False,
@@ -2430,6 +2531,58 @@ async def weft_prime(
                     "explicitly for repo-scoped prime."
                 ),
             }
+        elif not result.get("degraded"):
+            try:
+                requested_count = await _project_memory_count(app.pool, resolved_project)
+                # Threshold rule: warn for zero visible memories unconditionally;
+                # for 1–4, warn only when a case/prefix near-match has at least
+                # ten times the resolved project's count.
+                if requested_count == 0:
+                    result["project_warning"] = (
+                        f"Resolved project_id {resolved_project!r} has "
+                        f"{requested_count} active memories; the key may be "
+                        "misspelled or differ by case. Suggestions are advisory; "
+                        "the requested project_id was not changed."
+                    )
+                    result["suggestions"] = []
+                if requested_count < 5:
+                    project_counts = await _project_memory_census(app.pool)
+                    requested_folded = resolved_project.casefold()
+                    near_matches = []
+                    for candidate, count in project_counts:
+                        if candidate is None or candidate == resolved_project:
+                            continue
+                        candidate_folded = candidate.casefold()
+                        same_key_different_case = candidate_folded == requested_folded
+                        prefix_near_match = (
+                            min(len(candidate_folded), len(requested_folded)) >= 3
+                            and (
+                                candidate_folded.startswith(requested_folded)
+                                or requested_folded.startswith(candidate_folded)
+                            )
+                        )
+                        if not (same_key_different_case or prefix_near_match):
+                            continue
+                        if count > requested_count and (
+                            requested_count == 0 or count >= 10 * requested_count
+                        ):
+                            near_matches.append({
+                                "project_id": candidate,
+                                "active_memory_count": count,
+                            })
+                    near_matches.sort(
+                        key=lambda item: item["active_memory_count"], reverse=True
+                    )
+                    if requested_count == 0 or near_matches:
+                        result["project_warning"] = (
+                            f"Resolved project_id {resolved_project!r} has "
+                            f"{requested_count} active memories; the key may be "
+                            "misspelled or differ by case. Suggestions are advisory; "
+                            "the requested project_id was not changed."
+                        )
+                        result["suggestions"] = near_matches[:5]
+            except Exception as exc:
+                logger.debug("Primer project census skipped (non-fatal): %s", exc)
 
         # Reconciliation-meter health (recall canary). Attached as a tier-1
         # field so a DARK meter screams on every prime — the load-bearing
@@ -2447,7 +2600,6 @@ async def weft_prime(
         # Fire-and-forget tasks run without acquire — they're system-level ops
         # that don't need user scoping.
         try:
-            import asyncio
             from weft.consolidation import consolidate_if_due
             app.spawn_background_task(
                 consolidate_if_due(app.pool),
@@ -2468,32 +2620,20 @@ async def weft_prime(
 
         return result
     except _DB_ERRORS as e:
-        from weft.primer import _ONBOARDING_TEXT, _SECTION_HINTS
+        from weft.primer import _DEGRADED_HINT, _PRIMER_SECTION_NAMES
 
-        # Never serve the process-wide fallback snapshot from the multi-user
-        # MCP server. It cannot be scoped to the authenticated caller and may
-        # contain another user's memories. Return an honest empty/degraded
-        # primer until the database is available again.
-        return {
-            "grounding": None,
-            "rules": [],
-            "behaviors": [],
-            "handoff": [],
-            "recent_work": [],
-            "issues": {"count": 0, "items": []},
-            "decisions": [],
-            "entities": [],
-            "total_tokens": 0,
-            "budget_tokens": budget_tokens,
-            "budget_remaining": budget_tokens,
-            "excluded": 0,
-            "degraded": True,
-            "incomplete_evidence": True,
-            "section_tokens": {},
-            "hints": dict(_SECTION_HINTS),
-            "onboarding": _ONBOARDING_TEXT,
-            **_db_error_response("weft_prime", e),
-        }
+        # Never serve a process-wide fallback snapshot from the multi-user MCP
+        # server. It cannot be scoped to the authenticated caller and may
+        # contain another user's memories. This shares the same honest response
+        # shape as the explicit primer budget timeout.
+        detail = _db_error_response("weft_prime", e)
+        return _prime_degraded_response(
+            budget_tokens,
+            [{"section": "database", "error": f"{type(e).__name__}: {e}"}],
+            section_names=_PRIMER_SECTION_NAMES,
+            hint=_DEGRADED_HINT,
+            error_response=detail,
+        )
 
 
 @mcp.tool()

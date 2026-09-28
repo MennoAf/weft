@@ -41,6 +41,7 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "database.statement_cache_size": ("database", "statement_cache_size"),
     "database.command_timeout": ("database", "command_timeout"),
     "database.acquire_timeout": ("database", "acquire_timeout"),
+    "database.prime_timeout": ("database", "prime_timeout"),
     "redis.url": ("redis", "url"),
     "embedding.provider": ("embedding", "provider"),
     "embedding.model": ("embedding", "model"),
@@ -103,6 +104,9 @@ class DatabaseConfig(BaseModel):
     # drained, callers fail fast with a clear error instead of blocking
     # indefinitely — the difference between a visible error and a silent hang.
     acquire_timeout: float | None = 10.0
+    # Wall-clock budget for the complete parallel session-primer build. Per-query
+    # timeouts alone do not bound the aggregate fan-out latency.
+    prime_timeout: float = 60.0
 
 
 class RedisConfig(BaseModel):
@@ -748,6 +752,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.database.command_timeout = float(cmd_timeout)
     if acq_timeout := os.environ.get("WEFT_DB_ACQUIRE_TIMEOUT"):
         config.database.acquire_timeout = float(acq_timeout)
+    if prime_timeout := os.environ.get("WEFT_DB_PRIME_TIMEOUT"):
+        config.database.prime_timeout = float(prime_timeout)
     if "WEFT_REDIS_URL" in os.environ:
         config.redis.url = os.environ["WEFT_REDIS_URL"]
     if provider := os.environ.get("WEFT_EMBEDDING_PROVIDER"):

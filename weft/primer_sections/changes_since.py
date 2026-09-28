@@ -44,12 +44,14 @@ async def build_changes_since_section(ctx: PrimerContext) -> SectionResult:
             return SectionResult(items=[], tokens_used=0, skipped=True,
                                  skip_reason="no handoff timestamp")
 
-        changes, commits = await asyncio.gather(
-            get_memory_changes_since(
-                ctx.pool, since=handoff_ts, project_id=ctx.project_id,
-            ),
-            _safe_recent_commits(handoff_ts),
-        )
+        async with asyncio.TaskGroup() as task_group:
+            changes_task = task_group.create_task(
+                get_memory_changes_since(
+                    ctx.pool, since=handoff_ts, project_id=ctx.project_id,
+                )
+            )
+            commits_task = task_group.create_task(_safe_recent_commits(handoff_ts))
+        changes, commits = changes_task.result(), commits_task.result()
         changes["recent_commits"] = commits[:MAX_CHANGES_SINCE_COMMITS]
 
         return SectionResult(
