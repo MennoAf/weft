@@ -1,7 +1,7 @@
 # Weft — Persistent Agent Memory System
 
 Part of the trilogy: Loom (orchestration) → Warp (builder agent) → Weft (memory).
-Project context lives in Weft itself — `weft_prime(project_id="weft")` loads it.
+Project context lives in Weft itself — `weft_prime(project_id="weft")` loads it. If `weft_prime` returns `degraded: true` (or `error: Database unavailable`), treat its output as untrusted: verify any “nothing found” conclusion with `weft_recall` before acting. During a database incident, prefer `weft_recall` and `weft_projects` for reads, and hold non-essential Weft writes until the incident clears.
 
 ## Default agent role: orchestrator
 
