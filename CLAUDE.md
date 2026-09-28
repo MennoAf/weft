@@ -1,27 +1,24 @@
-# Weft — Persistent Agent Memory System
+# Claude-specific setup
 
-Part of the trilogy: Loom (orchestration) → Warp (builder agent) → Weft (memory).
-Project context lives in Weft itself — `weft_prime(project_id="weft")` loads it.
+General setup in AGENTS.md.
 
-## Loom project
-Active build work tracks in **`weft-public`** (id: `aa3131c9-5ed6-49dd-b907-2e22f35691de`) —
-making Weft public-ready ("going all in"): hardening, packaging, docs, productization.
-Owned by Jason's user account, so it's accessible (unlike the old weft-wick). This repo is
-**bound** to it: `.loom/config.yaml` carries the `project_id` and `.mcp.json` pins
-`LOOM_PROJECT_DIR` + `LOOM_PROJECT_ID`, so a reloaded session resolves here automatically —
-no `loom_switch_project` needed on boot. Lead agent: **Reed** (`reed`, role `lead`).
+## Claude Desktop
 
-Predecessors: the **`weft-wick`** build (id `6605fce2-...`) is **complete** and is not
-reachable from the default Loom identity (RLS denies access) — don't switch to it. The legacy
-**`weft`** project (id `0bd76172-...`) holds historical V1 tasks — leave it alone unless asked.
+Add Weft to Claude Desktop's `claude_desktop_config.json` MCP server configuration:
 
-## Commands
-```bash
-uv sync                          # Install dependencies
-uv run pytest tests/ -v          # Run tests
-uv run python -m weft            # Run MCP server locally
-fly deploy                       # Deploy MCP to Fly.io (DB is Supabase, managed separately)
+```json
+{
+  "mcpServers": {
+    "weft": {
+      "command": "weft",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-## Owner
-Jason Bauman. Builder agent: Warp.
+## Claude Code
+
+For the Claude Code memory protocol, copy the content of [`templates/CLAUDE.md`](templates/CLAUDE.md) into your global `~/.claude/CLAUDE.md` or project `CLAUDE.md`. Optional `/prime` and `/handoff` slash commands are in [`templates/commands/`](templates/commands/); install them under `~/.claude/commands/` to use those commands in Claude Code.
+
+Claude Code's optional PreCompact hook is documented in [Claude Code hooks for Weft](docs/claude-code-hooks/README.md). It is specific to Claude Code and is not required to connect other MCP-capable agent harnesses to Weft.

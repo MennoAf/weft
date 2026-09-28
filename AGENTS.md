@@ -23,9 +23,21 @@ reachable from the default Loom identity (RLS denies access) — don't switch to
 ```bash
 uv sync                          # Install dependencies
 uv run pytest tests/ -v          # Run tests
-uv run python -m weft            # Run MCP server locally
+uv run python -m weft.mcp        # Run MCP server locally (stdio)
 fly deploy                       # Deploy MCP to Fly.io (DB is Supabase, managed separately)
 ```
+
+## Connecting an agent harness to Weft
+
+Weft exposes its tools over MCP. Any harness that speaks MCP can connect to it. Follow that harness's own documentation to register an MCP server; configuration formats differ, so this guide does not assume a particular settings file.
+
+For a local install, register a stdio MCP server named `weft` with command `weft` and argument `mcp`. When running from a source checkout instead, use the equivalent command `uv run --directory /absolute/path/to/weft-memory python -m weft.mcp`, replacing the path with the checkout's location.
+
+Start the local services before connecting with `weft up`. This starts PostgreSQL with pgvector and Redis and applies migrations. To use externally managed services, set `WEFT_DATABASE_URL` and `WEFT_REDIS_URL` in the environment where the MCP server starts. See [Configuration](docs/configuration.md) for the supported variables and defaults; see [User Identity](docs/user-identity.md) for hosted-server authentication.
+
+When using Weft for persistent memory, call `weft_prime(disclosure="progressive")` at session start, `weft_recall` to retrieve relevant memories, `weft_remember` to save durable information, and `weft_handoff` at the end of non-trivial sessions. If Weft is unavailable, report that and continue without claiming to have saved or retrieved memory.
+
+The [README quickstart](README.md#quickstart) and [agent wiring guide](docs/wiring-your-agent.md) provide user-facing setup steps. Claude-specific options are in [CLAUDE.md](CLAUDE.md).
 
 ## Owner
 Jason Bauman. Builder agent: Warp.

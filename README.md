@@ -15,7 +15,7 @@ Default agent memory is a flat file the agent grep-reads at session start. That 
 - No structured confidence, provenance, pinning, or review lifecycle to distinguish a load-bearing convention from a one-off observation
 - No cross-session continuity beyond the user re-pasting context
 
-Weft treats memory as a first-class data system. Multiple agents (Claude Code, custom MCP clients, Claude API apps, Warp, etc.) read and write the same brain. A handoff at session end shows up in the next session's prime — same agent, different agent, different machine, doesn't matter.
+Weft treats memory as a first-class data system. Multiple agents and MCP clients can read and write the same brain. A handoff at session end shows up in the next session's prime — same agent, different agent, different machine, doesn't matter.
 
 ## Quickstart
 
@@ -46,46 +46,19 @@ This launches Postgres 16 (with pgvector) on port 5433 and Redis 7 on port 6380,
 
 ### 3. Register Weft as an MCP server
 
-Add to your project's `.mcp.json` (or Claude Desktop's MCP config):
+Register the Weft MCP server with your agent harness — see [AGENTS.md](AGENTS.md) for general setup (Claude-specific: [CLAUDE.md](CLAUDE.md)). Use the harness's own MCP documentation for its configuration format.
 
-```json
-{
-  "mcpServers": {
-    "weft": {
-      "command": "weft",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+### 4. Point your agent at Weft
 
-Use `command: "uv"` with `args: ["run", "--directory", "/path/to/weft-memory", "python", "-m", "weft.mcp"]` if you installed locally instead.
-
-### 4. Wire your agent
-
-The agent needs to know to use Weft instead of flat files. Drop in the templates:
-
-```bash
-# Memory protocol — append to ~/.claude/CLAUDE.md
-cat templates/CLAUDE.md >> ~/.claude/CLAUDE.md
-
-# Slash commands
-mkdir -p ~/.claude/commands
-cp templates/commands/prime.md ~/.claude/commands/
-cp templates/commands/handoff.md ~/.claude/commands/
-```
-
-Now every Claude Code session in any project will use Weft. Type `/prime` at session start to load context, `/handoff` before ending. The full guide with verification steps is at [docs/wiring-your-agent.md](docs/wiring-your-agent.md).
+Use the MCP registration details in [AGENTS.md](AGENTS.md), then give your agent the repo-level instructions or equivalent context for your harness. The general memory workflow and Claude-specific options are in [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md), respectively. See the [agent wiring guide](docs/wiring-your-agent.md) for details.
 
 ### 5. First session
 
-Start a Claude Code session and type `/prime`. The agent will call `weft_prime`, find no prior context (you're new), and ask what you're working on. Save something:
+Start a session with the connected harness and ask it to call `weft_prime(disclosure="progressive")`. It will load any saved context or report that none is available. To save a durable preference, ask it to use `weft_remember`, for example:
 
 > Save: I prefer test descriptions in the form "test_<thing>_<condition>_<outcome>"
 
-It will call `weft_remember` with type `preference`. Then `/handoff` and end the session.
-
-Open a new session in any project, `/prime` again. The handoff lands at the top, the preference is in the prime — your agent is now working with persistent context across sessions.
+At the end of a non-trivial session, ask it to call `weft_handoff`. In a later session, `weft_prime` surfaces the saved context and handoff.
 
 ## Architecture
 
@@ -123,7 +96,7 @@ Current numbers and reproduction harness: [docs/benchmarks.md](docs/benchmarks.m
 ## What you can do
 
 - **Query memories** — `weft recall "database configuration patterns"`
-- **Import existing memories** — `weft import ~/.claude/memory/MEMORY.md`
+- **Import existing memories** — `weft import /path/to/MEMORY.md`
 - **Sync an Obsidian vault** — `weft obsidian sync ~/Documents/MyVault` ([guide](docs/obsidian.md))
 - **Ingest a codebase** — `weft ingest .` for grounded recall against your own source
 - **Inspect state** — `weft status` for counts, `weft config show` for resolved config
@@ -136,7 +109,7 @@ Full CLI: [docs/cli.md](docs/cli.md).
 
 | | |
 | --- | --- |
-| **[Wire your agent](docs/wiring-your-agent.md)** | Full CLAUDE.md template + slash command setup + verification |
+| **[Wire your agent](docs/wiring-your-agent.md)** | Harness-neutral MCP setup and persistent-memory workflow |
 | **[MCP tool reference](docs/tools.md)** | Every tool, every parameter |
 | **[CLI reference](docs/cli.md)** | Every command |
 | **[Configuration](docs/configuration.md)** | Environment variables, TOML keys, infrastructure |
