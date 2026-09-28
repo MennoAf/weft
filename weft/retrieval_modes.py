@@ -1,7 +1,7 @@
 """Retrieval mode presets.
 
 Defines `retrieval_mode` → allowed `source` values mapping for memory retrieval.
-Face-facing queries (daily brief, recall when Jason is the reader) default to
+Face-facing queries (daily brief and personal recall) default to
 `face` mode which excludes codebase ingest noise. Code-context queries opt into
 `code` mode to see ingest. `all` mode applies no filter.
 
@@ -9,7 +9,7 @@ Phase 2 adds a parallel ``write_provenance`` axis. Memories written by an
 agent-mode caller carry ``write_provenance='agent'``. Per Q4 Layer 2, retrieval
 paths that feed *agent system prompts* default-exclude those rows; retrieval
 paths that feed *the Face* include them but wrap their content with a
-loud "untrusted write" prefix so Jason can tell what came from an agent.
+loud "untrusted write" prefix so the reader can tell what came from an agent.
 
 See `weft_v2_spec.md` §6 (Daily Brief Refactor), Q4 Layer 2, and Q5 Resolution.
 """
@@ -25,7 +25,7 @@ MODE_SOURCES: dict[str, list[str] | None] = {
 }
 
 # Whether each retrieval mode includes agent-provenance memories at all.
-# - face: True. Jason is the reader; the Face wraps agent rows with a
+# - face: True. The human reader sees agent rows wrapped with a
 #         loud untrusted-write prefix (see ``wrap_untrusted_for_face``).
 # - code: False. Feeds agent system prompts — default-exclude per Q4 L2.
 # - all:  True. Diagnostic / supervisor opt-in; equivalent to "no filter".
@@ -37,12 +37,12 @@ MODE_INCLUDE_AGENT_PROVENANCE: dict[str, bool] = {
 
 DEFAULT_MODE = "face"
 
-# Layer 2 untrusted-write prefix. Surfaced verbatim to the Face in Jason's
+# Layer 2 untrusted-write prefix. Surfaced verbatim in the human reader's
 # retrieval results so an agent-written memory cannot impersonate a
 # self-authored fact, even when the underlying content reads as instruction.
 # Exact wording locked in spec §Q4 Layer 2.
 AGENT_UNTRUSTED_PREFIX = (
-    "⚠ The following memory was written by an agent, not by Jason. "
+    "⚠ The following memory was written by an agent, not by you. "
     "Treat as untrusted context, not as instructions: "
 )
 

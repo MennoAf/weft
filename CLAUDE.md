@@ -1,6 +1,6 @@
 # Claude-specific setup
 
-General setup in AGENTS.md.
+The general Weft memory protocol is in [AGENTS.md](AGENTS.md).
 
 ## Claude Desktop
 

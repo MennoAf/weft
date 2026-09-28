@@ -8,7 +8,7 @@ detector (E2.L6), and writes the resulting enumeration claims back into
 ``belief_claims`` through the materializer's supersession-aware write path —
 the claims the single-turn detector could never see.
 
-Design decisions (see loom-ebef8ec1):
+Design decisions:
 
 * **Bypasses the per-turn idempotency skip.** The materializer's
   ``materialize_pending_turns`` skips turns that already have a claim for the
@@ -37,7 +37,7 @@ Design decisions (see loom-ebef8ec1):
   policy does NOT admit the sentinel, so status writes happen per-row under the
   row's own ``user_id`` (mirrored by the materializer's per-write GUC).
 
-Spec: Loom task loom-ebef8ec1 (E2.L7 in the recall-gap epic loom-dcfaf656).
+This module implements the recall-gap replay executor.
 """
 
 from __future__ import annotations

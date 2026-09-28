@@ -44,7 +44,7 @@ Then, before ending the session, type `/handoff`. The agent should call `weft_le
 
 - Add your own coding/test/commit preferences to your `CLAUDE.md` outside the Memory Protocol section
 - Add behavior triggers via `weft_behavior_add` for your own conventions
-- Drop the boot-sequence Loom reference if you don't use Loom
+- Remove instructions for any optional task-management integrations you don't use
 - Tweak the type-mapping table if you've added custom Weft types
 
 ## Deeper dive

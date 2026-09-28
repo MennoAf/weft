@@ -397,7 +397,7 @@ async def _detect_project_id(ctx: Context) -> str | None:
     it. ``WEFT_TRANSPORT`` is only a fallback outside a FastMCP request context.
 
     Uses the directory name of the first root URI as the project identifier.
-    E.g. file:///Users/jason/Projects/Weft → "weft". Returns None when roots are
+    E.g. file:///home/user/projects/weft → "weft". Returns None when roots are
     unavailable, empty, or unresponsive.
     """
     context_transport = ctx.transport

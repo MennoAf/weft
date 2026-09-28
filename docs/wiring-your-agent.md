@@ -33,4 +33,4 @@ Give the agent repository-level instructions or equivalent context appropriate t
 - At the end of a non-trivial session, call `weft_handoff` with the summary and any follow-up context.
 - If Weft is unavailable, report that clearly and do not claim that information was saved or retrieved.
 
-The repository's [`AGENTS.md`](../AGENTS.md) contains general agent and local server guidance. For Claude Desktop or Claude Code-specific setup, see [`CLAUDE.md`](../CLAUDE.md).
+The repository's [`AGENTS.md`](../AGENTS.md) provides a copy-paste memory protocol for your own agent instructions. For Claude Desktop or Claude Code-specific setup, see [`CLAUDE.md`](../CLAUDE.md).

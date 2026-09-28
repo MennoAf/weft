@@ -48,16 +48,16 @@ async def test_store_entity_minimal(pool):
 
 async def test_store_entity_full(pool):
     ent = await store_entity(pool, EntityCreate(
-        name="Jason Bauman",
+        name="Casey Example",
         entity_type=EntityType.person,
-        aliases=["Jason", "JB"],
+        aliases=["Casey", "CE"],
         description="Builder of Weft",
         project_id="weft",
         agent_id="warp",
     ))
-    assert ent.name == "Jason Bauman"
+    assert ent.name == "Casey Example"
     assert ent.entity_type == EntityType.person
-    assert ent.aliases == ["Jason", "JB"]
+    assert ent.aliases == ["Casey", "CE"]
     assert ent.description == "Builder of Weft"
     assert ent.project_id == "weft"
     assert ent.agent_id == "warp"
