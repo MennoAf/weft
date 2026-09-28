@@ -25,16 +25,16 @@ Five steps, ~5 minutes.
 
 ```bash
 # Recommended: pipx for system-wide availability
-pipx install git+https://github.com/MennoAf/weft-memory.git
+pipx install git+https://github.com/MennoAf/weft.git
 
 # Or as a uv tool
-uv tool install git+https://github.com/MennoAf/weft-memory.git
+uv tool install git+https://github.com/MennoAf/weft.git
 
 # Or local development install
-git clone https://github.com/MennoAf/weft-memory.git && cd weft-memory && uv sync
+git clone https://github.com/MennoAf/weft.git && cd weft && uv sync
 ```
 
-Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker Desktop.
+Prerequisites: Python 3.12+ and [uv](https://docs.astral.sh/uv/). Docker Desktop is needed only to run local PostgreSQL and Redis services with `weft up` or to run the database-backed test suite; it is not required to install or import Weft.
 
 ### 2. Start infrastructure
 
@@ -129,7 +129,7 @@ uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
 
-Tests use `testcontainers` for database isolation — each test gets a fresh Postgres+pgvector instance. No external services required.
+Database-backed tests use `testcontainers` for isolation — each test gets a fresh Postgres+pgvector instance and requires Docker. Pure unit tests do not require Docker.
 
 ## License
 

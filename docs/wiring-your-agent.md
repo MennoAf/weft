@@ -20,7 +20,7 @@ For an installed local copy, register a stdio MCP server with:
 - Command: `weft`
 - Argument: `mcp`
 
-When using a source checkout rather than an installed command, run `uv run --directory /absolute/path/to/weft-memory python -m weft.mcp` (replace the example path with the checkout's absolute path). Follow your harness's MCP documentation to enter these values; no one configuration-file format applies to every harness.
+When using a source checkout rather than an installed command, run `uv run --directory /absolute/path/to/weft python -m weft.mcp` (replace the example path with the checkout's absolute path). Follow your harness's MCP documentation to enter these values; no one configuration-file format applies to every harness.
 
 If connecting to a hosted Weft server, configure the endpoint and authentication supported by that deployment. See [User Identity](user-identity.md) for token and caller-mode details.
 
