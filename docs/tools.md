@@ -28,7 +28,7 @@ functional while usage is measured.
 
 ### `weft_remember`
 
-Store a new memory.
+Store the supplied content verbatim; this tool does not summarize or rewrite it. When composing a memory worth retaining, preserve quantitative qualifiers that materially specify it (date, duration, amount, range, unit, or period/direction); do not copy incidental numbers or retain a fact solely because it contains a number.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

@@ -67,7 +67,7 @@ from benchmarks.longmemeval.task_shape import TaskShape, derive_task_shape
 logger = logging.getLogger(__name__)
 
 
-Tier = Literal["belief", "turns", "auto", "belief-view", "replay"]
+Tier = Literal["belief", "turns", "auto", "belief-view", "replay", "production-belief"]
 
 # Owner identity benchmark turns + claims are written under. Mirrors
 # adapter.BENCHMARK_USER_ID; duplicated here to avoid a router→adapter import
@@ -920,17 +920,10 @@ async def _recall_turns_scoped(
                 # Diagnose on the SAME connection before releasing it.
                 # This observes the exact GUC/RLS state that produced
                 # the 0-return.
-                from benchmarks.longmemeval.diagnose import diagnose_zero_return
-
                 logger.warning(
                     "recall_turns returned 0 turns for q (project_id=%s, "
-                    "top_k=%d) — running diagnostics on same connection",
-                    project_id, top_k,
-                )
-                await diagnose_zero_return(
-                    conn,
-                    project_id=project_id,
-                    expected_count=expected_turn_count,
+                    "top_k=%d, expected_turn_count=%d) — retrying on same connection",
+                    project_id, top_k, expected_turn_count,
                 )
 
                 # Retry with the same embedding on the SAME connection.
@@ -1089,6 +1082,7 @@ async def _retrieve_belief(
     question: str,
     project_id: str,
     policy: RetrievalPolicy,
+    user_id: str = _BENCHMARK_USER_ID,
 ) -> list[MemoryRecall]:
     """Belief-tier hybrid recall over ``memories``, project-isolated.
 
@@ -1103,6 +1097,7 @@ async def _retrieve_belief(
         query_embedding,
         limit=policy.top_k * policy.overfetch_multiplier,
         project_id=project_id,
+        user_id=user_id,
     )
     memories = [r for r in raw if r.memory.project_id == project_id]
     return memories[: policy.top_k]
@@ -1242,6 +1237,34 @@ async def retrieve(
                 else "belief"
             )
 
+    if tier == "production-belief":
+        # Corrected pilot arm: active belief claims first, then the same
+        # project-scoped hybrid-memory fallback as the public belief path.
+        # Claims have no project column, so this path intentionally uses only
+        # the benchmark's isolated global user partition and cleans claims per
+        # question before the next question starts.
+        claims = await search_belief_claims(
+            pool,
+            query=question,
+            user_id=user_id,
+            scope="global",
+            limit=policy.top_k,
+        )
+        if claims:
+            total = len(claims)
+            return [
+                _claim_to_recall(c, rank=i, total=total, project_id=project_id)
+                for i, c in enumerate(claims)
+            ]
+        return await _retrieve_belief(
+            pool,
+            embedder,
+            question=question,
+            project_id=project_id,
+            policy=policy,
+            user_id=user_id,
+        )
+
     if tier in ("belief-view", "replay"):
         # 'replay' reads the SAME claim view as 'belief-view' — the difference is
         # purely on the WRITE side: the adapter ran the replay loop (enqueue +
@@ -1261,8 +1284,6 @@ async def retrieve(
                 _claim_to_recall(c, rank=i, total=total, project_id=project_id)
                 for i, c in enumerate(claims)
             ]
-        # No claim matched — augment-not-gate: fall through to the turn
-        # substrate so non-belief questions still get answered.
         return await _retrieve_turns(
             pool, embedder,
             question=question,
@@ -1328,6 +1349,7 @@ async def retrieve(
         fallback = await _retrieve_belief(
             pool, embedder,
             question=question, project_id=project_id, policy=policy,
+            user_id=user_id,
         )
         if diagnostics is not None:
             diagnostics.fallback_rescued = bool(fallback)

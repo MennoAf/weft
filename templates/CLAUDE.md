@@ -45,6 +45,8 @@ weft_remember(
 )
 ```
 
+When composing a memory worth retaining, preserve quantitative qualifiers that materially specify it (such as date, duration, amount, range, unit, or period/direction like "45 minutes each way"). Do not copy incidental numbers or save a fact solely because it contains a number.
+
 **Do NOT** write `.md` files under `.claude/projects/.../memory/`, edit `MEMORY.md`, or treat the file system as a memory store.
 
 ### Recall: every "access memory" operation maps to Weft

@@ -196,6 +196,46 @@ def _format_result_rows(results: list) -> str:
     return "\n\n".join(lines)
 
 
+def _format_public_evidence(item: object, index: int) -> str:
+    """Render one public recall evidence item without leaking its dict repr."""
+    if not isinstance(item, dict):
+        item = getattr(item, "to_dict", lambda: {})()
+    content = item.get("content") or item.get("text") or item.get("summary") or ""
+    if not content and isinstance(item.get("payload"), dict):
+        payload = item["payload"]
+        content = payload.get("content") or payload.get("text") or payload.get("summary") or ""
+    score = item.get("similarity", item.get("rrf_score", item.get("relevance_score")))
+    provenance = (
+        item.get("source_provenance")
+        or item.get("provenance")
+        or item.get("source")
+        or item.get("metadata")
+    )
+    if not provenance and isinstance(item.get("payload"), dict):
+        provenance = item["payload"].get("source_provenance") or item["payload"].get("provenance")
+    suffix = f" (provenance={provenance})" if provenance else ""
+    prefix = f"[{index}] (relevance={score:.2f})" if isinstance(score, (int, float)) else f"[{index}]"
+    return f"{prefix} {content}{suffix}"
+
+
+def format_public_recall_context(response: dict) -> str:
+    """Render only evidence returned by the public ``weft_recall`` tool."""
+    if not isinstance(response, dict):
+        return "(no relevant memories retrieved)"
+    enumeration = response.get("enumeration")
+    if enumeration:
+        members = enumeration.get("members", []) or []
+        lines = [f"COUNT: {enumeration.get('count', len(members))} {enumeration.get('target', 'items')} — complete list follows"]
+        lines.extend(_format_public_evidence(item, i) for i, item in enumerate(members, 1))
+        return "\n".join(lines)
+    evidence = response.get("results") or response.get("turns") or []
+    if response.get("anchors"):
+        evidence = [item for values in response["anchors"].values() for item in values]
+    if not evidence:
+        return "(no relevant memories retrieved)"
+    return "\n\n".join(_format_public_evidence(item, i) for i, item in enumerate(evidence, 1))
+
+
 def format_recall_context(response: dict, *, use_enumeration: bool = True) -> str:
     """Render a ``weft_recall`` response as the agent-facing context block.
 
@@ -241,6 +281,8 @@ class ReaderResponse:
     input_tokens: int
     cached_input_tokens: int
     output_tokens: int
+    system_prompt: str | None = None
+    user_content: str | None = None
 
 
 class Reader:
@@ -275,6 +317,7 @@ class Reader:
         question_type: str | None = None,
         task_shape: object = "single-session",
         memories: list[MemoryRecall] | None = None,
+        recall_response: dict | None = None,
         top_k: int | None = 10,
     ) -> ReaderResponse:
         """Produce one hypothesis string for one benchmark question.
@@ -299,13 +342,23 @@ class Reader:
             memories = memories[:top_k]
 
         system_prompt = _system_prompt_for(task_shape)
+        recall_context = (
+            format_public_recall_context(recall_response)
+            if recall_response is not None
+            else _format_memories(memories)
+        )
         model = self._model
         user_content = (
             f"Today's date: {question_date}\n\n"
             f"Question: {question}\n\n"
-            f"Memories:\n{_format_memories(memories)}"
+            f"Memories:\n{recall_context}"
         )
         if self._provider is not None:
+            user_content = (
+                f"Today's date: {question_date}\n\n"
+                f"Question: {question}\n\n"
+                f"Memories:\n{recall_context}"
+            )
             generated = await self._provider.generate(
                 GenerationRequest(
                     model=model,
@@ -318,6 +371,8 @@ class Reader:
                 hypothesis=generated.text.strip(), model=generated.model,
                 input_tokens=generated.input_tokens, cached_input_tokens=0,
                 output_tokens=generated.output_tokens,
+                system_prompt=system_prompt,
+                user_content=user_content,
             )
 
         # System prompt is stable per runtime task shape → cacheable. The
@@ -334,7 +389,7 @@ class Reader:
         user_content = (
             f"Today's date: {question_date}\n\n"
             f"Question: {question}\n\n"
-            f"Memories:\n{_format_memories(memories)}"
+            f"Memories:\n{recall_context}"
         )
 
         response = await self._client.messages.create(
@@ -361,6 +416,8 @@ class Reader:
             input_tokens=usage.input_tokens,
             cached_input_tokens=cached,
             output_tokens=usage.output_tokens,
+            system_prompt=system_prompt,
+            user_content=user_content,
         )
 
 

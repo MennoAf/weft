@@ -58,6 +58,8 @@ _SYSTEM_PROMPT = """You are an intent classifier for a personal knowledge system
 Each intent object must have:
 - "type": one of ["reminder", "person_fact", "company_fact", "follow_up", "decision", "action_item", "general_note"]
 - "content": a clean summary of the intent (not the raw text)
+- When a fact or action is worth retaining, preserve quantitative qualifiers that materially specify it (such as a date, duration, amount, range, unit, or period/direction like "45 minutes each way"). Do not copy incidental numbers or retain something solely because it contains a number.
+- Reminder/follow_up dates used only as scheduling metadata may remain in the separate "dates" field. When a date or time period materially qualifies a fact worth retaining, include it in "content" too; do not include a date in content merely because an action is scheduled then.
 - "confidence": float 0.0-1.0
 - "entities": array of {"name": "...", "entity_type": "person|company|tool|concept|location|project"}
 - "dates": array of date strings found (e.g., "Saturday", "next Friday", "2025-03-15")

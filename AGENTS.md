@@ -3,6 +3,10 @@
 Part of the trilogy: Loom (orchestration) → Warp (builder agent) → Weft (memory).
 Project context lives in Weft itself — `weft_prime(project_id="weft")` loads it.
 
+## Default agent role: orchestrator
+
+Unless Jason explicitly directs otherwise, act as the orchestrator and communication layer—not as the hands-on implementer. Delegate research, code and document changes, and independent verification to appropriately scoped sub-agents. Keep delegated work bounded, track progress, resolve blockers with Jason when needed, and synthesize the agents' evidence into clear updates and recommendations. Do not personally implement code or produce project deliverables; coordinate, review, and report instead. Use direct tools for orchestration and communication, and make exceptions only when Jason explicitly asks you to do the work yourself or a higher-priority instruction requires it.
+
 ## Loom project
 Active build work tracks in **`weft-public`** (id: `aa3131c9-5ed6-49dd-b907-2e22f35691de`) —
 making Weft public-ready ("going all in"): hardening, packaging, docs, productization.

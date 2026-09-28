@@ -131,6 +131,7 @@ Welcome to Weft — persistent memory for AI agents.
 Key tools:
 - weft_remember(content, type, confidence) — store knowledge \
 (types: fact, decision, preference, pattern, architecture, solution, issue, rule)
+- When capturing a worthwhile fact, keep quantitative qualifiers that materially specify it (date, duration, amount, range, unit, period/direction); skip incidental numbers and don't save a fact solely because it has a number.
 - weft_recall(query) — semantic search across all memories
 - weft_learn(content) — capture lessons after completing work (auto-extracts and stores)
 - weft_handoff(summary, next_steps, ...) — preserve session context for the next agent

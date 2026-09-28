@@ -547,7 +547,11 @@ async def weft_remember(
     project_facets: list[str] | None = None,
     preference_metadata: dict | None = None,
 ) -> dict:
-    """Store a new memory with type, topics, content, confidence, and source.
+    """Store the supplied content verbatim with type, topics, confidence, and source.
+    When composing a memory worth retaining, preserve quantitative qualifiers
+    that materially specify it (date, duration, amount, range, unit, or period/direction), but
+    do not copy incidental numbers or retain a fact solely because it has a number.
+    This tool is pass-through; smart ingest generates summaries separately.
     If project_id is omitted, auto-detects from the client's working directory.
 
     workspace_id: optional shared-brain scope. When set, the caller must be
