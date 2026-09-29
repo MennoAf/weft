@@ -17,7 +17,7 @@ not run-to-run noise.
    Active probes are gated behind ``active_probing_enabled`` in the audit so their
    miss rate can be calibrated before it's trusted.  Default: disabled.
 
-2. **``reaREDACTED``** (high-confidence, PRIMARY): Auto-enrolled at audit time from
+2. **``reask-bootstrap``** (high-confidence, PRIMARY): Auto-enrolled at audit time from
    ``weft_recall_queries`` rows where ``is_reask_miss = TRUE`` and a satisfying memory
    was recorded.  A real re-ask miss is a proven known-answer case: the original query
    text → satisfying memory.  These probes always run in the audit (not gated by the
@@ -73,7 +73,7 @@ DEFAULT_AUDIT_TOP_K = 10
 def _is_degenerate_reask_probe(text: str | None) -> bool:
     """Return True when ``text`` is a machine reference, not a natural-language query.
 
-    The reaREDACTED arm is the canary's *trustworthy* signal: its probes come
+    The reask-bootstrap arm is the canary's *trustworthy* signal: its probes come
     from real ``is_reask_miss`` events (a query that missed, then a satisfying
     memory recorded), so a miss is supposed to mean a genuine recall regression.
     But a query like ``task:loom-7bedb110`` (an internal task reference) embeds
@@ -186,10 +186,10 @@ async def enroll_canary(
         memory_id: The memory to probe.  The audit checks that this memory
             surfaces when ``probe_text`` is searched.
         probe_text: The query text to use in the audit.  For active probes,
-            use the memory's own content (truncated).  For reaREDACTED
+            use the memory's own content (truncated).  For reask-bootstrap
             probes, use the original missed query text.  Truncated to
             ``PROBE_TEXT_MAX_CHARS`` at enrollment.
-        probe_type: ``'active'`` (synthetic, gated) or ``'reaREDACTED'``
+        probe_type: ``'active'`` (synthetic, gated) or ``'reask-bootstrap'``
             (primary, always audited).
 
     Returns:
@@ -217,7 +217,7 @@ async def enroll_canary(
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap: is_reask_miss → reaREDACTED probes
+# Bootstrap: is_reask_miss → reask-bootstrap probes
 # ---------------------------------------------------------------------------
 
 
@@ -227,7 +227,7 @@ async def _sync_reask_bootstrap_probes(
     user_id: str,
     eval_case_store_path: "Any" = None,
 ) -> int:
-    """Auto-enroll new is_reask_miss events as high-confidence ``reaREDACTED`` probes.
+    """Auto-enroll new is_reask_miss events as high-confidence ``reask-bootstrap`` probes.
 
     Queries ``weft_recall_queries`` for rows where ``is_reask_miss = TRUE`` and a
     ``reask_satisfying_memory_id`` was recorded, then inserts a new
@@ -242,11 +242,11 @@ async def _sync_reask_bootstrap_probes(
     logged at ERROR level so it surfaces rather than being silently swallowed.
 
     Returns:
-        Number of new ``reaREDACTED`` probes enrolled (skipped conflicts and
+        Number of new ``reask-bootstrap`` probes enrolled (skipped conflicts and
         errors are excluded).  Callers can detect partial failure by comparing
         this against the WARNING log line that names attempted vs enrolled.
     """
-    # Hygiene: disable any already-enrolled reaREDACTED probe whose probe_text
+    # Hygiene: disable any already-enrolled reask-bootstrap probe whose probe_text
     # is a machine reference (enrolled before this guard existed). One-way disable
     # is correct here — probe_text is immutable, so a degenerate probe can never
     # become valid. Uses the same Python predicate as the enrollment filter so the
@@ -254,7 +254,7 @@ async def _sync_reask_bootstrap_probes(
     existing = await get_db(pool).fetch(
         """
         SELECT probe_id, probe_text FROM recall_canary
-        WHERE probe_type = 'reaREDACTED' AND enabled = TRUE
+        WHERE probe_type = 'reask-bootstrap' AND enabled = TRUE
           AND user_id = $1
         """,
         user_id,
@@ -268,11 +268,11 @@ async def _sync_reask_bootstrap_probes(
             user_id,
         )
         logger.info(
-            "_sync_reask_bootstrap_probes: disabled %d degenerate reaREDACTED "
+            "_sync_reask_bootstrap_probes: disabled %d degenerate reask-bootstrap "
             "probe(s) already enrolled", len(poisoned),
         )
 
-    # Find is_reask_miss rows not yet enrolled as reaREDACTED probes.
+    # Find is_reask_miss rows not yet enrolled as reask-bootstrap probes.
     # The NOT EXISTS subquery avoids duplicate enrollment for the same
     # (memory_id, probe_text) pair that may arise from multiple reask events
     # pointing at the same satisfying memory with similar query text.
@@ -286,7 +286,7 @@ async def _sync_reask_bootstrap_probes(
           AND NOT EXISTS (
               SELECT 1 FROM recall_canary c
               WHERE c.memory_id = q.reask_satisfying_memory_id
-                AND c.probe_type = 'reaREDACTED'
+                AND c.probe_type = 'reask-bootstrap'
                 AND c.probe_text = left(q.query_text, $1)
                 AND c.user_id = q.user_id
           )
@@ -320,13 +320,13 @@ async def _sync_reask_bootstrap_probes(
             # (scheduler / audit context) where ``app.user_id`` is unset, so the
             # ``nullif(current_setting('app.user_id', true), '')`` column default
             # resolves to NULL and trips the NOT NULL constraint — every
-            # reaREDACTED insert failed silently before this. (The active
+            # reask-bootstrap insert failed silently before this. (The active
             # enroll path works only because it rides weft_remember's acquire()
             # GUC.)
             result = await get_db(pool).execute(
                 """
                 INSERT INTO recall_canary (probe_id, memory_id, user_id, probe_text, probe_type)
-                VALUES ($1, $2, $3, $4, 'reaREDACTED')
+                VALUES ($1, $2, $3, $4, 'reask-bootstrap')
                 ON CONFLICT DO NOTHING
                 """,
                 probe_id,
@@ -431,10 +431,10 @@ async def run_canary_audit(
     global ``canary.miss`` counter is bumped, and ``last_audit_at`` is updated.
 
     Audit scope:
-    - ``active_probing_enabled=False`` (default): only ``'reaREDACTED'``
+    - ``active_probing_enabled=False`` (default): only ``'reask-bootstrap'``
       probes run.  Their miss rate is immediately trustworthy because they
       derive from the proven ``is_reask_miss`` signal.
-    - ``active_probing_enabled=True``: both ``'active'`` and ``'reaREDACTED'``
+    - ``active_probing_enabled=True``: both ``'active'`` and ``'reask-bootstrap'``
       probes run.  Enable only after calibrating the active miss baseline.
 
     **Fixed materialization guarantee**: FastEmbed is deterministic (local ONNX,
@@ -452,7 +452,7 @@ async def run_canary_audit(
         top_k: Number of top results to retrieve per probe.  A probe's
             ``memory_id`` must appear within these results to be a hit.
         active_probing_enabled: RI-4 gate.  ``False`` (default) runs only
-            ``reaREDACTED`` probes.  ``True`` also runs ``active`` probes.
+            ``reask-bootstrap`` probes.  ``True`` also runs ``active`` probes.
         eval_case_store_path: Path to the JSONL eval-case store for the CL1
             compounding loop.  On a miss, a known-answer case is appended so
             the ``benchmarks.enumeration_eval`` harness can exercise it on the
@@ -468,7 +468,7 @@ async def run_canary_audit(
         * ``probes_checked`` (int): number of probes actually evaluated.
         * ``misses`` (int): number of probes that failed to surface their memory.
         * ``miss_rate`` (float): ``misses / probes_checked``, or 0.0 if none checked.
-        * ``bootstrap_synced`` (int): new ``reaREDACTED`` probes enrolled this run.
+        * ``bootstrap_synced`` (int): new ``reask-bootstrap`` probes enrolled this run.
         * ``probes_disabled`` (int): orphan probes soft-disabled this run because
           their referenced memory is no longer ``active`` (probe hygiene).
         * ``audit_valid`` (bool): ``True`` when the audit ran with ≥1 probe and valid
@@ -540,7 +540,7 @@ async def run_canary_audit(
     # Unlike Phase 1.5's one-way disable (for permanently-archived memories),
     # review_status is TRANSIENT: a pending_review memory is skipped here without
     # disabling its probe, so it re-enters the audit automatically once approved.
-    probe_types = ["active", "reaREDACTED"] if active_probing_enabled else ["reaREDACTED"]
+    probe_types = ["active", "reask-bootstrap"] if active_probing_enabled else ["reask-bootstrap"]
 
     probes = await get_db(pool).fetch(
         """
@@ -674,7 +674,7 @@ async def run_canary_audit(
         # forever (see v66 migration). user_id is set EXPLICITLY from the probe
         # row: the raw scheduler pool leaves app.user_id unset, so the column
         # default would resolve to NULL and trip NOT NULL (same trap the
-        # reaREDACTED enroll hit).
+        # reask-bootstrap enroll hit).
         await get_db(pool).execute(
             """
             INSERT INTO recall_canary_audit (probe_id, user_id, hit)
@@ -788,7 +788,7 @@ async def canary_health(
 
     ``user_id`` scopes the read EXPLICITLY rather than relying on the
     ``app.user_id`` GUC — the primer and scheduler contexts do not reliably set
-    it (the same NULL-GUC gap that broke reaREDACTED enrollment). Returns
+    it (the same NULL-GUC gap that broke reask-bootstrap enrollment). Returns
     an explicit dark ``no_probes`` status when no enabled probe is in the
     current universe, and None only on query error — best-effort, never breaks
     prime.

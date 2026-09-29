@@ -8,7 +8,7 @@ Done-when gate (non-degeneracy):
 A no-op meter that just returns rate=0 with probes_checked=0 MUST fail the test.
 
 RI-4 design notes:
-  - ReaREDACTED probes (derived from is_reask_miss signal) are the primary,
+  - Reask-bootstrap probes (derived from is_reask_miss signal) are the primary,
     always-audited probe type.
   - Active synthetic probes are gated behind active_probing_enabled and
     collected at weft_remember write time but NOT audited by default.
@@ -93,15 +93,15 @@ async def test_enroll_canary_truncates_long_probe_text(pool):
 
 
 async def test_enroll_canary_reask_bootstrap_type(pool):
-    """reaREDACTED probe_type is stored correctly."""
+    """reask-bootstrap probe_type is stored correctly."""
     probe_id = await enroll_canary(
-        pool, "mem-rq001", "original missed query", probe_type="reaREDACTED",
+        pool, "mem-rq001", "original missed query", probe_type="reask-bootstrap",
     )
     row = await get_db(pool).fetchrow(
         "SELECT probe_type FROM recall_canary WHERE probe_id = $1", probe_id,
     )
     assert row is not None
-    assert row["probe_type"] == "reaREDACTED"
+    assert row["probe_type"] == "reask-bootstrap"
 
 
 # ---------------------------------------------------------------------------
@@ -146,14 +146,14 @@ async def test_canary_audit_nondegeneracy(pool, embedder):
 
     # Probe A: searching for cat content should surface the cat memory → HIT.
     await enroll_canary(
-        pool, cat_mem.id, cat_content, probe_type="reaREDACTED",
+        pool, cat_mem.id, cat_content, probe_type="reask-bootstrap",
     )
 
     # Probe B (deliberately-planted miss): also searches for cat content but
     # expects to find the physics memory — which it won't.  This is the
     # "below-cutoff probe" the done_when gate requires.
     await enroll_canary(
-        pool, physics_mem.id, cat_content, probe_type="reaREDACTED",
+        pool, physics_mem.id, cat_content, probe_type="reask-bootstrap",
     )
 
     # Run audit with top_k=1 (only the single most-similar result is returned).
@@ -227,7 +227,7 @@ async def test_active_probes_excluded_by_default(pool, embedder):
         pool, embedder, user_id=DEFAULT_TEST_USER_ID
     )
 
-    # No reaREDACTED probes exist, so no probes are checked.
+    # No reask-bootstrap probes exist, so no probes are checked.
     assert result["probes_checked"] == 0
     assert result["misses"] == 0
 
@@ -271,12 +271,12 @@ async def test_active_probes_included_when_flag_set(pool, embedder):
 
 
 # ---------------------------------------------------------------------------
-# ReaREDACTED sync
+# Reask-bootstrap sync
 # ---------------------------------------------------------------------------
 
 
 async def test_reask_bootstrap_sync_enrolls_from_is_reask_miss(pool, embedder):
-    """The audit auto-enrolls is_reask_miss rows as reaREDACTED probes.
+    """The audit auto-enrolls is_reask_miss rows as reask-bootstrap probes.
 
     Inserts a weft_recall_queries row with is_reask_miss=TRUE + a satisfying
     memory_id, then runs the audit.  The sync should enroll the probe and
@@ -308,7 +308,7 @@ async def test_reask_bootstrap_sync_enrolls_from_is_reask_miss(pool, embedder):
         pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
     )
 
-    # The sync should have enrolled one new reaREDACTED probe.
+    # The sync should have enrolled one new reask-bootstrap probe.
     assert result["bootstrap_synced"] == 1
 
     # The audit should have checked the newly-enrolled probe.
@@ -323,11 +323,11 @@ async def test_reask_bootstrap_sync_enrolls_from_is_reask_miss(pool, embedder):
         mem.id,
     )
     assert canary_row is not None
-    assert canary_row["probe_type"] == "reaREDACTED"
+    assert canary_row["probe_type"] == "reask-bootstrap"
 
 
 async def test_reask_bootstrap_sync_idempotent(pool, embedder):
-    """Running the audit twice does not double-enroll reaREDACTED probes."""
+    """Running the audit twice does not double-enroll reask-bootstrap probes."""
     content = "Idempotency test memory"
     emb = await embedder.embed(content)
     mem = await store_memory(
@@ -362,7 +362,7 @@ async def test_reask_bootstrap_sync_idempotent(pool, embedder):
     # Only one probe row for this memory.
     count = await get_db(pool).fetchval(
         "SELECT count(*) FROM recall_canary WHERE memory_id = $1 "
-        "AND probe_type = 'reaREDACTED'",
+        "AND probe_type = 'reask-bootstrap'",
         mem.id,
     )
     assert count == 1
@@ -407,7 +407,7 @@ async def test_real_all_pass_audit_is_valid(pool, embedder):
         MemoryCreate(type=MemoryType.fact, content=content, topic=["dogs"]),
         embedding=emb,
     )
-    await enroll_canary(pool, mem.id, content, probe_type="reaREDACTED")
+    await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
 
     result = await run_canary_audit(
         pool, embedder, user_id=DEFAULT_TEST_USER_ID, top_k=5
@@ -440,7 +440,7 @@ async def test_orphan_probe_disabled_on_soft_delete(pool, embedder):
         MemoryCreate(type=MemoryType.fact, content=content, topic=["orphan-test"]),
         embedding=emb,
     )
-    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reaREDACTED")
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
 
     # Confirm probe is enabled before deletion.
     row_before = await get_db(pool).fetchrow(
@@ -483,7 +483,7 @@ async def test_orphan_probe_disabled_on_hard_delete(pool, embedder):
         MemoryCreate(type=MemoryType.fact, content=content, topic=["orphan-test-hard"]),
         embedding=emb,
     )
-    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reaREDACTED")
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
 
     # Hard-delete the memory.
     deleted = await delete_memory(pool, mem.id, hard=True)
@@ -524,7 +524,7 @@ async def test_audit_self_heals_probe_archived_outside_delete_memory(pool, embed
         MemoryCreate(type=MemoryType.fact, content=content, topic=["hygiene-test"]),
         embedding=emb,
     )
-    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reaREDACTED")
+    probe_id = await enroll_canary(pool, mem.id, content, probe_type="reask-bootstrap")
 
     # Archive the memory WITHOUT going through delete_memory() — this is exactly
     # what revise.py / quarantine.py / consolidation.py do, so the probe is left
@@ -560,7 +560,7 @@ async def test_audit_self_heals_probe_archived_outside_delete_memory(pool, embed
 
     # canary_health must now exclude the disabled probe from its aggregate.
     health = await canary_health(pool, user_id=DEFAULT_TEST_USER_ID)
-    assert health is None or "reaREDACTED" not in health.get("arms", {}), (
+    assert health is None or "reask-bootstrap" not in health.get("arms", {}), (
         "The disabled orphan probe must drop out of the canary_health aggregate."
     )
 
@@ -583,8 +583,8 @@ async def test_audit_keeps_active_probe_and_disables_only_orphans(pool, embedder
         MemoryCreate(type=MemoryType.fact, content=dead_content, topic=["mixed"]),
         embedding=dead_emb,
     )
-    live_probe = await enroll_canary(pool, live.id, live_content, probe_type="reaREDACTED")
-    await enroll_canary(pool, dead.id, dead_content, probe_type="reaREDACTED")
+    live_probe = await enroll_canary(pool, live.id, live_content, probe_type="reask-bootstrap")
+    await enroll_canary(pool, dead.id, dead_content, probe_type="reask-bootstrap")
     await pool.execute(
         "UPDATE memories SET status = 'archived', updated_at = now() WHERE id = $1",
         dead.id,
@@ -604,18 +604,18 @@ async def test_audit_keeps_active_probe_and_disables_only_orphans(pool, embedder
 
 
 # ---------------------------------------------------------------------------
-# Bug 1 regression: reaREDACTED enrollment must set user_id explicitly
+# Bug 1 regression: reask-bootstrap enrollment must set user_id explicitly
 # ---------------------------------------------------------------------------
 
 
 async def test_reask_bootstrap_enroll_populates_user_id_from_query(pool, embedder):
-    """REGRESSION: reaREDACTED enrollment populates recall_canary.user_id
+    """REGRESSION: reask-bootstrap enrollment populates recall_canary.user_id
     EXPLICITLY from the source weft_recall_queries row, not from the
     app.user_id GUC default.
 
     In prod the audit runs via get_db(pool) with no SET LOCAL, so the
     ``nullif(current_setting('app.user_id', true), '')`` column default
-    resolved to NULL and every reaREDACTED insert hit the NOT NULL
+    resolved to NULL and every reask-bootstrap insert hit the NOT NULL
     constraint — the trustworthy probe arm stayed permanently empty.
 
     The source query is owned by a user DIFFERENT from the session GUC, so a
@@ -623,7 +623,7 @@ async def test_reask_bootstrap_enroll_populates_user_id_from_query(pool, embedde
     asserting the probe carries the QUERY's owner proves the value is sourced
     explicitly.
     """
-    owner = "reaREDACTED"  # deliberately != DEFAULT_TEST_USER_ID
+    owner = "reask-owner-xyz"  # deliberately != DEFAULT_TEST_USER_ID
     content = "Canary reask owner-scoping regression memory"
     emb = await embedder.embed(content)
     mem = await store_memory(
@@ -652,11 +652,11 @@ async def test_reask_bootstrap_enroll_populates_user_id_from_query(pool, embedde
     result = await run_canary_audit(
         pool, embedder, user_id=owner, top_k=5
     )
-    assert result["bootstrap_synced"] == 1, "reaREDACTED probe failed to enroll"
+    assert result["bootstrap_synced"] == 1, "reask-bootstrap probe failed to enroll"
 
     probe = await get_db(pool).fetchrow(
         "SELECT user_id, probe_type FROM recall_canary WHERE memory_id = $1 "
-        "AND probe_type = 'reaREDACTED'",
+        "AND probe_type = 'reask-bootstrap'",
         mem.id,
     )
     assert probe is not None
@@ -871,7 +871,7 @@ async def test_audit_prunes_events_past_retention(pool, embedder):
     horizon, keeping the windowed-rate query bounded, while writing this run's."""
     mem = await _store_active_memory(pool, embedder, "retention probe content")
     pid = await enroll_canary(
-        pool, mem.id, "retention probe content", probe_type="reaREDACTED"
+        pool, mem.id, "retention probe content", probe_type="reask-bootstrap"
     )
     # An event well past the 30d retention horizon.
     await _record_audit_event(pool, pid, hit=True, age_days=45)
@@ -903,7 +903,7 @@ async def test_audit_does_not_mutate_another_owner(pool, embedder):
     owner_b = "canary-owner-b"
     mem = await _store_active_memory(pool, embedder, "owner A live probe")
     await enroll_canary(
-        pool, mem.id, "owner A live probe", probe_type="reaREDACTED"
+        pool, mem.id, "owner A live probe", probe_type="reask-bootstrap"
     )
     await pool.execute(
         """
@@ -912,7 +912,7 @@ async def test_audit_does_not_mutate_another_owner(pool, embedder):
              audit_count, miss_count, last_audit_at)
         VALUES
             ('owner-b-orphan', 'missing-owner-b-memory', $1,
-             'task:owner-b-machine-id', 'reaREDACTED', 1, 1,
+             'task:owner-b-machine-id', 'reask-bootstrap', 1, 1,
              now() - interval '45 days')
         """,
         owner_b,
@@ -1076,7 +1076,7 @@ async def test_agent_provenance_probe_skipped(pool, embedder):
 
 
 # ---------------------------------------------------------------------------
-# Degenerate reaREDACTED probe guard
+# Degenerate reask-bootstrap probe guard
 # ---------------------------------------------------------------------------
 
 
@@ -1125,13 +1125,13 @@ async def test_degenerate_reask_query_not_enrolled(pool, embedder):
     )
     assert result["bootstrap_synced"] == 0
     count = await get_db(pool).fetchval(
-        "SELECT count(*) FROM recall_canary WHERE probe_type = 'reaREDACTED'"
+        "SELECT count(*) FROM recall_canary WHERE probe_type = 'reask-bootstrap'"
     )
     assert count == 0
 
 
 async def test_existing_degenerate_reask_probe_disabled(pool, embedder):
-    """An already-enrolled degenerate reaREDACTED probe self-heals to disabled."""
+    """An already-enrolled degenerate reask-bootstrap probe self-heals to disabled."""
     content = "The satisfying memory for a poisoned probe"
     emb = await embedder.embed(content)
     mem = await store_memory(
@@ -1143,7 +1143,7 @@ async def test_existing_degenerate_reask_probe_disabled(pool, embedder):
     await pool.execute(
         """
         INSERT INTO recall_canary (probe_id, memory_id, user_id, probe_text, probe_type)
-        VALUES ($1, $2, $3, 'task:loom-7bedb110', 'reaREDACTED')
+        VALUES ($1, $2, $3, 'task:loom-7bedb110', 'reask-bootstrap')
         """,
         "cp-poisoned01",
         mem.id,

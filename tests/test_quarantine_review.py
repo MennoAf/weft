@@ -341,7 +341,7 @@ class TestSchedulerLoop:
 
         Layer 3 regex still applies in this scenario; the LLM catch-up just
         doesn't run. The MCP server lifespan must not crash on the missing
-        REDACTED
+        credential.
         """
         from weft.scheduler import quarantine_review_loop
 

@@ -59,7 +59,7 @@ no expiry here, only the index that makes a windowed prune/query cheap
   sets the GUC on every acquire, e.g. `weft/board_server.py`'s `/act`
   handler) don't need to pass it explicitly.
 * No FK from `item_id` / `target_id` to a single source table — board items
-  span five heterogeneous sources (trackers/alerts/triggers/taREDACTED/
+  span five heterogeneous sources (trackers/alerts/triggers/task-memories/
   review rows), so these are opaque cross-source identifiers, not a
   relational reference. Mirrors how `Item.id` (weft/board.py) is already a
   cross-source string, not a foreign key.

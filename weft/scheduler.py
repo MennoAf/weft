@@ -1014,7 +1014,7 @@ async def canary_audit_loop(
     """Periodic recall-canary audit — the reconciliation meter. Runs until cancelled.
 
     Wires ``weft.canary.run_canary_audit`` to a daily cadence. Only the
-    high-confidence ``reaREDACTED`` probes run: ``active_probing_enabled``
+    high-confidence ``reask-bootstrap`` probes run: ``active_probing_enabled``
     stays at its ``False`` default until the active-probe miss baseline is
     calibrated (RI-4).
 

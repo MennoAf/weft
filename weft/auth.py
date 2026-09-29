@@ -250,7 +250,7 @@ def extract_user_id_from_header(auth_header: str | None) -> str | None:
     """Extract user_id from an Authorization header value.
 
     Expects ``Bearer <token>``. Returns None for missing, empty, or
-    non-Bearer REDACTED
+    non-Bearer headers.
     """
     if not auth_header:
         return None

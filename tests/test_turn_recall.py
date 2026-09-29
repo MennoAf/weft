@@ -18,6 +18,7 @@ import pytest
 from weft.cache import NullCache
 from weft.config import WeftConfig
 from weft.episode_turns import (
+    TurnRetrievalError,
     append_turn,
     list_recent_turns,
     recall_turns,
@@ -36,6 +37,30 @@ from weft.turn_recall import (
 
 
 # --- Test fixtures ---
+
+
+@pytest.mark.parametrize(
+    ("embedding", "phase"),
+    [([0.1] * 768, "vector"), (None, "keyword")],
+)
+async def test_recall_turns_raises_structured_sql_failure(embedding, phase):
+    cause = RuntimeError("database query failed")
+
+    class FailingExecutor:
+        async def fetch(self, *args):
+            raise cause
+
+    with pytest.raises(TurnRetrievalError) as raised:
+        await recall_turns(
+            None, "query", embedding=embedding, executor=FailingExecutor(),
+        )
+
+    error = raised.value
+    assert error.phase == phase
+    assert error.code == f"{phase}_search_failed"
+    assert error.cause_type == "RuntimeError"
+    assert str(error) == f"{phase}_search_failed: RuntimeError"
+    assert error.__cause__ is cause
 
 
 _FAKE_EMBEDDING = [0.1] * 768

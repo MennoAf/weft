@@ -61,54 +61,106 @@ def get_db(pool: asyncpg.Pool) -> Union[asyncpg.Pool, asyncpg.Connection]:
     return conn if conn is not None else pool
 
 
-async def _pgvector_codec_init(conn: asyncpg.Connection) -> None:
-    """Initialize pgvector resolution and its codec on each connection.
+_PGVECTOR_SCHEMAS = ("public", "extensions", "pg_catalog")
 
-    Supabase's pooler resets ``search_path`` to ``"$user", public`` even when
-    the login role has a role-level setting. Weft contains unqualified
-    ``::vector`` casts, while Supabase installs pgvector in ``extensions``.
-    Set the application search path explicitly before registering the codec so
-    both SQL type resolution and asyncpg's Python codec work consistently.
 
-    Tries multiple schemas since managed Postgres providers may install
-    pgvector in different schemas (public, extensions, pg_catalog).
+async def _pgvector_codec_init(conn: asyncpg.Connection) -> bool:
+    """Resolve the installed vector type and register its codec on one connection.
+
+    Pool initialization can happen before migrations create the pgvector
+    extension. In that expected case, return ``False`` and let the explicit
+    post-migration registration pass retry. Once the type exists, codec errors
+    are not swallowed: callers need to see a broken connection setup.
     """
     await conn.execute("SET search_path TO public, extensions")
-    for schema in ("public", "extensions", "pg_catalog"):
-        try:
-            await conn.set_type_codec(
-                "vector",
-                encoder=lambda v: "[" + ",".join(str(x) for x in v) + "]",
-                decoder=lambda s: [float(x) for x in s.strip("[]").split(",")],
-                schema=schema,
-                format="text",
-            )
-            logger.debug("pgvector codec registered (schema=%s)", schema)
-            return
-        except Exception:
-            continue
-    logger.warning("pgvector codec registration failed: vector type not found in any schema")
+    row = await conn.fetchrow(
+        """
+        SELECT n.nspname AS schema_name
+          FROM pg_type AS t
+          JOIN pg_namespace AS n ON n.oid = t.typnamespace
+         WHERE t.typname = 'vector'
+           AND n.nspname = ANY($1::text[])
+         ORDER BY array_position($1::text[], n.nspname)
+         LIMIT 1
+        """,
+        list(_PGVECTOR_SCHEMAS),
+    )
+    if row is None:
+        logger.warning(
+            "pgvector codec registration deferred: vector type absent; search_path=%s",
+            await conn.fetchval("SELECT current_setting('search_path')"),
+        )
+        return False
+    schema = row["schema_name"]
+    await conn.set_type_codec(
+        "vector",
+        encoder=lambda v: "[" + ",".join(str(x) for x in v) + "]",
+        decoder=lambda s: [float(x) for x in s.strip("[]").split(",")],
+        schema=schema,
+        format="text",
+    )
+    logger.debug("pgvector codec registered (schema=%s)", schema)
+    return True
 
 
-async def register_pgvector_codec(pool: asyncpg.Pool) -> None:
-    """Register the pgvector codec on all existing pool connections.
+async def pgvector_catalog_state(conn: asyncpg.Connection) -> dict[str, object]:
+    """Return safe catalog and connection state useful for codec diagnostics."""
+    row = await conn.fetchrow(
+        """
+        SELECT current_setting('search_path') AS search_path,
+               t.oid::bigint AS vector_type_oid,
+               n.nspname AS vector_schema,
+               e.extversion AS extension_version,
+               en.nspname AS extension_schema
+          FROM (SELECT 1) AS anchor
+          LEFT JOIN pg_type AS t ON t.typname = 'vector'
+          LEFT JOIN pg_namespace AS n ON n.oid = t.typnamespace
+          LEFT JOIN pg_extension AS e ON e.extname = 'vector'
+          LEFT JOIN pg_namespace AS en ON en.oid = e.extnamespace
+         WHERE n.nspname = ANY($1::text[]) OR t.oid IS NULL
+         ORDER BY array_position($1::text[], n.nspname)
+         LIMIT 1
+        """,
+        list(_PGVECTOR_SCHEMAS),
+    )
+    return {
+        "search_path": row["search_path"] if row else None,
+        "vector_type_oid": row["vector_type_oid"] if row else None,
+        "vector_schema": row["vector_schema"] if row else None,
+        "extension_present": bool(row and row["extension_version"]),
+        "extension_version": row["extension_version"] if row else None,
+        "extension_schema": row["extension_schema"] if row else None,
+    }
 
-    Call this AFTER migrations have run (which CREATE EXTENSION vector).
-    The pool's init callback handles future connections automatically.
 
-    Acquire every connection that existed when registration started before
-    initializing any of them.  This prevents a connection released after its
-    own initialization from being reacquired and initialized twice while a
-    warm connection is still waiting.  Always release connections acquired so
-    far, including when acquisition or initialization fails, so registration
-    cannot leave the pool starved.
+async def register_pgvector_codec(pool: asyncpg.Pool) -> dict[str, object]:
+    """Register the pgvector codec on every existing connection after migrations.
+
+    Acquire all currently existing connections before initializing any of
+    them. The init callback covers future connections; this pass repairs
+    connections warmed before the extension existed. A missing type or failed
+    codec registration is a hard post-migration error, not a warning-only pass.
     """
     connections: list[asyncpg.Connection] = []
+    registered = 0
     try:
         for _ in range(pool.get_size()):
             connections.append(await pool.acquire())
         for conn in connections:
-            await _pgvector_codec_init(conn)
+            if not await _pgvector_codec_init(conn):
+                state = await pgvector_catalog_state(conn)
+                raise RuntimeError(
+                    "pgvector type missing during post-migration codec registration: "
+                    f"{state!r}"
+                )
+            registered += 1
+        state = await pgvector_catalog_state(connections[0]) if connections else {}
+        return {
+            "codec_registered": registered == len(connections) and bool(connections),
+            "connections_checked": len(connections),
+            "connections_registered": registered,
+            "catalog": state,
+        }
     finally:
         for conn in connections:
             await pool.release(conn)

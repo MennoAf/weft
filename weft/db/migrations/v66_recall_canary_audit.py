@@ -37,7 +37,7 @@ event log is the new source of truth for the health/tripwire surface.
 * ``user_id`` — ``NOT NULL DEFAULT GUC`` (post-v36 convention). The audit loop
   inserts it EXPLICITLY from the probe row — the raw scheduler pool leaves
   ``app.user_id`` unset, so the column default resolves to NULL and would trip
-  NOT NULL (the same trap v63's reaREDACTED enroll hit; see canary.py).
+  NOT NULL (the same trap v63's reask-bootstrap enroll hit; see canary.py).
 * ``hit`` — ``TRUE`` the probe's memory surfaced in top-K, ``FALSE`` = a miss.
 
 ## RLS

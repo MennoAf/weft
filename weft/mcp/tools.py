@@ -3472,7 +3472,7 @@ async def weft_board(
     """Unified open-items board — the canonical "what needs me?" call.
 
     Fans out across all five open-item sources (trackers, alerts, triggers,
-    taREDACTED, review queue), normalizes each into one structured Item
+    task-memories, review queue), normalizes each into one structured Item
     schema, and buckets everything by urgency (overdue/due_soon/pending/
     no_date). Returns `{generated_at, horizon_days, buckets, items, counts,
     warnings}`. Every item carries self-describing `actions` naming the
@@ -6429,7 +6429,7 @@ async def weft_token_issue(
         ``'face-2026-04'``). Surfaces in ``weft_token_list``.
     expires_in:
         Optional ``Nd`` / ``Nh`` / ``Nm`` spec, e.g. ``'30d'``. Omit for
-        a non-expiring REDACTED
+        a non-expiring credential.
 
     Returns
     -------

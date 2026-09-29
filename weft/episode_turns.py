@@ -523,6 +523,16 @@ class RetrievalPolicyContractError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
+class TurnRetrievalError(RuntimeError):
+    """Structured SQL failure while retrieving turn evidence."""
+
+    def __init__(self, phase: str, cause: BaseException):
+        self.phase = phase
+        self.code = f"{phase}_search_failed"
+        self.cause_type = type(cause).__name__
+        super().__init__(f"{self.code}: {self.cause_type}")
+
+
 def validate_retrieval_policy_contract(
     *,
     retrieval_policy: RetrievalPolicySignal | None,
@@ -749,7 +759,7 @@ async def recall_turns(
                 phase="vector", sql=vector_sql, started=started,
                 status="failed", error_type=type(exc).__name__,
             )
-            raise
+            raise TurnRetrievalError("vector", exc) from exc
         _emit_sql_diag(
             phase="vector", sql=vector_sql, started=started,
             status="ok", row_count=len(vector_rows),
@@ -782,7 +792,7 @@ async def recall_turns(
             phase="keyword", sql=keyword_sql, started=started,
             status="failed", error_type=type(exc).__name__,
         )
-        raise
+        raise TurnRetrievalError("keyword", exc) from exc
     _emit_sql_diag(
         phase="keyword", sql=keyword_sql, started=started,
         status="ok", row_count=len(keyword_rows),

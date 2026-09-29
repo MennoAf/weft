@@ -57,13 +57,13 @@ async def test_due_true_when_no_probes(pool):
 
 async def test_due_true_when_never_audited(pool):
     """An enrolled-but-never-audited probe has last_audit_at NULL → due."""
-    await enroll_canary(pool, "mem-never", "some probe text", probe_type="reaREDACTED")
+    await enroll_canary(pool, "mem-never", "some probe text", probe_type="reask-bootstrap")
     assert await _canary_audit_due(pool, DEFAULT_TEST_USER_ID) is True
 
 
 async def test_not_due_right_after_audit(pool):
     """A probe audited 'now' is inside the min-age window → NOT due."""
-    probe_id = await enroll_canary(pool, "mem-fresh", "probe", probe_type="reaREDACTED")
+    probe_id = await enroll_canary(pool, "mem-fresh", "probe", probe_type="reask-bootstrap")
     await get_db(pool).execute(
         "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", probe_id
     )
@@ -72,7 +72,7 @@ async def test_not_due_right_after_audit(pool):
 
 async def test_due_again_after_min_age(pool):
     """A probe last audited > min_age_hours ago is due again (restart-safe cadence)."""
-    probe_id = await enroll_canary(pool, "mem-old", "probe", probe_type="reaREDACTED")
+    probe_id = await enroll_canary(pool, "mem-old", "probe", probe_type="reask-bootstrap")
     await get_db(pool).execute(
         "UPDATE recall_canary SET last_audit_at = now() - interval '25 hours' "
         "WHERE probe_id = $1",
@@ -243,7 +243,7 @@ async def test_loop_runs_audit_when_due(pool, embedder, monkeypatch):
     )
     # A probe that surfaces its own memory → a hit, but audit_count still ticks.
     probe_id = await enroll_canary(
-        pool, mem.id, content, probe_type="reaREDACTED"
+        pool, mem.id, content, probe_type="reask-bootstrap"
     )
 
     # Short poll interval so the post-audit sleep doesn't stall teardown.
@@ -282,7 +282,7 @@ async def test_loop_skips_when_not_due(pool, embedder, monkeypatch):
         embedding=emb,
     )
     probe_id = await enroll_canary(
-        pool, mem.id, content, probe_type="reaREDACTED"
+        pool, mem.id, content, probe_type="reask-bootstrap"
     )
     # Mark as already audited just now → not due.
     await get_db(pool).execute(

@@ -497,7 +497,7 @@ class TaskEntry:
 
 
 async def fetch_task_entries(pool: asyncpg.Pool, limit: int) -> list[TaskEntry]:
-    """Fetch open taREDACTED and parse due-date/priority out of topic tags.
+    """Fetch open task-memories and parse due-date/priority out of topic tags.
 
     This is the shared up_next core (PRD weft-board §Source-Semantics /
     Critical Implementation Notes): the row selection (``status = 'active'

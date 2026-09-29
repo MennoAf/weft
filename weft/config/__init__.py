@@ -680,7 +680,7 @@ def _encode_dsn_password(dsn: str) -> str:
     Handles passwords with special characters (/, :, ;, etc.) that break
     standard URL parsing. Only modifies the password; leaves the rest intact.
     """
-    m = re.match(r"^(REDACTED]+:)(.+)(@.+)$", dsn)
+    m = re.match(r"^(postgresql://[^:]+:)(.+)(@.+)$", dsn)
     if not m:
         return dsn
     prefix, password, suffix = m.groups()

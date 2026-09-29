@@ -112,7 +112,7 @@ def _clean_content(header: str, body: str) -> str:
 def parse_memory_md(path: str | Path) -> ParseResult:
     """Parse a MEMORY.md file into structured MemoryCreate objects.
 
-    Splits the file by ## or ### REDACTED Each section becomes a memory
+    Splits the file by ## or ### headers. Each section becomes a memory
     with type inferred from the header, topics extracted from header words,
     and confidence set by type.
 

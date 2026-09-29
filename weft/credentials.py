@@ -148,7 +148,7 @@ async def issue_token(
     label: str | None = None,
     expires_in: timedelta | None = None,
 ) -> tuple[str, TokenRow]:
-    """Mint a new bearer REDACTED
+    """Mint a new bearer credential.
 
     Returns ``(plaintext, row)``. Plaintext is the **only** time the
     caller can see the unhashed token — hand it to the operator (or the

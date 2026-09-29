@@ -16,7 +16,7 @@ miss, not run-to-run noise.
   Gated behind ``active_probing_enabled`` in the audit until the miss rate is
   calibrated and trusted.  Default: collected but *not yet audited*.
 
-* ``reaREDACTED`` — high-confidence, derived from real re-ask events.
+* ``reask-bootstrap`` — high-confidence, derived from real re-ask events.
   Auto-enrolled at audit time from ``weft_recall_queries`` rows where
   ``is_reask_miss = TRUE``.  The original query text → satisfying memory pair is
   a proven known-answer case.  Always audited (not gated by any flag).
@@ -25,7 +25,7 @@ miss, not run-to-run noise.
 
 * ``probe_id`` — caller-supplied ``TEXT PRIMARY KEY`` (``cp-{shortid}``).
 * ``user_id`` — ``NOT NULL DEFAULT GUC`` following post-v36 convention.
-* ``probe_type`` — ``'active' | 'reaREDACTED'``; CHECK constraint enforces the set.
+* ``probe_type`` — ``'active' | 'reask-bootstrap'``; CHECK constraint enforces the set.
 * ``enabled`` — soft-disable a probe without deleting it (e.g., after the
   underlying memory is archived).
 * ``audit_count / miss_count`` — monotonic counters; a rising ``miss_count`` while
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS recall_canary (
     user_id       TEXT NOT NULL DEFAULT nullif(current_setting('app.user_id', true), ''),
     probe_text    TEXT NOT NULL,
     probe_type    TEXT NOT NULL DEFAULT 'active'
-                      CHECK (probe_type IN ('active', 'reaREDACTED')),
+                      CHECK (probe_type IN ('active', 'reask-bootstrap')),
     enrolled_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     enabled       BOOLEAN NOT NULL DEFAULT TRUE,
     last_audit_at TIMESTAMPTZ,

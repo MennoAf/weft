@@ -2,7 +2,7 @@
 ranking, and the assemble_board() fan-out orchestrator.
 
 This module defines the Item model (normalized across five sources: trackers,
-alerts, triggers, taREDACTED, review queue), pure functions for urgency
+alerts, triggers, task-memories, review queue), pure functions for urgency
 bucketing and ranking, per-source adapters, and assemble_board() — the
 concurrent-fan-out read that turns the five sources into one board response.
 assemble_board() is read-only (PRD Validation V6): it never mutates a source
@@ -232,7 +232,7 @@ def rank_items(
 # an agent) fires the named tool via POST /act, then refetches — the board
 # itself never gains a mutation path. Every `tool` here MUST be in
 # `ACT_ALLOWLIST` (board_server rejects anything else before dispatch).
-# taREDACTED and the review queue are READ-ONLY in v1 (PRD Non-Goal), so
+# task-memories and the review queue are READ-ONLY in v1 (PRD Non-Goal), so
 # they carry no actions.
 _DEFAULT_SNOOZE = timedelta(days=1)
 
@@ -628,9 +628,9 @@ def task_adapter(
             source="task",
             kind=entry.priority or "task",
             title=entry.content,
-            state=None,  # taREDACTED have no tracker/alert-style state
+            state=None,  # task-memories have no tracker/alert-style state
             due_at=due_at,
-            snoozed_until=None,  # TaREDACTED do not have snooze capability
+            snoozed_until=None,  # Task-memories do not have snooze capability
             age_days=age_days,
             urgency=calculate_urgency(due_at, now, horizon_days),
             project_id=None,  # TaskEntry does not carry project association
