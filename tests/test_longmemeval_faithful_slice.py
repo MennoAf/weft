@@ -17,6 +17,13 @@ import asyncpg
 
 import pytest
 
+_LME_CHECKOUT = Path(os.environ.get("LONGMEMEVAL_PATH", "/tmp/longmemeval-source-20260921"))
+_LME_READY = (_LME_CHECKOUT / "src" / "evaluation" / "evaluate_qa.py").is_file()
+requires_lme_checkout = pytest.mark.skipif(
+    not _LME_READY,
+    reason="requires a full LongMemEval checkout (set LONGMEMEVAL_PATH or restore /tmp/longmemeval-source-* with src/evaluation/evaluate_qa.py)",
+)
+
 from benchmarks.longmemeval.faithful_slice import (
     AmbiguousSliceError,
     BudgetExceeded,
@@ -95,6 +102,7 @@ def real_app(pool):
 
 
 @pytest.mark.asyncio
+@requires_lme_checkout
 async def test_synthetic_slice_real_public_tools_and_restart(real_app, pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -220,6 +228,7 @@ def test_same_ledger_enforces_calibration_and_total_caps(tmp_path: Path):
             ledger.reserve("gpt-4o", 1_000_000, 0, phase="run")
 
 
+@requires_lme_checkout
 def test_official_judge_prompt_adapter_and_fake_response_semantics():
     root = Path(os.environ["LONGMEMEVAL_PATH"])
     source = root / "src" / "evaluation" / "evaluate_qa.py"

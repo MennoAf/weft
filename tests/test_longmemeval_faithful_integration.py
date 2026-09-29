@@ -246,7 +246,16 @@ async def real_s36_root(pg_dsn, tmp_path: Path):
         await _drop_benchmark_db(pg_dsn, name)
 
 
+_LME_CHECKOUT = Path(os.environ.get("LONGMEMEVAL_PATH", "/tmp/longmemeval-source-20260921"))
+_LME_READY = (_LME_CHECKOUT / "src" / "evaluation" / "evaluate_qa.py").is_file()
+requires_lme_checkout = pytest.mark.skipif(
+    not _LME_READY,
+    reason="requires a full LongMemEval checkout (set LONGMEMEVAL_PATH or restore /tmp/longmemeval-source-* with src/evaluation/evaluate_qa.py)",
+)
+
+
 @pytest.mark.asyncio
+@requires_lme_checkout
 async def test_actual_s36_real_gateway_prepare_calibrate_hold_approve_resume(
     real_s36_root, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ):

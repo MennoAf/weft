@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -13,6 +14,13 @@ from benchmarks.longmemeval import pilot
 from benchmarks.longmemeval.dataset import Instance, Session, Turn
 from benchmarks.longmemeval.reader import ReaderResponse
 from benchmarks.longmemeval import judge
+
+_LME_CHECKOUT = Path(os.environ.get("LONGMEMEVAL_PATH", "/tmp/longmemeval-source-20260921"))
+_LME_READY = (_LME_CHECKOUT / "src" / "evaluation" / "evaluate_qa.py").is_file()
+requires_lme_checkout = pytest.mark.skipif(
+    not _LME_READY,
+    reason="requires a full LongMemEval checkout (set LONGMEMEVAL_PATH or restore /tmp/longmemeval-source-* with src/evaluation/evaluate_qa.py)",
+)
 
 
 def test_corrected_sdk_constructors_bind_retry_caps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,8 +62,9 @@ async def test_detector_injected_client_is_used_without_default_singleton() -> N
     assert fake.messages.kwargs["model"] == pilot.DETECTOR_MODEL
 
 
+@requires_lme_checkout
 def test_bounded_judge_stops_after_configured_attempts(tmp_path: Path) -> None:
-    source_root = Path("/tmp/longmemeval-source-20260921")
+    source_root = _LME_CHECKOUT
     ref = tmp_path / "ref.json"
     hyp = tmp_path / "hyp.jsonl"
     ref.write_text(json.dumps([{"question_id": "q1", "question_type": "knowledge-update", "question": "q", "answer": "a"}]))
