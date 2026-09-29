@@ -19,7 +19,7 @@ That works for awhile, until it doesn't.
 
 Weft treats memory as a first-class data system.
 
-Multiple agent platforms can read and write the to the same brain. You can handoff a session to a fresh agent with a simple command. Same agent, different agent, *different machine*, it doesn't matter. Weft built for your projects, not for a single platform.
+Multiple agent platforms can read and write to the same brain. You can handoff a session to a fresh agent with a simple command. Same agent, different agent, *different machine*, it doesn't matter. Weft is built for your projects, not for a single platform.
 
 ## Quickstart
 
@@ -38,7 +38,7 @@ uv tool install git+https://github.com/MennoAf/weft.git
 git clone https://github.com/MennoAf/weft.git && cd weft && uv sync
 ```
 
-Prerequisites: Python 3.12+ and [uv](https://docs.astral.sh/uv/). Docker Desktop is needed only to run local PostgreSQL and Redis services with `weft up` or to run the database-backed test suite. I've tested the system using podman, but it does not natively support that out of the box. (yet)
+Prerequisites: Python 3.12+ and [uv](https://docs.astral.sh/uv/). Docker Desktop is needed only to run local PostgreSQL and Redis services with `weft up` or to run the database-backed test suite. Other containerization methods may work, but at this time only Docker is supported.
 
 ### 2. Start infrastructure
 
@@ -62,11 +62,13 @@ You'll also want to set up [handoff](https://github.com/MennoAf/weft/blob/main/t
 
 Start a session with the connected harness and ask it to call `weft_prime(disclosure="progressive")`. It will load any saved context or report that none is available. 
 
-Tell it to register a project in weft and then use `weft_remember`, for example:
+Memories are scoped per project, and a project is just a name: `weft_prime` and `weft_remember` take a `project_id`, and that name decides which brain you get back. Pick one name per repo and stick to it.
+
+Tell your agent to save a memory, for example:
 
 > Save: I prefer test descriptions in the form "test_<thing>_<condition>_<outcome>"
 
-Have it update the Agents.md with the project name it gave for that repo so it knows what to call the net time.
+Then have it write the project name into the repo's `AGENTS.md` (or your harness's equivalent instructions file), so every agent that works in this repo — on any machine — loads and saves to the same brain.
 
 At the end of a non-trivial session, ask it to call `weft_handoff`. In a later session, `weft_prime` surfaces the saved context and handoff.
 
@@ -126,7 +128,6 @@ Full CLI: [docs/cli.md](docs/cli.md).
 | **[Configuration](docs/configuration.md)** | Environment variables, TOML keys, infrastructure |
 | **[Database and schema guide](docs/database-schema.md)** | 52 public tables, ownership/RLS, migrations, vectors, and export boundaries |
 | **[Authentication + identity](docs/user-identity.md)** | Tokens, caller modes, agent floor |
-| **[Retrieval + scope](docs/retrieval-and-scope.md)** | How `weft_recall` decides what comes back |
 | **[Benchmarks](docs/benchmarks.md)** | LongMemEval methodology + current numbers |
 | **[Obsidian integration](docs/obsidian.md)** | Vault sync, frontmatter, Tasks plugin |
 | **[Disaster recovery](docs/disaster-recovery.md)** | Backup, restore, schema migration |
