@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -382,10 +383,22 @@ class TestDailyBriefLoop:
             if call_count >= 1:
                 raise asyncio.CancelledError()
 
-        today = date.today()
+        brief_tz = "America/New_York"
+        fixed_now = datetime(2026, 9, 29, 0, 37, tzinfo=timezone.utc)
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fixed_now.replace(tzinfo=None)
+                return fixed_now.astimezone(tz)
+
+        # This instant is Sep 29 in UTC but still Sep 28 in the brief timezone.
+        today = fixed_now.astimezone(ZoneInfo(brief_tz)).date()
 
         with (
             patch.dict("os.environ", {"WEFT_OUTBOUND_CONNECTOR": "slack"}),
+            patch("datetime.datetime", FixedDateTime),
             patch("weft.scheduler.is_daily_brief_due", return_value=True),
             patch("weft.brief_state.get_last_brief_date", return_value=today),
             patch("weft.daily_brief.assemble_daily_brief", new_callable=AsyncMock) as mock_assemble,
