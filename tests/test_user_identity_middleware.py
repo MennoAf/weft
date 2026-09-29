@@ -209,7 +209,7 @@ async def test_missing_authorization_returns_401(pool):
 async def test_unknown_token_returns_401(pool):
     async with _async_client(_build_app(pool=pool)) as client:
         resp = await client.get(
-            "/mcp", headers={"authorization": "Bearer REDACTED"},
+            "/mcp", headers={"authorization": "Bearer weft-not-a-real-token"},
         )
     assert resp.status_code == 401
 
@@ -298,7 +298,7 @@ async def test_token_row_wins_over_jwt(pool):
 async def test_invalid_jwt_with_oauth_returns_401(pool):
     async with _async_client(_build_app(pool=pool, oauth_enabled=True)) as client:
         resp = await client.get(
-            "/mcp", headers={"authorization": "Bearer REDACTED"},
+            "/mcp", headers={"authorization": "Bearer not.a.jwt"},
         )
     assert resp.status_code == 401
 

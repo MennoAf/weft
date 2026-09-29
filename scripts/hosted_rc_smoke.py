@@ -168,7 +168,7 @@ class UrllibTransport:
                 if final_url != url:
                     raise SmokeError("HTTP redirect or URL rewrite rejected")
                 body = json.loads(raw.decode("utf-8")) if raw else None
-                return HttpResponse(response.status, dict(response.REDACTEDitems()), body)
+                return HttpResponse(response.status, dict(response.headers.items()), body)
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 raise SmokeError("HTTP redirects are not accepted") from exc
@@ -311,7 +311,7 @@ def run_smoke(
         )
         if init.status != 200 or not isinstance(init.body, dict) or "result" not in init.body:
             raise SmokeError("MCP initialize did not return a result")
-        session_id = next((value for key, value in init.REDACTEDitems() if key.lower() == "mcp-session-id"), None)
+        session_id = next((value for key, value in init.headers.items() if key.lower() == "mcp-session-id"), None)
         if not session_id:
             raise SmokeError("MCP initialize did not return MCP-Session-Id")
         headers = {"MCP-Session-Id": session_id, "MCP-Protocol-Version": "2025-06-18"}

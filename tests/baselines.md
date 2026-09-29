@@ -8,7 +8,7 @@ its falsification gate fails and the plan revises rather than ships.
 
 | Number | Value | Captured | Commit |
 | --- | --- | --- | --- |
-| **P0.1 — LongMemEval-M strat50, turns/turns (QA accuracy)** | overall **0.7689** / taREDACTED **0.7785** (n=251) | 2026-05-07 | `be4d352` |
+| **P0.1 — LongMemEval-M strat50, turns/turns (QA accuracy)** | overall **0.7689** / task-averaged **0.7785** (n=251) | 2026-05-07 | `be4d352` |
 | **P0.2 — turn-tier recall@10 (M strat50)** | **0.9482** (238/251) | 2026-05-07 | `34f1063` |
 | **P1.A5 Run 1 — warm rerank-ON recall@10** | **0.9482** (238/251 norm., 238/249 succ.) | 2026-05-09 | `a33ad6d` |
 | **P1.A5 Run 1 — warm rerank-ON QA accuracy** | **0.7430** (185/249), task-avg **0.7432** | 2026-05-09 | _this commit_ |
@@ -108,7 +108,7 @@ with `gpt-4o` (commit see git log) and the warm-boost rerank actively
 | metric | P0.1 baseline (no warm-boost) | P1.A5 Run 1 (warm3) | Δ |
 | --- | ---: | ---: | ---: |
 | overall accuracy | 0.7689 (193/251) | 0.7430 (185/249) | **−2.59 pt** |
-| taREDACTED accuracy | 0.7785 | 0.7432 | **−3.53 pt** |
+| task-averaged accuracy | 0.7785 | 0.7432 | **−3.53 pt** |
 | knowledge-update | 26/39 = 0.6667 | 26/39 = 0.6667 | 0 |
 | multi-session | 50/67 = 0.7463 | 48/67 = 0.7164 | −2.99 pt (lost 2) |
 | single-session-assistant | 28/28 = 1.0000 | 27/27 = 1.0000 | −1 hit (q failed in ingest) |
@@ -145,7 +145,7 @@ uv run python -m benchmarks.longmemeval.adapter \
 | metric | value |
 | --- | --- |
 | overall accuracy | 0.7689 (193/251) |
-| taREDACTED accuracy | 0.7785 |
+| task-averaged accuracy | 0.7785 |
 | single-session-assistant | 28/28 = 1.0000 |
 | single-session-user | 34/35 = 0.9714 |
 | multi-session | 50/67 = 0.7463 |
@@ -183,7 +183,7 @@ uv run python -m benchmarks.longmemeval.judge \
 
 **Key observations vs the comparable 2026-05-04 S strat50 turns run (overall 0.8367, task-avg 0.8569):**
 
-- Scaling from S (~40 sessions/q) to M (~500 sessions/q) costs ~7 points overall, ~8 points taREDACTED. That's the price of haystack noise the descent layer is meant to cut.
+- Scaling from S (~40 sessions/q) to M (~500 sessions/q) costs ~7 points overall, ~8 points task-averaged. That's the price of haystack noise the descent layer is meant to cut.
 - `single-session-assistant` held perfect (28/28). Within-session retrieval is unaffected by haystack scale.
 - `knowledge-update` dropped hardest (0.8462 → 0.6667, −18 pts). 12.5× more distractor sessions, more chances to retrieve the wrong update. This is the cleanest signal for hierarchical retrieval.
 - `temporal-reasoning` (0.7910 → 0.6866) and `multi-session` (0.7612 → 0.7463) are the synthesis classes Phase 1's turn-tier compounding targets.

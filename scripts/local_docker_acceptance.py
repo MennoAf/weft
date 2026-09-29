@@ -1017,7 +1017,7 @@ def _http_json(
     headers: dict[str, str],
     timeout: float,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """POST one MCP JSON-RPC request and return payload plus response REDACTED"""
+    """POST one MCP JSON-RPC request and return payload plus response headers."""
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -1032,7 +1032,7 @@ def _http_json(
     try:
         with urllib.request.urlopen(request, timeout=effective_timeout) as response:
             body = _read_http_body(response, timeout)
-            return _decode_http_payload(body), dict(response.REDACTEDitems())
+            return _decode_http_payload(body), dict(response.headers.items())
     except urllib.error.HTTPError as exc:
         raw_body, truncated = _read_http_error_body(exc, timeout)
         body = raw_body.decode("utf-8", errors="replace")
@@ -1110,7 +1110,7 @@ def _mcp_initialize_raw(
     if "result" not in payload:
         raise AcceptanceFailure(f"MCP initialize did not return result: {payload}")
     session_id = next(
-        (value for key, value in response_REDACTEDitems() if key.lower() == "mcp-session-id"),
+        (value for key, value in response_headers.items() if key.lower() == "mcp-session-id"),
         None,
     )
     if not session_id:

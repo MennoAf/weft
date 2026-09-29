@@ -61,7 +61,7 @@ def test_redaction_never_emits_secrets_urls_paths_or_provider_body():
         config_loader=lambda: {
             "valid": False,
             "error": "postgresql://user:super-secret@example.invalid:5432/db",
-            "token": "REDACTED",
+            "token": "sk-live-test-token",
             "path": "/Users/private/person/.weft/config.toml",
         },
         engine_probe=lambda: {"available": False},
@@ -79,7 +79,7 @@ def test_redaction_never_emits_secrets_urls_paths_or_provider_body():
     text = json.dumps(run_doctor(dependencies=deps).to_dict())
     for secret in (
         "super-secret",
-        "REDACTED",
+        "sk-live-test-token",
         "password@example",
         "/Users/private",
         "provider response body",

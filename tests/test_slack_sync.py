@@ -413,7 +413,7 @@ class TestSyncSlackSdkScopeFallback:
         )
 
         with patch("slack_sdk.web.async_client.AsyncWebClient", return_value=mock_client):
-            result = await sync_slack_sdk(mock_pool, "REDACTED")
+            result = await sync_slack_sdk(mock_pool, "xoxb-test-token")
 
         assert result.channels_synced == 1
         # Verify it called conversations_list twice
@@ -432,7 +432,7 @@ class TestSyncSlackSdkScopeFallback:
 
         with patch("slack_sdk.web.async_client.AsyncWebClient", return_value=mock_client):
             with pytest.raises(RuntimeError, match="network failure"):
-                await sync_slack_sdk(mock_pool, "REDACTED")
+                await sync_slack_sdk(mock_pool, "xoxb-test-token")
 
 
 class TestAddIngestReaction:

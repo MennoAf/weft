@@ -82,10 +82,10 @@ async def test_one_miss_mints_one_eval_case(pool, embedder, store_path):
     )
 
     # Hit probe: searching cat content for the cat memory → should surface → HIT.
-    await enroll_canary(pool, cat_mem.id, CAT_CONTENT, probe_type="reaREDACTED")
+    await enroll_canary(pool, cat_mem.id, CAT_CONTENT, probe_type="reask-bootstrap")
 
     # Miss probe: searching cat content but expecting physics memory → MISS.
-    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reaREDACTED")
+    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reask-bootstrap")
 
     assert len(load_minted_cases(store_path)) == 0, "Pre-condition: store is empty"
 
@@ -141,7 +141,7 @@ async def test_harness_exercises_minted_case(pool, embedder, store_path):
         embedding=physics_emb,
     )
 
-    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reaREDACTED")
+    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reask-bootstrap")
 
     # Force the miss → mint the eval case.
     await run_canary_audit(
@@ -206,7 +206,7 @@ async def test_dead_tell_miss_must_grow_eval_case_count(pool, embedder, store_pa
     )
 
     # Guaranteed miss: probe expects physics_mem but query is about cats.
-    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reaREDACTED")
+    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reask-bootstrap")
 
     initial_count = len(load_minted_cases(store_path))
 
@@ -262,7 +262,7 @@ async def test_mint_is_idempotent(pool, embedder, store_path):
         embedding=physics_emb,
     )
 
-    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reaREDACTED")
+    await enroll_canary(pool, physics_mem.id, CAT_CONTENT, probe_type="reask-bootstrap")
 
     # First audit: 1 miss → 1 case minted.
     result1 = await run_canary_audit(
@@ -308,7 +308,7 @@ async def test_reask_miss_mints_eval_case(pool, embedder, store_path):
     emb = await embedder.embed(content)
     mem = await store_memory(
         pool,
-        MemoryCreate(type=MemoryType.fact, content=content, topic=["reaREDACTED"]),
+        MemoryCreate(type=MemoryType.fact, content=content, topic=["reask-mint-test"]),
         embedding=emb,
     )
 
@@ -320,7 +320,7 @@ async def test_reask_miss_mints_eval_case(pool, embedder, store_path):
              is_reask_miss, reask_satisfying_memory_id)
         VALUES ($1, $2, 'recall', now() - interval '5 minutes', TRUE, $3)
         """,
-        "qid-cl1-reaREDACTED",
+        "qid-cl1-reask-mint-001",
         "original query text that was re-asked and answered",
         mem.id,
     )
@@ -336,7 +336,7 @@ async def test_reask_miss_mints_eval_case(pool, embedder, store_path):
     )
 
     assert result["bootstrap_synced"] == 1, (
-        "Audit must have enrolled 1 new reaREDACTED probe"
+        "Audit must have enrolled 1 new reask-bootstrap probe"
     )
 
     cases = load_minted_cases(store_path)

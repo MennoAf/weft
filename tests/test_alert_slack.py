@@ -34,7 +34,7 @@ def _make_alert(
 class TestSlackDispatch:
     @pytest.mark.asyncio
     async def test_sends_message(self, monkeypatch):
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "REDACTED")
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
 
         mock_response = {"ok": True, "ts": "123456.789"}
         mock_client_instance = MagicMock()
@@ -47,7 +47,7 @@ class TestSlackDispatch:
             await dispatch_slack(alert)
 
             mock_cls.assert_called_once()
-            assert mock_cls.call_args[1]["token"] == "REDACTED"
+            assert mock_cls.call_args[1]["token"] == "xoxb-test-token"
             mock_client_instance.chat_postMessage.assert_called_once()
             call_kwargs = mock_client_instance.chat_postMessage.call_args[1]
             assert call_kwargs["channel"] == "#alerts"
@@ -57,7 +57,7 @@ class TestSlackDispatch:
 
     @pytest.mark.asyncio
     async def test_includes_body(self, monkeypatch):
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "REDACTED")
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
 
         mock_client_instance = MagicMock()
         mock_client_instance.chat_postMessage = AsyncMock(return_value={"ok": True})
@@ -72,7 +72,7 @@ class TestSlackDispatch:
 
     @pytest.mark.asyncio
     async def test_no_body(self, monkeypatch):
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "REDACTED")
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
 
         mock_client_instance = MagicMock()
         mock_client_instance.chat_postMessage = AsyncMock(return_value={"ok": True})
@@ -103,7 +103,7 @@ class TestSlackDispatch:
 
     @pytest.mark.asyncio
     async def test_empty_channel_target_logs_warning(self, monkeypatch, caplog):
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "REDACTED")
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
 
         alert = _make_alert(channel_target=None)
         with caplog.at_level(logging.WARNING, logger="weft.scheduler"):
@@ -112,7 +112,7 @@ class TestSlackDispatch:
 
     @pytest.mark.asyncio
     async def test_api_error_does_not_raise(self, monkeypatch, caplog):
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "REDACTED")
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
 
         mock_client_instance = MagicMock()
         mock_client_instance.chat_postMessage = AsyncMock(
@@ -129,7 +129,7 @@ class TestSlackDispatch:
 
     @pytest.mark.asyncio
     async def test_http_error_does_not_raise(self, monkeypatch):
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "REDACTED")
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
 
         mock_client_instance = MagicMock()
         mock_client_instance.chat_postMessage = AsyncMock(
