@@ -245,7 +245,7 @@ def test_summarize_per_type_accuracy(tmp_path):
 
 
 def test_summarize_task_averaged_treats_types_equally(tmp_path):
-    """TaREDACTED accuracy weights each question type the same — so a
+    """Task-averaged accuracy weights each question type the same — so a
     type with 3 questions doesn't drown out a type with 30. This is the
     headline metric LongMemEval reports."""
     ref = tmp_path / "ref.json"

@@ -176,7 +176,7 @@ agenda `finding` self-clears to `null`.
   Fixed by scoping to `PAAH_ENTITY_PROJECT_ID` (matching the temporal harness). The
   deeper single-project variant — a real user whose one project holds *both* turns
   and entity beliefs would hit the same wall — is tracked as a product finding
-  (`weft-99cac4e5`'s sibling case: the fallback should recover when the turns
+  (`weft-99cac4e5`'s sibling family: the fallback should recover when the turns
   answer is present-but-irrelevant, not only when it's empty).
 
 ## Handoff + targeted-turn continuity evaluation

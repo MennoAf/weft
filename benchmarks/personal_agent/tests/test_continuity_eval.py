@@ -110,7 +110,7 @@ async def test_fixed_snapshot_is_synthetic_stable_and_contains_no_db_ids():
 
 @pytest.mark.parametrize("secret", [
     "postgresql://user:pass@host/db",
-    "Bearer REDACTED",
+    "Bearer abc.def.ghi",
     "OPENAI_API_KEY=not-safe",
     "weft-abcdefghijklmnopqrstuvwxyz1234567890",
 ])

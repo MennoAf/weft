@@ -1,129 +1,130 @@
 # Benchmarks
 
-Weft is benchmarked against [LongMemEval](https://github.com/xiaowu0162/LongMemEval), a multi-session memory evaluation dataset for chat assistants. Numbers below are reproducible from the harness in `benchmarks/longmemeval/`.
+Weft is benchmarked against [LongMemEval](https://github.com/xiaowu0162/LongMemEval), a multi-session memory evaluation dataset for chat assistants. 
 
-## Qualification evidence classes
+This document explains how we created the benchmark harness, what was measured, and how you can run the numbers yourself. 
 
-The public benchmark contract leads with the shipped local FastEmbed profile:
-`BAAI/bge-small-en-v1.5` (provider `fastembed`, model
-`BAAI/bge-small-en-v1.5`). Its native/signal width is **384**; Weft stores and
-emits **768** dimensions for the local pgvector contract, with zero padding that
-adds no semantic information. Dimensions describe the vector interface, not
-parameter count.
+You can review the harness yourself in `benchmarks/longmemeval/`.
 
-Every future arm manifest and report MUST identify provider, model,
-native/signal dimensions, storage/output dimensions, profile/snapshot identity,
-and fixed controls. Controls include dataset split/checksum, question IDs and
-order, ingest representation, routing, retrieval tier and `top_k`, Reader
-model and prompt, judge/scoring, and retry behavior. This is a requirement for
-new qualification evidence, not a claim that every historical artifact already
-contains all fields.
+## A note on what Weft optimizes for
 
-Evidence classes are deliberately separate:
+Weft is built to save what you tell it to save. 
 
-1. **Provider-free contract tests** use deterministic fake/spy providers. They
-   prove label-blind task shape and runtime traces, artifact/output contracts,
-   and fail-closed coverage accounting. They make no provider calls and do not
-   prove answer quality.
-2. **Labeled live-provider smoke tests** are an operator-authorized, separately
-   labeled small-fixture check against a live provider. They are not
-   provider-free evidence and do not establish a qualification lift.
-3. **Paid qualification** is a separately authorized repeated run with frozen
-   inputs/configuration, raw artifacts, judge results, costs, and failure
-   categories. It remains **HOLD** here; no paid execution is performed by
-   this repository's contract tests.
+When you say "remember this," Weft does. It adds provenance and context, but at your direction. It does not curate your conversations into benchmark-shaped facts.
 
-Historical runs remain historical evidence. Their summaries must not be
-promoted into a current lift claim or used to hide missing hypotheses/judge
-results. Hosted OpenAI arms are optional later comparisons only, after explicit
-authorization; they are not executed here.
+This is a deliberate design choice. Weft prioritizes predictability and trust over maximum recall, even if that means leaving points on the table. 
 
-## What we measure
+I don't want to aggressively summarize everything just to make a score higher. When Weft gains an autonomous classifier, it will be because it makes the core product better. 
 
-LongMemEval ships two haystack tiers:
+But that isn't today. 
 
-- **LongMemEval-S** (~40 sessions/question, ~100K tokens) — the published leaderboard tier
-- **LongMemEval-M** (~500 sessions/question, ~1M tokens) — stress-tests retrieval at scale
+The numbers below measure the system as it actually ships, not a benchmark-tuned configuration.
 
-We score on two metrics:
+## Results — LongMemEval-S, full split (500 questions)
 
-- **Answer correctness** — judged by GPT-4o per LongMemEval's evaluator
-- **recall@10** — does the gold-evidence turn appear in the top-10 retrieved candidates? Independent of the answering model
+Run date: 2026-09-29. One authorized paid run; no repetitions yet (see the publication protocol below).
 
-The `recall@10` metric isolates retrieval quality from generation quality, so improvements to the storage/retrieval layer surface immediately rather than getting lost in answering noise.
+| Metric | Value |
+|--------|-------|
+| Overall accuracy (judged) | **335 / 496 = 67.54%** (67.0% against the full selected 500) |
+| Task-averaged accuracy | **70.06%** |
+| Completed / selected | 496 / 500 |
+| Failed cases | 4 (3 exceeded the harness's conservative context bound; 1 operational casualty, journaled and reported) |
+| Writer model | `gpt-6-luna` (agent workload with tool rounds) |
+| Judge | `gpt-4o`, official LongMemEval answer-check prompt, abstention-aware |
+| Retrieval | turn tier, `top_k=10`, dual ingest (raw memories + episode turns) |
+| Embeddings | local FastEmbed `BAAI/bge-small-en-v1.5` (768-dim storage contract) |
+| Actual provider spend | **$0.65** (conservative in-run ledger estimate: $4.79) |
+| Wall time | ~5.3 hours |
 
-## Current numbers
+> **Note:** The benchmark drove the models through direct paid API calls rather than a subscription-based harness, so no platform-injected system prompt influenced the responses.
 
-> *Results from in-progress baselining — table below will be updated as runs land.*
+**Per question type:**
 
-### LongMemEval-S
+| Question type | Accuracy |
+|---------------|----------|
+| single-session-assistant | 53/56 = 94.6% |
+| single-session-user | 64/68 = 94.1% |
+| temporal-reasoning | 88/131 = 67.2% |
+| single-session-preference | 17/30 = 56.7% |
+| knowledge-update | 43/78 = 55.1% |
+| multi-session | 70/133 = 52.6% |
 
-| Configuration | Overall | Single-session-assistant | Single-session-preference | Source |
-|---------------|---------|--------------------------|---------------------------|--------|
-| Honest-extracted baseline (n=500) | 43.6% | — | 16% | 2026-05-03 |
-| Raw-fallback (n=500) | 42.0% | — | 27% | 2026-05-03 |
+The current weakest question types are where memory systems earn their keep: multi-session recall, synthesis, knowledge-update (where old facts are replaced), and single-session preference (17/30 — small sample).
 
-Honest extraction (LLM-derived beliefs) and raw fallback (full-turn ingest) have different failure modes — see `weft_search_all` for the analysis memories tagged `longmemeval`.
+This is also where the current Weft model of "remember only what the user asks" struggles the most. 
 
-### LongMemEval-M
+These are active improvement targets, and the first update I'm making to Weft after launch. 
 
-**Publication status: unresolved.** Historical M runs exist, but their summaries were generated from labelled-result rows rather than the complete reference population. Missing hypotheses and missing judge results could disappear from the denominator. Those artifacts must be rescored through the reference → hypothesis → result contract before any M headline is published.
+## How this run was built
 
-| Configuration | recall@10 | Answer correctness | Notes |
-|---------------|-----------|--------------------|----|
-| `--mode turns --tier turns` historical runs | retained in raw artifacts | **not publication-ready** | Results vary materially across May runs; ingestion completion, retrieval, reader accuracy, and infrastructure failures must be reported separately. |
+- **Agent workload, not retrieval-only.** For each of the 500 questions, a fresh agent ingested the question's full haystack history through Weft's normal write path — raw memories *and* per-turn episode records (dual representation) — then answered the question using Weft's recall tools under a bounded tool-round policy. The model in the benchmark never sees the question_type, answer, or questionID, which might allow it to "[cheat](https://mediumroast.dev/blog/we-were-not-beating-longmemeval/)"
+- **Turn-tier retrieval.** Answers were produced from turn-level hybrid recall over the ingested corpus (`--tier turns`), the representation LongMemEval's multi-session questions stress.
+- **Official scoring.** Every hypothesis was judged by `gpt-4o` with LongMemEval's official answer-check prompt. The judge reviewed the answer from the agent against what it expected. Only answers that passed the judge were marked correct.
+- **Isolation.** The run wrote only to a disposable local Docker Postgres (`lme_bench` database). Database identity was verified before execution (Postgres `system_identifier` matched host-vs-container; loopback bind confirmed). Nothing touched any hosted database.
+- **Budget discipline.** A conservative reservation ledger priced every provider call before dispatch. Before the full run, a 4-question paid calibration measured the real per-case cost and produced the spend projection; the run was explicitly approved against that projection. Thinking tokens were not calculated, so the system used a "best guess" estimate for the conservative run ledger.
+- **Integrity.** The exact source files, dataset checksum, manifest, selection order, pricing, and tool-round policy are pinned by hash in the run manifest; the runner refuses to execute if any pinned file changes. Per-question checkpoints were written before each provider call; the run is crash-resumable, and every recovery is journaled.
 
-The repaired scorer uses the reference question set as the denominator. A question with no produced hypothesis or no judge label remains incorrect and is reported under its distinct pipeline-failure category. Duplicate or unknown IDs and malformed labels fail the summary rather than being silently counted or omitted.
+## Validating it yourself
 
-## How to reproduce
-
-### Prerequisites
+Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker, a LongMemEval checkout with the cleaned S dataset, and provider credentials for the writer and judge models.
 
 ```bash
-# Clone LongMemEval
-git clone https://github.com/xiaowu0162/LongMemEval ~/code/LongMemEval
-# Download the cleaned datasets per the LongMemEval README
+# 1. Local infrastructure (disposable Postgres + Redis)
+docker compose -f docker-compose.weft.yml up -d
+
+# 2. Create a benchmark database (the runner refuses databases named "weft")
+docker compose -f docker-compose.weft.yml exec -T postgres \
+  psql -U weft -d weft -c 'CREATE DATABASE lme_bench'
+
+# 3. Point every Weft DB variable at the local benchmark database
+export DATABASE_URL="postgresql://weft:weft_local@127.0.0.1:5433/lme_bench"
+export WEFT_DATABASE_URL="$DATABASE_URL"
+export LONGMEMEVAL_DATABASE_URL="$DATABASE_URL"
+
+# 4. Prepare the run (offline: normalizes the dataset, pins source hashes,
+#    writes the manifest — 500 questions, first-occurrence dedupe)
+uv run python -m benchmarks.longmemeval.faithful_s36 prepare \
+  --dataset benchmarks/longmemeval/data/longmemeval_s_full_first_occurrence.json \
+  --manifest benchmarks/longmemeval/manifests/longmemeval_s_full_turns_manifest.json \
+  --profile gpt6-luna-full-s-turns-v1 --writer-model gpt-6-luna \
+  --max-budget-usd 150 --owner-id <your-run-id> \
+  --judge-root /path/to/LongMemEval
+
+# 5. Calibrate (paid, small): measures real per-case cost, ends HOLD_FOR_APPROVAL
+uv run python -m benchmarks.longmemeval.faithful_s36 calibrate ... \
+  --case-limit 4 --execute --dsn "$DATABASE_URL"
+
+# 6. Approve against the measured projection (human gate, recorded in the receipt)
+uv run python -m benchmarks.longmemeval.faithful_s36 approve ... \
+  --projected-total-usd <measured> --approved-by <you>
+
+# 7. Run the full split (resumable; checkpoints survive interruption)
+uv run python -m benchmarks.longmemeval.faithful_s36 resume ... \
+  --execute --dsn "$DATABASE_URL"
 ```
 
-### Run the harness
+Each step's full flag set is printed by `--help`. Artifacts land under the run's artifact root: `execution-receipt.json` (status, denominators, budget), `budget-ledger.json` (every provider reservation, estimate vs actual), and `session-checkpoint.json` (per-question evidence including each judge verdict). The score is recomputable from the checkpoint: overall accuracy = judged rows with `judge.label: true` over all judged rows.
 
-```bash
-WEFT_DATABASE_URL="postgresql://weft:weft_local@localhost:5433/weft" \
-  uv run python -m benchmarks.longmemeval.adapter \
-    --dataset ~/code/LongMemEval/data/longmemeval_m_cleaned.json \
-    --mode turns \
-    --tier turns \
-    --stratified-frac 0.5 \
-    --sample-seed 0
-```
+## Limitations
 
-Outputs land in `benchmarks/longmemeval/results/` — both an answers JSONL (for the LongMemEval evaluator) and a `recall_at_10` summary.
+- **Single repetition.** One complete run is evidence, not a publication gate — the protocol below calls for 3–5 independent repetitions before headline claims.
+- **Model and system are confounded.** These numbers measure Weft-as-shipped with `gpt-6-luna` as the writer. The numbers might change based on the model you use for your system.
+- **Estimate vs invoice.** The ledger's $4.79 is a conservative reservation estimate, not a billing guarantee. Actuals are reported separately and were 14% of estimate on this run.
+- **User-directed memory policy.** See the note at the top: the current write path saves what the user designates. Systems that auto-curate conversations trade that predictability for recall, and will score differently on this benchmark.
+- **Provider-free contract tests prove correctness, not quality.** They verify task shape, artifacts, and fail-closed accounting without any provider call; only paid runs measure answer quality.
 
-### Score the answers
+## Repeatability and publication protocol
 
-Use Weft's wrapper so the metrics file receives all three pipeline artifacts and applies the complete reference denominator:
+A single aggregate run is not a keep/scrap or publication gate:
 
-```bash
-OPENAI_API_KEY=... uv run python -m benchmarks.longmemeval.judge \
-  --hyp benchmarks/longmemeval/results/<your-run>.jsonl \
-  --ref ~/code/LongMemEval/data/longmemeval_m_cleaned.json \
-  --model gpt-4o
-```
+1. Pin the code commit, dataset checksum, model identifiers, prompts, question IDs and order, and seeds. (The run manifest does this mechanically; the runner refuses drift.)
+2. Run 3–5 independent repetitions per arm, or hold stochastic substrate constant with a versioned fixed-materialization snapshot and repeat only the intended variable.
+3. Preserve raw hypotheses, judge results, ledgers, receipts, and failure logs for every repetition.
+4. Report stages separately: ingestion completion, retrieval recall, answer correctness, abstention behavior, and infrastructure failures. Failed cases stay in the denominator and are counted by cause.
+5. Record estimated cost before execution and actual cost afterward; paid runs require explicit operator approval against the measured projection.
 
-The upstream evaluator writes `<hyp>.eval-results-<model>`; Weft then writes `<hyp>.metrics.json` with expected, hypothesis, judge-result, missing-stage, correctness, and per-type counts. Scoring an existing labelled sidecar is free; generating missing labels is paid.
-
-### Repeatability and publication protocol
-
-A single aggregate run is not a keep/scrap or publication gate. Before publishing M or comparing retrieval arms:
-
-1. Pin the code commit, dataset checksum, model identifiers, prompt/configuration, sample IDs, and random seeds.
-2. Either run **3–5 independent repetitions per arm**, or hold stochastic substrate generation constant with a versioned fixed-materialization snapshot and repeat only the intended variable.
-3. Preserve raw hypotheses, labelled results, metrics, stats, and failure logs for every repetition.
-4. Report distributions and these stages separately: ingestion completion, retrieval recall, reader accuracy, preference compliance, enumeration, unsupported answers, and infrastructure failures.
-5. Treat missing hypotheses/results as incorrect. Do not compress elapsed time into evidence of completed coverage.
-6. Record estimated cost before execution and actual cost afterward. Paid runs require explicit operator approval.
-
-### Session continuity A/B/C benchmark
+## Session continuity A/B/C benchmark
 
 The deterministic continuity suite under `benchmarks/personal_agent/` tests a
 separate outcome from LongMemEval: whether a later session can recover omitted
@@ -139,47 +140,22 @@ exact wording, rejected rationale, supersession, structural containment of
 instruction-shaped text inside a quoted-evidence envelope, incomplete evidence,
 and project/user isolation. They do **not** prove reader-model instruction
 non-compliance or answer quality. `continuity_eval.py` writes deterministic
-per-arm mechanics and keeps those paid metrics explicitly pending. Repeated
-paid reader evaluation remains
-`PENDING-PAID-EVALUATION`, and neither Arm B automation nor Arm C materializer
-wiring is enabled by the benchmark.
-
-Run deterministic mechanics without an LLM:
+per-arm mechanics and keeps paid metrics explicitly `PENDING-PAID-EVALUATION`.
 
 ```bash
 uv run pytest benchmarks/personal_agent/tests/test_paah_continuity.py -q
 ```
 
-A future paid run must repeat each enabled arm 3–5 times, preserve raw
-artifacts, and report correctness, unsupported claims, evidence citation,
-stale/superseded answers, instruction non-compliance, activation precision,
-latency, token cost, and infrastructure failures separately.
+## Cost expectations (LongMemEval-S, agent workload, 2026-09-29 run)
 
-### Cost expectations
+| Stage | Measured |
+|-------|----------|
+| 4-question calibration smoke | $0.0045 actual / $0.037 reserved |
+| Full 500-question run | **$0.65 actual** / $4.79 reserved (~5.3 h) |
 
-| Tier | Wall time | Embedding cost (OpenAI) | Judge cost (GPT-4o) |
-|------|-----------|-------------------------|--------------------|
-| S, n=3 smoke | ~5 min | <$0.05 | <$0.05 |
-| M, strat50% (n≈251) | ~5–6 hours | ~$5–8 | ~$2–3 |
-| M, full (n=500) | ~10–12 hours | ~$10–15 | ~$4–6 |
+## Roadmap gates
 
-## RC-FL-20 qualification preparation
+Falsifiable claims for the retrieval roadmap, recorded against commits:
 
-`uv run python scripts/prepare_rc_qualification.py --output evidence/qualification.md --budget evidence/benchmark-budget.json` emits the deterministic qualification run card and budget. The generated status is always **`PREPARED — NOT AUTHORIZED`**. Preparation does not execute a provider, database, hosted arm, Reader, judge, or paid call; the budget is a non-authorizing spend guardrail, not permission to execute.
-
-The run card validates an immutable A/B/C matrix: required local FastEmbed `BAAI/bge-small-en-v1.5` primary (native/signal 384, stored/output 768), optional hosted OpenAI `text-embedding-3-small` controlled comparison (1536/768), and optional hosted `text-embedding-3-large` ceiling comparison (3072/3072). Every arm's role, provider/model, local/hosted state, execution state/text, credential requirement, comparison semantics, profile ID, snapshot ID, and dimension fields are canonical. Hosted profiles remain disabled until a separate dated operator authorization supplies scope, frozen prices, and a non-authorizing spend guardrail.
-
-Controls include exact execution-boundary keys (`authorization_required_before_execution=true`, credentials prohibited from manifest/CLI, preparation-only, no provider/paid/database calls, hosted disabled, and no authorization placeholder), label/gold-blind TaskShape derivation, and source-byte provenance. `recall_k=10` is the retrieval metric cutoff; Reader candidate width is the per-question TaskShape `top_k` (10 or 30), widened only by explicit `max(requested_top_k, derived_top_k)`. The validator re-reads every declared repository-relative source under an explicit root, rejects traversal/symlinks and path-set changes, and recomputes the source-boundary digest from current bytes. It never trusts HEAD metadata or its own stored hashes.
-
-Both planned tiers are explicit: S smoke (5) plus M stratified (251) equals **256 questions per repetition**. Reader and judge each have 256 question-stage calls per repetition and 768 over three repetitions. Embedding item count remains dataset-dependent until a frozen ingest manifest exists. Local embedding provider spend is separately known as $0, but local all-stage and all-arm totals remain unknown until Reader/judge prices and item counts are known; no known total `$0` is emitted. Provider-free contract, metamorphic, summary, and local Docker receipts remain contract evidence only, never lift claims; historical results remain historical.
-
-The external dataset checksum, exact sampled question-ID digest, ordered ID manifest/hash, dated authorization, frozen prices, and cleared blockers are deliberately absent in this checkout. A separate execution-readiness validator accepts only lowercase 64-hex identities, exactly 251 unique nonempty ordered IDs, and canonical bindings. `ordered_question_ids_sha256` is SHA-256 of the canonical ordered-ID JSON list; `question_ids_and_order_digest` is SHA-256 of canonical JSON `{"dataset_sha256": <dataset checksum>, "ordered_question_ids": <list>}`, so an arbitrary digest or reordered/duplicated list cannot pass. Authorization is a canonical record over operator/decision IDs, the exact qualification purpose and hosted arms, max spend/currency, timezone-aware `authorized_at`, and canonical model/profile IDs plus `prices_sha256`; its record hash is recomputed, never trusted. Each embedding/Reader/judge price is an amount/unit/currency/source/timezone-aware `as_of` record, is bound by `prices_sha256`, and participates in readiness/budget arithmetic; the maximum-spend guardrail remains a hard stop, not approval. Preparation reads no environment values and does not load `.env`; readiness accepts only unique sanitized key names (never values), rejecting forbidden or secret/path-shaped names. Canonical serialization is UTF-8 JSON with sorted keys and compact separators, hashed with SHA-256.
-
-## Falsification gates
-
-The retrieval roadmap commits to falsifiable claims at each phase, not pure improvements:
-
-- **Phase 1 (turn-tier compounding + RRF dispatch)** — turn recall@10 must lift ≥3 points over baseline; Oracle must lift ≥1
-- **Phase 2 (hierarchical retrieval)** — M-tier overall ≥ 0.75 with `WEFT_HIERARCHICAL=1`
-
-Numbers are recorded against the corresponding commit in `tests/baselines.md` and the `longmemeval` topic in Weft itself. If a phase fails its gate, the design is wrong, not the test — post-mortem before proceeding.
+- **Multi-session and knowledge-update lift** — the two weakest types (52.6%, 55.1%) are the active targets; a retrieval change ships only if these move without regressing single-session types.
+- **Turn-tier recall@10** — turn recall@10 must lift ≥3 points over baseline; Oracle must lift ≥1.

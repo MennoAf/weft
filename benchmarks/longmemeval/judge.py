@@ -571,7 +571,7 @@ def cli(
 
     click.echo("\nLongMemEval results:")
     click.echo(f"  overall accuracy:        {metrics['overall_accuracy']:.4f}")
-    click.echo(f"  taREDACTED accuracy:  {metrics['task_averaged_accuracy']:.4f}")
+    click.echo(f"  task-averaged accuracy:  {metrics['task_averaged_accuracy']:.4f}")
     click.echo(f"  n={metrics['n_total']} correct={metrics['n_correct_total']}")
     click.echo("")
     click.echo("  by question type:")

@@ -32,7 +32,7 @@ def extract_project_ref(dsn: str) -> str | None:
         return m.group(1)
 
     # Pooler connection: ref appears as the database name or in the URL path
-    # e.g. REDACTED
+    # e.g. postgresql://postgres.REFHERE:pw@aws-0-us-east-1.pooler.supabase.com:6543/postgres
     # or the user is postgres.REFHERE
     m = re.search(r"postgres\.([a-z]{20,})", dsn)
     if m:
