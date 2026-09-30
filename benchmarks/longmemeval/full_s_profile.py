@@ -123,11 +123,27 @@ def normalize_first_occurrence(records: Any) -> tuple[list[dict[str, Any]], dict
     return normalized, metadata
 
 
+def normalize_turn_tier_expansion_slots(value: Any) -> int:
+    """Validate the pinned turn-tier expansion depth (profile/manifest field).
+
+    The default is 0 (expansion off); a pinned value must be a non-negative
+    integer. Anything else refuses the manifest rather than silently
+    reinterpreting the profile.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise FullSProfileError(
+            "turn_tier_expansion_slots must be a non-negative integer, "
+            f"got {value!r}"
+        )
+    return value
+
+
 def build_full_s_manifest(
     source_path: Path,
     normalized_path: Path,
     *,
     source_hash_paths: Sequence[str] = SOURCE_HASH_PATHS,
+    turn_tier_expansion_slots: int = 0,
 ) -> dict[str, Any]:
     """Write normalized source data and return the deterministic turns manifest."""
     source_path = Path(source_path)
@@ -148,6 +164,14 @@ def build_full_s_manifest(
         if not path.is_file():
             raise FullSProfileError(f"source for manifest hash is missing: {name}")
         code_hashes[name] = sha256_file(path)
+    slots = normalize_turn_tier_expansion_slots(turn_tier_expansion_slots)
+    retrieval_block: dict[str, Any] = {
+        "tier": "turns", "top_k": 10, "recall_k": 10, "label_blind": True,
+    }
+    # Default 0 omits the key so default manifests stay byte-identical to
+    # the pre-expansion profile artifacts.
+    if slots:
+        retrieval_block["turn_tier_expansion_slots"] = slots
     return {
         "schema": "weft.longmemeval.pilot.v1",
         "status": "PREPARED_NOT_AUTHORIZED",
@@ -177,7 +201,7 @@ def build_full_s_manifest(
         "arms": [FULL_S_ARM],
         "repetitions": 1,
         "ingest": {"mode": "dual", "representations": ["raw_memory", "episode_turns"]},
-        "retrieval": {"tier": "turns", "top_k": 10, "recall_k": 10, "label_blind": True},
+        "retrieval": retrieval_block,
         "reader": {"provider": "openai", "model": FULL_S_WRITER_MODEL, "max_output_tokens": 2048},
         "judge": {"provider": "openai", "model": FULL_S_JUDGE_MODEL},
         "cost": {
@@ -209,9 +233,14 @@ def prepare_full_s_manifest(
     manifest_path: Path = DEFAULT_MANIFEST,
     *,
     source_hash_paths: Sequence[str] = SOURCE_HASH_PATHS,
+    turn_tier_expansion_slots: int = 0,
 ) -> dict[str, Any]:
     """Prepare the normalized dataset and atomically publish its run manifest."""
-    manifest = build_full_s_manifest(source_path, normalized_path, source_hash_paths=source_hash_paths)
+    manifest = build_full_s_manifest(
+        source_path, normalized_path,
+        source_hash_paths=source_hash_paths,
+        turn_tier_expansion_slots=turn_tier_expansion_slots,
+    )
     _write_json(Path(manifest_path), manifest)
     return manifest
 

@@ -76,6 +76,34 @@ Tier = Literal["belief", "turns", "auto", "belief-view", "replay", "production-b
 _BENCHMARK_USER_ID = "longmemeval-bench"
 
 
+def _resolve_turn_tier_expansion_slots(
+    manifest_retrieval: dict | None,
+    requested: int,
+) -> int:
+    """Reconcile the manifest-pinned turn-tier expansion depth with the run.
+
+    Mirrors the dataset-checksum drift refusal: a manifest that pins
+    ``retrieval.turn_tier_expansion_slots`` must match the runner invocation
+    exactly; a manifest without the pin uses the requested value as-is.
+    """
+    pinned = None
+    if manifest_retrieval:
+        pinned = manifest_retrieval.get("turn_tier_expansion_slots")
+    if pinned is None:
+        return requested
+    if isinstance(pinned, bool) or not isinstance(pinned, int) or pinned < 0:
+        raise ValueError(
+            "manifest turn_tier_expansion_slots must be a non-negative int, "
+            f"got {pinned!r}"
+        )
+    if pinned != requested:
+        raise ValueError(
+            "turn_tier_expansion_slots drift: manifest pins "
+            f"{pinned}, runner invoked with {requested}"
+        )
+    return pinned
+
+
 # ----------------------------------------------------------------------
 # Policy
 # ----------------------------------------------------------------------
@@ -615,6 +643,7 @@ async def _retrieve_turns(
     representation_pool_limit: int | None = None,
     representation_max_sessions: int | None = None,
     session_centroid_selector: Callable[..., object] | None = None,
+    turn_tier_expansion_slots: int = 0,
 ) -> list[MemoryRecall]:
     """Turn-tier retrieval path. Returns Reader-compatible MemoryRecall list.
 
@@ -719,6 +748,7 @@ async def _retrieve_turns(
                     fusion_candidate_limit=policy.fusion_candidate_limit,
                     use_anchor_local_variant=use_anchor_local_variant,
                     include_embedded_temporal_variant=include_embedded_temporal_variant,
+                    expansion_slots=turn_tier_expansion_slots,
                 )
                 if temporal_window is not None:
                     # Keep the normal temporal retrieval as the primary list.
@@ -738,6 +768,7 @@ async def _retrieve_turns(
                         fusion_candidate_limit=policy.fusion_candidate_limit,
                         use_anchor_local_variant=use_anchor_local_variant,
                         include_embedded_temporal_variant=include_embedded_temporal_variant,
+                        expansion_slots=turn_tier_expansion_slots,
                     )
                     for anchor, window_turns in windowed.items():
                         baseline_turns = anchored.setdefault(anchor, [])
@@ -803,6 +834,7 @@ async def _retrieve_turns(
             representation_max_sessions=representation_max_sessions,
             turn_session_map=turn_session_map,
             session_centroid_selector=session_centroid_selector,
+            expansion_slots=turn_tier_expansion_slots,
         )
         if use_session_centroid_representation:
             turns_list = _apply_centroid_selection(
@@ -846,6 +878,7 @@ async def _recall_turns_scoped(
     representation_max_sessions: int | None = None,
     turn_session_map: Mapping[str, str] | None = None,
     session_centroid_selector: Callable[..., object] | None = None,
+    expansion_slots: int = 0,
 ) -> list[EpisodeTurn]:
     """Run one or two flat probes on one explicitly scoped connection.
 
@@ -911,6 +944,7 @@ async def _recall_turns_scoped(
                 candidate_sql_limit=candidate_sql_limit,
                 fusion_candidate_limit=fusion_candidate_limit,
                 result_limit=result_limit,
+                expansion_slots=expansion_slots,
             )
 
             if not turns_list:
@@ -942,6 +976,7 @@ async def _recall_turns_scoped(
                     candidate_sql_limit=candidate_sql_limit,
                     fusion_candidate_limit=fusion_candidate_limit,
                     result_limit=result_limit,
+                    expansion_slots=expansion_slots,
                 )
                 if turns_list and diagnostics is not None:
                     diagnostics.retry_rescued = True
@@ -989,6 +1024,7 @@ async def _recall_turns_scoped(
                         diag_callback=_variant_diag,
                         candidate_sql_limit=candidate_sql_limit,
                         fusion_candidate_limit=fusion_candidate_limit,
+                        expansion_slots=expansion_slots,
                     )
                 except Exception as exc:
                     # The optional arm must never turn a valid baseline into
@@ -1131,6 +1167,7 @@ async def retrieve(
     representation_pool_limit: int | None = None,
     representation_max_sessions: int | None = None,
     session_centroid_selector: Callable[..., object] | None = None,
+    turn_tier_expansion_slots: int = 0,
 ) -> list[MemoryRecall]:
     """Run the question-type-appropriate retrieval and return ranked memories.
 
@@ -1307,6 +1344,7 @@ async def retrieve(
             representation_pool_limit=representation_pool_limit,
             representation_max_sessions=representation_max_sessions,
             session_centroid_selector=session_centroid_selector,
+            turn_tier_expansion_slots=turn_tier_expansion_slots,
         )
 
     if tier == "turns":
@@ -1333,6 +1371,7 @@ async def retrieve(
             representation_pool_limit=representation_pool_limit,
             representation_max_sessions=representation_max_sessions,
             session_centroid_selector=session_centroid_selector,
+            turn_tier_expansion_slots=turn_tier_expansion_slots,
         )
         # Never-miss fallback — mirrors the same resilience added to
         # weft_recall (empty turns tier → belief recall). A question the

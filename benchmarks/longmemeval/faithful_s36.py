@@ -294,6 +294,16 @@ def _select_instances(
             raise FaithfulRunError("full-S manifest must bind exactly 500 cases and the turns-only arm")
         if manifest.get("retrieval", {}).get("tier") != "turns":
             raise FaithfulRunError("full-S manifest retrieval tier must be turns")
+        expansion = manifest.get("retrieval", {}).get("turn_tier_expansion_slots")
+        if expansion is not None and (
+            isinstance(expansion, bool)
+            or not isinstance(expansion, int)
+            or expansion < 0
+        ):
+            raise FaithfulRunError(
+                "full-S manifest turn_tier_expansion_slots must be a "
+                "non-negative integer when pinned"
+            )
         if manifest.get("ingest", {}).get("mode") != "dual":
             raise FaithfulRunError("full-S manifest must retain dual ingestion")
         if manifest.get("dataset", {}).get("sha256") != _dataset_hash(dataset_path):
