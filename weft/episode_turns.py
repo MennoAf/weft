@@ -770,23 +770,27 @@ async def recall_turns(
     # equivalent to the historical inline form while allowing PostgreSQL to
     # use the benchmark snapshot's GIN index. Keep the default inline SQL for
     # production callers until the gated migration is universally applied.
+    from weft.store import build_or_tsquery
+
+    keyword_tsquery = build_or_tsquery(query) or ""
     keyword_vector = "t.search_tsv" if use_stored_search_tsv else "to_tsvector('english', t.content)"
     keyword_sql = f"""
         SELECT t.*
           FROM episode_turns t
           {_join_episodes_if_needed(project_id)}
-          WHERE {keyword_vector}
-                @@ websearch_to_tsquery('english', $1)
+          WHERE {keyword_vector} @@ to_tsquery('english', $1)
             {sql_filter}
-          ORDER BY ts_rank(
-              {keyword_vector},
-              websearch_to_tsquery('english', $1)
-          ) DESC, t.id
+          ORDER BY ts_rank({keyword_vector}, to_tsquery('english', $1)) DESC, t.id
           LIMIT ${len(params) + 2}
     """
+    keyword_args = [keyword_tsquery, *params, candidate_limit]
     started = time.perf_counter() if sql_diag_callback is not None else 0.0
     try:
-        keyword_rows = await db.fetch(keyword_sql, query, *params, candidate_limit)
+        keyword_rows = (
+            await db.fetch(keyword_sql, *keyword_args)
+            if keyword_tsquery
+            else []
+        )
     except Exception as exc:
         _emit_sql_diag(
             phase="keyword", sql=keyword_sql, started=started,

@@ -583,6 +583,8 @@ async def temporal_anchor(
     include_embedded_temporal_variant: bool = False,
     use_event_focused_anchor_representation: bool = False,
     use_stored_search_tsv: bool = False,
+    vector_weight: float = 1.0,
+    keyword_weight: float = 0.3,
 ) -> dict[str, list[EpisodeTurn]]:
     """Per-anchor turn recall for multi-anchor temporal questions.
 
@@ -618,6 +620,11 @@ async def temporal_anchor(
             trailing relative-time wording before the original query probe.
         use_stored_search_tsv: benchmark-only opt-in forwarded to
             ``recall_turns`` for the generated FTS column.
+        vector_weight / keyword_weight: RRF fusion weights forwarded to
+            ``recall_turns`` for every probe. The turn tier weights the
+            vector half above the keyword half so a populous keyword half
+            cannot demote vector-only gold turns through double RRF
+            contributions.
 
     Returns:
         ``{anchor_text: [EpisodeTurn, ...]}`` ordered as anchors appear
@@ -685,6 +692,8 @@ async def temporal_anchor(
                     _sql_diag if sql_diag_callback is not None else None
                 ),
                 use_stored_search_tsv=use_stored_search_tsv,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
             )
             if diag_callback is not None:
                 try:
@@ -818,6 +827,8 @@ async def temporal_anchor(
                     _sql_diag if sql_diag_callback is not None else None
                 ),
                 use_stored_search_tsv=use_stored_search_tsv,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
             )
             if diag_callback is not None:
                 try:

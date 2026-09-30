@@ -882,7 +882,9 @@ async def _weft_recall_turns(
                 anchored = await temporal_anchor(
                     app.pool, query,
                     project_id=resolved_project,
-                    top_k_per_anchor=max(1, limit // 2),
+                    top_k_per_anchor=min(limit, 10),
+                    candidate_sql_limit=min(limit, 10) * 5,
+                    anchor_result_limit=limit,
                     embedder=app.embedding,
                     as_of=as_of,
                     use_stored_search_tsv=use_stored_search_tsv,

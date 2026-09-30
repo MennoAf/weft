@@ -336,6 +336,40 @@ class TestExtractAnchors:
 # --- Store: hybrid recall_turns ---
 
 
+async def test_turn_keyword_query_uses_or_joined_content_lexemes():
+    from weft.store import build_or_tsquery
+
+    assert build_or_tsquery("autographed baseballs collection first three months how many added") == (
+        "autographed | baseballs | collection | first | three | months | how | many | added"
+    )
+    # PostgreSQL's english configuration stems these forms during to_tsquery;
+    # the query builder itself preserves safe content lexemes without ANDing.
+    assert build_or_tsquery("added many") == "added | many"
+
+
+async def test_recall_turns_keyword_or_matches_separate_terms(pool):
+    episode = await create_episode(
+        pool, EpisodeCreate(title="OR keyword fixture", project_id="proj-or-keyword")
+    )
+    first = await append_turn(
+        pool, EpisodeTurnCreate(
+            episode_id=episode.id, role=TurnRole.user,
+            content="added to the baseball collection",
+        ),
+    )
+    second = await append_turn(
+        pool, EpisodeTurnCreate(
+            episode_id=episode.id, role=TurnRole.user,
+            content="many months passed before collecting",
+        ),
+    )
+
+    results = await recall_turns(
+        pool, "added many", project_id="proj-or-keyword", top_k=5, embedding=None,
+    )
+    assert {turn.id for turn in results} == {first.id, second.id}
+
+
 async def test_recall_turns_keyword_hits(pool, episode_with_turns):
     """BM25 half should surface turns whose content matches the query
     even when no embedding is supplied."""
@@ -630,6 +664,107 @@ async def test_weft_count_occurrences_returns_distinct_conversations(
         len(occurrence["occurrence_id"]) == 10
         for occurrence in day_result["occurrences"]
     )
+
+
+async def test_weft_recall_uses_wider_bounded_turn_window(ctx, monkeypatch):
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured.update(kwargs)
+        return {args[1]: []}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-window",
+        tier="turns", limit=10,
+    )
+    assert result["count"] == 0
+    assert captured["top_k_per_anchor"] == 10
+    assert captured["candidate_sql_limit"] == 50
+    assert captured["anchor_result_limit"] == 10
+
+
+def _fusion_row(turn_id: str) -> dict:
+    """Minimal episode_turns row accepted by _rrf_fuse_turn_rows."""
+    return {
+        "id": turn_id,
+        "episode_id": "ep-fusion",
+        "turn_index": 0,
+        "role": "user",
+        "content": f"fusion fixture {turn_id}",
+        "occurred_at": datetime(2026, 1, 5, tzinfo=timezone.utc),
+        "trace_id": None,
+        "importance_score": None,
+        "token_count": 4,
+        "user_id": "test-user-default",
+        "created_at": datetime(2026, 1, 5, tzinfo=timezone.utc),
+    }
+
+
+def test_rrf_fuse_vector_dominant_weights_keep_vector_only_gold():
+    """A vector-only gold turn survives a populous keyword half only when
+    keyword RRF contributions are weighted below vector contributions.
+
+    49 double-listed noise turns outrank the vector-rank-1 gold when the
+    halves are equally weighted (the cycle-2 dilution pathology); with
+    vector 1.0 / keyword 0.3 the gold turn re-enters the top-10 window.
+    """
+    from weft.episode_turns import _rrf_fuse_turn_rows
+
+    gold = _fusion_row("et-gold-vector-only")
+    doubles = [_fusion_row(f"et-double-{i:02d}") for i in range(49)]
+    keyword_only = [_fusion_row(f"et-kw-{i:02d}") for i in range(5)]
+    vector_rows = [gold, *doubles]
+    keyword_rows = [*doubles, *keyword_only]
+
+    def fused_ids(vector_weight: float, keyword_weight: float) -> list[str]:
+        pairs = _rrf_fuse_turn_rows(
+            vector_rows,
+            keyword_rows,
+            candidate_limit=50,
+            top_k=10,
+            vector_weight=vector_weight,
+            keyword_weight=keyword_weight,
+        )
+        return [turn.id for turn, _ in pairs]
+
+    equal_weight = fused_ids(0.5, 0.5)
+    weighted = fused_ids(1.0, 0.3)
+
+    assert "et-gold-vector-only" not in equal_weight
+    assert "et-gold-vector-only" in weighted
+    assert weighted.index("et-gold-vector-only") < 10
+
+
+async def test_temporal_anchor_forwards_vector_dominant_fusion_weights(monkeypatch):
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_recall_turns(pool, query, **kwargs):
+        captured.update(kwargs)
+        return [
+            EpisodeTurn(
+                id="et-anchor-hit", episode_id="ep", turn_index=0,
+                role=TurnRole.user, content="anchor hit",
+                occurred_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            )
+        ]
+
+    monkeypatch.setattr(turn_recall_module, "recall_turns", fake_recall_turns)
+    result = await turn_recall_module.temporal_anchor(
+        None,
+        "quarterly planning notes without anchors",
+        top_k_per_anchor=5,
+    )
+
+    assert captured["vector_weight"] == 1.0
+    assert captured["keyword_weight"] == 0.3
+    assert [t.id for t in result["quarterly planning notes without anchors"]] == [
+        "et-anchor-hit"
+    ]
 
 
 async def test_weft_recall_tier_turns_returns_turns_array(ctx, episode_with_turns):
