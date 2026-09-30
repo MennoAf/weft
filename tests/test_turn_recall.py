@@ -981,3 +981,54 @@ async def test_weft_recall_turn_tier_expansion_slots_default_on(ctx, monkeypatch
     assert captured["expansion_slots"] == 5
     assert result["count"] == 8
     assert len(result["turns"]) == 8
+
+
+async def test_weft_recall_expansion_slots_omitted_uses_constant(ctx, monkeypatch):
+    """Omitting expansion_slots preserves the round-7 constant behavior (5)."""
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured["expansion_slots"] = kwargs.get("expansion_slots")
+        return {args[1]: []}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-omit",
+        tier="turns", limit=3,
+    )
+    assert captured["expansion_slots"] == 5
+    assert result["count"] == 0
+
+
+async def test_weft_recall_expansion_slots_explicit_overrides(ctx, monkeypatch):
+    """Explicit expansion_slots (8, or 0 = off) reaches recall_turns as-is."""
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured["expansion_slots"] = kwargs.get("expansion_slots")
+        return {args[1]: []}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    await weft_recall(
+        ctx, query="saved recall query", project_id="proj-pinned",
+        tier="turns", limit=3, expansion_slots=8,
+    )
+    assert captured["expansion_slots"] == 8
+    await weft_recall(
+        ctx, query="saved recall query", project_id="proj-pinned",
+        tier="turns", limit=3, expansion_slots=0,
+    )
+    assert captured["expansion_slots"] == 0
+
+
+async def test_weft_recall_expansion_slots_negative_is_input_error(ctx):
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-neg",
+        tier="turns", limit=3, expansion_slots=-2,
+    )
+    assert result["error"] == "Invalid input"
+    assert "expansion_slots" in result["detail"]

@@ -834,11 +834,17 @@ async def _weft_recall_turns(
     query: str,
     project_id: str | None,
     limit: int,
+    expansion_slots: int | None = None,
     resolution: ProjectResolution | None = None,
     as_of: datetime | None = None,
     use_stored_search_tsv: bool = False,
 ) -> dict:
     """Turn-tier dispatch for ``weft_recall(tier='turns'|'auto'→turns)``.
+
+    ``expansion_slots``: optional additive session-expansion depth. ``None``
+    (default) falls back to the module constant ``_TURN_TIER_EXPANSION_SLOTS``;
+    an explicit non-negative int overrides it for this call (the protected
+    funnel window stays ``limit`` turns; siblings are appended after it).
 
     Multi-anchor queries get the per-anchor split (``anchors`` map);
     everything else is a single hybrid recall keyed under the query.
@@ -855,6 +861,11 @@ async def _weft_recall_turns(
     here, not inside ``recall_turns_hierarchical`` itself, so the new
     function stays directly testable without env-var dance.
     """
+    expansion = _TURN_TIER_EXPANSION_SLOTS
+    if expansion_slots is not None:
+        # Outer weft_recall validates the argument; this defensive clamp keeps
+        # direct internal callers safe.
+        expansion = max(0, int(expansion_slots))
     try:
         cid = set_correlation_id()
         logger.debug("weft_recall.turns start [%s] query=%r", cid, query[:50])
@@ -893,16 +904,15 @@ async def _weft_recall_turns(
                     embedder=app.embedding,
                     as_of=as_of,
                     use_stored_search_tsv=use_stored_search_tsv,
-                    expansion_slots=_TURN_TIER_EXPANSION_SLOTS,
+                    expansion_slots=expansion,
                 )
 
         # Flatten dedup'd turns for a single ``turns`` array (the most
         # common consumer shape), and surface the per-anchor mapping for
         # callers that want to do anchored arithmetic. With additive
         # session expansion the array carries the protected funnel window
-        # (``limit`` turns, unchanged order) plus up to
-        # ``_TURN_TIER_EXPANSION_SLOTS`` appended session siblings.
-        expansion = _TURN_TIER_EXPANSION_SLOTS
+        # (``limit`` turns, unchanged order) plus up to ``expansion``
+        # appended session siblings.
         seen: set[str] = set()
         flat: list[dict] = []
         for turns in anchored.values():
@@ -1162,6 +1172,7 @@ async def weft_recall(
     structured_recall_mode: Literal["off", "shadow", "selective"] = "off",
     enumeration_compatibility: bool = True,
     recovery_mode: Literal["off", "deterministic", "model"] | None = None,
+    expansion_slots: int | None = None,
 ) -> dict:
     """Retrieve memories by semantic query, keyword search, or hybrid (default).
 
@@ -1190,6 +1201,10 @@ async def weft_recall(
     anchored arithmetic. When the chosen tier is 'both', the response carries `tier: "both"`
     and a `results` array of unified entries `{kind, payload, rank, rrf_score}` where `kind`
     is 'memory' or 'turn'.
+
+    expansion_slots: turn-tier only — optional additive session-expansion
+    depth appended after the protected funnel window (default: the server's
+    configured slot count; turn-tier flat path only).
     """
     if user_id is None:
         user_id = resolve_caller_user_id()
@@ -1410,6 +1425,15 @@ async def weft_recall(
         return _input_error_response(
             "weft_recall",
             ValueError("structured_recall_mode must be 'off', 'shadow', or 'selective'"),
+        )
+    if expansion_slots is not None and (
+        isinstance(expansion_slots, bool)
+        or not isinstance(expansion_slots, int)
+        or expansion_slots < 0
+    ):
+        return _input_error_response(
+            "weft_recall",
+            ValueError("expansion_slots must be a non-negative integer"),
         )
 
     # Recovery is opt-in at this seam. Resolve project-local config defensively;
@@ -1690,6 +1714,7 @@ async def weft_recall(
             project_id=resolved_structured_project,
             resolution=resolution,
             limit=limit,
+            expansion_slots=expansion_slots,
             as_of=parsed_opt_n_as_of,
             use_stored_search_tsv=use_stored_search_tsv,
         )

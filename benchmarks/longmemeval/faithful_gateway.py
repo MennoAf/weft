@@ -122,7 +122,7 @@ class FaithfulGateway:
             raise GatewayError("tool arguments must be an object")
         allowed = {
             "weft_remember": {"content", "type", "topic", "source", "confidence", "project_id", "agent_id", "workspace_id", "check_contradictions", "pinned", "review_after", "project_facets", "preference_metadata"},
-            "weft_recall": {"query", "topic", "type", "status", "project_id", "agent_id", "limit", "threshold", "mode", "retrieval_mode", "user_id", "tier"},
+            "weft_recall": {"query", "topic", "type", "status", "project_id", "agent_id", "limit", "threshold", "mode", "retrieval_mode", "user_id", "tier", "expansion_slots"},
             "weft_prime": {"project_id", "agent_id", "budget_tokens", "query", "disclosure", "mode"},
             "weft_handoff": {"summary", "in_progress", "next_steps", "open_questions", "project_id", "agent_id"},
         }[name]

@@ -120,6 +120,43 @@ def test_adapter_resolver_refuses_manifest_invocation_drift() -> None:
         resolve({"turn_tier_expansion_slots": -1}, 5)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expansion_arg", "expected_key"),
+    [(None, None), (0, 0), (8, 8)],
+)
+async def test_s36_public_recall_passes_pinned_expansion_slots(
+    expansion_arg, expected_key,
+) -> None:
+    """Pin present → the argument rides the gateway call; unset (None) → the
+    call is byte-identical to the pre-expansion invocation (key omitted)."""
+    from benchmarks.longmemeval import faithful_s36
+
+    class _Gateway:
+        def __init__(self):
+            self.calls: list = []
+
+        async def call(self, name, arguments):
+            self.calls.append((name, dict(arguments)))
+            return {"results": [], "count": 0}
+
+    class _Shape:
+        top_k = 10
+
+    gateway = _Gateway()
+    kwargs = {} if expansion_arg is None else {"expansion_slots": expansion_arg}
+    await faithful_s36._public_recall(
+        gateway, "question", _Shape(), "proj-x", **kwargs,
+    )
+
+    name, args = gateway.calls[0]
+    assert name == "weft_recall"
+    if expected_key is None:
+        assert "expansion_slots" not in args
+    else:
+        assert args["expansion_slots"] == expected_key
+
+
 class _Pool:
     def acquire(self):
         return _async_context(_Conn())

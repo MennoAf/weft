@@ -2111,14 +2111,28 @@ async def resume_run(
         )
 
 
-async def _public_recall(gateway: object | None, question: str, shape: Any, project_id: str) -> str:
-    """Call public recall only through an explicitly supplied gateway."""
+async def _public_recall(
+    gateway: object | None,
+    question: str,
+    shape: Any,
+    project_id: str,
+    expansion_slots: int | None = None,
+) -> str:
+    """Call public recall only through an explicitly supplied gateway.
+
+    ``expansion_slots``: when None (profile does not pin a depth), the
+    argument is omitted entirely so the call is identical to the
+    pre-expansion invocation and the server applies its own default.
+    """
     if gateway is None or not hasattr(gateway, "call"):
         raise ExecutionGateError("public recall gateway is required; no hidden/background fallback")
-    response = await gateway.call("weft_recall", {
+    arguments: dict[str, Any] = {
         "query": question, "project_id": project_id, "agent_id": "faithful-s36",
         "limit": shape.top_k, "tier": "auto", "mode": "hybrid", "retrieval_mode": "face",
-    })
+    }
+    if expansion_slots is not None:
+        arguments["expansion_slots"] = int(expansion_slots)
+    response = await gateway.call("weft_recall", arguments)
     if not isinstance(response, Mapping):
         raise AgentExecutionError("weft_recall returned a non-object")
     return json.dumps(response, ensure_ascii=False, sort_keys=True)
