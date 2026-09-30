@@ -256,7 +256,7 @@
     "schema": "weft.longmemeval.full-s-first-occurrence.v1",
     "source_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
   },
-  "profile": "gpt6-luna-full-s-turns-v1",
+  "profile": "gpt6-luna-full-s-turns-v2-exp8",
   "reader": {
     "max_output_tokens": 2048,
     "model": "gpt-6-luna",
@@ -267,7 +267,8 @@
     "label_blind": true,
     "recall_k": 10,
     "tier": "turns",
-    "top_k": 10
+    "top_k": 10,
+    "turn_tier_expansion_slots": 8
   },
   "schema": "weft.longmemeval.pilot.v1",
   "selection": {
@@ -787,9 +788,9 @@
     "benchmarks/longmemeval/dataset.py": "bddab1f08b5676d38a8b013a0b91df257e1ca2923905fd57b72e4aef79edb4ab",
     "benchmarks/longmemeval/faithful_agent.py": "4e9ce04266fe5f98bbfc27c3420632bc275f1272798779ef4826b3c743cfe5cd",
     "benchmarks/longmemeval/faithful_budget.py": "109b3955334d97ac1a9018d726619832426997599cb9a6cbd1fdf43df4afa11c",
-    "benchmarks/longmemeval/faithful_gateway.py": "3af7312b8cf1cbfec4522865e208439a5d438457040edba9716bf2b5c56d7af8",
-    "benchmarks/longmemeval/faithful_s36.py": "4be997bf59c9085f0ce4bee32532977170a3f1f3eaa8fb85b401bde24ff0738c",
-    "benchmarks/longmemeval/full_s_profile.py": "52513066fbf9a4826524a7987b75c01f67565afda54ccb0fb3942c8a0221a652",
+    "benchmarks/longmemeval/faithful_gateway.py": "a0191098a1bbc0e97bac731fe1811c93e3a9aa93d06fdee3cba3f26eb8604be9",
+    "benchmarks/longmemeval/faithful_s36.py": "db1eeea90756880cf58fe92dde58afb23fb6a347e3a524f56d7ab2bc1e892438",
+    "benchmarks/longmemeval/full_s_profile.py": "eb08bee208526cb1e604bd481151042851ede171a3f0935bc4c2c0e9e3ebda0b",
     "benchmarks/longmemeval/ingest.py": "57167358a66b9c951bf972f4cafec951814d9a411707e65387bf4f64b3979d20",
     "benchmarks/longmemeval/judge.py": "ca48f58a053dfb7f612cd22713f14c4037456ab7688942cdfeb8ffed3a92eb2b",
     "benchmarks/longmemeval/task_shape.py": "b8546ea119494029e744f90289134d59f25ef58540af85cde4fbdcb060ec0c0c"
