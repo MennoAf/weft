@@ -15,6 +15,17 @@ from typing import Any, Mapping, Sequence
 from benchmarks.longmemeval.agent_workload import sha256_file
 
 FULL_S_PROFILE = "gpt6-luna-full-s-turns-v1"
+FULL_S_EXP8_PROFILE = "gpt6-luna-full-s-turns-v2-exp8"
+# Profile registry: name -> pinned turn-tier expansion depth. The v1 profile
+# omits the field (byte-identical to the pre-expansion manifest); the exp8
+# profile pins the round-8-measured operating point (yield knee).
+FULL_S_PROFILE_EXPANSION_SLOTS = {
+    FULL_S_PROFILE: 0,
+    FULL_S_EXP8_PROFILE: 8,
+}
+# Every profile admitted to the full-S runner semantics (budgets, policies,
+# manifest validation, drift refusals).
+FULL_S_RUN_PROFILES = frozenset(FULL_S_PROFILE_EXPANSION_SLOTS)
 FULL_S_CASE_COUNT = 500
 FULL_S_MAX_BUDGET_USD = 150.0
 FULL_S_OPERATIONAL_STOP_USD = FULL_S_MAX_BUDGET_USD
@@ -123,13 +134,48 @@ def normalize_first_occurrence(records: Any) -> tuple[list[dict[str, Any]], dict
     return normalized, metadata
 
 
+def normalize_turn_tier_expansion_slots(value: Any) -> int:
+    """Validate the pinned turn-tier expansion depth (profile/manifest field).
+
+    The default is 0 (expansion off); a pinned value must be a non-negative
+    integer. Anything else refuses the manifest rather than silently
+    reinterpreting the profile.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise FullSProfileError(
+            "turn_tier_expansion_slots must be a non-negative integer, "
+            f"got {value!r}"
+        )
+    return value
+
+
 def build_full_s_manifest(
     source_path: Path,
     normalized_path: Path,
     *,
     source_hash_paths: Sequence[str] = SOURCE_HASH_PATHS,
+    profile: str = FULL_S_PROFILE,
+    turn_tier_expansion_slots: int | None = None,
 ) -> dict[str, Any]:
-    """Write normalized source data and return the deterministic turns manifest."""
+    """Write normalized source data and return the deterministic turns manifest.
+
+    ``profile`` selects from the full-S profile registry; the registry pins
+    the turn-tier expansion depth unless explicitly overridden (override must
+    match the registry pin).
+    """
+    registry_slots = FULL_S_PROFILE_EXPANSION_SLOTS.get(profile)
+    if registry_slots is None:
+        raise FullSProfileError(f"unsupported full-S profile: {profile!r}")
+    slots = (
+        normalize_turn_tier_expansion_slots(turn_tier_expansion_slots)
+        if turn_tier_expansion_slots is not None
+        else registry_slots
+    )
+    if slots != registry_slots:
+        raise FullSProfileError(
+            f"profile {profile!r} pins turn_tier_expansion_slots="
+            f"{registry_slots}; conflicting value {turn_tier_expansion_slots!r} refused"
+        )
     source_path = Path(source_path)
     normalized_path = Path(normalized_path)
     source_bytes = source_path.read_bytes()
@@ -148,10 +194,18 @@ def build_full_s_manifest(
         if not path.is_file():
             raise FullSProfileError(f"source for manifest hash is missing: {name}")
         code_hashes[name] = sha256_file(path)
+    slots = normalize_turn_tier_expansion_slots(slots)
+    retrieval_block: dict[str, Any] = {
+        "tier": "turns", "top_k": 10, "recall_k": 10, "label_blind": True,
+    }
+    # Depth 0 omits the key so v1 manifests stay byte-identical to the
+    # pre-expansion profile artifacts.
+    if slots:
+        retrieval_block["turn_tier_expansion_slots"] = slots
     return {
         "schema": "weft.longmemeval.pilot.v1",
         "status": "PREPARED_NOT_AUTHORIZED",
-        "profile": FULL_S_PROFILE,
+        "profile": profile,
         "dataset": {
             "name": normalized_path.name,
             "sha256": normalized_sha,
@@ -177,7 +231,7 @@ def build_full_s_manifest(
         "arms": [FULL_S_ARM],
         "repetitions": 1,
         "ingest": {"mode": "dual", "representations": ["raw_memory", "episode_turns"]},
-        "retrieval": {"tier": "turns", "top_k": 10, "recall_k": 10, "label_blind": True},
+        "retrieval": retrieval_block,
         "reader": {"provider": "openai", "model": FULL_S_WRITER_MODEL, "max_output_tokens": 2048},
         "judge": {"provider": "openai", "model": FULL_S_JUDGE_MODEL},
         "cost": {
@@ -209,9 +263,16 @@ def prepare_full_s_manifest(
     manifest_path: Path = DEFAULT_MANIFEST,
     *,
     source_hash_paths: Sequence[str] = SOURCE_HASH_PATHS,
+    profile: str = FULL_S_PROFILE,
+    turn_tier_expansion_slots: int | None = None,
 ) -> dict[str, Any]:
     """Prepare the normalized dataset and atomically publish its run manifest."""
-    manifest = build_full_s_manifest(source_path, normalized_path, source_hash_paths=source_hash_paths)
+    manifest = build_full_s_manifest(
+        source_path, normalized_path,
+        source_hash_paths=source_hash_paths,
+        profile=profile,
+        turn_tier_expansion_slots=turn_tier_expansion_slots,
+    )
     _write_json(Path(manifest_path), manifest)
     return manifest
 
@@ -221,12 +282,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--normalized", type=Path, default=DEFAULT_NORMALIZED)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--profile",
+        choices=tuple(FULL_S_PROFILE_EXPANSION_SLOTS),
+        default=FULL_S_PROFILE,
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    manifest = prepare_full_s_manifest(args.source, args.normalized, args.manifest)
+    manifest = prepare_full_s_manifest(
+        args.source, args.normalized, args.manifest,
+        profile=args.profile,
+    )
     print(json.dumps({
         "status": "prepared_not_authorized",
         "question_count": manifest["selection"]["count"],

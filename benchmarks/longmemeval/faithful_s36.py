@@ -42,9 +42,11 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 from benchmarks.longmemeval.agent_workload import EXPECTED_CASE_COUNT, load_manifest, sha256_file
 from benchmarks.longmemeval.full_s_profile import (
     FULL_S_CASE_COUNT,
+    FULL_S_EXP8_PROFILE,
     FULL_S_MAX_BUDGET_USD,
     FULL_S_OPERATIONAL_STOP_USD,
     FULL_S_PROFILE,
+    FULL_S_RUN_PROFILES,
     FULL_S_WRITER_MODEL,
 )
 from benchmarks.longmemeval.dataset import Instance, load_split
@@ -161,7 +163,7 @@ def _resolve_run_profile(
         if model != LUNA_MODEL or budget != DEFAULT_TOTAL_BUDGET_USD:
             raise FaithfulRunError("legacy runs remain fixed to GPT-5.6 Luna and the $20 cap")
         return profile, model, budget, DEFAULT_CALIBRATION_BUDGET_USD, Pricing(), "auto", None
-    if profile == FULL_S_PROFILE:
+    if profile in FULL_S_RUN_PROFILES:
         if writer_model != FULL_S_WRITER_MODEL or max_budget_usd != FULL_S_MAX_BUDGET_USD:
             raise FaithfulRunError("full-S profile requires --writer-model gpt-6-luna and --max-budget-usd 150")
         if selection_policy is not None and (
@@ -289,11 +291,21 @@ def _select_instances(
         raise FaithfulRunError("source manifest must contain ordered string question IDs")
     if len(ordered) != len(set(ordered)):
         raise FaithfulRunError("source manifest contains duplicate question IDs")
-    if manifest.get("profile") == FULL_S_PROFILE:
+    if manifest.get("profile") in FULL_S_RUN_PROFILES:
         if len(ordered) != FULL_S_CASE_COUNT or manifest.get("arms") != ["turns"]:
             raise FaithfulRunError("full-S manifest must bind exactly 500 cases and the turns-only arm")
         if manifest.get("retrieval", {}).get("tier") != "turns":
             raise FaithfulRunError("full-S manifest retrieval tier must be turns")
+        expansion = manifest.get("retrieval", {}).get("turn_tier_expansion_slots")
+        if expansion is not None and (
+            isinstance(expansion, bool)
+            or not isinstance(expansion, int)
+            or expansion < 0
+        ):
+            raise FaithfulRunError(
+                "full-S manifest turn_tier_expansion_slots must be a "
+                "non-negative integer when pinned"
+            )
         if manifest.get("ingest", {}).get("mode") != "dual":
             raise FaithfulRunError("full-S manifest must retain dual ingestion")
         if manifest.get("dataset", {}).get("sha256") != _dataset_hash(dataset_path):
@@ -325,7 +337,7 @@ def _validate_full_s_source_hashes(
     manifest: Mapping[str, Any], *, root: Path = Path.cwd()
 ) -> None:
     """Reject full-S execution when any manifest-pinned source file changed."""
-    if manifest.get("profile") != FULL_S_PROFILE:
+    if manifest.get("profile") not in FULL_S_RUN_PROFILES:
         return
     pinned = manifest.get("source_hashes")
     if not isinstance(pinned, Mapping) or not pinned:
@@ -360,7 +372,7 @@ def _validate_run_source_hashes(
     profiles keep skipping legitimately.
     """
     binding = run_document.get("binding")
-    if not isinstance(binding, Mapping) or binding.get("run_profile") != FULL_S_PROFILE:
+    if not isinstance(binding, Mapping) or binding.get("run_profile") not in FULL_S_RUN_PROFILES:
         return
     manifest_path_text = run_document.get("manifest_path")
     if not isinstance(manifest_path_text, str) or not manifest_path_text.strip():
@@ -452,7 +464,7 @@ def _effective_selection_policy(
 
 def _operational_stop_for_profile(profile: str, max_budget_usd: float) -> float:
     """Resolve the early run stop without changing any profile's hard cap."""
-    return FULL_S_OPERATIONAL_STOP_USD if profile == FULL_S_PROFILE else max_budget_usd
+    return FULL_S_OPERATIONAL_STOP_USD if profile in FULL_S_RUN_PROFILES else max_budget_usd
 
 
 def _operational_stop_from_binding(binding: Mapping[str, Any]) -> float:
@@ -460,7 +472,7 @@ def _operational_stop_from_binding(binding: Mapping[str, Any]) -> float:
     profile = str(binding.get("run_profile", "legacy"))
     if profile == "legacy":
         return DEFAULT_TOTAL_BUDGET_USD
-    expected = FULL_S_OPERATIONAL_STOP_USD if profile == FULL_S_PROFILE else GPT6_TOTAL_BUDGET_USD
+    expected = FULL_S_OPERATIONAL_STOP_USD if profile in FULL_S_RUN_PROFILES else GPT6_TOTAL_BUDGET_USD
     try:
         actual = float(binding.get("operational_stop_usd", "nan"))
     except (TypeError, ValueError) as exc:
@@ -504,8 +516,8 @@ def _binding(
         "judge_prompt": "LongMemEval official get_anscheck_prompt",
     }
     profile_policy = dict(legacy_policy)
-    retrieval_tier = "turns" if profile == FULL_S_PROFILE else "auto"
-    calibration_budget = FULL_S_CALIBRATION_BUDGET_USD if profile == FULL_S_PROFILE else DEFAULT_CALIBRATION_BUDGET_USD
+    retrieval_tier = "turns" if profile in FULL_S_RUN_PROFILES else "auto"
+    calibration_budget = FULL_S_CALIBRATION_BUDGET_USD if profile in FULL_S_RUN_PROFILES else DEFAULT_CALIBRATION_BUDGET_USD
     operational_stop = _operational_stop_for_profile(profile, max_budget_usd)
     if profile != "legacy":
         profile_policy.update({
@@ -582,7 +594,7 @@ def _binding(
 
 def _agent_policy_for_profile(profile: str) -> AgentPolicy:
     """Return the bounded writer policy pinned by the selected run profile."""
-    if profile in {FRESH_RUN_PROFILE, FULL_S_PROFILE}:
+    if profile in {FRESH_RUN_PROFILE, *FULL_S_RUN_PROFILES}:
         return AgentPolicy(
             max_tool_rounds=MAX_TOOL_ROUNDS,
             max_output_tokens=FRESH_GPT6_MAX_OUTPUT_TOKENS,
@@ -603,14 +615,14 @@ def _profile_from_binding(binding: Mapping[str, Any]) -> tuple[str, str, float, 
         )):
             raise LedgerBindingError("legacy binding unexpectedly contains profile-specific options")
         return "legacy", LUNA_MODEL, DEFAULT_TOTAL_BUDGET_USD, DEFAULT_CALIBRATION_BUDGET_USD, DEFAULT_TOTAL_BUDGET_USD, Pricing(), "auto"
-    if profile not in {FRESH_RUN_PROFILE, FULL_S_PROFILE}:
+    if profile not in {FRESH_RUN_PROFILE, *FULL_S_RUN_PROFILES}:
         raise LedgerBindingError(f"unsupported prepared run profile: {profile!r}")
     model = binding.get("writer_model")
-    expected_model = FULL_S_WRITER_MODEL if profile == FULL_S_PROFILE else GPT6_LUNA_MODEL
-    expected_budget = FULL_S_MAX_BUDGET_USD if profile == FULL_S_PROFILE else GPT6_TOTAL_BUDGET_USD
-    expected_calibration_budget = FULL_S_CALIBRATION_BUDGET_USD if profile == FULL_S_PROFILE else DEFAULT_CALIBRATION_BUDGET_USD
-    expected_operational_stop = FULL_S_OPERATIONAL_STOP_USD if profile == FULL_S_PROFILE else GPT6_TOTAL_BUDGET_USD
-    expected_tier = "turns" if profile == FULL_S_PROFILE else "auto"
+    expected_model = FULL_S_WRITER_MODEL if profile in FULL_S_RUN_PROFILES else GPT6_LUNA_MODEL
+    expected_budget = FULL_S_MAX_BUDGET_USD if profile in FULL_S_RUN_PROFILES else GPT6_TOTAL_BUDGET_USD
+    expected_calibration_budget = FULL_S_CALIBRATION_BUDGET_USD if profile in FULL_S_RUN_PROFILES else DEFAULT_CALIBRATION_BUDGET_USD
+    expected_operational_stop = FULL_S_OPERATIONAL_STOP_USD if profile in FULL_S_RUN_PROFILES else GPT6_TOTAL_BUDGET_USD
+    expected_tier = "turns" if profile in FULL_S_RUN_PROFILES else "auto"
     try:
         budget = float(binding.get("max_budget_usd", "nan"))
         calibration_budget = float(binding.get("calibration_budget_usd", "nan"))
@@ -691,7 +703,7 @@ def prepare_run(
     # deterministic fixture identity for backwards-compatible test seams.
     owner_id = owner_id.strip() or "faithful-s36-offline"
     default_root = (
-        GPT6_FULL_S_ARTIFACT_NAMESPACE if profile == FULL_S_PROFILE
+        GPT6_FULL_S_ARTIFACT_NAMESPACE if profile in FULL_S_RUN_PROFILES
         else GPT6_SELECTED35_ARTIFACT_NAMESPACE if profile == FRESH_RUN_PROFILE
         else ARTIFACT_NAMESPACE
     )
@@ -703,7 +715,7 @@ def prepare_run(
         raise FaithfulRunError("fresh profile selection is fixed to selected-35 excluding 7527f7e2")
     if profile == FRESH_RUN_PROFILE and exclude_question_ids is None:
         exclude_question_ids = [GPT6_SELECTED35_EXCLUDED_ID]
-    if profile == FULL_S_PROFILE and (include_question_ids is not None or exclude_question_ids is not None):
+    if profile in FULL_S_RUN_PROFILES and (include_question_ids is not None or exclude_question_ids is not None):
         raise FaithfulRunError("full-S profile is fixed to all 500 manifest cases")
     (resolved_profile, resolved_model, resolved_budget, calibration_budget,
      pricing, retrieval_tier, _) = _resolve_run_profile(
@@ -715,9 +727,9 @@ def prepare_run(
         include_question_ids=include_question_ids,
         exclude_question_ids=exclude_question_ids,
     )
-    if resolved_profile == FULL_S_PROFILE and manifest.get("profile") != FULL_S_PROFILE:
+    if resolved_profile in FULL_S_RUN_PROFILES and manifest.get("profile") not in FULL_S_RUN_PROFILES:
         raise FaithfulRunError("full-S profile requires its full-S source manifest")
-    if resolved_profile != FULL_S_PROFILE and manifest.get("profile") == FULL_S_PROFILE:
+    if resolved_profile not in FULL_S_RUN_PROFILES and manifest.get("profile") in FULL_S_RUN_PROFILES:
         raise FaithfulRunError("full-S source manifest requires the full-S runner profile")
     carry_forward = import_prior_ledger(prior_ledger) if prior_ledger is not None else {}
     _, selection_policy = _normalize_selection_policy(
@@ -729,7 +741,7 @@ def prepare_run(
         selection_policy = {"include_question_ids": None, "exclude_question_ids": None}
     expected_selection_policy = (
         {"include_question_ids": None, "exclude_question_ids": None}
-        if resolved_profile == FULL_S_PROFILE
+        if resolved_profile in FULL_S_RUN_PROFILES
         else {"include_question_ids": None, "exclude_question_ids": [GPT6_SELECTED35_EXCLUDED_ID]}
         if resolved_profile == FRESH_RUN_PROFILE
         else selection_policy
@@ -860,7 +872,7 @@ async def run_calibration(
     run_profile, writer_model, max_budget_usd, calibration_budget, operational_stop, pricing, retrieval_tier = _profile_from_binding(binding)
     source_manifest = load_manifest(
         manifest_path,
-        expected_case_count=FULL_S_CASE_COUNT if run_profile == FULL_S_PROFILE else EXPECTED_CASE_COUNT,
+        expected_case_count=FULL_S_CASE_COUNT if run_profile in FULL_S_RUN_PROFILES else EXPECTED_CASE_COUNT,
     )
     carry_forward = _carry_forward_from_binding(binding)
     selection_policy = _effective_selection_policy(
@@ -947,7 +959,7 @@ async def run_calibration(
                 for session in _sort_sessions(instance):
                     checkpoint["in_flight_stage"] = f"session:{session.session_id}"
                     _write_checkpoint(paths.checkpoint, checkpoint)
-                    if run_profile == FULL_S_PROFILE:
+                    if run_profile in FULL_S_RUN_PROFILES:
                         # Ingest exactly like the run loop: ingest_session_dual
                         # is clear-then-insert per session, so a calibration
                         # attempt and a resumed run converge on the same rows
@@ -1721,7 +1733,7 @@ async def _resume_run_locked(
     run_profile, writer_model, max_budget_usd, calibration_budget, operational_stop, pricing, retrieval_tier = _profile_from_binding(binding)
     source_manifest = load_manifest(
         manifest_path,
-        expected_case_count=FULL_S_CASE_COUNT if run_profile == FULL_S_PROFILE else EXPECTED_CASE_COUNT,
+        expected_case_count=FULL_S_CASE_COUNT if run_profile in FULL_S_RUN_PROFILES else EXPECTED_CASE_COUNT,
     )
     selection_policy = _effective_selection_policy(
         binding,
@@ -1930,7 +1942,7 @@ async def _resume_run_locked(
                     continue
                 checkpoint["in_flight_stage"] = f"session:{session.session_id}"
                 _write_checkpoint(paths.checkpoint, checkpoint)
-                if run_profile == FULL_S_PROFILE:
+                if run_profile in FULL_S_RUN_PROFILES:
                     await _ingest_full_s_session(
                         instance, session,
                         pool=getattr(gateway, "_pool", None),
@@ -2101,14 +2113,28 @@ async def resume_run(
         )
 
 
-async def _public_recall(gateway: object | None, question: str, shape: Any, project_id: str) -> str:
-    """Call public recall only through an explicitly supplied gateway."""
+async def _public_recall(
+    gateway: object | None,
+    question: str,
+    shape: Any,
+    project_id: str,
+    expansion_slots: int | None = None,
+) -> str:
+    """Call public recall only through an explicitly supplied gateway.
+
+    ``expansion_slots``: when None (profile does not pin a depth), the
+    argument is omitted entirely so the call is identical to the
+    pre-expansion invocation and the server applies its own default.
+    """
     if gateway is None or not hasattr(gateway, "call"):
         raise ExecutionGateError("public recall gateway is required; no hidden/background fallback")
-    response = await gateway.call("weft_recall", {
+    arguments: dict[str, Any] = {
         "query": question, "project_id": project_id, "agent_id": "faithful-s36",
         "limit": shape.top_k, "tier": "auto", "mode": "hybrid", "retrieval_mode": "face",
-    })
+    }
+    if expansion_slots is not None:
+        arguments["expansion_slots"] = int(expansion_slots)
+    response = await gateway.call("weft_recall", arguments)
     if not isinstance(response, Mapping):
         raise AgentExecutionError("weft_recall returned a non-object")
     return json.dumps(response, ensure_ascii=False, sort_keys=True)
@@ -2123,7 +2149,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         child.add_argument("--dataset", type=Path, required=True)
         child.add_argument("--manifest", type=Path, required=True)
         child.add_argument("--artifact-root", type=Path)
-        child.add_argument("--profile", choices=("legacy", FRESH_RUN_PROFILE, FULL_S_PROFILE), default="legacy")
+        child.add_argument("--profile", choices=("legacy", FRESH_RUN_PROFILE, *FULL_S_RUN_PROFILES), default="legacy")
         child.add_argument("--writer-model", choices=(LUNA_MODEL, GPT6_LUNA_MODEL))
         child.add_argument("--max-budget-usd", type=float)
         child.add_argument("--include-question-id", action="append", dest="include_question_ids")
@@ -2141,7 +2167,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     cal.add_argument("--case-limit", type=int, default=4)
     approve = sub.add_parser("approve")
     approve.add_argument("--artifact-root", type=Path)
-    approve.add_argument("--profile", choices=("legacy", FRESH_RUN_PROFILE, FULL_S_PROFILE), default="legacy")
+    approve.add_argument("--profile", choices=("legacy", FRESH_RUN_PROFILE, *FULL_S_RUN_PROFILES), default="legacy")
     approve.add_argument("--writer-model", choices=(LUNA_MODEL, GPT6_LUNA_MODEL))
     approve.add_argument("--max-budget-usd", type=float)
     approve.add_argument("--approved-by", required=True)
@@ -2204,7 +2230,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         print(json.dumps(result, sort_keys=True))
         return 0
     artifact_root = args.artifact_root or (
-        GPT6_FULL_S_ARTIFACT_NAMESPACE if args.profile == FULL_S_PROFILE
+        GPT6_FULL_S_ARTIFACT_NAMESPACE if args.profile in FULL_S_RUN_PROFILES
         else GPT6_SELECTED35_ARTIFACT_NAMESPACE if args.profile == FRESH_RUN_PROFILE
         else ARTIFACT_NAMESPACE
     )
@@ -2213,7 +2239,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         args.writer_model != GPT6_LUNA_MODEL or args.max_budget_usd != GPT6_TOTAL_BUDGET_USD
     ):
         raise ExecutionGateError("fresh profile requires --writer-model gpt-6-luna and --max-budget-usd 50")
-    if args.profile == FULL_S_PROFILE and (
+    if args.profile in FULL_S_RUN_PROFILES and (
         args.writer_model != FULL_S_WRITER_MODEL or args.max_budget_usd != FULL_S_MAX_BUDGET_USD
     ):
         raise ExecutionGateError("full-S profile requires --writer-model gpt-6-luna and --max-budget-usd 150")

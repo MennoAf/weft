@@ -68,7 +68,13 @@ from benchmarks.longmemeval.materialize import (
 from benchmarks.longmemeval.reader import Reader
 from benchmarks.longmemeval.replay_drive import ReplayExecutorKind, drive_replay
 from benchmarks.longmemeval.task_shape import derive_task_shape
-from benchmarks.longmemeval.router import RetrievalDiagnostics, Tier, RetrievalPolicy, retrieve
+from benchmarks.longmemeval.router import (
+    RetrievalDiagnostics,
+    Tier,
+    RetrievalPolicy,
+    _resolve_turn_tier_expansion_slots,
+    retrieve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1137,6 +1143,7 @@ async def _run_recall_only(
     limit: int | None = None,
     question_types: frozenset[str] | None = None,
     top_k: int = DEFAULT_TOP_K,
+    turn_tier_expansion_slots: int = 0,
 ) -> dict:
     """Load manifest, run recall-only, record recall@k. No ingest, no Reader.
 
@@ -1151,6 +1158,10 @@ async def _run_recall_only(
     if not manifest_path.exists():
         raise FileNotFoundError(f"manifest not found: {manifest_path}")
     manifest = Manifest.from_json(manifest_path.read_text(encoding="utf-8"))
+    turn_tier_expansion_slots = _resolve_turn_tier_expansion_slots(
+        json.loads(manifest_path.read_text(encoding="utf-8")).get("retrieval"),
+        turn_tier_expansion_slots,
+    )
 
     # Load question texts from the dataset (needed for embedding the query)
     instances = load_split(dataset_path)
@@ -1199,6 +1210,7 @@ async def _run_recall_only(
                 as_of=as_of,
                 gold_turn_ids=gold_session_turn_ids,
                 diagnostics=diagnostics,
+                turn_tier_expansion_slots=turn_tier_expansion_slots,
             )
 
             topk = memories[:recall_k]
@@ -1293,6 +1305,7 @@ async def _run_snapshot_reader_only(
     question_types: frozenset[str] | None = None,
     top_k: int = DEFAULT_TOP_K,
     resume: bool = False,
+    turn_tier_expansion_slots: int = 0,
     pool: asyncpg.Pool | None = None,
     embedder: EmbeddingProvider | None = None,
     reader: Reader | None = None,
@@ -1334,6 +1347,10 @@ async def _run_snapshot_reader_only(
             "dataset checksum mismatch: "
             f"dataset={actual_dataset_checksum}, manifest={manifest.dataset_checksum}"
         )
+    turn_tier_expansion_slots = _resolve_turn_tier_expansion_slots(
+        json.loads(manifest_path.read_text(encoding="utf-8")).get("retrieval"),
+        turn_tier_expansion_slots,
+    )
 
     instances = load_split(dataset_path)
     instance_by_id = {instance.question_id: instance for instance in instances}
@@ -1445,6 +1462,7 @@ async def _run_snapshot_reader_only(
                     "gold_session_turn_count": len(gold_session_turn_ids),
                     "retrieval_tier": "turns",
                     "reader_top_k": policy.top_k,
+                    "turn_tier_expansion_slots": turn_tier_expansion_slots,
                 }
                 try:
                     memories = await retrieve(
@@ -1461,6 +1479,7 @@ async def _run_snapshot_reader_only(
                         gold_turn_ids=gold_session_turn_ids,
                         diagnostics=diagnostics,
                         turn_session_map=q.turn_session_map,
+                        turn_tier_expansion_slots=turn_tier_expansion_slots,
                     )
                     response = await reader.read_answer(
                         question=instance.question,
@@ -1675,6 +1694,18 @@ def _dataset_checksum_for_reader(dataset_path: Path) -> str:
     help="Memories returned from hybrid recall and fed to the Reader.",
 )
 @click.option(
+    "--turn-tier-expansion-slots",
+    type=int,
+    default=0,
+    show_default=True,
+    help=(
+        "Additive session-expansion slots appended after the turn-tier "
+        "funnel window (round-7 expansion_slots). Must match a "
+        "turn_tier_expansion_slots pin in the manifest's retrieval block "
+        "when one is present."
+    ),
+)
+@click.option(
     "--limit",
     type=int,
     default=None,
@@ -1820,6 +1851,7 @@ def cli(
     materialize_only: bool,
     recall_only: bool,
     snapshot_reader_only: bool,
+    turn_tier_expansion_slots: int,
     log_level: str,
 ) -> None:
     """Run Weft against the LongMemEval benchmark, write hypotheses JSONL."""
@@ -1958,6 +1990,7 @@ def cli(
                 limit=limit,
                 question_types=qt_set,
                 top_k=top_k,
+                turn_tier_expansion_slots=turn_tier_expansion_slots,
             )
         )
         click.echo(f"\nRecall-only complete:")
@@ -1987,6 +2020,7 @@ def cli(
                 question_types=qt_set,
                 top_k=top_k,
                 resume=resume,
+                turn_tier_expansion_slots=turn_tier_expansion_slots,
             )
         )
         click.echo("\\nFixed-snapshot Reader complete:")

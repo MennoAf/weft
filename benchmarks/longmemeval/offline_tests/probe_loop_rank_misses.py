@@ -4,6 +4,7 @@ Replays the exact answer-time ``weft_recall(tier=turns)`` queries for:
 
 * ``0a995998`` (multi-session, gold 3) — both recall tool calls
 * ``0ddfec37`` (knowledge-update, gold 15) — the single recall tool call
+* additional judged-false saved questions — exact pinned turn-tier calls
 
 through the real retrieval path (``weft.turn_recall.temporal_anchor`` →
 ``weft.episode_turns.recall_turns`` → RRF → ``weft.relevance.rank_turns``),
@@ -149,6 +150,68 @@ GOLD_TURNS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
+CHECKPOINT_PATH = (
+    _REPO_ROOT.parent
+    / "artifacts/longmemeval-gpt6-full-s-turns/faithful/session-checkpoint.json"
+)
+
+
+def _load_extra_cases(max_questions: int = 5) -> list[dict[str, Any]]:
+    """Read saved judged-false rows and pin a bounded set of extra recall calls."""
+    from weft.turn_recall import extract_anchors, temporal_query_variants
+
+    checkpoint = json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+    cases: list[dict[str, Any]] = []
+    selected_questions: set[str] = set()
+    for question_id, evidence in checkpoint.get("evidence", {}).items():
+        judge = evidence.get("judge") or {}
+        if (
+            evidence.get("status") != "completed"
+            or not isinstance(judge, dict)
+            or judge.get("label") is not False
+            or question_id in GOLD_TURNS
+            or question_id in selected_questions
+        ):
+            continue
+        answer_sessions = [
+            str(session.get("session_id"))
+            for session in evidence.get("sessions", [])
+            if isinstance(session, dict)
+            and str(session.get("session_id", "")).startswith("answer_")
+        ]
+        if not answer_sessions:
+            continue
+        for call_index, tool_call in enumerate(evidence.get("tool_results", [])):
+            args = tool_call.get("arguments") or {}
+            if tool_call.get("name") != "weft_recall" or args.get("tier") != "turns":
+                continue
+            query = args.get("query")
+            if (
+                not isinstance(query, str)
+                or extract_anchors(query)
+                or temporal_query_variants(query) != [query]
+                or not isinstance(args.get("limit"), int)
+                or not args.get("project_id")
+            ):
+                continue
+            turns = (tool_call.get("result") or {}).get("turns") or []
+            cases.append({
+                "case_id": f"{question_id}:tool_call_{call_index}",
+                "question_id": question_id,
+                "project_id": args["project_id"],
+                "tool_call_index": call_index,
+                "limit": int(args["limit"]),
+                "query": query,
+                "checkpoint_returned_ids": [str(turn["id"]) for turn in turns],
+                "gold_session_ids": answer_sessions,
+                "gold_source": "all turns in checkpoint answer_* sessions",
+            })
+            selected_questions.add(question_id)
+            break
+        if len(selected_questions) >= max_questions:
+            break
+    return cases
+
 
 # ---------------------------------------------------------------------------
 # Probe implementation
@@ -174,16 +237,20 @@ def _record_to_meta(row: Any, rank: int, half: str) -> dict[str, Any]:
 
 
 async def _tsrank_scores(
-    conn: Any, query: str, ids: list[str]
+    conn: Any, query: str, ids: list[str], *, keyword_mode: str = "and"
 ) -> dict[str, float]:
-    """Read-only ts_rank values for specific turn ids (production expression)."""
+    """Read-only ts_rank values using the selected keyword query form."""
     if not ids:
         return {}
+    query_expr = (
+        "to_tsquery('english', $1)"
+        if keyword_mode == "or"
+        else "websearch_to_tsquery('english', $1)"
+    )
     rows = await conn.fetch(
-        """
+        f"""
         SELECT id,
-               ts_rank(to_tsvector('english', content),
-                       websearch_to_tsquery('english', $1)) AS score
+               ts_rank(to_tsvector('english', content), {query_expr}) AS score
           FROM episode_turns
          WHERE id = ANY($2::text[])
         """,
@@ -193,16 +260,22 @@ async def _tsrank_scores(
     return {str(r["id"]): float(r["score"]) for r in rows}
 
 
-async def _keyword_match_count(conn: Any, project_id: str, query: str) -> int:
-    """How many project turns match the FTS query at all (read-only)."""
+async def _keyword_match_count(
+    conn: Any, project_id: str, query: str, *, keyword_mode: str = "and"
+) -> int:
+    """How many project turns match the selected FTS query (read-only)."""
+    query_expr = (
+        "to_tsquery('english', $2)"
+        if keyword_mode == "or"
+        else "websearch_to_tsquery('english', $2)"
+    )
     val = await conn.fetchval(
-        """
+        f"""
         SELECT count(*)
           FROM episode_turns t
           JOIN episodes e ON t.episode_id = e.id
          WHERE e.project_id = $1
-           AND to_tsvector('english', t.content)
-               @@ websearch_to_tsquery('english', $2)
+           AND to_tsvector('english', t.content) @@ {query_expr}
         """,
         project_id,
         query,
@@ -255,18 +328,23 @@ async def _global_vector_ranks(
 
 
 async def _global_keyword_ranks(
-    conn: Any, project_id: str, query: str, top_n: int, watch_ids: list[str]
+    conn: Any, project_id: str, query: str, top_n: int, watch_ids: list[str],
+    *, keyword_mode: str = "and",
 ) -> dict[str, Any]:
     """Untruncated FTS ranking of the whole project (read-only)."""
+    query_expr = (
+        "to_tsquery('english', $1)"
+        if keyword_mode == "or"
+        else "websearch_to_tsquery('english', $1)"
+    )
     rows = await conn.fetch(
-        """
+        f"""
         WITH s AS (
             SELECT t.id,
-                   ts_rank(to_tsvector('english', t.content),
-                           websearch_to_tsquery('english', $1)) AS score,
+                   ts_rank(to_tsvector('english', t.content), {query_expr}) AS score,
                    row_number() OVER (
                        ORDER BY ts_rank(to_tsvector('english', t.content),
-                                        websearch_to_tsquery('english', $1)) DESC,
+                                        {query_expr}) DESC,
                                 t.id
                    ) AS rnk
               FROM episode_turns t
@@ -309,8 +387,10 @@ def _analyse_case(
     keyword_match_total: int,
 ) -> dict[str, Any]:
     """Classify each gold turn: absent-from-candidates vs top_k-cut vs low fusion."""
-    top_k_per_anchor = max(1, case["limit"] // 2)
-    candidate_limit = top_k_per_anchor * 3
+    top_k_per_anchor = int(
+        case.get("top_k_per_anchor", max(1, case["limit"] // 2))
+    )
+    candidate_limit = int(case.get("candidate_sql_limit", top_k_per_anchor * 3))
     fusion_top_k = top_k_per_anchor
     absent_rank = candidate_limit + 1
 
@@ -368,16 +448,30 @@ async def run_case(
     pool: Any,
     embedder: Any,
     owner_id: str,
+    *,
+    phase: str,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    if phase not in {"before", "after"}:
+        raise ValueError(f"unsupported probe phase: {phase}")
+    keyword_mode = "or" if phase == "after" else "and"
+    top_k_per_anchor = int(
+        case.get("after_top_k_per_anchor", max(1, case["limit"] // 2))
+        if phase == "after"
+        else max(1, case["limit"] // 2)
+    )
+    candidate_limit = int(
+        case.get("after_candidate_sql_limit", top_k_per_anchor * 3)
+        if phase == "after"
+        else top_k_per_anchor * 3
+    )
     """Replay one checkpointed recall call through the real production path."""
     from weft.auth import current_user_id
     from weft.db.connection import acquire
     from weft.turn_recall import temporal_anchor
 
-    gold_ids = [g["id"] for g in GOLD_TURNS[case["question_id"]]]
-    gold_labels = {g["id"]: g for g in GOLD_TURNS[case["question_id"]]}
-    top_k_per_anchor = max(1, case["limit"] // 2)
-    candidate_limit = top_k_per_anchor * 3
+    gold_labels = {
+        g["id"]: g for g in GOLD_TURNS.get(case["question_id"], [])
+    }
 
     probes: list[dict[str, Any]] = []
     final_ids: list[str] = []
@@ -396,6 +490,7 @@ async def run_case(
                 case["query"],
                 project_id=case["project_id"],
                 top_k_per_anchor=top_k_per_anchor,
+                candidate_sql_limit=candidate_limit,
                 embedder=embedder,
                 diag_callback=_diag,
                 probe_diag_callback=_probe,
@@ -414,6 +509,29 @@ async def run_case(
             # the SAME variants using recall_turns directly is a fork — so
             # instead re-derive raw halves with read-only SQL that mirrors
             # the production queries exactly.
+            if case.get("gold_session_ids"):
+                gold_rows = await conn.fetch(
+                    """
+                    SELECT t.id, t.source_session_id, t.turn_index, t.role, t.content
+                      FROM episode_turns t
+                      JOIN episodes e ON t.episode_id = e.id
+                     WHERE e.project_id = $1
+                       AND t.source_session_id = ANY($2::text[])
+                     ORDER BY t.source_session_id, t.turn_index, t.id
+                    """,
+                    case["project_id"],
+                    case["gold_session_ids"],
+                )
+                gold_labels.update({
+                    str(row["id"]): {
+                        "label": (
+                            f"{row['source_session_id']} t{row['turn_index']}"
+                        ),
+                        "note": "checkpoint answer-session turn",
+                    }
+                    for row in gold_rows
+                })
+            gold_ids = list(gold_labels)
             embedding = await embedder.embed(case["query"])
             vector_rows = await conn.fetch(
                 """
@@ -433,13 +551,22 @@ async def run_case(
                 case["project_id"],
                 candidate_limit,
             )
+            fts_query = (
+                "to_tsquery('english', $1)"
+                if keyword_mode == "or"
+                else "websearch_to_tsquery('english', $1)"
+            )
+            fts_argument = case["query"]
+            if keyword_mode == "or":
+                from weft.store import build_or_tsquery
+                fts_argument = build_or_tsquery(case["query"])
             keyword_rows = await conn.fetch(
-                """
+                f"""
                 SELECT t.*
                   FROM episode_turns t
                   JOIN episodes e ON t.episode_id = e.id
                  WHERE to_tsvector('english', t.content)
-                       @@ websearch_to_tsquery('english', $1)
+                       @@ {fts_query}
                    AND e.project_id = $2
                  ORDER BY ts_rank(
                      to_tsvector('english', t.content),
@@ -471,19 +598,28 @@ async def run_case(
             from weft.episode_turns import _rrf_fuse_turn_rows
             from weft.relevance import rank_turns, score_turn
 
-            fused_pairs = _rrf_fuse_turn_rows(
+            all_fused_pairs = _rrf_fuse_turn_rows(
                 vector_rows,
                 keyword_rows,
                 candidate_limit=candidate_limit,
-                top_k=top_k_per_anchor,
-                vector_weight=0.5,
-                keyword_weight=0.5,
+                top_k=len({str(r["id"]) for r in vector_rows} | {str(r["id"]) for r in keyword_rows}),
+                # Mirrors the turn-tier production fusion weights
+                # (weft.turn_recall.temporal_anchor defaults).
+                vector_weight=1.0,
+                keyword_weight=0.3,
             )
+            all_fused_scores = {
+                str(t.id): float(s) for t, s in all_fused_pairs
+            }
+            all_fused_rank = {
+                tid: i + 1 for i, tid in enumerate(all_fused_scores)
+            }
+            fused_pairs = all_fused_pairs[:top_k_per_anchor]
             fused_scores = {
                 str(t.id): float(s) for t, s in fused_pairs
             }
             fused_rank = {
-                tid: i + 1 for i, tid in enumerate(fused_scores)
+                tid: all_fused_rank[tid] for tid in fused_scores
             }
             ranked = rank_turns(fused_pairs)  # production rerank (now = wall clock)
             rerank_report = []
@@ -715,15 +851,9 @@ async def main_async(out_dir: Path) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path("artifacts/loop-rank-probe-20260929"),
-        help="output directory (default: artifacts/loop-rank-probe-20260929)",
-    )
-    args = parser.parse_args()
-    return asyncio.run(main_async(args.out))
+    from benchmarks.longmemeval.offline_tests.probe_loop_rank_misses_extended import main as extended_main
+
+    return extended_main()
 
 
 if __name__ == "__main__":
