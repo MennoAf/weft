@@ -129,6 +129,11 @@ from weft.store import (
 
 logger = logging.getLogger(__name__)
 
+# Additive session-expansion slots for the turn tier: the funnel window
+# (``limit`` turns, unchanged order) is a protected prefix and up to this
+# many session-sibling turns are appended after it (0 = historical behavior).
+_TURN_TIER_EXPANSION_SLOTS = 5
+
 
 def _recovery_telemetry_projection(stage, outcome, scope, parent_query_id=None):
     """Project one recovery stage to the bounded, redacted v72 row shape."""
@@ -888,11 +893,16 @@ async def _weft_recall_turns(
                     embedder=app.embedding,
                     as_of=as_of,
                     use_stored_search_tsv=use_stored_search_tsv,
+                    expansion_slots=_TURN_TIER_EXPANSION_SLOTS,
                 )
 
         # Flatten dedup'd turns for a single ``turns`` array (the most
         # common consumer shape), and surface the per-anchor mapping for
-        # callers that want to do anchored arithmetic.
+        # callers that want to do anchored arithmetic. With additive
+        # session expansion the array carries the protected funnel window
+        # (``limit`` turns, unchanged order) plus up to
+        # ``_TURN_TIER_EXPANSION_SLOTS`` appended session siblings.
+        expansion = _TURN_TIER_EXPANSION_SLOTS
         seen: set[str] = set()
         flat: list[dict] = []
         for turns in anchored.values():
@@ -901,9 +911,9 @@ async def _weft_recall_turns(
                     continue
                 seen.add(t.id)
                 flat.append(t.to_dict())
-                if len(flat) >= limit:
+                if len(flat) >= limit + expansion:
                     break
-            if len(flat) >= limit:
+            if len(flat) >= limit + expansion:
                 break
 
         response: dict = {

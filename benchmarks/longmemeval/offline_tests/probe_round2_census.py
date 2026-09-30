@@ -290,7 +290,10 @@ def analyze_funnel(
     }
 
 
-async def capture_after(case: dict[str, Any], pool: Any, embedder: Any, conn: Any):
+async def capture_after(
+    case: dict[str, Any], pool: Any, embedder: Any, conn: Any,
+    expansion_slots: int = 0,
+):
     from weft.auth import current_user_id
     from weft.turn_recall import temporal_anchor
 
@@ -316,6 +319,7 @@ async def capture_after(case: dict[str, Any], pool: Any, embedder: Any, conn: An
             anchor_result_limit=limit,
             embedder=embedder,
             diag_callback=on_diag,
+            expansion_slots=expansion_slots,
         )
     finally:
         current_user_id.reset(token)
@@ -362,8 +366,18 @@ async def run(args: argparse.Namespace) -> int:
         flush=True,
     )
 
-    partial_path = OUT / "round2_census_partial.json"
-    final_path = OUT / "round2_census_results.json"
+    partial_path = OUT / f"{args.out_name}_partial.json"
+    final_path = OUT / f"{args.out_name}_results.json"
+    baseline_map: dict[str, list[str]] = {}
+    if args.baseline and Path(args.baseline).exists():
+        try:
+            _baseline_doc = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+            baseline_map = {
+                c["case_id"]: c["after"]["returned"] for c in _baseline_doc["records"]
+            }
+            print(f"prefix baseline loaded: {args.baseline}", flush=True)
+        except (json.JSONDecodeError, KeyError) as exc:
+            print(f"baseline load failed ({exc}); prefix assertion disabled", flush=True)
     records: list[dict[str, Any]] = []
     if not args.fresh and partial_path.exists():
         records = json.loads(partial_path.read_text(encoding="utf-8")).get("records", [])
@@ -399,6 +413,7 @@ async def run(args: argparse.Namespace) -> int:
                         "database": parsed.path.lstrip("/"), "user": parsed.username},
                 "fusion_after": {"vector": VECTOR_WEIGHT_AFTER, "keyword": KEYWORD_WEIGHT_AFTER},
                 "fusion_before": {"vector": WEIGHTS_BEFORE[0], "keyword": WEIGHTS_BEFORE[1]},
+                "expansion_slots": args.expansion_slots,
                 "records": records,
                 "skipped": skipped,
             }, indent=2, default=str) + "\n",
@@ -444,15 +459,35 @@ async def run(args: argparse.Namespace) -> int:
                         embedding = await embedder.embed(case["query"])
                         embeddings[case["query"]] = embedding
 
-                    # AFTER: authentic production path.
+                    # AFTER: authentic production path — captured TWICE in the
+                    # same run (same wall clock) so the prefix assertion is
+                    # drift-free: base = expansion 0, expanded = production.
+                    vec_b0, kw_b0, returned_base, top_k_a, width_a = await capture_after(
+                        case, pool, embedder, conn, expansion_slots=0,
+                    )
                     vec_a, kw_a, returned_a, top_k_a, width_a = await capture_after(
                         case, pool, embedder, conn,
+                        expansion_slots=args.expansion_slots,
                     )
+                    record["after_base"] = {
+                        "returned": returned_base,
+                        "expansion_slots": 0,
+                    }
                     record["after"] = {
                         "returned": returned_a,
                         "top_k_per_anchor": top_k_a,
                         "candidate_sql_limit": width_a,
+                        "expansion_slots": args.expansion_slots,
                     }
+                    baseline_window = baseline_map.get(case["case_id"])
+                    if baseline_window is not None:
+                        record["after"]["prefix_matches_baseline"] = (
+                            returned_a[: case["limit"]] == baseline_window[: case["limit"]]
+                        )
+                    # Drift-free prefix assertion: same-run, same wall clock.
+                    record["after"]["prefix_preserved_same_run"] = (
+                        returned_a[: case["limit"]] == returned_base[: case["limit"]]
+                    )
                     if case["segment"] == "false":
                         fts = build_or_tsquery(case["query"])
                         record["after"]["keyword_match_total"] = int(
@@ -567,6 +602,7 @@ async def run(args: argparse.Namespace) -> int:
             "read_only": True,
             "fusion_after": {"vector": VECTOR_WEIGHT_AFTER, "keyword": KEYWORD_WEIGHT_AFTER},
             "fusion_before": {"vector": WEIGHTS_BEFORE[0], "keyword": WEIGHTS_BEFORE[1]},
+            "expansion_slots": args.expansion_slots,
             "records": records,
             "skipped": skipped,
         }, indent=2, default=str) + "\n",
@@ -582,6 +618,14 @@ def main() -> int:
                         help="smoke-test bound on cohort size (0 = full census)")
     parser.add_argument("--fresh", action="store_true",
                         help="ignore any existing partial results")
+    parser.add_argument("--expansion-slots", type=int, default=5,
+                        help="additive session-expansion slots on the AFTER path "
+                             "(production turn-tier default)")
+    parser.add_argument("--out-name", default="round2_census",
+                        help="output basename: <out-name>_results.json / _partial.json")
+    parser.add_argument("--baseline", default=str(OUT / "round2_census_results.json"),
+                        help="census results whose windows define the protected "
+                             "prefix for the per-call prefix assertion")
     return asyncio.run(run(parser.parse_args()))
 
 

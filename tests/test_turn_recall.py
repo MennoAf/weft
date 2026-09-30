@@ -841,3 +841,143 @@ async def test_weft_recall_tier_default_auto_is_backwards_compatible(ctx):
     result = await weft_recall(ctx, query="describe this codebase", limit=3)
     assert "results" in result
     assert "turns" not in result
+
+
+# --- Round-7: additive session-expansion slots ---
+
+
+def test_select_session_siblings_orders_by_priority_then_proximity():
+    from weft.episode_turns import _select_session_siblings
+
+    window = ["w1", "w2"]
+    session_of = {"w1": "sess-a", "w2": "sess-b"}
+    index_of = {"w1": 2, "w2": 5}
+    session_turns = {
+        "sess-a": [("a1", 0), ("w1", 2), ("a3", 3)],
+        "sess-b": [("w2", 5), ("b1", 6)],
+    }
+
+    siblings = _select_session_siblings(window, 5, session_of, index_of, session_turns)
+
+    # sess-a outranks sess-b (best window rank 0 beats 1); within a session
+    # siblings order by |turn_index - hit| then turn_index; window members
+    # are never returned.
+    assert siblings == ["a3", "a1", "b1"]
+
+
+def test_select_session_siblings_skips_null_sessions_and_caps():
+    from weft.episode_turns import _select_session_siblings
+
+    assert _select_session_siblings(["w1"], 3, {"w1": None}, {"w1": 0}, {}) == []
+
+
+async def test_recall_turns_session_expansion_preserves_prefix(pool):
+    """Mandatory prefix-preservation: with expansion_slots > 0 the first
+    `limit` returns are bit-identical to expansion_slots=0, and only
+    same-session sibling turns are appended after the protected prefix."""
+    ep_a = await create_episode(pool, EpisodeCreate(title="expansion-a"))
+    ep_b = await create_episode(pool, EpisodeCreate(title="expansion-b"))
+    rows = [
+        ("sess-alpha", "zeta expansion anchor one"),
+        ("sess-alpha", "filler alpha neighbor two"),
+        ("sess-alpha", "filler alpha neighbor three"),
+        ("sess-alpha", "filler alpha neighbor four"),
+        ("sess-beta", "unrelated beta content five"),
+    ]
+    for sess, text in rows:
+        await append_turn(
+            pool,
+            EpisodeTurnCreate(
+                episode_id=ep_a.id if sess == "sess-alpha" else ep_b.id,
+                role=TurnRole.user,
+                content=text,
+                source_session_id=sess,
+            ),
+            embedding=[0.1] * 768,
+        )
+
+    embedding = [0.1] * 768
+    base = await recall_turns(
+        pool, "zeta expansion anchor", top_k=2, embedding=embedding,
+        expansion_slots=0,
+    )
+    expanded = await recall_turns(
+        pool, "zeta expansion anchor", top_k=2, embedding=embedding,
+        expansion_slots=5,
+    )
+
+    base_ids = [t.id for t in base]
+    expanded_ids = [t.id for t in expanded]
+    assert base_ids, "expected a non-empty baseline window"
+    assert expanded_ids[: len(base_ids)] == base_ids
+
+    # Additive: the expanded window is a superset that reaches limit + 5
+    # slots (here the project has exactly 5 turns, so all of them surface).
+    assert len(expanded_ids) == 5
+
+    # Siblings are session-scoped: every appended ep_a turn is a filler from
+    # the anchor's own session, in turn_index proximity order to the hit
+    # (the hit is the rank-1 "zeta expansion anchor" turn at index 0).
+    appended = expanded_ids[len(base_ids):]
+    assert appended, "expected session siblings to be appended"
+    from weft.episode_turns import list_turns
+
+    all_turns = await list_turns(pool, ep_a.id)
+    index_by_id = {t.id: t.turn_index for t in all_turns}
+    ep_a_siblings = [tid for tid in appended if tid in index_by_id]
+    assert ep_a_siblings, "expected at least one same-session sibling appended"
+    assert ep_a_siblings == sorted(ep_a_siblings, key=lambda tid: index_by_id[tid])
+
+
+async def test_temporal_anchor_forwards_expansion_slots(monkeypatch):
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_recall_turns(pool, query, **kwargs):
+        captured.update(kwargs)
+        return [
+            EpisodeTurn(
+                id="et-x", episode_id="ep", turn_index=0,
+                role=TurnRole.user, content="hit",
+                occurred_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            )
+        ]
+
+    monkeypatch.setattr(turn_recall_module, "recall_turns", fake_recall_turns)
+    await turn_recall_module.temporal_anchor(
+        None, "plain query without anchors", top_k_per_anchor=5,
+        expansion_slots=4,
+    )
+    assert captured["expansion_slots"] == 4
+
+
+async def test_weft_recall_turn_tier_expansion_slots_default_on(ctx, monkeypatch):
+    """The MCP turn-tier tool defaults expansion on (5 slots) and honors the
+    returned-length contract: limit + expansion_slots."""
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured.update(kwargs)
+        anchor_limit = kwargs["anchor_result_limit"]
+        turns = [
+            EpisodeTurn(
+                id=f"et-exp-{i}", episode_id="ep", turn_index=i,
+                role=TurnRole.user,
+                content=f"saved recall query expansion turn {i}",
+                occurred_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            )
+            for i in range(anchor_limit + 5)
+        ]
+        return {args[1]: turns}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-expansion",
+        tier="turns", limit=3,
+    )
+    assert captured["expansion_slots"] == 5
+    assert result["count"] == 8
+    assert len(result["turns"]) == 8

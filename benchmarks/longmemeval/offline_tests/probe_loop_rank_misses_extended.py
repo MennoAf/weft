@@ -158,7 +158,7 @@ def _row_id(row: Any) -> str:
 
 
 async def run_case(case: dict[str, Any], pool: Any, embedder: Any, phase: str,
-                   candidate_multiplier: int) -> dict[str, Any]:
+                   candidate_multiplier: int, expansion_slots: int = 0) -> dict[str, Any]:
     from weft.auth import current_user_id
     from weft.db.connection import acquire
     from weft.turn_recall import temporal_anchor
@@ -215,6 +215,7 @@ async def run_case(case: dict[str, Any], pool: Any, embedder: Any, phase: str,
                 embedder=embedder,
                 diag_callback=on_diag,
                 probe_diag_callback=on_probe,
+                expansion_slots=expansion_slots if phase == "after" else 0,
             )
 
             # Match the live keyword half for this phase, with only fixed
@@ -382,7 +383,8 @@ async def run(args: argparse.Namespace) -> int:
         for case in cases:
             print(f"probing {case['case_id']} [{args.phase}] ...", flush=True)
             result = await run_case(
-                case, pool, embedder, args.phase, args.candidate_multiplier
+                case, pool, embedder, args.phase, args.candidate_multiplier,
+                expansion_slots=args.expansion_slots
             )
             if args.phase == "before" and not result["matches_checkpoint"]:
                 print(f"WARNING: checkpoint divergence for {case['case_id']}", file=sys.stderr)
@@ -404,6 +406,7 @@ async def run(args: argparse.Namespace) -> int:
             "dsn": {"host": parsed.hostname, "port": parsed.port,
                     "database": parsed.path.lstrip("/"), "user": parsed.username},
             "extra_false_judgment_questions": args.extra_questions,
+            "expansion_slots": args.expansion_slots,
             "cases": results,
         }, indent=2, default=str) + "\n",
         encoding="utf-8",
@@ -427,6 +430,9 @@ def main() -> int:
         "--label", default="",
         help="filename prefix for outputs (e.g. cycle3_ keeps prior evidence intact)",
     )
+    parser.add_argument("--expansion-slots", type=int, default=5,
+                        help="additive session-expansion slots on the AFTER path "
+                             "(production turn-tier default)")
     return asyncio.run(run(parser.parse_args()))
 
 
