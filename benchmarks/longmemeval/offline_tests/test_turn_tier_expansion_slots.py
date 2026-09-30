@@ -12,17 +12,22 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from benchmarks.longmemeval import router as bench_router
 from benchmarks.longmemeval.faithful_s36 import (
     FaithfulRunError,
+    _agent_policy_for_profile,
     _dataset_hash,
+    _operational_stop_for_profile,
     _select_instances,
 )
 from benchmarks.longmemeval.full_s_profile import (
     FULL_S_CASE_COUNT,
+    FULL_S_EXP8_PROFILE,
+    FULL_S_PROFILE,
     build_full_s_manifest,
     normalize_turn_tier_expansion_slots,
 )
@@ -40,7 +45,9 @@ def _synthetic_source() -> list[dict]:
     ]
 
 
-def _build_manifest(tmp_path: pytest.Path, *, expansion: int = 0) -> dict:
+def _build_manifest(
+    tmp_path: pytest.Path, *, profile: str = FULL_S_PROFILE,
+) -> dict:
     source = tmp_path / "source.json"
     normalized = tmp_path / "normalized.json"
     hashes = [tmp_path / "hash_one.py", tmp_path / "hash_two.py"]
@@ -49,19 +56,27 @@ def _build_manifest(tmp_path: pytest.Path, *, expansion: int = 0) -> dict:
         h.write_text("# pinned source\n", encoding="utf-8")
     return build_full_s_manifest(
         source, normalized, source_hash_paths=[str(h) for h in hashes],
-        turn_tier_expansion_slots=expansion,
+        profile=profile,
     )
 
 
 def test_profile_with_expansion_pins_manifest_field(tmp_path: pytest.Path) -> None:
-    manifest = _build_manifest(tmp_path, expansion=8)
+    manifest = _build_manifest(tmp_path, profile="gpt6-luna-full-s-turns-v2-exp8")
+    assert manifest["profile"] == "gpt6-luna-full-s-turns-v2-exp8"
     assert manifest["retrieval"]["turn_tier_expansion_slots"] == 8
+    # Everything else in the retrieval block is identical to v1.
+    v1 = _build_manifest(tmp_path, profile=FULL_S_PROFILE)
+    base = {k: v for k, v in v1["retrieval"].items()}
+    pinned = {k: v for k, v in manifest["retrieval"].items()
+              if k != "turn_tier_expansion_slots"}
+    assert pinned == base
 
 
 def test_default_profile_omits_field_byte_identical_semantics(
     tmp_path: pytest.Path,
 ) -> None:
     manifest = _build_manifest(tmp_path)
+    assert manifest["profile"] == FULL_S_PROFILE
     assert "turn_tier_expansion_slots" not in manifest["retrieval"]
     assert manifest["retrieval"] == {
         "tier": "turns", "top_k": 10, "recall_k": 10, "label_blind": True,
@@ -75,6 +90,47 @@ def test_normalize_turn_tier_expansion_slots_refuses_invalid(bad) -> None:
     assert "turn_tier_expansion_slots" in str(excinfo.value)
 
 
+def test_unsupported_profile_refused(tmp_path: pytest.Path) -> None:
+    from benchmarks.longmemeval.full_s_profile import FullSProfileError
+
+    with pytest.raises(FullSProfileError, match="unsupported full-S profile"):
+        _build_manifest(tmp_path, profile="gpt6-luna-full-s-turns-v9")
+
+
+def test_conflicting_expansion_override_refused(tmp_path: pytest.Path) -> None:
+    from benchmarks.longmemeval.full_s_profile import FullSProfileError
+
+    source = tmp_path / "source.json"
+    normalized = tmp_path / "normalized.json"
+    hashes = [str(tmp_path / "hash_one.py"), str(tmp_path / "hash_two.py")]
+    source.write_text(json.dumps(_synthetic_source()), encoding="utf-8")
+    for h in hashes:
+        Path(h).write_text("# pinned source\n", encoding="utf-8")
+    with pytest.raises(FullSProfileError, match="unsupported full-S profile"):
+        build_full_s_manifest(
+            source, normalized, source_hash_paths=hashes, profile="bogus",
+        )
+    with pytest.raises(FullSProfileError, match="conflicting value"):
+        build_full_s_manifest(
+            source, normalized, source_hash_paths=hashes,
+            profile="gpt6-luna-full-s-turns-v1", turn_tier_expansion_slots=8,
+        )
+    with pytest.raises(FullSProfileError, match="conflicting value"):
+        build_full_s_manifest(
+            source, normalized, source_hash_paths=hashes,
+            profile="gpt6-luna-full-s-turns-v2-exp8", turn_tier_expansion_slots=0,
+        )
+
+
+def test_s36_policies_accept_exp8_profile() -> None:
+    v1_policy = _agent_policy_for_profile(FULL_S_PROFILE)
+    exp8_policy = _agent_policy_for_profile("gpt6-luna-full-s-turns-v2-exp8")
+    assert exp8_policy == v1_policy
+    assert (_operational_stop_for_profile(
+        "gpt6-luna-full-s-turns-v2-exp8", 150.0,
+    ) == _operational_stop_for_profile(FULL_S_PROFILE, 150.0))
+
+
 def test_normalize_turn_tier_expansion_slots_accepts_zero_and_positive() -> None:
     assert normalize_turn_tier_expansion_slots(0) == 0
     assert normalize_turn_tier_expansion_slots(8) == 8
@@ -83,7 +139,9 @@ def test_normalize_turn_tier_expansion_slots_accepts_zero_and_positive() -> None
 def test_s36_selection_refuses_invalid_expansion_pin(
     tmp_path: pytest.Path,
 ) -> None:
-    manifest = _build_manifest(tmp_path, expansion=8)
+    manifest = _build_manifest(
+        tmp_path, profile="gpt6-luna-full-s-turns-v2-exp8",
+    )
     manifest["retrieval"]["turn_tier_expansion_slots"] = -1
     manifest_path = tmp_path / "full_s_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -95,7 +153,9 @@ def test_s36_selection_refuses_invalid_expansion_pin(
 
 
 def test_s36_selection_accepts_valid_expansion_pin(tmp_path: pytest.Path) -> None:
-    manifest = _build_manifest(tmp_path, expansion=8)
+    manifest = _build_manifest(
+        tmp_path, profile="gpt6-luna-full-s-turns-v2-exp8",
+    )
     dataset_path = tmp_path / "dataset.json"
     dataset_path.write_text(json.dumps(_synthetic_source()), encoding="utf-8")
     manifest["dataset"] = {"sha256": _dataset_hash(dataset_path)}
