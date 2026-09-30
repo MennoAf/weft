@@ -132,7 +132,10 @@ logger = logging.getLogger(__name__)
 # Additive session-expansion slots for the turn tier: the funnel window
 # (``limit`` turns, unchanged order) is a protected prefix and up to this
 # many session-sibling turns are appended after it (0 = historical behavior).
-_TURN_TIER_EXPANSION_SLOTS = 5
+# 8 = product operating point (operator decision 2026-09-30, chosen at the
+# measured yield knee; depth-8 latency indistinguishable from depth-5 in the
+# round-10 real-path probe).
+_TURN_TIER_EXPANSION_SLOTS = 8
 
 
 def _recovery_telemetry_projection(stage, outcome, scope, parent_query_id=None):

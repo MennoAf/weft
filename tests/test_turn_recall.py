@@ -969,7 +969,7 @@ async def test_weft_recall_turn_tier_expansion_slots_default_on(ctx, monkeypatch
                 content=f"saved recall query expansion turn {i}",
                 occurred_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
             )
-            for i in range(anchor_limit + 5)
+            for i in range(anchor_limit + 8)
         ]
         return {args[1]: turns}
 
@@ -978,13 +978,14 @@ async def test_weft_recall_turn_tier_expansion_slots_default_on(ctx, monkeypatch
         ctx, query="saved recall query", project_id="proj-expansion",
         tier="turns", limit=3,
     )
-    assert captured["expansion_slots"] == 5
-    assert result["count"] == 8
-    assert len(result["turns"]) == 8
+    assert captured["expansion_slots"] == 8
+    assert result["count"] == 11
+    assert len(result["turns"]) == 11
 
 
 async def test_weft_recall_expansion_slots_omitted_uses_constant(ctx, monkeypatch):
-    """Omitting expansion_slots preserves the round-7 constant behavior (5)."""
+    """Omitting expansion_slots uses the product operating point (8 since
+    the 2026-09-30 operator re-pin; was the round-7 constant 5)."""
     from weft import turn_recall as turn_recall_module
 
     captured = {}
@@ -998,7 +999,7 @@ async def test_weft_recall_expansion_slots_omitted_uses_constant(ctx, monkeypatc
         ctx, query="saved recall query", project_id="proj-omit",
         tier="turns", limit=3,
     )
-    assert captured["expansion_slots"] == 5
+    assert captured["expansion_slots"] == 8
     assert result["count"] == 0
 
 
