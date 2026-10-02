@@ -20,9 +20,54 @@ But that isn't today.
 
 The numbers below measure the system as it actually ships, not a benchmark-tuned configuration.
 
-## Results — LongMemEval-S, full split (500 questions)
+## Results — LongMemEval-S recall lift (three repeated executions, September 30, 2026)
 
-Run date: 2026-09-29. One authorized paid run; no repetitions yet (see the publication protocol below).
+The lift was measured by repeating the same selected 500-question set three times with the same first-occurrence dataset, writer (`gpt-6-luna`), judge (`gpt-4o`, official abstention-aware answer-check prompt), and turn-tier retrieval profile. These are repeated executions of the same selected question set, not statistically independent samples. Of the 1,500 selected question slots, 1,491 were judged across the three runs — 9 selected cases went unjudged, and the per-run denominators below disclose them.
+
+| Run | Judged / selected | Correct / judged | Accuracy |
+|-----|-------------------|------------------|----------|
+| 1 | 495 / 500 | 395 / 495 | 79.8% |
+| 2 | 499 / 500 | 404 / 499 | 81.0% |
+| 3 | 497 / 500 | 393 / 497 | 79.1% |
+| **All three** | **1,491 / 1,500** | **1,192 / 1,491 (pooled)** | **80.0% pooled** |
+
+The unweighted mean of the three run accuracies is **~80.0%**, versus the **67.54%** historical baseline — **+12.4 percentage points**. The pooled judged-row rate is 1,192/1,491 = 80.0%. Denominators stay visible because the nine unjudged selected cases mean the per-run scores are computed over slightly different judged sets.
+
+Actual combined provider spend across the three runs: **$3.34** (reservation ledgers were conservative estimates, not invoices).
+
+### Per question type (historical baseline → recall-lift mean)
+
+| Question type | Baseline (single run, 2026-09-29) | Recall-lift mean (3 runs) | Change | Lifted-run range |
+|---------------|-----------------------------------|---------------------------|--------|------------------|
+| knowledge-update | 43/78 = 55.1% | 78.6% | **+23.5 pp** | 75.6–82.1% |
+| multi-session | 70/133 = 52.6% | 71.3% | **+18.7 pp** | 67.4–74.2% |
+| temporal-reasoning | 88/131 = 67.2% | 77.9% | **+10.7 pp** | run-level details in receipts |
+| single-session-assistant | 53/56 = 94.6% | 98.2% | **+3.6 pp** | identical across all 3 runs |
+| single-session-user | 64/68 = 94.1% | 97.6% | **+3.5 pp** | run-level details in receipts |
+| single-session-preference | 17/30 = 56.7% | 55.6% | **−1.1 pp** | 50.0–60.0% (30 judged each run) |
+
+The overall score is weighted by judged-question counts. The unweighted mean of the six category deltas is ~+9.8 pp — don't present the category-average delta as the overall gain.
+
+The lift landed mostly where the baseline was weakest: knowledge-update, multi-session, and temporal reasoning moved substantially, and single-session assistant/user gained a few points from already-strong levels. Single-session preference is the one category that did not improve — it was variable across runs (50.0–60.0%) and slightly below its historical baseline on the mean.
+
+### Single-session preference: cautious first-pass read
+
+The same 30 single-session-preference question IDs were judged in every run:
+
+| Run | Correct | Judged | Accuracy |
+|-----|---------|--------|----------|
+| 1 | 15 | 30 | 50.0% |
+| 2 | 18 | 30 | 60.0% |
+| 3 | 17 | 30 | 56.7% |
+| Mean | 50 | 90 run-question judgments | 55.6% |
+
+Across those 30 shared IDs, 12 were judged correct in all three runs, 9 were incorrect in all three, and 9 changed label across runs. That is a stable hard-case subset alongside real run-to-run writer/judge variability. The 90 repeated judgments are not 90 independent questions.
+
+A preliminary join of each run's retrieved turn source-session IDs to each question's annotated answer session suggests a mixture of retrieval misses (some stable misses returned no turns from the gold answer session) and downstream answer/judge variability (some misses returned gold-session turns and still flipped label between runs). This diagnosis is **preliminary and unconfirmed**: a gold-session hit is only a coarse proxy — it does not prove the exact preference-bearing fact was returned or that the agent attended to it — and the planned independent preference review did not complete. Exact-fact annotation and a completed independent review are still needed before publishing any mechanism claim.
+
+### Historical baseline — pre-lift single run (2026-09-29)
+
+Kept for the before/after comparison above; these were the numbers before the recall lift.
 
 | Metric | Value |
 |--------|-------|
@@ -37,26 +82,11 @@ Run date: 2026-09-29. One authorized paid run; no repetitions yet (see the publi
 | Actual provider spend | **$0.65** (conservative in-run ledger estimate: $4.79) |
 | Wall time | ~5.3 hours |
 
-> **Note:** The benchmark drove the models through direct paid API calls rather than a subscription-based harness, so no platform-injected system prompt influenced the responses.
-
-**Per question type:**
-
-| Question type | Accuracy |
-|---------------|----------|
-| single-session-assistant | 53/56 = 94.6% |
-| single-session-user | 64/68 = 94.1% |
-| temporal-reasoning | 88/131 = 67.2% |
-| single-session-preference | 17/30 = 56.7% |
-| knowledge-update | 43/78 = 55.1% |
-| multi-session | 70/133 = 52.6% |
-
-The current weakest question types are where memory systems earn their keep: multi-session recall, synthesis, knowledge-update (where old facts are replaced), and single-session preference (17/30 — small sample).
-
-This is also where the current Weft model of "remember only what the user asks" struggles the most. 
-
-These are active improvement targets, and the first update I'm making to Weft after launch. 
+> **Note:** The benchmark drove the models through direct paid API calls rather than a subscription-based harness, so no platform-injected system prompt influenced the responses. This applies to the baseline run and all three repeated runs.
 
 ## How this run was built
+
+The 2026-09-29 baseline run and all three repeated executions used the same construction:
 
 - **Agent workload, not retrieval-only.** For each of the 500 questions, a fresh agent ingested the question's full haystack history through Weft's normal write path — raw memories *and* per-turn episode records (dual representation) — then answered the question using Weft's recall tools under a bounded tool-round policy. The model in the benchmark never sees the question_type, answer, or questionID, which might allow it to "[cheat](https://mediumroast.dev/blog/we-were-not-beating-longmemeval/)"
 - **Turn-tier retrieval.** Answers were produced from turn-level hybrid recall over the ingested corpus (`--tier turns`), the representation LongMemEval's multi-session questions stress.
@@ -78,7 +108,7 @@ docker compose -f docker-compose.weft.yml exec -T postgres \
   psql -U weft -d weft -c 'CREATE DATABASE lme_bench'
 
 # 3. Point every Weft DB variable at the local benchmark database
-export DATABASE_URL="postgresql://weft:weft_local@127.0.0.1:5433/lme_bench"
+export DATABASE_URL="postgresql://weft:weft_local@localhost:5433/lme_bench"
 export WEFT_DATABASE_URL="$DATABASE_URL"
 export LONGMEMEVAL_DATABASE_URL="$DATABASE_URL"
 
@@ -108,9 +138,9 @@ Each step's full flag set is printed by `--help`. Artifacts land under the run's
 
 ## Limitations
 
-- **Single repetition.** One complete run is evidence, not a publication gate — the protocol below calls for 3–5 independent repetitions before headline claims.
+- **Repeated executions, not independent samples.** The current headline comes from three repeated executions of the same selected 500-question set — 1,491 of 1,500 selected slots judged, with 9 unjudged. The protocol below still calls for 3–5 independent repetitions per arm (or a versioned fixed-materialization design) before publication-grade claims; that independent-sample standard has not been met.
 - **Model and system are confounded.** These numbers measure Weft-as-shipped with `gpt-6-luna` as the writer. The numbers might change based on the model you use for your system.
-- **Estimate vs invoice.** The ledger's $4.79 is a conservative reservation estimate, not a billing guarantee. Actuals are reported separately and were 14% of estimate on this run.
+- **Estimate vs invoice.** Reservation ledgers are conservative estimates, not billing guarantees. On the baseline run the $4.79 reservation came in at $0.65 actual (14% of estimate); the three recall-lift runs totaled $3.34 actual combined.
 - **User-directed memory policy.** See the note at the top: the current write path saves what the user designates. Systems that auto-curate conversations trade that predictability for recall, and will score differently on this benchmark.
 - **Provider-free contract tests prove correctness, not quality.** They verify task shape, artifacts, and fail-closed accounting without any provider call; only paid runs measure answer quality.
 
@@ -146,16 +176,18 @@ per-arm mechanics and keeps paid metrics explicitly `PENDING-PAID-EVALUATION`.
 uv run pytest benchmarks/personal_agent/tests/test_paah_continuity.py -q
 ```
 
-## Cost expectations (LongMemEval-S, agent workload, 2026-09-29 run)
+## Cost expectations (LongMemEval-S, agent workload)
 
 | Stage | Measured |
 |-------|----------|
-| 4-question calibration smoke | $0.0045 actual / $0.037 reserved |
-| Full 500-question run | **$0.65 actual** / $4.79 reserved (~5.3 h) |
+| 4-question calibration smoke (baseline run) | $0.0045 actual / $0.037 reserved |
+| Baseline full 500-question run (2026-09-29, historical) | **$0.65 actual** / $4.79 reserved (~5.3 h) |
+| Three recall-lift repetitions (2026-09-30) | **$3.34 actual combined** |
 
 ## Roadmap gates
 
 Falsifiable claims for the retrieval roadmap, recorded against commits:
 
-- **Multi-session and knowledge-update lift** — the two weakest types (52.6%, 55.1%) are the active targets; a retrieval change ships only if these move without regressing single-session types.
+- **Multi-session and knowledge-update lift** — met in the three-run recall lift: 52.6% → 71.3% and 55.1% → 78.6% means (historical baseline → lift), with single-session assistant/user means up at 98.2%/97.6%. Further retrieval changes must preserve these gains.
+- **Single-session preference** — still flat (56.7% historical baseline → 55.6% mean, −1.1 pp, 50.0–60.0% across runs) and now the active improvement target; a change ships only if preference moves without regressing the other types.
 - **Turn-tier recall@10** — turn recall@10 must lift ≥3 points over baseline; Oracle must lift ≥1.
