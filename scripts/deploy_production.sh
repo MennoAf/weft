@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy the canonical production ref only after the repository guard passes.
+# Deploy an explicitly approved production tag only after the repository guard passes.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"

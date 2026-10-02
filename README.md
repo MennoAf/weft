@@ -2,20 +2,24 @@
 
 > Shared persistent brain for you and your agents.
 
-Weft is the persistent brain you share with your agents. Conversations, decisions, recipes, plans — anything you'd write down so you and your agents can find it later. Queryable via semantic search (pgvector), structured memory types, confidence metadata, pinned conventions, hierarchical retrieval, and cross-session/cross-agent continuity. Lifecycle scoring is review-only: consolidation can propose stale candidates, but it does not automatically hide or delete memories.
+Weft is a persistent brain you share with your agents. It doesn't remember everything, and that's on purpose.
 
-Part of the trilogy: **Loom** (orchestration) → **Warp** (builder agent) → **Weft** (memory).
+Your agent doesn't need to remember every conversation, every answer, every date. You want it to remember what you need for that moment, and nothing more. By default, Weft remembers your decisions, plans, and other things that matter for your code in a way that makes it easy for your agents to pull up later using vector-based semantic search. 
 
 ## Why Weft
 
-Default agent memory is a flat file the agent grep-reads at session start. That works for a while, then it doesn't:
+When you're coding with an AI agent, your default option to have a persistent memory is a set of flat files you have your agent read and write in.
 
-- One agent can't read another agent's memories
-- No retrieval beyond grep — semantic similarity, time-aware ranking, and provenance all live in the agent's head
-- No structured confidence, provenance, pinning, or review lifecycle to distinguish a load-bearing convention from a one-off observation
-- No cross-session continuity beyond the user re-pasting context
+That works for awhile, until it doesn't. 
 
-Weft treats memory as a first-class data system. Multiple agents (Claude Code, custom MCP clients, Claude API apps, Warp, etc.) read and write the same brain. A handoff at session end shows up in the next session's prime — same agent, different agent, different machine, doesn't matter.
+- One agent can't read another agent's memories, so your learnings stay locked to the repo. 
+- Retrieval is limited to `grep` so if you're not sure where a memory is, you have to burn up your agents context reading everything.
+- There's no easy way for your agent to know the difference between something that's important to every session and a temporary rule you created to deal with a bug you fixed nine months ago.
+- Switching sessions means starting from zero, giving your agent the same list of flat files to read.
+
+Weft treats memory as a first-class data system.
+
+Multiple agent platforms can read and write to the same brain. You can handoff a session to a fresh agent with a simple command. Same agent, different agent, *different machine*, it doesn't matter. Weft is built for your projects, not for a single platform.
 
 ## Quickstart
 
@@ -25,16 +29,16 @@ Five steps, ~5 minutes.
 
 ```bash
 # Recommended: pipx for system-wide availability
-pipx install git+https://github.com/MennoAf/weft-memory.git
+pipx install git+https://github.com/MennoAf/weft.git
 
 # Or as a uv tool
-uv tool install git+https://github.com/MennoAf/weft-memory.git
+uv tool install git+https://github.com/MennoAf/weft.git
 
 # Or local development install
-git clone https://github.com/MennoAf/weft-memory.git && cd weft-memory && uv sync
+git clone https://github.com/MennoAf/weft.git && cd weft && uv sync
 ```
 
-Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker Desktop.
+Prerequisites: Python 3.12+ and [uv](https://docs.astral.sh/uv/). Docker Desktop is needed only to run local PostgreSQL and Redis services with `weft up` or to run the database-backed test suite. Other containerization methods may work, but at this time only Docker is supported.
 
 ### 2. Start infrastructure
 
@@ -46,49 +50,29 @@ This launches Postgres 16 (with pgvector) on port 5433 and Redis 7 on port 6380,
 
 ### 3. Register Weft as an MCP server
 
-Add to your project's `.mcp.json` (or Claude Desktop's MCP config):
+Register the Weft MCP server with your agent harness — see [AGENTS.md](AGENTS.md) for a copy-paste memory protocol and [the wiring guide](docs/wiring-your-agent.md) for full setup. Claude-specific setup: [CLAUDE.md](CLAUDE.md). Use the harness's own MCP documentation for its configuration format.
 
-```json
-{
-  "mcpServers": {
-    "weft": {
-      "command": "weft",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+### 4. Point your agent at Weft
 
-Use `command: "uv"` with `args: ["run", "--directory", "/path/to/weft-memory", "python", "-m", "weft.mcp"]` if you installed locally instead.
+Use the MCP registration details in [AGENTS.md](AGENTS.md), then give your agent the copy-paste memory protocol or equivalent context for your harness. Claude-specific options are in [CLAUDE.md](CLAUDE.md). See the [agent wiring guide](docs/wiring-your-agent.md) for full connection steps.
 
-### 4. Wire your agent
-
-The agent needs to know to use Weft instead of flat files. Drop in the templates:
-
-```bash
-# Memory protocol — append to ~/.claude/CLAUDE.md
-cat templates/CLAUDE.md >> ~/.claude/CLAUDE.md
-
-# Slash commands
-mkdir -p ~/.claude/commands
-cp templates/commands/prime.md ~/.claude/commands/
-cp templates/commands/handoff.md ~/.claude/commands/
-```
-
-Now every Claude Code session in any project will use Weft. Type `/prime` at session start to load context, `/handoff` before ending. The full guide with verification steps is at [docs/wiring-your-agent.md](docs/wiring-your-agent.md).
+You'll also want to set up [handoff](https://github.com/MennoAf/weft/blob/main/templates/commands/handoff.md) and [prime](https://github.com/MennoAf/weft/blob/main/templates/commands/prime.md) as skills your agents can access. 
 
 ### 5. First session
 
-Start a Claude Code session and type `/prime`. The agent will call `weft_prime`, find no prior context (you're new), and ask what you're working on. Save something:
+Start a session with the connected harness and ask it to call `weft_prime(disclosure="progressive")`. It will load any saved context or report that none is available. 
+
+Memories are scoped per project, and a project is just a name: `weft_prime` and `weft_remember` take a `project_id`, and that name decides which brain you get back. Pick one name per repo and stick to it.
+
+Tell your agent to save a memory, for example:
 
 > Save: I prefer test descriptions in the form "test_<thing>_<condition>_<outcome>"
 
-It will call `weft_remember` with type `preference`. Then `/handoff` and end the session.
+Then have it write the project name into the repo's `AGENTS.md` (or your harness's equivalent instructions file), so every agent that works in this repo — on any machine — loads and saves to the same brain.
 
-Open a new session in any project, `/prime` again. The handoff lands at the top, the preference is in the prime — your agent is now working with persistent context across sessions.
+At the end of a non-trivial session, ask it to call `weft_handoff`. In a later session, `weft_prime` surfaces the saved context and handoff.
 
 ## Architecture
-
 ```
 ┌──────────────────────────────────────────────────┐
 │                  MCP Interface                   │
@@ -116,14 +100,16 @@ Full reference: [docs/tools.md](docs/tools.md).
 
 ## Benchmarks
 
-Weft is benchmarked against [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — multi-session memory evaluation across S (~40 sessions/question) and M (~500 sessions/question) haystacks.
+Weft doesn't benchmark well because it's not designed to remember things the way a benchmark tests. However, for transparency I did run it through [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — multi-session memory evaluation across S (~40 sessions/question) using the "turn-tier" which is the memory type that works best here.
 
 Current numbers and reproduction harness: [docs/benchmarks.md](docs/benchmarks.md).
+
+In the future, I plan on showing my own benchmark so you can review how the system works in more detail.
 
 ## What you can do
 
 - **Query memories** — `weft recall "database configuration patterns"`
-- **Import existing memories** — `weft import ~/.claude/memory/MEMORY.md`
+- **Import existing memories** — `weft import /path/to/MEMORY.md`
 - **Sync an Obsidian vault** — `weft obsidian sync ~/Documents/MyVault` ([guide](docs/obsidian.md))
 - **Ingest a codebase** — `weft ingest .` for grounded recall against your own source
 - **Inspect state** — `weft status` for counts, `weft config show` for resolved config
@@ -136,12 +122,12 @@ Full CLI: [docs/cli.md](docs/cli.md).
 
 | | |
 | --- | --- |
-| **[Wire your agent](docs/wiring-your-agent.md)** | Full CLAUDE.md template + slash command setup + verification |
+| **[Wire your agent](docs/wiring-your-agent.md)** | Harness-neutral MCP setup and persistent-memory workflow |
 | **[MCP tool reference](docs/tools.md)** | Every tool, every parameter |
 | **[CLI reference](docs/cli.md)** | Every command |
 | **[Configuration](docs/configuration.md)** | Environment variables, TOML keys, infrastructure |
+| **[Database and schema guide](docs/database-schema.md)** | 52 public tables, ownership/RLS, migrations, vectors, and export boundaries |
 | **[Authentication + identity](docs/user-identity.md)** | Tokens, caller modes, agent floor |
-| **[Retrieval + scope](docs/retrieval-and-scope.md)** | How `weft_recall` decides what comes back |
 | **[Benchmarks](docs/benchmarks.md)** | LongMemEval methodology + current numbers |
 | **[Obsidian integration](docs/obsidian.md)** | Vault sync, frontmatter, Tasks plugin |
 | **[Disaster recovery](docs/disaster-recovery.md)** | Backup, restore, schema migration |
@@ -155,7 +141,7 @@ uv run python -m weft          # Run CLI
 uv run python -m weft.mcp      # Run MCP server (stdio)
 ```
 
-Tests use `testcontainers` for database isolation — each test gets a fresh Postgres+pgvector instance. No external services required.
+Database-backed tests use `testcontainers` for isolation — each test gets a fresh Postgres+pgvector instance and requires Docker. Pure unit tests do not require Docker.
 
 ## License
 

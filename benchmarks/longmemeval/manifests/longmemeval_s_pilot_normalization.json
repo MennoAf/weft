@@ -1,0 +1,328 @@
+{
+  "schema": "weft.longmemeval.dataset-normalization.v1",
+  "status": "PILOT_DERIVATIVE_READY",
+  "purpose": "pilot_only",
+  "official_benchmark": {
+    "source_unchanged": true,
+    "source_records_remain_authoritative": true,
+    "duplicate_id_semantics": "unadjudicated_upstream_data_question",
+    "full_suite_disposition": "separate_follow_up_required"
+  },
+  "source": {
+    "filename": "longmemeval_s_cleaned.json",
+    "url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned",
+    "path": "/tmp/longmemeval-source-20260921/data/longmemeval_s_cleaned.json",
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "record_count": 500
+  },
+  "derived": {
+    "filename": "longmemeval_s_pilot_derivative.json",
+    "path": "/tmp/longmemeval-pilot-normalization-20260921/longmemeval_s_pilot_derivative.json",
+    "sha256": "8b825543dc35734d6f61e578abd73021b21d4db53128975a4c7997be9cff4135",
+    "record_count": 487,
+    "valid_question_type_counts": {
+      "knowledge-update": 76,
+      "multi-session": 130,
+      "single-session-assistant": 55,
+      "single-session-preference": 29,
+      "single-session-user": 67,
+      "temporal-reasoning": 130
+    }
+  },
+  "rule": {
+    "identical_duplicate_payload": "preserve_first_occurrence",
+    "conflicting_duplicate_payload": "exclude_entire_question",
+    "payload_definition": "canonical date plus session JSON at each repeated session ID"
+  },
+  "collapsed_identical_groups": [],
+  "exclusions": [
+    {
+      "question_id": "58bf7951",
+      "question_type": "single-session-user",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "07b7a667_1",
+          "occurrences": [
+            {
+              "source_index": 17,
+              "date": "2023/05/23 (Tue) 23:54",
+              "payload_sha256": "55a1aa8720a1ae6b5f0cc0717319a720a8e872ce48a827a02099859236c9ef60"
+            },
+            {
+              "source_index": 47,
+              "date": "2023/05/29 (Mon) 13:56",
+              "payload_sha256": "cd1e2a497755d7feec591b0b47e874f7dc14dbc9e7e1e555a422a9137adb7433"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "d5d1f9c4",
+          "occurrences": [
+            {
+              "source_index": 11,
+              "date": "2023/05/21 (Sun) 11:42",
+              "payload_sha256": "9e17cd2d551273a1611ca45a3cdb2220e9a8df42995733a7736cf43b8ceb4359"
+            },
+            {
+              "source_index": 26,
+              "date": "2023/05/24 (Wed) 06:24",
+              "payload_sha256": "48a996ea32c90d092631e934b385cc98dedf5e6bd79f7aa6f60d2afc7de3d876"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "001be529",
+      "question_type": "single-session-user",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "sharegpt_SYbLHTK_0",
+          "occurrences": [
+            {
+              "source_index": 25,
+              "date": "2023/05/25 (Thu) 12:40",
+              "payload_sha256": "515688af3e02691ce169d3ae0f0d33075e5f4f59084ebb05e3fabb7212452336"
+            },
+            {
+              "source_index": 49,
+              "date": "2023/05/30 (Tue) 04:52",
+              "payload_sha256": "8e3ae96ee2831bde32e7cb549062e8accd2c9227a57c09d443060440617c4b48"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "d23cf73b",
+      "question_type": "multi-session",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "334ab2f1",
+          "occurrences": [
+            {
+              "source_index": 31,
+              "date": "2023/05/26 (Fri) 12:34",
+              "payload_sha256": "f58dc95dec49b3c3c22a4a9dcd2d2088f52dab60c137767a96b46afeb716c52d"
+            },
+            {
+              "source_index": 34,
+              "date": "2023/05/27 (Sat) 12:59",
+              "payload_sha256": "9cc82a200c8f4d56f9215409781519caa4f26e16c68b5ee0508f9913be0b0cff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "sharegpt_YCfhENU_0",
+          "occurrences": [
+            {
+              "source_index": 9,
+              "date": "2023/05/23 (Tue) 05:09",
+              "payload_sha256": "4ea67e79ae3e0d335971eaddea9627536d49f3aeee79aece8a28730deb387919"
+            },
+            {
+              "source_index": 12,
+              "date": "2023/05/24 (Wed) 05:53",
+              "payload_sha256": "8fbe29eb9c44b81e2c5a9f9676f4edc0aea6b1ffd1b026fb549812626ea024b8"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "91b15a6e",
+      "question_type": "multi-session",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "sharegpt_fgnzLtE_0",
+          "occurrences": [
+            {
+              "source_index": 3,
+              "date": "2023/05/21 (Sun) 08:40",
+              "payload_sha256": "fda0e8619783c73ca71b0631392a5be4734b4643d3daca5802b1e86b44b0c8a0"
+            },
+            {
+              "source_index": 5,
+              "date": "2023/05/22 (Mon) 00:50",
+              "payload_sha256": "21291450c00d27b81e230499d55158959a2a6eb966a433bd9aa9dee7c6d693bc"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "078150f1",
+      "question_type": "multi-session",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "sharegpt_z7Ogy29_0",
+          "occurrences": [
+            {
+              "source_index": 11,
+              "date": "2023/05/22 (Mon) 17:27",
+              "payload_sha256": "514567066973f764d7bb924b6078bfb1b1119362fd707b4a86b42059f88fcbcc"
+            },
+            {
+              "source_index": 32,
+              "date": "2023/05/28 (Sun) 07:12",
+              "payload_sha256": "5d4178e9873256be223b9b82a4a53fcc27f92900b132f07a8d81d1e44b47353e"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "gpt4_4929293b",
+      "question_type": "temporal-reasoning",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "sharegpt_81riySf_0",
+          "occurrences": [
+            {
+              "source_index": 8,
+              "date": "2023/04/12 (Wed) 05:52",
+              "payload_sha256": "23e86bb7a8acfcb686088fd9dc15996da1c2b3bb707c23798747798bfb60e94d"
+            },
+            {
+              "source_index": 27,
+              "date": "2023/04/30 (Sun) 18:46",
+              "payload_sha256": "6a5365f16c2adc4fada5031cfc93dc0d1362ce037a6f47b97d3671ba44a65d1f"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "gpt4_76048e76",
+      "question_type": "temporal-reasoning",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "8fcaf3a9_2",
+          "occurrences": [
+            {
+              "source_index": 9,
+              "date": "2023/03/10 (Fri) 13:21",
+              "payload_sha256": "c26a8b2ab80226df230b21bb1d7cff18dfeb5cd5e75dbec0057f4c240d69397f"
+            },
+            {
+              "source_index": 19,
+              "date": "2023/03/10 (Fri) 17:38",
+              "payload_sha256": "22a02f5d9364b671f39c0d51ba0f8e9f6882f1a91fc189d0af8353953014048a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "gpt4_c27434e8_abs",
+      "question_type": "temporal-reasoning",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "8c64ce26_3",
+          "occurrences": [
+            {
+              "source_index": 1,
+              "date": "2023/05/23 (Tue) 05:34",
+              "payload_sha256": "a2752ce76313060972ef145ef91aafb3aa46767823ca3e9ae5b2de8cd26651dc"
+            },
+            {
+              "source_index": 27,
+              "date": "2023/05/23 (Tue) 09:46",
+              "payload_sha256": "2573aa72439d8d4fde7d3010939918dc0a089aae597795482ba3dd6ef4194450"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "18bc8abd",
+      "question_type": "knowledge-update",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "sharegpt_vyHqfrX_0",
+          "occurrences": [
+            {
+              "source_index": 13,
+              "date": "2023/04/10 (Mon) 11:41",
+              "payload_sha256": "e1a5308a65dd42efa5355044bc8686e01b4cbf5c1383d75aebf570fe9613d60b"
+            },
+            {
+              "source_index": 41,
+              "date": "2023/06/26 (Mon) 16:08",
+              "payload_sha256": "eb8187d145f1017c57503d03ccf9017754a3ed6a83cd8ec49afeef9753ef8678"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "c7dc5443",
+      "question_type": "knowledge-update",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "6b8e8bb3_1",
+          "occurrences": [
+            {
+              "source_index": 6,
+              "date": "2023/06/10 (Sat) 02:11",
+              "payload_sha256": "026f310e304202c306c9b33b766c2f084893d7c71323827316d30c42fb648e3e"
+            },
+            {
+              "source_index": 44,
+              "date": "2023/07/10 (Mon) 19:09",
+              "payload_sha256": "968c9e062e9b4e3b201047542377cce63386b48e018014039458de743bbaadb2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "1d4da289",
+      "question_type": "single-session-assistant",
+      "reason": "conflicting_duplicate_haystack_session_ids",
+      "duplicate_groups": [
+        {
+          "session_id": "sharegpt_qktLFWS_21",
+          "occurrences": [
+            {
+              "source_index": 0,
+              "date": "2023/05/20 (Sat) 00:48",
+              "payload_sha256": "007b4f13ac5be7872292184153024e27bf45216460865bf04aa5dbe9df93e274"
+            },
+            {
+              "source_index": 45,
+              "date": "2023/05/29 (Mon) 02:12",
+              "payload_sha256": "86af22da45372417b2bc46b4e48d69f1a68615dfb057d274170c5c3beefac46d"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "exclusion_count": 13,
+  "collapsed_group_count": 0
+}

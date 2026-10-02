@@ -98,15 +98,42 @@ class Instance:
         # Upstream uses parallel arrays: haystack_session_ids[i],
         # haystack_dates[i], haystack_sessions[i]. answer_session_ids names
         # which sessions carry evidence (used only for has_answer flag).
-        evidence_ids = set(d.get("answer_session_ids") or [])
+        answer_ids_present = "answer_session_ids" in d
+        raw_evidence_ids = d.get("answer_session_ids") if answer_ids_present else []
         ids = d["haystack_session_ids"]
         dates = d["haystack_dates"]
         haystacks = d["haystack_sessions"]
+        if not isinstance(raw_evidence_ids, list) or any(
+            not isinstance(value, str) or not value.strip() for value in raw_evidence_ids
+        ):
+            raise ValueError(
+                f"Malformed instance {d.get('question_id')}: answer_session_ids must be strings"
+            )
+        if len(set(raw_evidence_ids)) != len(raw_evidence_ids):
+            raise ValueError(
+                f"Malformed instance {d.get('question_id')}: duplicate answer_session_ids"
+            )
         if not (len(ids) == len(dates) == len(haystacks)):
             raise ValueError(
                 f"Malformed instance {d.get('question_id')}: "
                 f"haystack arrays disagree in length "
                 f"({len(ids)}, {len(dates)}, {len(haystacks)})"
+            )
+        if not isinstance(ids, list) or any(
+            not isinstance(sid, str) or not sid.strip() for sid in ids
+        ):
+            raise ValueError(
+                f"Malformed instance {d.get('question_id')}: session IDs must be strings"
+            )
+        if len(set(ids)) != len(ids):
+            raise ValueError(
+                f"Malformed instance {d.get('question_id')}: duplicate haystack session IDs"
+            )
+        evidence_ids = set(raw_evidence_ids)
+        unknown = evidence_ids.difference(ids)
+        if unknown:
+            raise ValueError(
+                f"Malformed instance {d.get('question_id')}: unknown answer_session_ids {sorted(unknown)}"
             )
         for sid, date, turns in zip(ids, dates, haystacks):
             sessions.append(

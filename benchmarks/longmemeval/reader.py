@@ -27,11 +27,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from anthropic import AsyncAnthropic
+try:
+    from anthropic import AsyncAnthropic
+except ImportError:  # Provider-injected tests and alternate providers need no SDK.
+    AsyncAnthropic = None  # type: ignore[assignment,misc]
 
 from weft.models import MemoryRecall
-
-from benchmarks.longmemeval.dataset import ABSTENTION_TYPES
+from weft.text_generation import GenerationRequest, TextGenerationProvider
 
 logger = logging.getLogger(__name__)
 
@@ -132,21 +134,29 @@ _ABSTENTION_SUFFIX = (
 )
 
 
-def _system_prompt_for(question_type: str) -> str:
-    """Build the Reader's system prompt for a given question type.
+def _system_prompt_for(task_shape: str = "single-session") -> str:
+    """Build a prompt from a runtime shape or legacy family name.
 
-    Stable for any given (question_type) input — important so the prompt
-    cache can reuse the same hash across the run. Suffix for abstention
-    types is appended deterministically.
+    Runtime calls pass an explicit task shape. Legacy family names remain
+    supported here for direct prompt-unit callers, but are not used by
+    ``Reader.read_answer`` to select a model or runtime policy.
     """
-    base_type = question_type.removesuffix("_abs")
-    type_block = _TYPE_INSTRUCTIONS.get(
-        base_type, "Answer the question from the supplied memories.",
-    )
-    prompt = f"{_BASE_INSTRUCTIONS}\n{type_block}"
-    if question_type in ABSTENTION_TYPES:
-        prompt += _ABSTENTION_SUFFIX
-    return prompt
+    task_shape = getattr(task_shape, "task_shape", task_shape)
+    abstention = isinstance(task_shape, str) and task_shape.endswith("_abs")
+    family = task_shape.removesuffix("_abs") if isinstance(task_shape, str) else task_shape
+    type_block = {
+        "multi-session": _TYPE_INSTRUCTIONS["multi-session"],
+        "temporal": _TYPE_INSTRUCTIONS["temporal-reasoning"],
+        "temporal-multi": _TYPE_INSTRUCTIONS["temporal-reasoning"],
+        "temporal-reasoning": _TYPE_INSTRUCTIONS["temporal-reasoning"],
+        "single-session": "Answer the question from the supplied memories.",
+        "single-session-user": _TYPE_INSTRUCTIONS["single-session-user"],
+        "single-session-assistant": _TYPE_INSTRUCTIONS["single-session-assistant"],
+        "single-session-preference": _TYPE_INSTRUCTIONS["single-session-preference"],
+        "knowledge-update": _TYPE_INSTRUCTIONS["knowledge-update"],
+    }.get(family, "Answer the question from the supplied memories.")
+    suffix = _ABSTENTION_SUFFIX if abstention else ""
+    return f"{_BASE_INSTRUCTIONS}\n{type_block}{suffix}"
 
 
 def _format_memories(memories: list[MemoryRecall]) -> str:
@@ -184,6 +194,46 @@ def _format_result_rows(results: list) -> str:
         prefix = f"[{i}] (relevance={sim:.2f})" if isinstance(sim, (int, float)) else f"[{i}]"
         lines.append(f"{prefix} {content}")
     return "\n\n".join(lines)
+
+
+def _format_public_evidence(item: object, index: int) -> str:
+    """Render one public recall evidence item without leaking its dict repr."""
+    if not isinstance(item, dict):
+        item = getattr(item, "to_dict", lambda: {})()
+    content = item.get("content") or item.get("text") or item.get("summary") or ""
+    if not content and isinstance(item.get("payload"), dict):
+        payload = item["payload"]
+        content = payload.get("content") or payload.get("text") or payload.get("summary") or ""
+    score = item.get("similarity", item.get("rrf_score", item.get("relevance_score")))
+    provenance = (
+        item.get("source_provenance")
+        or item.get("provenance")
+        or item.get("source")
+        or item.get("metadata")
+    )
+    if not provenance and isinstance(item.get("payload"), dict):
+        provenance = item["payload"].get("source_provenance") or item["payload"].get("provenance")
+    suffix = f" (provenance={provenance})" if provenance else ""
+    prefix = f"[{index}] (relevance={score:.2f})" if isinstance(score, (int, float)) else f"[{index}]"
+    return f"{prefix} {content}{suffix}"
+
+
+def format_public_recall_context(response: dict) -> str:
+    """Render only evidence returned by the public ``weft_recall`` tool."""
+    if not isinstance(response, dict):
+        return "(no relevant memories retrieved)"
+    enumeration = response.get("enumeration")
+    if enumeration:
+        members = enumeration.get("members", []) or []
+        lines = [f"COUNT: {enumeration.get('count', len(members))} {enumeration.get('target', 'items')} — complete list follows"]
+        lines.extend(_format_public_evidence(item, i) for i, item in enumerate(members, 1))
+        return "\n".join(lines)
+    evidence = response.get("results") or response.get("turns") or []
+    if response.get("anchors"):
+        evidence = [item for values in response["anchors"].values() for item in values]
+    if not evidence:
+        return "(no relevant memories retrieved)"
+    return "\n\n".join(_format_public_evidence(item, i) for i, item in enumerate(evidence, 1))
 
 
 def format_recall_context(response: dict, *, use_enumeration: bool = True) -> str:
@@ -231,6 +281,8 @@ class ReaderResponse:
     input_tokens: int
     cached_input_tokens: int
     output_tokens: int
+    system_prompt: str | None = None
+    user_content: str | None = None
 
 
 class Reader:
@@ -246,8 +298,14 @@ class Reader:
         *,
         model: str = DEFAULT_MODEL,
         abstention_model: str = ABSTENTION_MODEL,
+        provider: TextGenerationProvider | None = None,
     ):
-        self._client = client or AsyncAnthropic()
+        self._client = client if provider is None else None
+        self._provider = provider
+        if self._client is None and self._provider is None:
+            if AsyncAnthropic is None:
+                raise ValueError("Anthropic SDK is required when no Reader provider is injected")
+            self._client = AsyncAnthropic()
         self._model = model
         self._abstention_model = abstention_model
 
@@ -256,8 +314,10 @@ class Reader:
         *,
         question: str,
         question_date: str,
-        question_type: str,
-        memories: list[MemoryRecall],
+        question_type: str | None = None,
+        task_shape: object = "single-session",
+        memories: list[MemoryRecall] | None = None,
+        recall_response: dict | None = None,
         top_k: int | None = 10,
     ) -> ReaderResponse:
         """Produce one hypothesis string for one benchmark question.
@@ -277,17 +337,45 @@ class Reader:
         Returns:
             ReaderResponse with the hypothesis and token accounting.
         """
+        memories = list(memories or ())
         if top_k is not None and len(memories) > top_k:
             memories = memories[:top_k]
 
-        system_prompt = _system_prompt_for(question_type)
-        model = (
-            self._abstention_model
-            if question_type in ABSTENTION_TYPES
-            else self._model
+        system_prompt = _system_prompt_for(task_shape)
+        recall_context = (
+            format_public_recall_context(recall_response)
+            if recall_response is not None
+            else _format_memories(memories)
         )
+        model = self._model
+        user_content = (
+            f"Today's date: {question_date}\n\n"
+            f"Question: {question}\n\n"
+            f"Memories:\n{recall_context}"
+        )
+        if self._provider is not None:
+            user_content = (
+                f"Today's date: {question_date}\n\n"
+                f"Question: {question}\n\n"
+                f"Memories:\n{recall_context}"
+            )
+            generated = await self._provider.generate(
+                GenerationRequest(
+                    model=model,
+                    system=system_prompt,
+                    messages=({"role": "user", "content": user_content},),
+                    max_tokens=MAX_TOKENS_OUT,
+                )
+            )
+            return ReaderResponse(
+                hypothesis=generated.text.strip(), model=generated.model,
+                input_tokens=generated.input_tokens, cached_input_tokens=0,
+                output_tokens=generated.output_tokens,
+                system_prompt=system_prompt,
+                user_content=user_content,
+            )
 
-        # System prompt is stable per question_type → cacheable. The
+        # System prompt is stable per runtime task shape → cacheable. The
         # `cache_control` marker tells Anthropic to keep the prefix warm
         # across calls for the 5-minute TTL window.
         system_blocks = [
@@ -301,7 +389,7 @@ class Reader:
         user_content = (
             f"Today's date: {question_date}\n\n"
             f"Question: {question}\n\n"
-            f"Memories:\n{_format_memories(memories)}"
+            f"Memories:\n{recall_context}"
         )
 
         response = await self._client.messages.create(
@@ -328,6 +416,8 @@ class Reader:
             input_tokens=usage.input_tokens,
             cached_input_tokens=cached,
             output_tokens=usage.output_tokens,
+            system_prompt=system_prompt,
+            user_content=user_content,
         )
 
 

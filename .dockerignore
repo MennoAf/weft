@@ -19,3 +19,7 @@ CLAUDE.md
 CHANGELOG.md
 benchmarks/
 .polytoken/
+# Local acceptance workspaces and evidence are not container build inputs.
+.ci-rc-worktree/
+.rc-candidate-worktree/
+artifacts/

@@ -57,7 +57,7 @@ async def test_primer_empty_db(pool):
     assert result["behaviors"] == []
     assert result["entities"] == []
     # Empty DB = all hints + onboarding
-    assert set(result["hints"].keys()) == {"rules", "behaviors", "handoff", "recent_work", "issues", "decisions", "loom"}
+    assert set(result["hints"].keys()) == {"rules", "behaviors", "handoff", "recent_work", "issues", "decisions", "task_management"}
     assert result["onboarding"] is not None
 
 
@@ -1341,7 +1341,7 @@ async def test_primer_cold_start_has_both_hints_and_onboarding(pool):
     result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is not None
-    assert len(result["hints"]) == 7  # all six sections empty + loom cold-start hint
+    assert len(result["hints"]) == 7  # six empty-section hints + task-management guidance
 
 
 async def test_primer_established_agent_has_neither(pool):
@@ -1377,20 +1377,19 @@ async def test_primer_established_agent_has_neither(pool):
     assert result["hints"] == {}
 
 
-# --- Loom cold-start hint ---
+# --- Task-management cold-start guidance ---
 
 
-async def test_primer_loom_hint_on_cold_start(pool):
-    """Loom project hint appears on cold start to prevent task scoping mistakes."""
+async def test_primer_task_management_hint_on_cold_start(pool):
+    """Generic task-management guidance appears on cold start."""
     result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
-    assert "loom" in result["hints"]
-    assert "loom_create_project" in result["hints"]["loom"]
-    assert "loom_decompose" in result["hints"]["loom"]
+    assert "task_management" in result["hints"]
+    assert "task-management integration" in result["hints"]["task_management"]
 
 
-async def test_primer_loom_hint_absent_for_established_agent(pool):
-    """Loom hint does not appear once a handoff exists (not a cold start)."""
+async def test_primer_task_management_hint_absent_for_established_agent(pool):
+    """Task-management guidance disappears once a handoff exists."""
     await store_memory(pool, MemoryCreate(
         type=MemoryType.handoff,
         content="## Session Handoff\n\n**Summary:** Returning",
@@ -1401,15 +1400,15 @@ async def test_primer_loom_hint_absent_for_established_agent(pool):
         pool, project_id="test-proj", budget_tokens=1800, disclosure="full",
     )
 
-    assert "loom" not in result["hints"]
+    assert "task_management" not in result["hints"]
 
 
-async def test_primer_onboarding_mentions_loom(pool):
-    """Onboarding text includes Loom integration guidance."""
+async def test_primer_onboarding_mentions_task_management(pool):
+    """Onboarding text includes generic task-management guidance."""
     result = await build_primer(pool, budget_tokens=1800, disclosure="full")
 
     assert result["onboarding"] is not None
-    assert "loom_create_project" in result["onboarding"]
+    assert "task-management integration" in result["onboarding"].lower()
 
 
 # --- Progressive disclosure ---

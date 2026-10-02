@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -52,11 +55,38 @@ from weft.seed import seed_memories
 
 logger = logging.getLogger(__name__)
 
+# The strictest tracked Fly health grace is 30s. Startup gets an 18s total
+# budget, leaving 8s for failed-startup cleanup and 4s of probe margin.
+STARTUP_READINESS_TIMEOUT_SECONDS = 18.0
+STARTUP_CLEANUP_TIMEOUT_SECONDS = 8.0
+STARTUP_CONNECT_TIMEOUT_SECONDS = 5.0
+EMBEDDING_VALIDATION_TIMEOUT_SECONDS = 5.0
+SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
 # Pool health check interval in seconds
 _KEEPALIVE_INTERVAL = 300  # 5 minutes
 # Startup retry config
 _STARTUP_MAX_RETRIES = 5
 _STARTUP_BASE_DELAY = 1.0  # seconds, doubles each retry
+
+# Startup resources are tracked before the application context exists so a
+# failure at any acquisition point can close everything acquired so far.
+_startup_resources: ContextVar[list[object] | None] = ContextVar(
+    "weft_startup_resources", default=None
+)
+_startup_deadline: ContextVar[float | None] = ContextVar(
+    "weft_startup_deadline", default=None
+)
+_startup_cleanup_deadline: ContextVar[float | None] = ContextVar(
+    "weft_startup_cleanup_deadline", default=None
+)
+
+
+def _track_startup_resource(resource: object | None) -> object | None:
+    resources = _startup_resources.get()
+    if resource is not None and resources is not None:
+        resources.append(resource)
+    return resource
 
 # Valid outbound connector values
 _VALID_OUTBOUND_CONNECTORS = {"slack", "discord", "none", ""}
@@ -87,7 +117,7 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
        adds a scope claim that distinguishes agent-issued tokens.
 
     Header narrowing: ``X-Weft-Caller-Mode`` is honoured **only** when
-    the resolved credential mode is ``supervisor`` — Jason can downgrade
+    the resolved credential mode is ``supervisor`` — an operator can downgrade
     himself to ``agent`` locally for testing without minting a real
     agent token. When the credential mode is ``agent``, the header is
     ignored. This is the change that closes the escalation path.
@@ -140,7 +170,7 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
           resolves to ``agent`` regardless of any header — that's the
           rule that closes the X-Weft-Caller-Mode escalation.
         * For supervisor credentials, the header is allowed to
-          downgrade the request (supervisor → agent) so Jason can
+          downgrade the request (supervisor → agent) so an operator can
           locally test agent code paths without minting an agent
           token.
         """
@@ -217,6 +247,11 @@ class AppContext:
     cache: Cache | NullCache
     embedding: EmbeddingProvider
     config: WeftConfig
+    # Optional resources owned by this process (for example a text provider or
+    # an SDK client) and subprocess handles registered by integrations.
+    text_provider: object | None = None
+    owned_resources: tuple[object, ...] = ()
+    subprocesses: tuple[object, ...] = ()
     # Episode-tier embedder. Resolved once at startup via
     # ``resolve_episode_embedder`` (honours ``WEFT_EPISODE_EMBEDDER`` env
     # override, falls back to ``embedding``). Stored on AppContext so the
@@ -255,20 +290,39 @@ async def _connect_with_retry(
     label: str,
     max_retries: int = _STARTUP_MAX_RETRIES,
     base_delay: float = _STARTUP_BASE_DELAY,
+    *,
+    deadline: float | None = None,
+    attempt_timeout: float | None = None,
 ):
-    """Call *connect_fn* with exponential backoff on failure.
+    """Retry a connection, keeping every attempt and delay within deadline.
 
-    Returns the result of *connect_fn()* on success.
-    Raises the last exception after exhausting retries.
+    A deadline is an absolute event-loop monotonic timestamp. When supplied,
+    ``connect_fn`` receives its remaining per-attempt timeout as a positional
+    argument; this lets pool creation bound both socket connects and restore
+    polling with the same remaining budget.
     """
     last_exc: Exception | None = None
+    loop = asyncio.get_running_loop()
     for attempt in range(max_retries + 1):
+        remaining = None if deadline is None else deadline - loop.time()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError(f"{label} startup deadline exhausted") from last_exc
+        timeout = attempt_timeout
+        if remaining is not None:
+            timeout = remaining if timeout is None else min(timeout, remaining)
         try:
-            return await connect_fn()
+            if timeout is None:
+                return await connect_fn()
+            return await asyncio.wait_for(connect_fn(timeout), timeout=timeout)
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
                 delay = base_delay * (2 ** attempt)
+                if deadline is not None:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError(f"{label} startup deadline exhausted") from exc
+                    delay = min(delay, remaining)
                 logger.warning(
                     "%s connection failed (attempt %d/%d): %s — retrying in %.1fs",
                     label, attempt + 1, max_retries + 1, exc, delay,
@@ -280,6 +334,23 @@ async def _connect_with_retry(
                     label, max_retries + 1, exc,
                 )
     raise last_exc  # type: ignore[misc]
+
+
+async def _validate_embedding_provider(
+    embedding: EmbeddingProvider,
+    *,
+    timeout: float = EMBEDDING_VALIDATION_TIMEOUT_SECONDS,
+) -> list[float]:
+    """Validate provider responsiveness before application readiness is exposed."""
+    try:
+        return await asyncio.wait_for(
+            embedding.embed("startup validation"), timeout=timeout
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"Embedding provider {embedding.provider_name} validation exceeded "
+            f"{timeout:.1f}s; startup aborted"
+        ) from exc
 
 
 async def _pool_keepalive(ctx: AppContext) -> None:
@@ -357,19 +428,178 @@ def _validate_outbound_connector_env() -> None:
 
 async def _cancel_background_tasks(
     tasks: tuple[asyncio.Task, ...],
-) -> None:
-    """Cancel and observe every lifespan task without short-circuiting cleanup."""
+    *,
+    timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+) -> list[BaseException]:
+    """Cancel and observe every lifespan task within a shared deadline."""
+    tasks = tuple(task for task in tasks if task is not None)
+    if not tasks:
+        return []
     for task in tasks:
-        task.cancel()
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for result in results:
-        if isinstance(result, BaseException) and not isinstance(
-            result, asyncio.CancelledError
-        ):
-            logger.warning(
-                "background task failed before shutdown cleanup",
-                exc_info=(type(result), result, result.__traceback__),
+        if not task.done():
+            task.cancel()
+    done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+    errors: list[BaseException] = []
+    for task in done:
+        if task.cancelled():
+            continue
+        try:
+            error = task.exception()
+        except BaseException as exc:  # pragma: no cover - defensive task API
+            error = exc
+        if error is not None:
+            errors.append(error)
+            logger.error(
+                "background task failed before shutdown cleanup (during shutdown): %s",
+                error,
             )
+    for task in pending:
+        error = TimeoutError("background task did not stop before shutdown deadline")
+        errors.append(error)
+        task.cancel()
+        logger.error("background task cleanup timed out after %.1fs", timeout)
+    return errors
+
+
+def _observe_finished_task(task: asyncio.Future) -> None:
+    """Retrieve late task errors after a bounded shutdown wait has returned."""
+    if task.cancelled():
+        return
+    task.exception()
+
+
+async def _await_until(awaitable, deadline: float) -> None:
+    """Wait only until an absolute deadline, cancelling without unbounded drain."""
+    task = asyncio.ensure_future(awaitable)
+    remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+    done, _ = await asyncio.wait((task,), timeout=remaining)
+    if task in done:
+        task.result()
+        return
+    task.cancel()
+    task.add_done_callback(_observe_finished_task)
+    raise TimeoutError("shutdown cleanup exceeded its shared deadline")
+
+
+async def _close_one_resource(resource: object, deadline: float) -> None:
+    """Close one resource using one absolute monotonic deadline."""
+    if resource is None:
+        return
+
+    def remaining() -> float:
+        return max(0.0, deadline - asyncio.get_running_loop().time())
+
+    wait = getattr(resource, "wait", None)
+    returncode = getattr(resource, "returncode", None)
+    if callable(wait) and returncode is None:
+        terminate = getattr(resource, "terminate", None)
+        if callable(terminate):
+            terminate()
+        try:
+            await _await_until(wait(), deadline)
+        except TimeoutError:
+            kill = getattr(resource, "kill", None)
+            if not callable(kill):
+                raise
+            kill()
+            # Do not reset the budget after kill: a stubborn child can consume
+            # at most the one shutdown deadline across both waits.
+            await _await_until(wait(), deadline)
+        return
+    close = getattr(resource, "aclose", None)
+    if not callable(close):
+        close = getattr(resource, "close", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await _await_until(result, deadline)
+        return
+    # Some embedding adapters own an SDK client but intentionally expose only
+    # the embedding protocol. Close that client without requiring a protocol
+    # expansion or reaching into it from every provider implementation.
+    client = getattr(resource, "_client", None)
+    if client is None:
+        client = getattr(resource, "client", None)
+    if client is not None and client is not resource:
+        await _close_one_resource(client, deadline)
+
+
+async def _cleanup_resources(
+    resources: tuple[object, ...],
+    *,
+    timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+    deadline: float | None = None,
+) -> list[BaseException]:
+    """Close each owned resource, continuing after failures and timeouts."""
+    errors: list[BaseException] = []
+    seen: set[int] = set()
+    if deadline is None:
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+    for resource in resources:
+        if resource is None or id(resource) in seen:
+            continue
+        seen.add(id(resource))
+        try:
+            await _close_one_resource(resource, deadline)
+        except BaseException as exc:
+            errors.append(exc)
+            logger.error("resource cleanup failed: %s", exc)
+    return errors
+
+
+async def _run_startup_cleanup(
+    primary_error: BaseException,
+    *,
+    resources: tuple[object, ...],
+) -> None:
+    """Clean startup acquisitions within the Fly health-grace budget."""
+    cleanup_deadline = _startup_cleanup_deadline.get()
+    await _cleanup_resources(
+        resources,
+        timeout=STARTUP_CLEANUP_TIMEOUT_SECONDS,
+        deadline=cleanup_deadline,
+    )
+    raise primary_error
+
+
+async def _shutdown_app(
+    ctx: AppContext,
+    *,
+    redis: object | None = None,
+    lifespan_tasks: tuple[asyncio.Task, ...] = (),
+    primary_error: BaseException | None = None,
+) -> list[BaseException]:
+    """Bounded, best-effort shutdown that never masks a primary exception."""
+    deadline = asyncio.get_running_loop().time() + SHUTDOWN_TIMEOUT_SECONDS
+    remaining = lambda: max(0.0, deadline - asyncio.get_running_loop().time())
+    errors = await _cancel_background_tasks(
+        lifespan_tasks + tuple(getattr(ctx, "_background_tasks", ())),
+        timeout=remaining(),
+    )
+    try:
+        drain_task = asyncio.create_task(tool_usage_middleware.drain(ctx.pool))
+        await _await_until(drain_task, deadline)
+        drain_report = drain_task.result()
+        if not drain_report["shutdown_drained"]:
+            logger.warning("tool usage telemetry did not drain cleanly: %s", drain_report)
+    except BaseException as exc:
+        errors.append(exc)
+        logger.error("shutdown telemetry drain failed: %s", exc)
+
+    resources = tuple(getattr(ctx, "owned_resources", ())) + (
+        ctx.pool,
+        redis,
+        getattr(getattr(ctx, "cache", None), "_redis", None),
+        getattr(ctx, "embedding", None),
+        getattr(ctx, "episode_embedding", None),
+        getattr(ctx, "text_provider", None),
+    ) + tuple(getattr(ctx, "subprocesses", ()))
+    errors.extend(await _cleanup_resources(resources, timeout=remaining()))
+    if errors:
+        logger.error("shutdown completed with %d cleanup error(s)", len(errors))
+    if primary_error is not None:
+        raise primary_error
+    return errors
 
 
 async def _prepare_database_schema(
@@ -390,7 +620,10 @@ async def _prepare_database_schema(
         # The first pool's connections may predate installation of vector.
         await pool.close()
         replacement = await _connect_with_retry(
-            lambda: create_pool(config), "Postgres"
+            lambda timeout: create_pool(config, connect_timeout=timeout),
+            "Postgres",
+            deadline=_startup_deadline.get(),
+            attempt_timeout=STARTUP_CONNECT_TIMEOUT_SECONDS,
         )
         owned_pool = replacement
         migrated_tables = await ensure_vector_dimensions(
@@ -399,12 +632,16 @@ async def _prepare_database_schema(
         return replacement, migrated_tables
     except BaseException:
         if not owned_pool.is_closing():
-            await owned_pool.close()
+            cleanup_deadline = _startup_cleanup_deadline.get()
+            if cleanup_deadline is None:
+                await owned_pool.close()
+            else:
+                await _await_until(owned_pool.close(), cleanup_deadline)
         raise
 
 
 @asynccontextmanager
-async def lifespan(server: FastMCP):
+async def _lifespan_impl(server: FastMCP):
     """Initialize database, Redis, and embedding provider."""
     from weft.correlation import CorrelationFilter
 
@@ -434,11 +671,14 @@ async def lifespan(server: FastMCP):
         handler.addFilter(corr_filter)
 
     # Database (with retry)
-    pool = await _connect_with_retry(
-        lambda: create_pool(config),
+    pool = _track_startup_resource(await _connect_with_retry(
+        lambda timeout: create_pool(config, connect_timeout=timeout),
         "Postgres",
-    )
+        deadline=_startup_deadline.get(),
+        attempt_timeout=STARTUP_CONNECT_TIMEOUT_SECONDS,
+    ))
     pool, migrated_tables = await _prepare_database_schema(pool, config)
+    _track_startup_resource(pool)
 
     # Phase 2.5 L3: bootstrap a credential row for the legacy
     # WEFT_API_KEY env var so existing clients keep working when L4
@@ -467,7 +707,9 @@ async def lifespan(server: FastMCP):
                 await client.ping()
                 return client
 
-            r = await _connect_with_retry(_connect_redis, "Redis", max_retries=1, base_delay=0.5)
+            r = _track_startup_resource(
+                await _connect_with_retry(_connect_redis, "Redis", max_retries=1, base_delay=0.5)
+            )
             cache = Cache(r)
         except Exception as exc:
             logger.warning("Redis unavailable, using NullCache: %s", exc)
@@ -478,13 +720,15 @@ async def lifespan(server: FastMCP):
         cache = NullCache()
 
     # Embedding provider (validate eagerly to catch config errors at startup)
-    embedding = get_provider(
+    embedding = _track_startup_resource(get_provider(
         config.embedding.provider,
         model_name=config.embedding.model,
         dimensions=config.embedding.dimensions,
-    )
+    ))
     try:
-        test_vec = await embedding.embed("startup validation")
+        test_vec = await _validate_embedding_provider(
+            embedding, timeout=EMBEDDING_VALIDATION_TIMEOUT_SECONDS
+        )
         logger.info(
             "Embedding provider %s validated (%d dims)",
             embedding.provider_name, len(test_vec),
@@ -492,7 +736,7 @@ async def lifespan(server: FastMCP):
     except Exception as exc:
         logger.error(
             "Embedding provider %s failed validation: %s. "
-            "Check API keys and model configuration.",
+            "Check API keys and model configuration; startup aborted.",
             embedding.provider_name, exc,
         )
         raise
@@ -522,7 +766,7 @@ async def lifespan(server: FastMCP):
             reembed_table,
             resolve_episode_embedder,
         )
-        episode_embedder = resolve_episode_embedder(config)
+        episode_embedder = _track_startup_resource(resolve_episode_embedder(config))
         backfilled = await reembed_table(pool, "episodes", episode_embedder)
         if backfilled:
             logger.info("Backfilled episode embeddings for %d rows", backfilled)
@@ -630,50 +874,82 @@ async def lifespan(server: FastMCP):
             config.supabase_url or "<unset>",
         )
 
+    tasks = tuple(
+        task
+        for task in (
+            ctx._keepalive_task,
+            ctx._tool_usage_heartbeat_task,
+            _redis_task,
+            ctx._scheduler_task,
+            ctx._slack_sync_task,
+            ctx._daily_brief_task,
+            ctx._discord_bot_task,
+            ctx._loom_awareness_task,
+            ctx._memory_hygiene_task,
+            ctx._trigger_eval_task,
+            ctx._reask_feedback_task,
+            ctx._canary_audit_task,
+            ctx._quarantine_review_task,
+            ctx._cost_enforcement_task,
+        )
+        if task is not None
+    )
     try:
         yield ctx
-    finally:
+    except BaseException as exc:
         _app_ctx_ref.ctx = None
-        tasks = tuple(
-            task
-            for task in (
-                ctx._keepalive_task,
-                ctx._tool_usage_heartbeat_task,
-                _redis_task,
-                ctx._scheduler_task,
-                ctx._slack_sync_task,
-                ctx._daily_brief_task,
-                ctx._discord_bot_task,
-                ctx._loom_awareness_task,
-                ctx._memory_hygiene_task,
-                ctx._trigger_eval_task,
-                ctx._reask_feedback_task,
-                ctx._canary_audit_task,
-                ctx._quarantine_review_task,
-                ctx._cost_enforcement_task,
-            )
-            if task is not None
+        await _shutdown_app(
+            ctx,
+            redis=r,
+            lifespan_tasks=tasks,
+            primary_error=exc,
         )
-        request_tasks = tuple(ctx._background_tasks)
-        await _cancel_background_tasks(tasks + request_tasks)
+        raise
+    else:
+        _app_ctx_ref.ctx = None
+        await _shutdown_app(ctx, redis=r, lifespan_tasks=tasks)
+    finally:
+        if local_identity_token is not None:
+            current_user_id.reset(local_identity_token)
 
-        # Keepalive may replace the original pool. AppContext is the live owner;
-        # drain telemetry and close that current pool rather than a stale local.
-        # Resource closure remains guaranteed even if drain or pool close fails.
+
+@asynccontextmanager
+async def lifespan(server: FastMCP):
+    """Run startup with acquisition tracking and a bounded shutdown."""
+    resources: list[object] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + STARTUP_READINESS_TIMEOUT_SECONDS
+    cleanup_deadline = deadline + STARTUP_CLEANUP_TIMEOUT_SECONDS
+    token = _startup_resources.set(resources)
+    deadline_token = _startup_deadline.set(deadline)
+    cleanup_deadline_token = _startup_cleanup_deadline.set(cleanup_deadline)
+    manager = _lifespan_impl(server)
+    entered = False
+    try:
         try:
-            drain_report = await tool_usage_middleware.drain(ctx.pool)
-            if not drain_report["shutdown_drained"]:
-                logger.warning(
-                    "tool usage telemetry did not drain cleanly: %s", drain_report
-                )
-        finally:
+            ctx = await asyncio.wait_for(
+                manager.__aenter__(), timeout=STARTUP_READINESS_TIMEOUT_SECONDS
+            )
+            entered = True
+            # Startup acquisitions are now owned by the context. Keep the
+            # tuple immutable so integrations cannot mutate ownership while
+            # shutdown is in progress.
+            ctx.owned_resources = tuple(resources)
             try:
-                await ctx.pool.close()
-            finally:
-                if r is not None:
-                    await r.aclose()
-            if local_identity_token is not None:
-                current_user_id.reset(local_identity_token)
+                yield ctx
+            except BaseException as exc:
+                await manager.__aexit__(type(exc), exc, exc.__traceback__)
+                raise
+            else:
+                await manager.__aexit__(None, None, None)
+        except BaseException as exc:
+            if not entered and resources:
+                await _run_startup_cleanup(exc, resources=tuple(resources))
+            raise
+    finally:
+        _startup_cleanup_deadline.reset(cleanup_deadline_token)
+        _startup_deadline.reset(deadline_token)
+        _startup_resources.reset(token)
 
 
 class _AppCtxRef:

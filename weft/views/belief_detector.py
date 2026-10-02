@@ -254,7 +254,7 @@ _client: AsyncAnthropic | None = None
 
 
 def _get_client() -> AsyncAnthropic:
-    """Lazy singleton for the Anthropic async client."""
+    """Lazy singleton for the default Anthropic async client."""
     global _client
     if _client is None:
         _client = AsyncAnthropic()
@@ -492,6 +492,7 @@ async def detect_belief_updates(
     turn: EpisodeTurn,
     *,
     participants_count: int = 1,
+    client: Any | None = None,
 ) -> list[ClaimUpdate]:
     """Extract belief claims from a single episode turn.
 
@@ -552,7 +553,7 @@ async def detect_belief_updates(
     # Call Haiku
     user_message = f"TURN ROLE: {turn.role.value}\nTURN CONTENT: {turn.content}"
     try:
-        client = _get_client()
+        client = client if client is not None else _get_client()
         response = await client.messages.create(
             model=_MODEL,
             max_tokens=_MAX_TOKENS,

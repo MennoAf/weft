@@ -23,8 +23,8 @@ def test_entity_type_values():
 
 
 def test_entity_create_minimal():
-    ec = EntityCreate(name="Jason")
-    assert ec.name == "Jason"
+    ec = EntityCreate(name="Casey Example")
+    assert ec.name == "Casey Example"
     assert ec.entity_type == EntityType.concept
     assert ec.aliases == []
     assert ec.description is None
@@ -77,12 +77,12 @@ def test_entity_to_dict():
 
 def test_entity_with_aliases():
     e = Entity(
-        name="Jason Bauman",
+        name="Casey Example",
         entity_type=EntityType.person,
-        aliases=["Jason", "JB"],
+        aliases=["Casey", "CE"],
     )
     d = e.to_dict()
-    assert d["aliases"] == ["Jason", "JB"]
+    assert d["aliases"] == ["Casey", "CE"]
 
 
 # --- Migration (entities + entity_mentions tables) ---
@@ -220,11 +220,11 @@ async def test_entities_defaults(pool):
 async def test_entities_aliases_array(pool):
     await pool.execute(
         "INSERT INTO entities (id, name, aliases) VALUES ($1, $2, $3)",
-        "test-ent-3", "Jason", ["Jason Bauman", "JB"],
+        "test-ent-3", "Casey", ["Casey Example", "CE"],
     )
 
     row = await pool.fetchrow("SELECT * FROM entities WHERE id = $1", "test-ent-3")
-    assert row["aliases"] == ["Jason Bauman", "JB"]
+    assert row["aliases"] == ["Casey Example", "CE"]
 
 
 async def test_entity_mentions_join(pool):

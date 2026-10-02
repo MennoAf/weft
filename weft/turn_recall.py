@@ -583,6 +583,9 @@ async def temporal_anchor(
     include_embedded_temporal_variant: bool = False,
     use_event_focused_anchor_representation: bool = False,
     use_stored_search_tsv: bool = False,
+    vector_weight: float = 1.0,
+    keyword_weight: float = 0.3,
+    expansion_slots: int = 0,
 ) -> dict[str, list[EpisodeTurn]]:
     """Per-anchor turn recall for multi-anchor temporal questions.
 
@@ -618,6 +621,17 @@ async def temporal_anchor(
             trailing relative-time wording before the original query probe.
         use_stored_search_tsv: benchmark-only opt-in forwarded to
             ``recall_turns`` for the generated FTS column.
+        vector_weight / keyword_weight: RRF fusion weights forwarded to
+            ``recall_turns`` for every probe. The turn tier weights the
+            vector half above the keyword half so a populous keyword half
+            cannot demote vector-only gold turns through double RRF
+            contributions.
+        expansion_slots: additive session-expansion slots forwarded to
+            ``recall_turns``. The per-variant funnel window stays
+            ``anchor_result_limit`` turns (bit-identical prefix); up to
+            ``expansion_slots`` session siblings are appended after it, so
+            each probe returns ``anchor_result_limit + expansion_slots``
+            turns and the merge budget is raised to match.
 
     Returns:
         ``{anchor_text: [EpisodeTurn, ...]}`` ordered as anchors appear
@@ -631,6 +645,7 @@ async def temporal_anchor(
     effective_anchor_result_limit = max(
         top_k_per_anchor, requested_anchor_result_limit,
     )
+    merge_budget = effective_anchor_result_limit + max(0, expansion_slots)
     if not anchors:
         # No multi-anchor pattern — search the original question and, for
         # temporal scaffolding, an event-focused lexical variant. Unioning
@@ -685,6 +700,9 @@ async def temporal_anchor(
                     _sql_diag if sql_diag_callback is not None else None
                 ),
                 use_stored_search_tsv=use_stored_search_tsv,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
+                expansion_slots=expansion_slots,
             )
             if diag_callback is not None:
                 try:
@@ -718,9 +736,9 @@ async def temporal_anchor(
                     continue
                 seen.add(turn.id)
                 merged.append(turn)
-                if len(merged) >= effective_anchor_result_limit:
+                if len(merged) >= merge_budget:
                     break
-            if len(merged) >= effective_anchor_result_limit:
+            if len(merged) >= merge_budget:
                 break
         if not merged:
             # Empty hybrid hit — try a temporal-only fallback so the
@@ -730,7 +748,7 @@ async def temporal_anchor(
                 pool, project_id=project_id, since=since, until=until,
                 limit=effective_anchor_result_limit, executor=executor,
             )
-        return {query: merged[:effective_anchor_result_limit]}
+        return {query: merged[:merge_budget]}
 
     out: dict[str, list[EpisodeTurn]] = {}
     probe_candidate_sql_limit = (
@@ -818,6 +836,9 @@ async def temporal_anchor(
                     _sql_diag if sql_diag_callback is not None else None
                 ),
                 use_stored_search_tsv=use_stored_search_tsv,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
+                expansion_slots=expansion_slots,
             )
             if diag_callback is not None:
                 try:
@@ -854,7 +875,7 @@ async def temporal_anchor(
                     continue
                 seen_anchor.add(turn.id)
                 merged_anchor.append(turn)
-                if len(merged_anchor) >= effective_anchor_result_limit:
+                if len(merged_anchor) >= merge_budget:
                     break
             # The benchmark event-focused treatment must execute every
             # declared representation probe so diagnostics measure the arm,
@@ -862,11 +883,11 @@ async def temporal_anchor(
             # the historical short-circuit for the baseline and production
             # callers that do not opt into that treatment.
             if (
-                len(merged_anchor) >= effective_anchor_result_limit
+                len(merged_anchor) >= merge_budget
                 and not use_event_focused_anchor_representation
             ):
                 break
-        out[anchor] = merged_anchor[:effective_anchor_result_limit]
+        out[anchor] = merged_anchor[:merge_budget]
     return out
 
 

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,7 @@ from fastmcp import Context
 
 from capability_registry.lookup import format_lookup_results, lookup_capabilities
 from weft.auth import current_user_id, resolve_canary_user_id, resolve_caller_user_id
+from weft.config import configured_project_name, load_config
 from weft.correlation import set_correlation_id
 from weft.db.connection import acquire
 from weft.fsck import list_orphan_memories
@@ -126,6 +128,14 @@ from weft.store import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Additive session-expansion slots for the turn tier: the funnel window
+# (``limit`` turns, unchanged order) is a protected prefix and up to this
+# many session-sibling turns are appended after it (0 = historical behavior).
+# 8 = product operating point (operator decision 2026-09-30, chosen at the
+# measured yield knee; depth-8 latency indistinguishable from depth-5 in the
+# round-10 real-path probe).
+_TURN_TIER_EXPANSION_SLOTS = 8
 
 
 def _recovery_telemetry_projection(stage, outcome, scope, parent_query_id=None):
@@ -395,7 +405,7 @@ async def _detect_project_id(ctx: Context) -> str | None:
     it. ``WEFT_TRANSPORT`` is only a fallback outside a FastMCP request context.
 
     Uses the directory name of the first root URI as the project identifier.
-    E.g. file:///Users/jason/Projects/Weft → "weft". Returns None when roots are
+    E.g. file:///home/user/projects/weft → "weft". Returns None when roots are
     unavailable, empty, or unresponsive.
     """
     context_transport = ctx.transport
@@ -404,7 +414,7 @@ async def _detect_project_id(ctx: Context) -> str | None:
         if isinstance(context_transport, str)
         else os.environ.get("WEFT_TRANSPORT", "stdio")
     ).strip().lower()
-    if transport in {"streamable-http", "streamable_http", "sse"}:
+    if transport in _HTTP_TRANSPORTS:
         logger.debug(
             "detect_project_id skipped roots reverse RPC on transport=%s",
             transport,
@@ -430,13 +440,33 @@ _UUID_RE = re.compile(
 )
 
 
-async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
-    """Return the explicit project_id if provided, otherwise auto-detect.
+@dataclass(frozen=True)
+class ProjectResolution:
+    """Resolved project scope and the source that authorized it."""
 
-    Raises ValueError if the explicit value looks like a UUID — project_ids
-    should be human-readable directory names (e.g. 'delphi', not a Loom
-    project UUID).
-    """
+    project_id: str | None
+    source: str
+
+    @property
+    def resolved(self) -> bool:
+        return self.project_id is not None
+
+
+_HTTP_TRANSPORTS = {"streamable-http", "streamable_http", "sse"}
+
+
+def _context_transport(ctx: Context) -> str:
+    """Return the active request transport, using env only outside a request."""
+    context_transport = getattr(ctx, "transport", None)
+    if isinstance(context_transport, str) and context_transport.strip():
+        return context_transport.strip().lower()
+    return os.environ.get("WEFT_TRANSPORT", "stdio").strip().lower()
+
+
+async def _resolve_project_scope(
+    ctx: Context, explicit: str | None
+) -> ProjectResolution:
+    """Resolve project scope: explicit, configured, bounded stdio roots, unresolved."""
     if explicit is not None:
         if _UUID_RE.match(explicit):
             raise ValueError(
@@ -445,8 +475,34 @@ async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
                 "UUIDs are Loom project IDs — Weft project_ids should be "
                 "human-readable names that match the working directory."
             )
-        return explicit
-    return await _detect_project_id(ctx)
+        return ProjectResolution(explicit, "explicit")
+
+    app = getattr(getattr(ctx, "request_context", None), "lifespan_context", None)
+    configured = configured_project_name(getattr(getattr(app, "config", None), "project_name", None))
+    if configured is None:
+        try:
+            configured = configured_project_name(load_config().project_name)
+        except Exception:
+            configured = None
+    if configured is not None:
+        return ProjectResolution(configured, "configured")
+
+    if _context_transport(ctx) in _HTTP_TRANSPORTS:
+        logger.debug(
+            "resolve_project_scope skipped roots reverse RPC on transport=%s",
+            _context_transport(ctx),
+        )
+        return ProjectResolution(None, "unresolved")
+
+    detected = await _detect_project_id(ctx)
+    if detected is not None:
+        return ProjectResolution(detected, "roots")
+    return ProjectResolution(None, "unresolved")
+
+
+async def _resolve_project_id(ctx: Context, explicit: str | None) -> str | None:
+    """Return the resolved project name while retaining the legacy API shape."""
+    return (await _resolve_project_scope(ctx, explicit)).project_id
 
 
 def _input_error_response(tool_name: str, error: Exception) -> dict:
@@ -464,6 +520,79 @@ def _db_error_response(tool_name: str, error: Exception) -> dict:
         detail = "database unreachable"
     logger.warning("Database unavailable in %s: %s — %s", tool_name, detail, error)
     return {"error": "Database unavailable", "detail": detail, "degraded": True, "tool": tool_name}
+
+
+def _prime_degraded_response(
+    budget_tokens: int,
+    failed_sections: list[dict[str, str]],
+    *,
+    section_names: tuple[str, ...],
+    hint: str,
+    error_response: dict | None = None,
+) -> dict:
+    """Return an empty, explicitly degraded primer without false empty hints."""
+    return {
+        "grounding": None,
+        "rules": [],
+        "behaviors": [],
+        "handoff": [],
+        "recent_memories": [],
+        "recent_work": [],
+        "issues": {"count": 0, "items": []},
+        "anti_patterns": [],
+        "decisions": [],
+        "entities": [],
+        "autonomy": [],
+        "changes_since": None,
+        "total_tokens": 0,
+        "budget_tokens": budget_tokens,
+        "budget_remaining": budget_tokens,
+        "excluded": 0,
+        "section_tokens": {},
+        "section_status": {name: "failed" for name in section_names}
+        | {
+            failed["section"]: "failed"
+            for failed in failed_sections
+        },
+        "failed_sections": failed_sections,
+        "degraded": True,
+        "incomplete_evidence": True,
+        "hints": {"degraded": hint},
+        "onboarding": None,
+        **(error_response or {}),
+    }
+
+
+async def _project_memory_count(pool, project_id: str) -> int:
+    """Count active, caller-visible memories for one project key."""
+    async with acquire(pool) as conn:
+        count = await conn.fetchval(
+            """
+            SELECT count(*) FROM memories
+            WHERE status = 'active' AND review_status = 'active'
+              AND project_id = $1
+            """,
+            project_id,
+        )
+    return int(count or 0)
+
+
+async def _project_memory_census(pool) -> list[tuple[str | None, int]]:
+    """Count active, caller-visible project rows through an RLS connection."""
+    async with acquire(pool) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT project_id, count(*) AS active_memory_count
+            FROM memories
+            WHERE status = 'active' AND review_status = 'active'
+              AND project_id IS NOT NULL
+            GROUP BY 1
+            """
+        )
+    return [
+        (row["project_id"], int(row["active_memory_count"]))
+        for row in rows
+    ]
 
 
 def _extract_primer_memory_ids(result: dict) -> list[str]:
@@ -499,7 +628,11 @@ async def weft_remember(
     project_facets: list[str] | None = None,
     preference_metadata: dict | None = None,
 ) -> dict:
-    """Store a new memory with type, topics, content, confidence, and source.
+    """Store the supplied content verbatim with type, topics, confidence, and source.
+    When composing a memory worth retaining, preserve quantitative qualifiers
+    that materially specify it (date, duration, amount, range, unit, or period/direction), but
+    do not copy incidental numbers or retain a fact solely because it has a number.
+    This tool is pass-through; smart ingest generates summaries separately.
     If project_id is omitted, auto-detects from the client's working directory.
 
     workspace_id: optional shared-brain scope. When set, the caller must be
@@ -532,7 +665,8 @@ async def weft_remember(
                 ),
             )
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
         if workspace_id is not None:
             from weft.workspaces import is_member as _ws_is_member
             caller_uid = resolve_caller_user_id()
@@ -703,10 +837,17 @@ async def _weft_recall_turns(
     query: str,
     project_id: str | None,
     limit: int,
+    expansion_slots: int | None = None,
+    resolution: ProjectResolution | None = None,
     as_of: datetime | None = None,
     use_stored_search_tsv: bool = False,
 ) -> dict:
     """Turn-tier dispatch for ``weft_recall(tier='turns'|'auto'→turns)``.
+
+    ``expansion_slots``: optional additive session-expansion depth. ``None``
+    (default) falls back to the module constant ``_TURN_TIER_EXPANSION_SLOTS``;
+    an explicit non-negative int overrides it for this call (the protected
+    funnel window stays ``limit`` turns; siblings are appended after it).
 
     Multi-anchor queries get the per-anchor split (``anchors`` map);
     everything else is a single hybrid recall keyed under the query.
@@ -723,6 +864,11 @@ async def _weft_recall_turns(
     here, not inside ``recall_turns_hierarchical`` itself, so the new
     function stays directly testable without env-var dance.
     """
+    expansion = _TURN_TIER_EXPANSION_SLOTS
+    if expansion_slots is not None:
+        # Outer weft_recall validates the argument; this defensive clamp keeps
+        # direct internal callers safe.
+        expansion = max(0, int(expansion_slots))
     try:
         cid = set_correlation_id()
         logger.debug("weft_recall.turns start [%s] query=%r", cid, query[:50])
@@ -730,7 +876,11 @@ async def _weft_recall_turns(
         from weft.turn_recall import temporal_anchor
 
         hierarchical = os.environ.get("WEFT_HIERARCHICAL") == "1"
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolved_project = (
+            resolution.project_id
+            if resolution is not None
+            else (await _resolve_project_scope(ctx, project_id)).project_id
+        )
         async with acquire(app.pool):
             if hierarchical:
                 from weft.episode_turns import recall_turns_hierarchical
@@ -751,15 +901,21 @@ async def _weft_recall_turns(
                 anchored = await temporal_anchor(
                     app.pool, query,
                     project_id=resolved_project,
-                    top_k_per_anchor=max(1, limit // 2),
+                    top_k_per_anchor=min(limit, 10),
+                    candidate_sql_limit=min(limit, 10) * 5,
+                    anchor_result_limit=limit,
                     embedder=app.embedding,
                     as_of=as_of,
                     use_stored_search_tsv=use_stored_search_tsv,
+                    expansion_slots=expansion,
                 )
 
         # Flatten dedup'd turns for a single ``turns`` array (the most
         # common consumer shape), and surface the per-anchor mapping for
-        # callers that want to do anchored arithmetic.
+        # callers that want to do anchored arithmetic. With additive
+        # session expansion the array carries the protected funnel window
+        # (``limit`` turns, unchanged order) plus up to ``expansion``
+        # appended session siblings.
         seen: set[str] = set()
         flat: list[dict] = []
         for turns in anchored.values():
@@ -768,9 +924,9 @@ async def _weft_recall_turns(
                     continue
                 seen.add(t.id)
                 flat.append(t.to_dict())
-                if len(flat) >= limit:
+                if len(flat) >= limit + expansion:
                     break
-            if len(flat) >= limit:
+            if len(flat) >= limit + expansion:
                 break
 
         response: dict = {
@@ -822,6 +978,7 @@ async def _weft_recall_both(
     agent_id: str | None,
     user_id: str | None,
     limit: int,
+    resolution: ProjectResolution | None = None,
     retrieval_mode: str,
     memory_status: MemoryStatus,
     memory_type: MemoryType | None,
@@ -848,7 +1005,11 @@ async def _weft_recall_both(
 
         sources = sources_for_mode(retrieval_mode)
         agent_provenance_ok = include_agent_provenance(retrieval_mode)
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolved_project = (
+            resolution.project_id
+            if resolution is not None
+            else (await _resolve_project_scope(ctx, project_id)).project_id
+        )
 
         async with acquire(app.pool):
             fused = await recall_both(
@@ -949,7 +1110,8 @@ async def weft_count_occurrences(
         return {"error": "since must be before or equal to until"}
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
         variants = temporal_query_variants(query)
         seen: set[str] = set()
         turns = []
@@ -1013,6 +1175,7 @@ async def weft_recall(
     structured_recall_mode: Literal["off", "shadow", "selective"] = "off",
     enumeration_compatibility: bool = True,
     recovery_mode: Literal["off", "deterministic", "model"] | None = None,
+    expansion_slots: int | None = None,
 ) -> dict:
     """Retrieve memories by semantic query, keyword search, or hybrid (default).
 
@@ -1041,6 +1204,10 @@ async def weft_recall(
     anchored arithmetic. When the chosen tier is 'both', the response carries `tier: "both"`
     and a `results` array of unified entries `{kind, payload, rank, rrf_score}` where `kind`
     is 'memory' or 'turn'.
+
+    expansion_slots: turn-tier only — optional additive session-expansion
+    depth appended after the protected funnel window (default: the server's
+    configured slot count; turn-tier flat path only).
     """
     if user_id is None:
         user_id = resolve_caller_user_id()
@@ -1262,6 +1429,15 @@ async def weft_recall(
             "weft_recall",
             ValueError("structured_recall_mode must be 'off', 'shadow', or 'selective'"),
         )
+    if expansion_slots is not None and (
+        isinstance(expansion_slots, bool)
+        or not isinstance(expansion_slots, int)
+        or expansion_slots < 0
+    ):
+        return _input_error_response(
+            "weft_recall",
+            ValueError("expansion_slots must be a non-negative integer"),
+        )
 
     # Recovery is opt-in at this seam. Resolve project-local config defensively;
     # the explicit request value always wins. A model planner is reserved for a
@@ -1475,15 +1651,15 @@ async def weft_recall(
             }
         return response
 
-    # Resolve structured authority once. Baseline retrieval retains its existing
-    # face/code/all semantics; only this explicit scope may authorize a complete
-    # deterministic sidecar result.
-    if opt_n_supplement or structured_recall_mode != "off" or tier == "belief":
-        try:
-            resolved_structured_project = await _resolve_project_id(ctx, project_id)
-        except BaseException:
-            await _finish_enum_task()
-            raise
+    # Resolve project authority exactly once for every recall request. Baseline
+    # retrieval retains its existing face/code/all semantics; the structured
+    # resolution is threaded through every scope-bearing branch below.
+    try:
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_structured_project = resolution.project_id
+    except _INPUT_ERRORS as e:
+        await _finish_enum_task()
+        return _input_error_response("weft_recall", e)
     if tier == "belief":
         try:
             from weft.enumeration_router import detect_enumeration_intent, gather_enumeration
@@ -1496,11 +1672,7 @@ async def weft_recall(
                         app_enum.pool,
                         enum_target,
                         user_id,
-                        project_id=(
-                            resolved_structured_project
-                            if opt_n_supplement or structured_recall_mode != "off"
-                            else None
-                        ),
+                        project_id=resolved_structured_project,
                     ),
                     name="weft-recall-enumeration-gather",
                 )
@@ -1522,7 +1694,7 @@ async def weft_recall(
             tool_name="recall",
             query_text=query,
             user_id=user_id,
-            project_id=project_id,
+            project_id=resolved_structured_project,
             tier=tier,
             mode=mode,
             retrieval_mode=retrieval_mode,
@@ -1542,8 +1714,10 @@ async def weft_recall(
         turns_response = await _weft_recall_turns(
             ctx,
             query=query,
-            project_id=project_id,
+            project_id=resolved_structured_project,
+            resolution=resolution,
             limit=limit,
+            expansion_slots=expansion_slots,
             as_of=parsed_opt_n_as_of,
             use_stored_search_tsv=use_stored_search_tsv,
         )
@@ -1572,9 +1746,10 @@ async def weft_recall(
         both_response = await _weft_recall_both(
             ctx,
             query=query,
-            project_id=project_id,
+            project_id=resolved_structured_project,
             agent_id=agent_id,
             user_id=user_id,
+            resolution=resolution,
             limit=limit,
             retrieval_mode=retrieval_mode,
             memory_status=MemoryStatus(status) if status else MemoryStatus.active,
@@ -1683,11 +1858,14 @@ async def weft_recall(
         # preserved unchanged — ingest scoping must not leak across repos.
         facet_boost_project_id: str | None = None
         if retrieval_mode == "face":
-            _raw_boost_id = await _resolve_project_id(ctx, project_id)
-            facet_boost_project_id = _raw_boost_id.lower() if _raw_boost_id else None
+            facet_boost_project_id = (
+                resolved_structured_project.lower()
+                if resolved_structured_project else None
+            )
 
         # When facet boost is active, suppress the project wall in search calls.
-        _search_project_id = None if retrieval_mode == "face" else project_id
+        # The resolved scope still drives facet ranking in face mode.
+        _search_project_id = None if retrieval_mode == "face" else resolved_structured_project
 
         async with acquire(app.pool):
             if mode == "keyword":
@@ -1771,7 +1949,7 @@ async def weft_recall(
                     status=memory_status,
                     memory_type=memory_type,
                     topic=topic,
-                    project_id=project_id,
+                    project_id=resolved_structured_project,
                     agent_id=agent_id,
                     sources=sources,
                     include_agent_provenance=agent_provenance_ok,
@@ -1788,8 +1966,7 @@ async def weft_recall(
             # Face mode uses facet-boost in the primary query (above), so
             # cross-project beliefs already surface there — no separate pass.
             if embedding is not None and retrieval_mode != "face":
-                resolved_project = await _resolve_project_id(ctx, project_id)
-                if resolved_project is not None:
+                if resolved_structured_project is not None:
                     try:
                         from weft.config import load_config
                         cfg = load_config()
@@ -1797,7 +1974,7 @@ async def weft_recall(
                             main_ids = {r.memory.id for r in results}
                             cross_results = await search_cross_project(
                                 app.pool, embedding,
-                                exclude_project_id=resolved_project,
+                                exclude_project_id=resolved_structured_project,
                                 limit=cfg.retrieval.cross_project_limit,
                                 threshold=threshold,
                                 status=memory_status,
@@ -2324,14 +2501,27 @@ async def weft_prime(
     mode: optional name of a retrieval mode/persona (e.g., 'research',
     'coding'). Adjusts section weights via ModeWeights — behavior_boost
     and entity_boost scale section token caps, recency_bias shifts
-    milestone ranking toward recency. Falls back to defaults if not found."""
+    milestone ranking toward recency. Falls back to defaults if not found.
+
+    Results preserve sections that completed successfully and always include
+    ``degraded``, ``incomplete_evidence``, ``failed_sections``, and per-section
+    ``section_status`` (``ok``, ``empty``, or ``failed``). A scoped project with
+    zero active memories includes a non-fatal ``project_warning`` even when
+    census suggestions are unavailable; for 1–4 memories, ``project_warning``
+    and ``suggestions`` are conditional on census evidence of a likely near-miss.
+    The requested project key is never rewritten."""
     try:
         cid = set_correlation_id()
         logger.debug("weft_prime start [%s] project=%s", cid, project_id)
-        from weft.primer import build_primer
+        from weft.primer import (
+            _DEGRADED_HINT,
+            _PRIMER_SECTION_NAMES,
+            build_primer,
+        )
 
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
 
         # Compute query embedding if provided (best-effort).
         query_vec: list[float] | None = None
@@ -2341,22 +2531,39 @@ async def weft_prime(
             except Exception as exc:
                 logger.warning("Failed to embed primer query (non-fatal): %s", exc)
 
-        # NOTE: build_primer uses asyncio.gather for parallel section fetches,
-        # so we do NOT wrap it in acquire() — concurrent queries on a shared
+        # NOTE: build_primer uses structured concurrency for parallel section
+        # fetches, so we do NOT wrap it in acquire() — concurrent queries on a shared
         # connection would crash.  RLS SELECT policies handle NULL user_id
         # gracefully (showing global rows).
-        result = await build_primer(
-            app.pool,
-            project_id=resolved_project,
-            agent_id=agent_id,
-            budget_tokens=budget_tokens,
-            query_vec=query_vec,
-            disclosure=disclosure,
-            mode=mode,
-        )
+        prime_timeout = app.config.database.prime_timeout
+        try:
+            result = await asyncio.wait_for(
+                build_primer(
+                    app.pool,
+                    project_id=resolved_project,
+                    agent_id=agent_id,
+                    budget_tokens=budget_tokens,
+                    query_vec=query_vec,
+                    disclosure=disclosure,
+                    mode=mode,
+                ),
+                timeout=prime_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("weft_prime exceeded %.2fs wall-clock budget", prime_timeout)
+            return _prime_degraded_response(
+                budget_tokens,
+                [{
+                    "section": "prime_budget_exceeded",
+                    "error": "prime wall-clock budget exceeded",
+                }],
+                section_names=_PRIMER_SECTION_NAMES,
+                hint=_DEGRADED_HINT,
+            )
         if resolved_project is None:
             result["project_resolution"] = {
                 "resolved": False,
+                "source": resolution.source,
                 "scope": "user-wide",
                 "warning": (
                     "No project_id resolved. Prime is user-wide: project filters "
@@ -2364,6 +2571,58 @@ async def weft_prime(
                     "explicitly for repo-scoped prime."
                 ),
             }
+        elif not result.get("degraded"):
+            try:
+                requested_count = await _project_memory_count(app.pool, resolved_project)
+                # Threshold rule: warn for zero visible memories unconditionally;
+                # for 1–4, warn only when a case/prefix near-match has at least
+                # ten times the resolved project's count.
+                if requested_count == 0:
+                    result["project_warning"] = (
+                        f"Resolved project_id {resolved_project!r} has "
+                        f"{requested_count} active memories; the key may be "
+                        "misspelled or differ by case. Suggestions are advisory; "
+                        "the requested project_id was not changed."
+                    )
+                    result["suggestions"] = []
+                if requested_count < 5:
+                    project_counts = await _project_memory_census(app.pool)
+                    requested_folded = resolved_project.casefold()
+                    near_matches = []
+                    for candidate, count in project_counts:
+                        if candidate is None or candidate == resolved_project:
+                            continue
+                        candidate_folded = candidate.casefold()
+                        same_key_different_case = candidate_folded == requested_folded
+                        prefix_near_match = (
+                            min(len(candidate_folded), len(requested_folded)) >= 3
+                            and (
+                                candidate_folded.startswith(requested_folded)
+                                or requested_folded.startswith(candidate_folded)
+                            )
+                        )
+                        if not (same_key_different_case or prefix_near_match):
+                            continue
+                        if count > requested_count and (
+                            requested_count == 0 or count >= 10 * requested_count
+                        ):
+                            near_matches.append({
+                                "project_id": candidate,
+                                "active_memory_count": count,
+                            })
+                    near_matches.sort(
+                        key=lambda item: item["active_memory_count"], reverse=True
+                    )
+                    if requested_count == 0 or near_matches:
+                        result["project_warning"] = (
+                            f"Resolved project_id {resolved_project!r} has "
+                            f"{requested_count} active memories; the key may be "
+                            "misspelled or differ by case. Suggestions are advisory; "
+                            "the requested project_id was not changed."
+                        )
+                        result["suggestions"] = near_matches[:5]
+            except Exception as exc:
+                logger.debug("Primer project census skipped (non-fatal): %s", exc)
 
         # Reconciliation-meter health (recall canary). Attached as a tier-1
         # field so a DARK meter screams on every prime — the load-bearing
@@ -2381,7 +2640,6 @@ async def weft_prime(
         # Fire-and-forget tasks run without acquire — they're system-level ops
         # that don't need user scoping.
         try:
-            import asyncio
             from weft.consolidation import consolidate_if_due
             app.spawn_background_task(
                 consolidate_if_due(app.pool),
@@ -2402,32 +2660,20 @@ async def weft_prime(
 
         return result
     except _DB_ERRORS as e:
-        from weft.primer import _ONBOARDING_TEXT, _SECTION_HINTS
+        from weft.primer import _DEGRADED_HINT, _PRIMER_SECTION_NAMES
 
-        # Never serve the process-wide fallback snapshot from the multi-user
-        # MCP server. It cannot be scoped to the authenticated caller and may
-        # contain another user's memories. Return an honest empty/degraded
-        # primer until the database is available again.
-        return {
-            "grounding": None,
-            "rules": [],
-            "behaviors": [],
-            "handoff": [],
-            "recent_work": [],
-            "issues": {"count": 0, "items": []},
-            "decisions": [],
-            "entities": [],
-            "total_tokens": 0,
-            "budget_tokens": budget_tokens,
-            "budget_remaining": budget_tokens,
-            "excluded": 0,
-            "degraded": True,
-            "incomplete_evidence": True,
-            "section_tokens": {},
-            "hints": dict(_SECTION_HINTS),
-            "onboarding": _ONBOARDING_TEXT,
-            **_db_error_response("weft_prime", e),
-        }
+        # Never serve a process-wide fallback snapshot from the multi-user MCP
+        # server. It cannot be scoped to the authenticated caller and may
+        # contain another user's memories. This shares the same honest response
+        # shape as the explicit primer budget timeout.
+        detail = _db_error_response("weft_prime", e)
+        return _prime_degraded_response(
+            budget_tokens,
+            [{"section": "database", "error": f"{type(e).__name__}: {e}"}],
+            section_names=_PRIMER_SECTION_NAMES,
+            hint=_DEGRADED_HINT,
+            error_response=detail,
+        )
 
 
 @mcp.tool()
@@ -2459,7 +2705,8 @@ async def weft_focus(
         from weft.focus import build_focus
 
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
 
         async with acquire(app.pool):
             result = await build_focus(
@@ -2920,7 +3167,8 @@ async def weft_handoff(
     - open_questions: unresolved decisions or things to investigate"""
     try:
         app: AppContext = ctx.request_context.lifespan_context
-        resolved_project = await _resolve_project_id(ctx, project_id)
+        resolution = await _resolve_project_scope(ctx, project_id)
+        resolved_project = resolution.project_id
         if resolved_project is None:
             return _input_error_response(
                 "weft_handoff",
@@ -4592,6 +4840,8 @@ async def weft_ingest(
                 app.pool,
                 app.embedding,
                 project_id=resolved_project,
+                generation_provider=getattr(app, "generation_provider", None),
+                config=app.config,
             )
 
         return {

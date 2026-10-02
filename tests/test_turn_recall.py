@@ -18,6 +18,7 @@ import pytest
 from weft.cache import NullCache
 from weft.config import WeftConfig
 from weft.episode_turns import (
+    TurnRetrievalError,
     append_turn,
     list_recent_turns,
     recall_turns,
@@ -36,6 +37,30 @@ from weft.turn_recall import (
 
 
 # --- Test fixtures ---
+
+
+@pytest.mark.parametrize(
+    ("embedding", "phase"),
+    [([0.1] * 768, "vector"), (None, "keyword")],
+)
+async def test_recall_turns_raises_structured_sql_failure(embedding, phase):
+    cause = RuntimeError("database query failed")
+
+    class FailingExecutor:
+        async def fetch(self, *args):
+            raise cause
+
+    with pytest.raises(TurnRetrievalError) as raised:
+        await recall_turns(
+            None, "query", embedding=embedding, executor=FailingExecutor(),
+        )
+
+    error = raised.value
+    assert error.phase == phase
+    assert error.code == f"{phase}_search_failed"
+    assert error.cause_type == "RuntimeError"
+    assert str(error) == f"{phase}_search_failed: RuntimeError"
+    assert error.__cause__ is cause
 
 
 _FAKE_EMBEDDING = [0.1] * 768
@@ -309,6 +334,40 @@ class TestExtractAnchors:
 
 
 # --- Store: hybrid recall_turns ---
+
+
+async def test_turn_keyword_query_uses_or_joined_content_lexemes():
+    from weft.store import build_or_tsquery
+
+    assert build_or_tsquery("autographed baseballs collection first three months how many added") == (
+        "autographed | baseballs | collection | first | three | months | how | many | added"
+    )
+    # PostgreSQL's english configuration stems these forms during to_tsquery;
+    # the query builder itself preserves safe content lexemes without ANDing.
+    assert build_or_tsquery("added many") == "added | many"
+
+
+async def test_recall_turns_keyword_or_matches_separate_terms(pool):
+    episode = await create_episode(
+        pool, EpisodeCreate(title="OR keyword fixture", project_id="proj-or-keyword")
+    )
+    first = await append_turn(
+        pool, EpisodeTurnCreate(
+            episode_id=episode.id, role=TurnRole.user,
+            content="added to the baseball collection",
+        ),
+    )
+    second = await append_turn(
+        pool, EpisodeTurnCreate(
+            episode_id=episode.id, role=TurnRole.user,
+            content="many months passed before collecting",
+        ),
+    )
+
+    results = await recall_turns(
+        pool, "added many", project_id="proj-or-keyword", top_k=5, embedding=None,
+    )
+    assert {turn.id for turn in results} == {first.id, second.id}
 
 
 async def test_recall_turns_keyword_hits(pool, episode_with_turns):
@@ -607,6 +666,107 @@ async def test_weft_count_occurrences_returns_distinct_conversations(
     )
 
 
+async def test_weft_recall_uses_wider_bounded_turn_window(ctx, monkeypatch):
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured.update(kwargs)
+        return {args[1]: []}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-window",
+        tier="turns", limit=10,
+    )
+    assert result["count"] == 0
+    assert captured["top_k_per_anchor"] == 10
+    assert captured["candidate_sql_limit"] == 50
+    assert captured["anchor_result_limit"] == 10
+
+
+def _fusion_row(turn_id: str) -> dict:
+    """Minimal episode_turns row accepted by _rrf_fuse_turn_rows."""
+    return {
+        "id": turn_id,
+        "episode_id": "ep-fusion",
+        "turn_index": 0,
+        "role": "user",
+        "content": f"fusion fixture {turn_id}",
+        "occurred_at": datetime(2026, 1, 5, tzinfo=timezone.utc),
+        "trace_id": None,
+        "importance_score": None,
+        "token_count": 4,
+        "user_id": "test-user-default",
+        "created_at": datetime(2026, 1, 5, tzinfo=timezone.utc),
+    }
+
+
+def test_rrf_fuse_vector_dominant_weights_keep_vector_only_gold():
+    """A vector-only gold turn survives a populous keyword half only when
+    keyword RRF contributions are weighted below vector contributions.
+
+    49 double-listed noise turns outrank the vector-rank-1 gold when the
+    halves are equally weighted (the cycle-2 dilution pathology); with
+    vector 1.0 / keyword 0.3 the gold turn re-enters the top-10 window.
+    """
+    from weft.episode_turns import _rrf_fuse_turn_rows
+
+    gold = _fusion_row("et-gold-vector-only")
+    doubles = [_fusion_row(f"et-double-{i:02d}") for i in range(49)]
+    keyword_only = [_fusion_row(f"et-kw-{i:02d}") for i in range(5)]
+    vector_rows = [gold, *doubles]
+    keyword_rows = [*doubles, *keyword_only]
+
+    def fused_ids(vector_weight: float, keyword_weight: float) -> list[str]:
+        pairs = _rrf_fuse_turn_rows(
+            vector_rows,
+            keyword_rows,
+            candidate_limit=50,
+            top_k=10,
+            vector_weight=vector_weight,
+            keyword_weight=keyword_weight,
+        )
+        return [turn.id for turn, _ in pairs]
+
+    equal_weight = fused_ids(0.5, 0.5)
+    weighted = fused_ids(1.0, 0.3)
+
+    assert "et-gold-vector-only" not in equal_weight
+    assert "et-gold-vector-only" in weighted
+    assert weighted.index("et-gold-vector-only") < 10
+
+
+async def test_temporal_anchor_forwards_vector_dominant_fusion_weights(monkeypatch):
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_recall_turns(pool, query, **kwargs):
+        captured.update(kwargs)
+        return [
+            EpisodeTurn(
+                id="et-anchor-hit", episode_id="ep", turn_index=0,
+                role=TurnRole.user, content="anchor hit",
+                occurred_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            )
+        ]
+
+    monkeypatch.setattr(turn_recall_module, "recall_turns", fake_recall_turns)
+    result = await turn_recall_module.temporal_anchor(
+        None,
+        "quarterly planning notes without anchors",
+        top_k_per_anchor=5,
+    )
+
+    assert captured["vector_weight"] == 1.0
+    assert captured["keyword_weight"] == 0.3
+    assert [t.id for t in result["quarterly planning notes without anchors"]] == [
+        "et-anchor-hit"
+    ]
+
+
 async def test_weft_recall_tier_turns_returns_turns_array(ctx, episode_with_turns):
     result = await weft_recall(
         ctx,
@@ -681,3 +841,195 @@ async def test_weft_recall_tier_default_auto_is_backwards_compatible(ctx):
     result = await weft_recall(ctx, query="describe this codebase", limit=3)
     assert "results" in result
     assert "turns" not in result
+
+
+# --- Round-7: additive session-expansion slots ---
+
+
+def test_select_session_siblings_orders_by_priority_then_proximity():
+    from weft.episode_turns import _select_session_siblings
+
+    window = ["w1", "w2"]
+    session_of = {"w1": "sess-a", "w2": "sess-b"}
+    index_of = {"w1": 2, "w2": 5}
+    session_turns = {
+        "sess-a": [("a1", 0), ("w1", 2), ("a3", 3)],
+        "sess-b": [("w2", 5), ("b1", 6)],
+    }
+
+    siblings = _select_session_siblings(window, 5, session_of, index_of, session_turns)
+
+    # sess-a outranks sess-b (best window rank 0 beats 1); within a session
+    # siblings order by |turn_index - hit| then turn_index; window members
+    # are never returned.
+    assert siblings == ["a3", "a1", "b1"]
+
+
+def test_select_session_siblings_skips_null_sessions_and_caps():
+    from weft.episode_turns import _select_session_siblings
+
+    assert _select_session_siblings(["w1"], 3, {"w1": None}, {"w1": 0}, {}) == []
+
+
+async def test_recall_turns_session_expansion_preserves_prefix(pool):
+    """Mandatory prefix-preservation: with expansion_slots > 0 the first
+    `limit` returns are bit-identical to expansion_slots=0, and only
+    same-session sibling turns are appended after the protected prefix."""
+    ep_a = await create_episode(pool, EpisodeCreate(title="expansion-a"))
+    ep_b = await create_episode(pool, EpisodeCreate(title="expansion-b"))
+    rows = [
+        ("sess-alpha", "zeta expansion anchor one"),
+        ("sess-alpha", "filler alpha neighbor two"),
+        ("sess-alpha", "filler alpha neighbor three"),
+        ("sess-alpha", "filler alpha neighbor four"),
+        ("sess-beta", "unrelated beta content five"),
+    ]
+    for sess, text in rows:
+        await append_turn(
+            pool,
+            EpisodeTurnCreate(
+                episode_id=ep_a.id if sess == "sess-alpha" else ep_b.id,
+                role=TurnRole.user,
+                content=text,
+                source_session_id=sess,
+            ),
+            embedding=[0.1] * 768,
+        )
+
+    embedding = [0.1] * 768
+    base = await recall_turns(
+        pool, "zeta expansion anchor", top_k=2, embedding=embedding,
+        expansion_slots=0,
+    )
+    expanded = await recall_turns(
+        pool, "zeta expansion anchor", top_k=2, embedding=embedding,
+        expansion_slots=5,
+    )
+
+    base_ids = [t.id for t in base]
+    expanded_ids = [t.id for t in expanded]
+    assert base_ids, "expected a non-empty baseline window"
+    assert expanded_ids[: len(base_ids)] == base_ids
+
+    # Additive: the expanded window is a superset that reaches limit + 5
+    # slots (here the project has exactly 5 turns, so all of them surface).
+    assert len(expanded_ids) == 5
+
+    # Siblings are session-scoped: every appended ep_a turn is a filler from
+    # the anchor's own session, in turn_index proximity order to the hit
+    # (the hit is the rank-1 "zeta expansion anchor" turn at index 0).
+    appended = expanded_ids[len(base_ids):]
+    assert appended, "expected session siblings to be appended"
+    from weft.episode_turns import list_turns
+
+    all_turns = await list_turns(pool, ep_a.id)
+    index_by_id = {t.id: t.turn_index for t in all_turns}
+    ep_a_siblings = [tid for tid in appended if tid in index_by_id]
+    assert ep_a_siblings, "expected at least one same-session sibling appended"
+    assert ep_a_siblings == sorted(ep_a_siblings, key=lambda tid: index_by_id[tid])
+
+
+async def test_temporal_anchor_forwards_expansion_slots(monkeypatch):
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_recall_turns(pool, query, **kwargs):
+        captured.update(kwargs)
+        return [
+            EpisodeTurn(
+                id="et-x", episode_id="ep", turn_index=0,
+                role=TurnRole.user, content="hit",
+                occurred_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            )
+        ]
+
+    monkeypatch.setattr(turn_recall_module, "recall_turns", fake_recall_turns)
+    await turn_recall_module.temporal_anchor(
+        None, "plain query without anchors", top_k_per_anchor=5,
+        expansion_slots=4,
+    )
+    assert captured["expansion_slots"] == 4
+
+
+async def test_weft_recall_turn_tier_expansion_slots_default_on(ctx, monkeypatch):
+    """The MCP turn-tier tool defaults expansion on (5 slots) and honors the
+    returned-length contract: limit + expansion_slots."""
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured.update(kwargs)
+        anchor_limit = kwargs["anchor_result_limit"]
+        turns = [
+            EpisodeTurn(
+                id=f"et-exp-{i}", episode_id="ep", turn_index=i,
+                role=TurnRole.user,
+                content=f"saved recall query expansion turn {i}",
+                occurred_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            )
+            for i in range(anchor_limit + 8)
+        ]
+        return {args[1]: turns}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-expansion",
+        tier="turns", limit=3,
+    )
+    assert captured["expansion_slots"] == 8
+    assert result["count"] == 11
+    assert len(result["turns"]) == 11
+
+
+async def test_weft_recall_expansion_slots_omitted_uses_constant(ctx, monkeypatch):
+    """Omitting expansion_slots uses the product operating point (8 since
+    the 2026-09-30 operator re-pin; was the round-7 constant 5)."""
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured["expansion_slots"] = kwargs.get("expansion_slots")
+        return {args[1]: []}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-omit",
+        tier="turns", limit=3,
+    )
+    assert captured["expansion_slots"] == 8
+    assert result["count"] == 0
+
+
+async def test_weft_recall_expansion_slots_explicit_overrides(ctx, monkeypatch):
+    """Explicit expansion_slots (8, or 0 = off) reaches recall_turns as-is."""
+    from weft import turn_recall as turn_recall_module
+
+    captured = {}
+
+    async def fake_temporal_anchor(*args, **kwargs):
+        captured["expansion_slots"] = kwargs.get("expansion_slots")
+        return {args[1]: []}
+
+    monkeypatch.setattr(turn_recall_module, "temporal_anchor", fake_temporal_anchor)
+    await weft_recall(
+        ctx, query="saved recall query", project_id="proj-pinned",
+        tier="turns", limit=3, expansion_slots=8,
+    )
+    assert captured["expansion_slots"] == 8
+    await weft_recall(
+        ctx, query="saved recall query", project_id="proj-pinned",
+        tier="turns", limit=3, expansion_slots=0,
+    )
+    assert captured["expansion_slots"] == 0
+
+
+async def test_weft_recall_expansion_slots_negative_is_input_error(ctx):
+    result = await weft_recall(
+        ctx, query="saved recall query", project_id="proj-neg",
+        tier="turns", limit=3, expansion_slots=-2,
+    )
+    assert result["error"] == "Invalid input"
+    assert "expansion_slots" in result["detail"]

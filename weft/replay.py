@@ -26,10 +26,7 @@ Return value is always a deduplicated list of turn_id strings.  The list is
 empty only when the database has no episode_turns at all (pathological case).
 Callers that need to enqueue should check for an empty list and skip.
 
-Spec: loom-c483a5dc (E1.L2 in the replay loop epic loom-8a9a0ff0).
-Depends on: loom-a6fa27eb (replay_queue table, migration v53).
-
-enqueue_replay_on_miss (E1.L3, loom-5d414368):
+Replay resolution and enqueueing are part of the recall-correction pipeline.
     Called from apply_reask_feedback (store.py) after a fresh claim.
     Resolves implicated turns, groups them by episode, and inserts one
     pending replay_queue row per distinct episode (idempotent).
@@ -269,7 +266,7 @@ async def enqueue_replay_on_miss(
         Number of new ``replay_queue`` rows inserted (0 when all episodes
         already had a pending row or when no turns could be resolved).
 
-    Spec: loom-5d414368 (E1.L3 in replay loop epic loom-8a9a0ff0).
+    This helper enqueues replay work for implicated episodes.
     """
     turn_ids = await resolve_implicated_turns(
         pool,

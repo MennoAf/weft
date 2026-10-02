@@ -28,7 +28,7 @@ functional while usage is measured.
 
 ### `weft_remember`
 
-Store a new memory.
+Store the supplied content verbatim; this tool does not summarize or rewrite it. When composing a memory worth retaining, preserve quantitative qualifiers that materially specify it (date, duration, amount, range, unit, or period/direction); do not copy incidental numbers or retain a fact solely because it contains a number.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -110,7 +110,11 @@ Session primer: assemble structured context for session startup. Returns priorit
 | `disclosure` | `str` | `"progressive"` | `progressive` (tier-1 full + tier-2 counts) or `full` (all sections) |
 | `mode` | `str` | `null` | Persona name (e.g. `coding`, `research`) — adjusts section weights |
 
-Returns `{ grounding, rules, behaviors, handoff, recent_work, issues, decisions, entities, total_tokens, budget_tokens, budget_remaining, excluded, freshness_hours, section_tokens, hints }`.
+If `weft_prime` returns `degraded: true` (or `error: Database unavailable`), treat its output as untrusted: verify any “nothing found” conclusion with `weft_recall` before acting. During a database incident, prefer `weft_recall` and `weft_projects` for reads, and hold non-essential Weft writes until the incident clears.
+
+The response always includes `degraded` and `incomplete_evidence` booleans, `failed_sections` (an array of `{section, error}` entries), and `section_status` (per-section `ok`, `empty`, or `failed`). For a scoped project with zero active memories, it includes a non-fatal `project_warning`; suggestions may be unavailable if the project census fails. For a scoped project with 1–4 active memories, it may include `project_warning` and `suggestions` when census evidence establishes a likely near-miss. `suggestions` is an array of `{project_id, active_memory_count}` entries; these advisories never rewrite the requested project key. A database failure may return `error: Database unavailable` alongside the degraded fields.
+
+Returns `{ grounding, rules, behaviors, handoff, recent_work, issues, decisions, entities, total_tokens, budget_tokens, budget_remaining, excluded, freshness_hours, section_tokens, hints, degraded, incomplete_evidence, failed_sections, section_status }`; a scoped project warning may additionally add `project_warning` and `suggestions` according to the active-memory census.
 
 ### `weft_handoff`
 

@@ -69,6 +69,18 @@ _MAX_BEHAVIORS = 5
 _MAX_ENTITIES = 10
 _MAX_ANTI_PATTERNS = 3
 
+# Every parallel fetch/build operation has an explicit status in the response.
+_PRIMER_SECTION_NAMES = (
+    "grounding", "rules", "behaviors", "handoff", "recent_memories",
+    "recent_work", "issues", "anti_patterns", "decisions", "entities",
+    "autonomy", "calibration", "degradation", "triggers", "cost",
+    "working_memory", "changes_since", "wellness", "mode_weights", "onboarding",
+)
+_DEGRADED_HINT = (
+    "degraded: some sections failed (see failed_sections) — verify any "
+    "'nothing found' conclusion via weft_recall before acting."
+)
+
 # Per-section token caps.
 _CAP_GROUNDING = 50
 _CAP_RULES = 100
@@ -131,6 +143,7 @@ Welcome to Weft — persistent memory for AI agents.
 Key tools:
 - weft_remember(content, type, confidence) — store knowledge \
 (types: fact, decision, preference, pattern, architecture, solution, issue, rule)
+- When capturing a worthwhile fact, keep quantitative qualifiers that materially specify it (date, duration, amount, range, unit, period/direction); skip incidental numbers and don't save a fact solely because it has a number.
 - weft_recall(query) — semantic search across all memories
 - weft_learn(content) — capture lessons after completing work (auto-extracts and stores)
 - weft_handoff(summary, next_steps, ...) — preserve session context for the next agent
@@ -143,9 +156,8 @@ Tips for getting started:
 - Call weft_handoff before ending sessions — the next primer surfaces it prominently
 - After completing tasks, call weft_learn to capture gotchas and patterns automatically
 
-Loom integration:
-- If Loom is available, run loom_create_project before decomposing work \
-to avoid tasks landing in the wrong project."""
+Task-management integration:
+- If available, initialize the project before decomposing work so tasks stay correctly scoped."""
 
 
 def _newest_created_at(memories: list[dict], now: datetime) -> float | None:
@@ -200,6 +212,7 @@ async def build_primer(
     12. cost — spending posture summary
     """
     from weft.modes import get_active_weights
+    from weft.models import ModeWeights
     from weft.primer_sections.anti_patterns import fetch_anti_patterns_section, pack_anti_patterns_section
     from weft.primer_sections.autonomy import fetch_autonomy_section, pack_autonomy_section
     from weft.primer_sections.behaviors import fetch_behaviors_section, pack_behaviors_section
@@ -231,7 +244,47 @@ async def build_primer(
     # one asyncpg connection. The facade acquires per query and preserves the
     # pool-shaped API expected by store/section helpers.
     scoped_pool = _ScopedQueryPool(pool)
-    weights = await get_active_weights(scoped_pool, mode)
+    failed_sections: list[dict[str, str]] = []
+
+    async def _cancel_and_wait(task: asyncio.Task) -> None:
+        """Cancel an attempt and observe its terminal state before continuing."""
+        if task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_section(name: str, operation):
+        """Run one query/builder with exactly one short-backoff retry."""
+        for attempt in range(2):
+            attempt_task = asyncio.create_task(operation())
+            try:
+                value = await attempt_task
+                skip_reason = getattr(value, "skip_reason", None)
+                if skip_reason and str(skip_reason).startswith("error:"):
+                    raise RuntimeError(str(skip_reason))
+                return value
+            except asyncio.CancelledError:
+                await _cancel_and_wait(attempt_task)
+                raise
+            except Exception as exc:
+                await _cancel_and_wait(attempt_task)
+                if attempt == 0:
+                    await asyncio.sleep(0.05)
+                    continue
+                failed_sections.append({
+                    "section": name,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                logger.warning("Primer section %s failed after retry: %s", name, exc)
+                return exc
+
+    fetched_weights = await _run_section(
+        "mode_weights", lambda: get_active_weights(scoped_pool, mode)
+    )
+    weights = fetched_weights if isinstance(fetched_weights, ModeWeights) else ModeWeights()
 
     # Build context.
     ctx = PrimerContext(
@@ -276,26 +329,36 @@ async def build_primer(
     async def _noop_result() -> SectionResult:
         return _skip
 
-    fetch_results = await asyncio.gather(
-        fetch_grounding_section(ctx) if _enabled("grounding") else _noop_fetch(),
-        fetch_rules_section(ctx) if _enabled("rules") else _noop_fetch(),
-        fetch_behaviors_section(ctx) if _enabled("behaviors") else _noop_fetch(),
-        fetch_handoff_section(ctx) if _enabled("handoff") else _noop_fetch(),
-        fetch_recent_memories_section(ctx) if _enabled("recent_memories") else _noop_fetch(),
-        fetch_recent_work_section(ctx) if _enabled("recent_work") else _noop_fetch(),
-        fetch_issues_section(ctx) if _enabled("issues") else _noop_fetch(),
-        fetch_anti_patterns_section(ctx) if _enabled("anti_patterns") else _noop_fetch(),
-        fetch_decisions_section(ctx) if _enabled("decisions") else _noop_fetch(),
-        fetch_entities_section(ctx) if _enabled("entities") else _noop_fetch(),
-        fetch_autonomy_section(ctx) if _enabled("autonomy") else _noop_fetch(),
-        fetch_calibration_section(ctx) if _enabled("calibration") else _noop_fetch(),
-        fetch_degradation_section(ctx) if _enabled("degradation") else _noop_fetch(),
-        fetch_triggers_section(ctx) if _enabled("triggers") else _noop_fetch(),
-        fetch_cost_section(ctx) if _enabled("cost") else _noop_fetch(),
-        fetch_working_memory_section(ctx) if _enabled("working_memory") else _noop_fetch(),
-        build_changes_since_section(ctx) if _enabled("changes_since") else _noop_result(),
-        build_wellness_section(ctx) if _enabled("wellness") else _noop_result(),
+    async def _guarded(name: str, operation, fallback):
+        value = await _run_section(name, operation)
+        return fallback if isinstance(value, BaseException) else value
+
+    section_operations = (
+        ("grounding", lambda: fetch_grounding_section(ctx) if _enabled("grounding") else _noop_fetch(), _skipped_fetch),
+        ("rules", lambda: fetch_rules_section(ctx) if _enabled("rules") else _noop_fetch(), _skipped_fetch),
+        ("behaviors", lambda: fetch_behaviors_section(ctx) if _enabled("behaviors") else _noop_fetch(), _skipped_fetch),
+        ("handoff", lambda: fetch_handoff_section(ctx) if _enabled("handoff") else _noop_fetch(), _skipped_fetch),
+        ("recent_memories", lambda: fetch_recent_memories_section(ctx) if _enabled("recent_memories") else _noop_fetch(), _skipped_fetch),
+        ("recent_work", lambda: fetch_recent_work_section(ctx) if _enabled("recent_work") else _noop_fetch(), _skipped_fetch),
+        ("issues", lambda: fetch_issues_section(ctx) if _enabled("issues") else _noop_fetch(), _skipped_fetch),
+        ("anti_patterns", lambda: fetch_anti_patterns_section(ctx) if _enabled("anti_patterns") else _noop_fetch(), _skipped_fetch),
+        ("decisions", lambda: fetch_decisions_section(ctx) if _enabled("decisions") else _noop_fetch(), _skipped_fetch),
+        ("entities", lambda: fetch_entities_section(ctx) if _enabled("entities") else _noop_fetch(), _skipped_fetch),
+        ("autonomy", lambda: fetch_autonomy_section(ctx) if _enabled("autonomy") else _noop_fetch(), _skipped_fetch),
+        ("calibration", lambda: fetch_calibration_section(ctx) if _enabled("calibration") else _noop_fetch(), _skipped_fetch),
+        ("degradation", lambda: fetch_degradation_section(ctx) if _enabled("degradation") else _noop_fetch(), _skipped_fetch),
+        ("triggers", lambda: fetch_triggers_section(ctx) if _enabled("triggers") else _noop_fetch(), _skipped_fetch),
+        ("cost", lambda: fetch_cost_section(ctx) if _enabled("cost") else _noop_fetch(), _skipped_fetch),
+        ("working_memory", lambda: fetch_working_memory_section(ctx) if _enabled("working_memory") else _noop_fetch(), _skipped_fetch),
+        ("changes_since", lambda: build_changes_since_section(ctx) if _enabled("changes_since") else _noop_result(), _skip),
+        ("wellness", lambda: build_wellness_section(ctx) if _enabled("wellness") else _noop_result(), _skip),
     )
+    async with asyncio.TaskGroup() as task_group:
+        fetch_tasks = [
+            task_group.create_task(_guarded(name, operation, fallback))
+            for name, operation, fallback in section_operations
+        ]
+    fetch_results = [task.result() for task in fetch_tasks]
 
     (
         grounding_fetch,
@@ -373,10 +436,58 @@ async def build_primer(
         "entities": len(entities_result.items),
         "autonomy": len(autonomy_result.items),
     }
-    onboarding_result = await build_onboarding_section(ctx, section_counts=section_counts)
-    onboarding_data = onboarding_result.items[0] if onboarding_result.items else {}
+    onboarding_result = await _run_section(
+        "onboarding", lambda: build_onboarding_section(ctx, section_counts=section_counts)
+    )
+    onboarding_failed = isinstance(onboarding_result, BaseException)
+    onboarding_data = (
+        onboarding_result.items[0]
+        if not onboarding_failed and onboarding_result.items else {}
+    )
     hints = onboarding_data.get("hints", {})
     onboarding_text = onboarding_data.get("onboarding")
+
+    section_status = {
+        name: "empty" for name in _PRIMER_SECTION_NAMES
+    }
+    section_data = {
+        "grounding": grounding_fetch.payload,
+        "rules": rules_fetch.payload,
+        "behaviors": behaviors_fetch.payload,
+        "handoff": handoff_fetch.payload,
+        "recent_memories": recent_memories_fetch.payload,
+        "recent_work": recent_work_fetch.payload,
+        "issues": issues_fetch.payload,
+        "anti_patterns": anti_patterns_fetch.payload,
+        "decisions": decisions_fetch.payload,
+        "entities": entities_fetch.payload,
+        "autonomy": autonomy_fetch.payload,
+        "calibration": calibration_fetch.payload,
+        "degradation": degradation_fetch.payload,
+        "triggers": triggers_fetch.payload,
+        "cost": cost_fetch.payload,
+        "working_memory": working_memory_fetch.payload,
+        "changes_since": changes_result.items,
+        "wellness": wellness_result.items,
+        "mode_weights": [weights],
+        "onboarding": onboarding_result.items if not onboarding_failed else [],
+    }
+    for name, data in section_data.items():
+        # Handoff wraps rows plus a diagnostic flag in a dict; the wrapper is
+        # present even when no rows were found, so inspect its actual payload.
+        has_data = bool(data.get("raw")) if name == "handoff" and isinstance(data, dict) else bool(data)
+        if has_data:
+            section_status[name] = "ok"
+    for failed in failed_sections:
+        section_status[failed["section"]] = "failed"
+    if onboarding_failed:
+        # _run_section already recorded the single terminal failure.
+        section_status["onboarding"] = "failed"
+
+    degraded = bool(failed_sections)
+    if degraded:
+        hints = {"degraded": _DEGRADED_HINT}
+        onboarding_text = None
 
     # --- Phase 5: Extract section values ---
     grounding_line = (
@@ -392,7 +503,7 @@ async def build_primer(
         def _deferred(section_items, hint):
             count = len(section_items)
             d = {"count": count, "deferred": True}
-            if count > 0:
+            if count > 0 and not degraded:
                 d["hint"] = hint
             return d
 
@@ -461,6 +572,10 @@ async def build_primer(
             "hints": hints,
             "onboarding": onboarding_text,
             "disclosure": "progressive",
+            "section_status": section_status,
+            "failed_sections": failed_sections,
+            "degraded": degraded,
+            "incomplete_evidence": degraded,
         }
         if wellness_snapshot:
             result["wellness_snapshot"] = wellness_snapshot
@@ -493,6 +608,10 @@ async def build_primer(
         "hints": hints,
         "onboarding": onboarding_text,
         "disclosure": "full",
+        "section_status": section_status,
+        "failed_sections": failed_sections,
+        "degraded": degraded,
+        "incomplete_evidence": degraded,
     }
     if wellness_snapshot:
         result["wellness_snapshot"] = wellness_snapshot

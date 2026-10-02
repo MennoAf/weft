@@ -205,7 +205,7 @@ async def merge_pending(pool: asyncpg.Pool, candidate_id: str) -> dict | None:
     is not a pending merge candidate (no merge_candidate edge / not pending).
     This is the merge-aware counterpart to :func:`approve_pending` (which
     instead promotes a candidate to its own active belief — the keep-separate
-    outcome). Spec: loom-c82bd8d8.
+    outcome).
     """
     db = get_db(pool)
     target_id = await db.fetchval(

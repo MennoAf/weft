@@ -41,11 +41,14 @@ _KEY_MAP: dict[str, tuple[str, str]] = {
     "database.statement_cache_size": ("database", "statement_cache_size"),
     "database.command_timeout": ("database", "command_timeout"),
     "database.acquire_timeout": ("database", "acquire_timeout"),
+    "database.prime_timeout": ("database", "prime_timeout"),
     "redis.url": ("redis", "url"),
     "embedding.provider": ("embedding", "provider"),
     "embedding.model": ("embedding", "model"),
     "embedding.dimensions": ("embedding", "dimensions"),
     "embedding.batch_size": ("embedding", "batch_size"),
+    "text_generation.provider": ("text_generation", "provider"),
+    "text_generation.models": ("text_generation", "models"),
     "retrieval.default_top_k": ("retrieval", "default_top_k"),
     "retrieval.similarity_threshold": ("retrieval", "similarity_threshold"),
     "retrieval.context_budget_tokens": ("retrieval", "context_budget_tokens"),
@@ -101,6 +104,9 @@ class DatabaseConfig(BaseModel):
     # drained, callers fail fast with a clear error instead of blocking
     # indefinitely — the difference between a visible error and a silent hang.
     acquire_timeout: float | None = 10.0
+    # Wall-clock budget for the complete parallel session-primer build. Per-query
+    # timeouts alone do not bound the aggregate fan-out latency.
+    prime_timeout: float = 60.0
 
 
 class RedisConfig(BaseModel):
@@ -215,6 +221,17 @@ class QuarantineReviewConfig(BaseModel):
     model: str = "claude-haiku-4-5-20251001"
 
 
+class TextGenerationConfig(BaseModel):
+    """Provider and logical-role model selection for text generation.
+
+    The role map is deliberately abstract: feature code asks for a role such
+    as ``ingest_classifier`` rather than assuming a provider-specific model.
+    """
+
+    provider: str = "anthropic"
+    models: dict[str, str] = Field(default_factory=dict)
+
+
 # Cost-enforcement config types live here (not in weft.cost_enforcement)
 # because weft.db.connection imports WeftConfig at module-load time, which
 # is loaded by every cost_enforcement dependency — a circular cycle if
@@ -308,10 +325,23 @@ class AlertCooldownConfig(BaseModel):
         return self.by_type.get(str(key), self.default_minutes)
 
 
+DEFAULT_PROJECT_NAME = "default"
+
+
+def configured_project_name(value: object) -> str | None:
+    """Return a usable configured scope name, excluding the default sentinel."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or name.casefold() == DEFAULT_PROJECT_NAME:
+        return None
+    return name
+
+
 class WeftConfig(BaseModel):
     env: WeftEnv = WeftEnv.local
     migration_mode: MigrationMode = MigrationMode.apply
-    project_name: str = "default"
+    project_name: str = DEFAULT_PROJECT_NAME
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
@@ -323,6 +353,7 @@ class WeftConfig(BaseModel):
     quarantine_review: QuarantineReviewConfig = Field(
         default_factory=QuarantineReviewConfig
     )
+    text_generation: TextGenerationConfig = Field(default_factory=TextGenerationConfig)
     cost_enforcement: CostEnforcementConfig = Field(
         default_factory=CostEnforcementConfig
     )
@@ -446,18 +477,54 @@ def save_config_value(key: str, value: str, path: Path | None = None) -> None:
     """
     p = path or CONFIG_PATH
     data = load_config_file(p)
-
-    # Coerce value to the right type
-    coerced: object = _coerce_value(key, value)
-
-    parts = key.split(".", 1)
-    if len(parts) == 2:
-        section, field = parts
-        data.setdefault(section, {})[field] = coerced
-    else:
-        data[key] = coerced
-
+    data = config_data_with_updates(data, {key: value})
     _write_toml(data, p)
+
+
+def config_data_with_updates(data: dict, updates: dict[str, str]) -> dict:
+    """Return *data* with validated/coerced dotted-key updates applied.
+
+    This is deliberately side-effect free so callers can produce a plan before
+    writing.  Unknown keys are rejected instead of being silently persisted.
+    """
+    result = dict(data)
+    for key, value in updates.items():
+        if key not in _KEY_MAP and not key.startswith("text_generation.models."):
+            raise ValueError(f"Unknown config key: {key}")
+        coerced: object = _coerce_value(key, value)
+        parts = key.split(".", 1)
+        if len(parts) == 2:
+            section, field = parts
+            section_data = dict(result.get(section, {}))
+            section_data[field] = coerced
+            result[section] = section_data
+        else:
+            result[key] = coerced
+    return result
+
+
+def initialize_config(path: Path | None = None) -> bool:
+    """Create the minimal local config once; return whether it was created.
+
+    Existing files are never opened for writing.  Credentials, infrastructure,
+    migrations, and provider setup are intentionally outside this helper.
+    """
+    p = path or CONFIG_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with p.open("x", encoding="utf-8") as config_file:
+            config_file.write(
+                '# Weft configuration; use ``weft config set`` for explicit changes.\n'
+                'project_name = "default"\n'
+            )
+    except FileExistsError:
+        return False
+    return True
+
+
+def write_config_data(data: dict, path: Path | None = None) -> None:
+    """Write already validated config data to *path* (the only write seam)."""
+    _write_toml(data, path or CONFIG_PATH)
 
 
 def _coerce_value(key: str, value: str) -> object:
@@ -468,6 +535,7 @@ def _coerce_value(key: str, value: str) -> object:
         ("database", DatabaseConfig),
         ("redis", RedisConfig),
         ("embedding", EmbeddingConfig),
+        ("text_generation", TextGenerationConfig),
         ("retrieval", RetrievalConfig),
         ("decay", DecayConfig),
         ("alert", AlertConfig),
@@ -539,6 +607,10 @@ def _apply_toml_to_config(data: dict, config: WeftConfig) -> None:
         for k, v in data["quarantine_review"].items():
             if hasattr(config.quarantine_review, k):
                 setattr(config.quarantine_review, k, v)
+    if "text_generation" in data and isinstance(data["text_generation"], dict):
+        for k, v in data["text_generation"].items():
+            if hasattr(config.text_generation, k):
+                setattr(config.text_generation, k, v)
     if "cost_enforcement" in data and isinstance(data["cost_enforcement"], dict):
         # ``thresholds`` is a list of structured dicts; everything else is scalar.
         for k, v in data["cost_enforcement"].items():
@@ -680,12 +752,27 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.database.command_timeout = float(cmd_timeout)
     if acq_timeout := os.environ.get("WEFT_DB_ACQUIRE_TIMEOUT"):
         config.database.acquire_timeout = float(acq_timeout)
+    if prime_timeout := os.environ.get("WEFT_DB_PRIME_TIMEOUT"):
+        config.database.prime_timeout = float(prime_timeout)
     if "WEFT_REDIS_URL" in os.environ:
         config.redis.url = os.environ["WEFT_REDIS_URL"]
     if provider := os.environ.get("WEFT_EMBEDDING_PROVIDER"):
         config.embedding.provider = provider
     if model := os.environ.get("WEFT_EMBEDDING_MODEL"):
         config.embedding.model = model
+    if provider := os.environ.get("WEFT_TEXT_PROVIDER"):
+        config.text_generation.provider = provider
+    for role in (
+        "ingest_classifier",
+        "codebase_summary",
+        "codebase_architecture",
+        "quarantine_review",
+        "belief_detector",
+        "topic_synthesis",
+        "replay_aggregate",
+    ):
+        if model := os.environ.get(f"WEFT_TEXT_MODEL_{role.upper()}"):
+            config.text_generation.models[role] = model
     if recovery_mode := os.environ.get("WEFT_RETRIEVAL_RECOVERY_MODE"):
         config.retrieval = RetrievalConfig.model_validate(
             {
@@ -716,6 +803,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.alert.batch_size = int(batch_size)
     if sync_interval := os.environ.get("WEFT_SLACK_SYNC_INTERVAL"):
         config.slack_sync.interval = int(sync_interval)
+    if quarantine_enabled := os.environ.get("WEFT_QUARANTINE_REVIEW_ENABLED"):
+        config.quarantine_review.enabled = quarantine_enabled.lower() in ("1", "true", "yes")
     if brief_time := os.environ.get("WEFT_DAILY_BRIEF_TIME"):
         config.daily_brief.time = brief_time.strip()
     if brief_tz := os.environ.get("WEFT_DAILY_BRIEF_TZ"):

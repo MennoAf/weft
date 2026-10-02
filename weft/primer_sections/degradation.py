@@ -29,16 +29,20 @@ _MAX = SECTION_MAX_ITEMS["degradation"]
 
 async def fetch_degradation_section(ctx: PrimerContext) -> SectionFetch:
     """Fetch active + recently-fired degradation policies (parallel-safe)."""
-    active, fired = await asyncio.gather(
-        list_policies(
-            ctx.pool, status=DegradationPolicyStatus.active,
-            project_id=ctx.project_id, limit=_MAX * 2,
-        ),
-        list_policies(
-            ctx.pool, status=DegradationPolicyStatus.fired,
-            project_id=ctx.project_id, limit=5,
-        ),
-    )
+    async with asyncio.TaskGroup() as task_group:
+        active_task = task_group.create_task(
+            list_policies(
+                ctx.pool, status=DegradationPolicyStatus.active,
+                project_id=ctx.project_id, limit=_MAX * 2,
+            )
+        )
+        fired_task = task_group.create_task(
+            list_policies(
+                ctx.pool, status=DegradationPolicyStatus.fired,
+                project_id=ctx.project_id, limit=5,
+            )
+        )
+    active, fired = active_task.result(), fired_task.result()
     raw = list(active) + list(fired)
     if not raw:
         return SectionFetch(skipped=True, skip_reason="No active degradation policies")

@@ -17,16 +17,13 @@ from weft.cli import cli
 
 
 @pytest.fixture
-def runner(monkeypatch, pool):
+def runner(monkeypatch, pool, pg_container):
     """Click runner with WEFT_DATABASE_URL set to the testcontainer DSN.
 
     The pool fixture has already migrated the DB and TRUNCATEd it, so
     each test starts clean. The CLI commands open their own short-lived
     pool against the same URL — close-on-finish keeps that simple."""
-    from tests.conftest import _pg_container
-
-    assert _pg_container is not None, "testcontainer not running"
-    dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
+    dsn = pg_container.get_connection_url().replace("+psycopg2", "")
     monkeypatch.setenv("WEFT_DATABASE_URL", dsn)
     return CliRunner()
 

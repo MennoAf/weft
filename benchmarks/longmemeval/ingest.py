@@ -45,12 +45,14 @@ from typing import Literal
 import asyncpg
 
 from weft.embeddings.base import EmbeddingProvider
-from weft.episode_turns import _short_id
+from weft.episode_turns import _short_id, append_turn
+from weft.db.connection import acquire, get_db
 from weft.episodes import create_episode
 from weft.ingest_pipeline import IngestItem, process as pipeline_process
 from weft.tokens import estimate_tokens
 from weft.models import (
     EpisodeCreate,
+    EpisodeTurnCreate,
     MemoryCreate,
     MemorySource,
     MemoryType,
@@ -98,7 +100,7 @@ async def _embed_batch_with_retry(
     raise last_exc
 
 
-IngestMode = Literal["raw", "extracted", "turns"]
+IngestMode = Literal["raw", "extracted", "turns", "dual", "production-belief"]
 
 
 def project_id_for(question_id: str) -> str:
@@ -107,6 +109,16 @@ def project_id_for(question_id: str) -> str:
     Prefix lets us bulk-clean: ``DELETE FROM memories WHERE project_id LIKE 'lme_%'``.
     """
     return f"lme_{question_id}"
+
+
+def expected_turn_count(instance: Instance) -> int:
+    """Count turns that turn-mode ingestion will actually persist."""
+    return sum(
+        1
+        for session in instance.sessions
+        for turn in session.turns
+        if turn.role in _ROLE_MAP
+    )
 
 
 _WEEKDAY_PAREN = re.compile(r"\s*\([A-Za-z]+\)\s*")
@@ -135,6 +147,8 @@ async def _ingest_session_raw(
     embedder: EmbeddingProvider,
     session: Session,
     project_id: str,
+    *,
+    session_topic: str | None = None,
 ) -> None:
     """Write one session as a single ``fact`` memory, full fidelity.
 
@@ -143,10 +157,13 @@ async def _ingest_session_raw(
     """
     text = session.to_text()
     embedding = await embedder.embed(text)
+    topics = [f"longmemeval/{project_id}"]
+    if session_topic is not None:
+        topics.append(session_topic)
     create = MemoryCreate(
         type=MemoryType.fact,
         content=text,
-        topic=[f"longmemeval/{project_id}"],
+        topic=topics,
         source=MemorySource.conversation,
         confidence=1.0,  # Ground-truth dataset; not LLM-extracted.
         project_id=project_id,
@@ -189,6 +206,109 @@ _ROLE_MAP: dict[str, TurnRole] = {
     "tool": TurnRole.tool,
 }
 
+
+async def _ingest_turn_level_production(
+    pool: asyncpg.Pool,
+    embedder: EmbeddingProvider,
+    instance: Instance,
+    project_id: str,
+    *,
+    generation_provider=None,
+    config=None,
+    turn_session_map: dict[str, str] | None = None,
+    turn_content_map: dict[str, str] | None = None,
+) -> int:
+    """Ingest every source turn through the production ingestion boundary.
+
+    This is deliberately separate from ``_ingest_haystack_turns``.  The latter
+    is the historical turn-only arm and bulk-writes a synthetic trace; this
+    path preserves the production order for each LongMemEval turn:
+
+    ``IngestItem -> ingest_pipeline.process`` and then ``episode_turn`` append.
+
+    The benchmark metadata is provenance only.  It contains no question, answer,
+    or gold-session labels, and the text passed to the classifier is exactly the
+    individual source turn content (not a rendered session or whole haystack).
+    """
+    episode = await create_episode(
+        pool,
+        EpisodeCreate(
+            title=f"longmemeval/{instance.question_id}",
+            summary=f"Haystack for question {instance.question_id} ({instance.question_type})",
+            project_id=project_id,
+        ),
+    )
+    inserted = 0
+    for session in instance.sessions:
+        occurred_at = _parse_session_date(session.date)
+        for source_turn in session.turns:
+            role = _ROLE_MAP.get(source_turn.role)
+            if role is None:
+                logger.warning(
+                    "skipping turn with unknown role %r in session %s",
+                    source_turn.role,
+                    session.session_id,
+                )
+                continue
+
+            item = IngestItem(
+                text=source_turn.content,
+                source="longmemeval",
+                timestamp=occurred_at,
+                metadata={
+                    "benchmark": "longmemeval",
+                    "benchmark_source": "longmemeval",
+                    "session_id": session.session_id,
+                    "question_id": instance.question_id,
+                    "turn_role": source_turn.role,
+                },
+            )
+            result = await pipeline_process(
+                item,
+                pool,
+                embedding_provider=embedder,
+                project_id=project_id,
+                generation_provider=generation_provider,
+                config=config,
+            )
+            if result.errors:
+                logger.warning(
+                    "turn-level production ingest errors q=%s session=%s: %s",
+                    instance.question_id,
+                    session.session_id,
+                    result.errors,
+                )
+
+            embedding = None
+            try:
+                embedding = await embedder.embed(source_turn.content)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "turn embedding failed q=%s session=%s: %s — appending without vector",
+                    instance.question_id,
+                    session.session_id,
+                    exc,
+                )
+
+            turn = await append_turn(
+                pool,
+                EpisodeTurnCreate(
+                    episode_id=episode.id,
+                    role=role,
+                    content=source_turn.content,
+                    occurred_at=occurred_at,
+                    source_session_id=session.session_id,
+                ),
+                embedding=embedding,
+            )
+            inserted += 1
+            if turn_session_map is not None:
+                turn_session_map[turn.id] = session.session_id
+            if turn_content_map is not None:
+                turn_content_map[turn.id] = source_turn.content
+    return inserted
+
+
 # OpenAI's embeddings endpoint accepts up to 2048 inputs per call; 100 is a
 # conservative chunk size that keeps individual requests responsive and
 # avoids hitting the 8192-token-per-input ceiling on long-turn batches.
@@ -204,6 +324,8 @@ async def _ingest_haystack_turns(
     *,
     turn_session_map: dict[str, str] | None = None,
     turn_content_map: dict[str, str] | None = None,
+    persist_source_session_ids: bool = False,
+    episode_title: str | None = None,
 ) -> None:
     """Write the haystack as one episode of dialogue turns (turn-tier).
 
@@ -335,10 +457,171 @@ async def _ingest_haystack_turns(
     turn_ids = await _bulk_append_turns(
         pool, episode.id, pending, embeddings,
         turn_content_map=turn_content_map,
+        source_session_ids=pending_session_ids if persist_source_session_ids else None,
     )
     if turn_session_map is not None:
         for turn_id, session_id in zip(turn_ids, pending_session_ids):
             turn_session_map[turn_id] = session_id
+
+
+def _session_memory_topic(project_id: str, session_id: str) -> str:
+    """Stable per-session topic tag scoping idempotent raw-memory deletes."""
+    return f"longmemeval/{project_id}/session/{session_id}"
+
+
+async def ingest_session_dual(
+    pool: asyncpg.Pool,
+    embedder: EmbeddingProvider,
+    instance: Instance,
+    session: Session,
+    project_id: str,
+    *,
+    turn_session_map: dict[str, str] | None = None,
+    turn_content_map: dict[str, str] | None = None,
+) -> None:
+    """Idempotently write one session as one raw memory plus its episode turns.
+
+    Per-session clear-then-insert inside one caller-owned transaction: this
+    session's prior turns (matched by ``source_session_id`` inside the
+    question's episode) and its prior raw memory (matched by the session
+    topic tag) are deleted, the replacements inserted, and everything
+    commits when the ``acquire()`` block exits. Re-ingesting therefore
+    replaces rows instead of duplicating them, so a crashed and resumed
+    run converges instead of stacking duplicates.
+
+    Dual rows always persist ``source_session_id`` — the idempotent delete
+    depends on it — regardless of the bulk writer's opt-in flag. Turn
+    indices are pre-allocated from ``instance.sessions`` order so a resumed
+    run lands on the same indices the crashed attempt used.
+    """
+    occurred_at = _parse_session_date(session.date)
+    base_index = 0
+    pending: list[tuple[TurnRole, str, datetime]] = []
+    for prior in instance.sessions:
+        if prior.session_id == session.session_id:
+            for turn in prior.turns:
+                role = _ROLE_MAP.get(turn.role)
+                if role is None:
+                    logger.warning(
+                        "skipping turn with unknown role %r in session %s",
+                        turn.role, session.session_id,
+                    )
+                    continue
+                pending.append((role, turn.content, occurred_at))
+            break
+        base_index += sum(1 for turn in prior.turns if turn.role in _ROLE_MAP)
+
+    embeddings: list[list[float] | None] = [None] * len(pending)
+    if pending:
+        texts = [content for _, content, _ in pending]
+        try:
+            batch_vecs = await _embed_batch_with_retry(
+                embedder, texts,
+                question_id=instance.question_id,
+                chunk_label=f"dual/{session.session_id}",
+            )
+            for i, vec in enumerate(batch_vecs):
+                if vec is not None and len(vec) == _EMBEDDING_DIMENSIONS:
+                    embeddings[i] = vec
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "dual batch embed failed for session %s (q=%s): %s — storing turns without vectors",
+                session.session_id, instance.question_id, exc,
+            )
+
+    session_topic = _session_memory_topic(project_id, session.session_id)
+    async with acquire(pool) as conn:
+        # Get-or-create the question's single dual episode inside the RLS-scoped
+        # connection so a resumed run reuses the episode a crashed attempt made.
+        title = f"longmemeval/{instance.question_id}"
+        existing = await get_db(pool).fetchrow(
+            "SELECT id FROM episodes WHERE project_id = $1 AND title = $2",
+            project_id, title,
+        )
+        if existing is not None:
+            episode_id = str(existing["id"])
+        else:
+            episode = await create_episode(
+                pool,
+                EpisodeCreate(
+                    title=title,
+                    summary=f"Haystack for question {instance.question_id} ({instance.question_type})",
+                    project_id=project_id,
+                ),
+            )
+            episode_id = str(episode.id)
+        async with conn.transaction():
+            await conn.execute(
+                """
+                DELETE FROM episode_turns et USING episodes e
+                WHERE et.episode_id = e.id
+                  AND e.project_id = $1
+                  AND et.source_session_id = $2
+                """,
+                project_id, session.session_id,
+            )
+            await conn.execute(
+                "DELETE FROM memories WHERE project_id = $1 AND $2 = ANY(topic)",
+                project_id, session_topic,
+            )
+            await _ingest_session_raw(
+                pool, embedder, session, project_id, session_topic=session_topic,
+            )
+            rows: list[tuple] = []
+            turn_ids: list[str] = []
+            contents: list[str] = []
+            for offset, ((role, content, turn_at), embedding) in enumerate(zip(pending, embeddings)):
+                turn_id = f"et-{_short_id()}"
+                turn_ids.append(turn_id)
+                contents.append(content)
+                rows.append((
+                    turn_id, episode_id, base_index + offset, role.value, content,
+                    turn_at, embedding, estimate_tokens(content), session.session_id,
+                ))
+            if rows:
+                await conn.executemany(
+                    """
+                    INSERT INTO episode_turns (
+                        id, episode_id, turn_index, role, content,
+                        occurred_at, embedding, token_count, source_session_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    """,
+                    rows,
+                )
+    if turn_session_map is not None:
+        for turn_id in turn_ids:
+            turn_session_map[turn_id] = session.session_id
+    if turn_content_map is not None:
+        for turn_id, content in zip(turn_ids, contents):
+            turn_content_map[turn_id] = content
+
+
+async def _ingest_haystack_dual(
+    pool: asyncpg.Pool,
+    embedder: EmbeddingProvider,
+    instance: Instance,
+    project_id: str,
+    *,
+    turn_session_map: dict[str, str] | None = None,
+    turn_content_map: dict[str, str] | None = None,
+    persist_source_session_ids: bool = False,
+) -> None:
+    """Write both turn and raw-memory representations for one question.
+
+    ``dual`` is a benchmark-only substrate for comparing ``turns``, ``belief``,
+    and ``auto`` against identical source material.  It is provider-free: the
+    only embedding work is the configured local provider shared by both
+    representations.  Ingestion is per-session idempotent — each session is a
+    transactional clear-then-insert via ``ingest_session_dual`` — so resuming
+    a crashed run replaces rows instead of duplicating them.
+    """
+    for session in instance.sessions:
+        await ingest_session_dual(
+            pool, embedder, instance, session, project_id,
+            turn_session_map=turn_session_map,
+            turn_content_map=turn_content_map,
+        )
 
 
 async def _bulk_append_turns(
@@ -348,6 +631,7 @@ async def _bulk_append_turns(
     embeddings: list[list[float] | None],
     *,
     turn_content_map: dict[str, str] | None = None,
+    source_session_ids: list[str] | None = None,
 ) -> list[str]:
     """Bulk-insert all turns of one episode in a single executemany call.
 
@@ -378,6 +662,8 @@ async def _bulk_append_turns(
     """
     if not pending:
         return []
+    if source_session_ids is not None and len(source_session_ids) != len(pending):
+        raise ValueError("source_session_ids must align one-to-one with pending turns")
 
     rows: list[tuple] = []
     turn_ids: list[str] = []
@@ -387,27 +673,30 @@ async def _bulk_append_turns(
         if turn_content_map is not None:
             turn_content_map[turn_id] = content
         token_count = estimate_tokens(content)
-        rows.append(
-            (
-                turn_id,
-                episode_id,
-                idx,
-                role.value,
-                content,
-                occurred_at,
-                embedding,
-                token_count,
-            )
+        row = (
+            turn_id,
+            episode_id,
+            idx,
+            role.value,
+            content,
+            occurred_at,
+            embedding,
+            token_count,
         )
+        if source_session_ids is not None:
+            row += (source_session_ids[idx],)
+        rows.append(row)
 
+    source_session_column = ", source_session_id" if source_session_ids is not None else ""
+    value_placeholders = "$1, $2, $3, $4, $5, $6, $7, $8, $9" if source_session_ids is not None else "$1, $2, $3, $4, $5, $6, $7, $8"
     async with pool.acquire() as conn:
         await conn.executemany(
-            """
+            f"""
             INSERT INTO episode_turns (
                 id, episode_id, turn_index, role, content,
-                occurred_at, embedding, token_count
+                occurred_at, embedding, token_count{source_session_column}
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ({value_placeholders})
             """,
             rows,
         )
@@ -420,8 +709,12 @@ async def load_haystack(
     instance: Instance,
     mode: IngestMode,
     *,
+    generation_provider=None,
+    config=None,
     turn_session_map: dict[str, str] | None = None,
     turn_content_map: dict[str, str] | None = None,
+    project_id: str | None = None,
+    persist_source_session_ids: bool = False,
 ) -> int:
     """Load all sessions for one benchmark question into Weft.
 
@@ -430,36 +723,51 @@ async def load_haystack(
         embedder: Embedding provider (typically FastEmbed BGE-small).
         instance: The benchmark question + its haystack.
         mode: "raw" (write sessions verbatim), "extracted"
-            (run Weft's LLM extraction pipeline), or "turns"
-            (write each conversational turn as an ``episode_turns`` row
-            for turn-tier hybrid recall — Branch A of the roadmap).
-        turn_session_map: Optional dict that, in turn-mode only, will be
-            populated in-place with ``{turn_id: session_id}`` for every
-            turn written. Ignored in raw/extracted modes (those paths
-            don't have stable per-row IDs that map back to the Reader's
-            view). The adapter passes a fresh dict per question to drive
-            recall@10 instrumentation without persisting lineage.
-        turn_content_map: Optional dict that, in turn-mode only, will be
-            populated in-place with ``{turn_id: content}`` for every turn
-            written. Ignored in raw/extracted modes. Used alongside
-            ``turn_session_map`` to power turn-level recall@k
-            instrumentation (gold-answer text-match against retrieved
-            turn contents).
+            (run Weft's LLM extraction pipeline), "turns" (historical
+            turn-tier writes), or "production-belief" (one production
+            ingest item plus one episode turn per source turn).
+        turn_session_map: Optional dict populated for ``turns`` and
+            ``production-belief`` writes with ``{turn_id: session_id}``.
+            The corrected mode uses this only for audit telemetry.
+        turn_content_map: Optional dict populated for turn-bearing modes
+            with ``{turn_id: content}`` for audit telemetry.
 
     Returns:
-        Count of sessions ingested. Memory count may be higher (extracted
-        mode produces multiple memories per session) or zero per session
-        (LLM may decide nothing is worth storing).
+        Count of source sessions ingested for the historical modes. The
+        ``production-belief`` mode returns the number of source turns appended
+        after one production ``IngestItem`` was processed per turn. Memory
+        count may be higher (extracted mode produces multiple memories per
+        session) or zero per session (LLM may decide nothing is worth storing).
 
     Raises:
         ValueError: If mode is not one of the supported literals.
     """
-    project_id = project_id_for(instance.question_id)
+    project_id = project_id or project_id_for(instance.question_id)
+    if mode == "production-belief":
+        return await _ingest_turn_level_production(
+            pool,
+            embedder,
+            instance,
+            project_id,
+            generation_provider=generation_provider,
+            config=config,
+            turn_session_map=turn_session_map,
+            turn_content_map=turn_content_map,
+        )
     if mode == "turns":
         await _ingest_haystack_turns(
             pool, embedder, instance, project_id,
             turn_session_map=turn_session_map,
             turn_content_map=turn_content_map,
+            persist_source_session_ids=persist_source_session_ids,
+        )
+        return len(instance.sessions)
+    if mode == "dual":
+        await _ingest_haystack_dual(
+            pool, embedder, instance, project_id,
+            turn_session_map=turn_session_map,
+            turn_content_map=turn_content_map,
+            persist_source_session_ids=persist_source_session_ids,
         )
         return len(instance.sessions)
 

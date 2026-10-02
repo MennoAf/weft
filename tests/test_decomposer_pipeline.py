@@ -5,8 +5,9 @@ with fully mocked LLM calls.
 """
 
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -51,6 +52,20 @@ def _mock_anthropic_response(json_payload: list | dict) -> MagicMock:
     response = MagicMock()
     response.content = [text_block]
     return response
+
+
+def _anthropic_config():
+    return SimpleNamespace(
+        text_generation=SimpleNamespace(provider="anthropic", models={})
+    )
+
+
+@contextmanager
+def _managed_anthropic_client(client):
+    with patch("weft.config.load_config", return_value=_anthropic_config()), patch(
+        "anthropic.AsyncAnthropic", return_value=client
+    ):
+        yield
 
 
 # --- Data model tests ---
@@ -191,7 +206,7 @@ class TestClassify:
             return_value=_mock_anthropic_response(payload)
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("remind me to buy eggs Saturday")
 
         assert len(result) == 1
@@ -218,7 +233,7 @@ class TestClassify:
             return_value=_mock_anthropic_response(payload)
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("Bob is the CEO of TechCorp")
 
         assert len(result) == 1
@@ -252,7 +267,7 @@ class TestClassify:
             return_value=_mock_anthropic_response(payload)
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("Bob is the CEO. Meet Bob next Tuesday.")
 
         assert len(result) == 2
@@ -275,7 +290,7 @@ class TestClassify:
             return_value=_mock_anthropic_response(payload)
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("We decided to use PostgreSQL for the backend")
 
         assert len(result) == 1
@@ -294,7 +309,7 @@ class TestClassify:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=response)
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("some valid input text here")
 
         assert result == []
@@ -307,7 +322,7 @@ class TestClassify:
             side_effect=RuntimeError("API timeout")
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("some valid input text here")
 
         assert result == []
@@ -327,7 +342,7 @@ class TestClassify:
             return_value=_mock_anthropic_response(payload)
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("I need to fix the authentication bug")
 
         assert len(result) == 1
@@ -349,7 +364,7 @@ class TestClassify:
             return_value=_mock_anthropic_response(payload)
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("Something with unknown intent type")
 
         assert len(result) == 1
@@ -371,7 +386,7 @@ class TestClassify:
             return_value=_mock_anthropic_response(payload)
         )
 
-        with patch("weft.ingest_pipeline._get_client", return_value=mock_client):
+        with _managed_anthropic_client(mock_client):
             result = await classify("remind me to buy eggs tomorrow")
 
         assert len(result) == 1

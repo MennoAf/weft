@@ -64,7 +64,7 @@ packages = ["weft", "capability_registry"]
 # wheel-installed CLI. Keep this runtime resource beside the installed
 # packages rather than relying on a source checkout.
 [tool.hatch.build.targets.wheel.force-include]
-"docker-compose.weft.yml" = "docker-compose.weft.yml"
+"docker-compose.weft.yml" = "weft/data/docker-compose.weft.yml"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

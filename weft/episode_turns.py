@@ -26,9 +26,10 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable, Iterable, Literal, Mapping, Sequence
+from typing import Any, TYPE_CHECKING, Callable, Iterable, Literal, Mapping, Sequence
 
 import asyncpg
 
@@ -523,6 +524,16 @@ class RetrievalPolicyContractError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
+class TurnRetrievalError(RuntimeError):
+    """Structured SQL failure while retrieving turn evidence."""
+
+    def __init__(self, phase: str, cause: BaseException):
+        self.phase = phase
+        self.code = f"{phase}_search_failed"
+        self.cause_type = type(cause).__name__
+        super().__init__(f"{self.code}: {self.cause_type}")
+
+
 def validate_retrieval_policy_contract(
     *,
     retrieval_policy: RetrievalPolicySignal | None,
@@ -565,6 +576,118 @@ def validate_retrieval_policy_contract(
             raise RetrievalPolicyContractError("blank_session_id", f"blank session for turn: {turn_id}")
 
 
+_SESSION_EXPANSION_SQL = {
+    # Window turns → their source session and turn index.
+    "window": """
+        SELECT id, source_session_id, turn_index
+          FROM episode_turns
+         WHERE id = ANY($1::text[])
+    """,
+    # Sibling turns of the matched sessions, project-scoped.
+    "session_project": """
+        SELECT t.*
+          FROM episode_turns t
+          JOIN episodes e ON t.episode_id = e.id
+         WHERE e.project_id = $1
+           AND t.source_session_id = ANY($2::text[])
+         ORDER BY t.source_session_id, t.turn_index, t.id
+    """,
+    # Sibling turns of the matched sessions, keyed on source_session_id only
+    # (used when the caller did not scope the recall to a project).
+    "session_global": """
+        SELECT *
+          FROM episode_turns
+         WHERE source_session_id = ANY($1::text[])
+         ORDER BY source_session_id, turn_index, id
+    """,
+}
+
+_EXPANSION_MAX_SESSIONS = 3
+
+
+def _select_session_siblings(
+    window_ids: list[str],
+    k: int,
+    session_of: dict[str, str | None],
+    index_of: dict[str, int],
+    session_turns: dict[str, list[tuple[str, int]]],
+) -> list[str]:
+    """Deterministic additive sibling selection (pure; unit-testable).
+
+    Matched sessions = up to ``_EXPANSION_MAX_SESSIONS`` sessions ranked by
+    the best window position of their member turns. Sibling candidates are
+    the matched sessions' turns not already in the window, ordered by
+    (session priority, |turn_index − hit|, turn_index, id).
+    """
+    priority: dict[str, int] = {}
+    hit_index: dict[str, int] = {}
+    for pos, tid in enumerate(window_ids):
+        sid = session_of.get(tid)
+        if sid is None:
+            continue
+        if sid not in priority:
+            priority[sid] = pos
+            hit_index[sid] = index_of.get(tid, 0)
+    matched = sorted(priority, key=lambda s: (priority[s], s))[:_EXPANSION_MAX_SESSIONS]
+    window_set = set(window_ids)
+    candidates = []
+    for prio, sid in enumerate(matched):
+        hit = hit_index.get(sid, 0)
+        for tid, tidx in session_turns.get(sid, []):
+            if tid in window_set:
+                continue
+            candidates.append((prio, abs(tidx - hit), tidx, tid))
+    candidates.sort()
+    return [c[3] for c in candidates[:k]]
+
+
+async def _append_session_siblings(
+    db,
+    window: list,
+    k: int,
+    project_id: str | None,
+) -> list:
+    """Append up to ``k`` session-sibling turns after ``window`` (additive).
+
+    The window order is untouched — siblings are appended after it, so the
+    first ``len(window)`` entries are bit-identical to the caller's window.
+    """
+    if k <= 0 or not window:
+        return list(window)
+    ids = [t.id for t in window]
+    wrows = await db.fetch(_SESSION_EXPANSION_SQL["window"], ids)
+    session_of: dict[str, str | None] = {}
+    index_of: dict[str, int] = {}
+    for r in wrows:
+        session_of[str(r["id"])] = (
+            str(r["source_session_id"]) if r["source_session_id"] else None
+        )
+        index_of[str(r["id"])] = int(r["turn_index"])
+    sessions = sorted({s for s in session_of.values() if s})
+    if not sessions:
+        return list(window)
+    if project_id:
+        srows = await db.fetch(
+            _SESSION_EXPANSION_SQL["session_project"], project_id, sessions,
+        )
+    else:
+        srows = await db.fetch(_SESSION_EXPANSION_SQL["session_global"], sessions)
+    grouped: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    row_by_id: dict[str, Any] = {}
+    for r in srows:
+        tid = str(r["id"])
+        grouped[str(r["source_session_id"])].append((tid, int(r["turn_index"])))
+        row_by_id[tid] = r
+    session_turns = {sid: sorted(v) for sid, v in grouped.items()}
+    siblings = _select_session_siblings(ids, k, session_of, index_of, session_turns)
+    if not siblings:
+        return list(window)
+    appended = [
+        _row_to_turn(row_by_id[tid]) for tid in siblings if tid in row_by_id
+    ]
+    return list(window) + appended
+
+
 async def recall_turns(
     pool: asyncpg.Pool,
     query: str,
@@ -588,6 +711,7 @@ async def recall_turns(
     use_stored_search_tsv: bool = False,
     retrieval_policy: RetrievalPolicySignal | None = None,
     turn_session_map: Mapping[str, str] | None = None,
+    expansion_slots: int = 0,
 ) -> list[EpisodeTurn]:
     """Hybrid (vector + BM25) recall over episode_turns.
 
@@ -650,6 +774,16 @@ async def recall_turns(
             ``episode_turns.search_tsv`` column for keyword matching and
             ranking. The default keeps the inline ``to_tsvector`` SQL for
             production compatibility.
+        expansion_slots: additive session-expansion slots (default 0 =
+            today's behavior exactly). When > 0, the first ``result_limit``
+            returns are bit-identical to the non-expanded funnel window and
+            up to ``expansion_slots`` sibling turns from the same
+            ``source_session_id`` are appended after the protected prefix
+            (matched sessions capped at 3 by best window rank; siblings
+            ordered by turn_index proximity to the session's best hit,
+            then turn_index, then id; unfilled slots are padded with
+            next-best query-ranked candidates). Returned length:
+            ``result_limit + expansion_slots``.
     """
     validate_retrieval_policy_contract(
         retrieval_policy=retrieval_policy,
@@ -749,7 +883,7 @@ async def recall_turns(
                 phase="vector", sql=vector_sql, started=started,
                 status="failed", error_type=type(exc).__name__,
             )
-            raise
+            raise TurnRetrievalError("vector", exc) from exc
         _emit_sql_diag(
             phase="vector", sql=vector_sql, started=started,
             status="ok", row_count=len(vector_rows),
@@ -760,29 +894,33 @@ async def recall_turns(
     # equivalent to the historical inline form while allowing PostgreSQL to
     # use the benchmark snapshot's GIN index. Keep the default inline SQL for
     # production callers until the gated migration is universally applied.
+    from weft.store import build_or_tsquery
+
+    keyword_tsquery = build_or_tsquery(query) or ""
     keyword_vector = "t.search_tsv" if use_stored_search_tsv else "to_tsvector('english', t.content)"
     keyword_sql = f"""
         SELECT t.*
           FROM episode_turns t
           {_join_episodes_if_needed(project_id)}
-          WHERE {keyword_vector}
-                @@ websearch_to_tsquery('english', $1)
+          WHERE {keyword_vector} @@ to_tsquery('english', $1)
             {sql_filter}
-          ORDER BY ts_rank(
-              {keyword_vector},
-              websearch_to_tsquery('english', $1)
-          ) DESC, t.id
+          ORDER BY ts_rank({keyword_vector}, to_tsquery('english', $1)) DESC, t.id
           LIMIT ${len(params) + 2}
     """
+    keyword_args = [keyword_tsquery, *params, candidate_limit]
     started = time.perf_counter() if sql_diag_callback is not None else 0.0
     try:
-        keyword_rows = await db.fetch(keyword_sql, query, *params, candidate_limit)
+        keyword_rows = (
+            await db.fetch(keyword_sql, *keyword_args)
+            if keyword_tsquery
+            else []
+        )
     except Exception as exc:
         _emit_sql_diag(
             phase="keyword", sql=keyword_sql, started=started,
             status="failed", error_type=type(exc).__name__,
         )
-        raise
+        raise TurnRetrievalError("keyword", exc) from exc
     _emit_sql_diag(
         phase="keyword", sql=keyword_sql, started=started,
         status="ok", row_count=len(keyword_rows),
@@ -867,7 +1005,42 @@ async def recall_turns(
                 exc_info=True,
             )
 
-    return ranked_turns[: int(result_limit or top_k)]
+    final_limit = int(result_limit or top_k)
+    window = ranked_turns[:final_limit]
+    if expansion_slots > 0 and window and db is not None:
+        # Additive session expansion: the first ``final_limit`` entries are
+        # bit-identical to the non-expanded funnel window (the protected
+        # prefix pipeline above is untouched). Session siblings are appended
+        # after the prefix, then unfilled slots are padded with next-best
+        # query-ranked candidates taken from a SEPARATE wider fusion pass —
+        # never from the prefix pipeline, whose recency rerank would
+        # otherwise promote those candidates INTO the protected prefix.
+        # Returned length: final_limit + expansion_slots (or all available
+        # turns if the project is smaller).
+        window = await _append_session_siblings(
+            db, window, expansion_slots, project_id=project_id,
+        )
+        window_ids = {t.id for t in window}
+        wider = _rrf_fuse_turn_rows(
+            vector_rows, keyword_rows,
+            candidate_limit=fusion_limit,
+            top_k=max(top_k, int(result_limit or top_k)) + expansion_slots,
+            vector_weight=vector_weight,
+            keyword_weight=keyword_weight,
+        )
+        filler = [
+            s.turn for s in rank_turns(wider, now=as_of)
+            if s.turn.id not in window_ids
+        ][:expansion_slots]
+        expanded = window + filler
+        expanded_ids = {t.id for t in expanded}
+        filler_ids = {f.id for f in filler}
+        ranked_turns = expanded + [
+            t for t in ranked_turns
+            if t.id not in expanded_ids and t.id not in filler_ids
+        ]
+        return ranked_turns[: final_limit + expansion_slots]
+    return ranked_turns[:final_limit]
 
 
 # --- Hierarchical descent: episodes → turns ---

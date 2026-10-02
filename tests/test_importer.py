@@ -40,7 +40,7 @@ SAMPLE_MEMORY_MD = """\
 - Float precision issues with Postgres REAL columns handled by pytest.approx
 
 ## Relationships and Ownership
-- Jason Bauman owns Weft, Loom, and Muttr projects
+- A project maintainer owns several related projects
 
 ## Facts
 - Loom has 760 tests across unit, integration, and e2e suites
@@ -316,7 +316,7 @@ def test_smoke_importer(tmp_path: Path):
 - Restart the dev server if hot-reload fails after changing __init__.py
 
 ## Project Owner
-- Jason Bauman is the owner and primary developer
+- A project maintainer is the owner and primary developer
 
 ## Empty Notes
 """

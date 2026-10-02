@@ -50,6 +50,7 @@ Welcome to Weft — persistent memory for AI agents.
 Key tools:
 - weft_remember(content, type, confidence) — store knowledge \
 (types: fact, decision, preference, pattern, architecture, solution, issue, rule)
+- When capturing a worthwhile fact, keep quantitative qualifiers that materially specify it (date, duration, amount, range, unit, period/direction); skip incidental numbers and don't save a fact solely because it has a number.
 - weft_recall(query) — semantic search across all memories
 - weft_learn(content) — capture lessons after completing work (auto-extracts and stores)
 - weft_handoff(summary, next_steps, ...) — preserve session context for the next agent
@@ -62,9 +63,8 @@ Tips for getting started:
 - Call weft_handoff before ending sessions — the next primer surfaces it prominently
 - After completing tasks, call weft_learn to capture gotchas and patterns automatically
 
-Loom integration:
-- If Loom is available, run loom_create_project before decomposing work \
-to avoid tasks landing in the wrong project."""
+Task-management integration:
+- If available, initialize the project before decomposing work so tasks stay correctly scoped."""
 
 
 async def build_onboarding_section(
@@ -112,12 +112,11 @@ async def build_onboarding_section(
         except Exception as e:
             logger.debug("rls_diagnostic_check failed: %s", e, exc_info=True)
 
-    # Loom hint: only on cold start.
+    # Optional task-management hint: only on cold start.
     if is_cold_start:
-        hints["loom"] = (
-            "New project detected. If Loom is available, run "
-            "loom_create_project to set up a dedicated task space "
-            "before decomposing work with loom_decompose."
+        hints["task_management"] = (
+            "New project detected. If a task-management integration is available, "
+            "use its project setup and planning tools to organize the work."
         )
 
     result_data = {"hints": hints, "onboarding": onboarding_text}

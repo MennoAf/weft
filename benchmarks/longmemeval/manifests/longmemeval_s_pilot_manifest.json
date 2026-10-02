@@ -1,0 +1,144 @@
+{
+  "schema": "weft.longmemeval.pilot.v1",
+  "status": "PREPARED_NOT_AUTHORIZED",
+  "dataset": {
+    "name": "longmemeval_s_pilot_derivative.json",
+    "sha256": "8b825543dc35734d6f61e578abd73021b21d4db53128975a4c7997be9cff4135",
+    "population_count": 487
+  },
+  "normalization": {
+    "schema": "weft.longmemeval.dataset-normalization.v1",
+    "report_filename": "longmemeval_s_pilot_normalization.json",
+    "report_sha256": "44033a2a322bb9ca2bf3834b655ac9ed0bb92baa8a8acadbcd938b75f9ae184e",
+    "source_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "source_record_count": 500,
+    "derived_sha256": "8b825543dc35734d6f61e578abd73021b21d4db53128975a4c7997be9cff4135",
+    "derived_record_count": 487,
+    "excluded_question_ids": [
+      "58bf7951",
+      "1e043500",
+      "001be529",
+      "d23cf73b",
+      "caf03d32",
+      "91b15a6e",
+      "078150f1",
+      "gpt4_4929293b",
+      "gpt4_76048e76",
+      "gpt4_c27434e8_abs",
+      "18bc8abd",
+      "c7dc5443",
+      "1d4da289"
+    ],
+    "exclusion_count": 13,
+    "collapsed_group_count": 0
+  },
+  "selection": {
+    "strategy": "equal_by_question_type_source_order",
+    "question_types": [
+      "knowledge-update",
+      "multi-session",
+      "single-session-assistant",
+      "single-session-preference",
+      "single-session-user",
+      "temporal-reasoning"
+    ],
+    "per_type": 6,
+    "seed": 0,
+    "ordered_question_ids": [
+      "118b2229",
+      "7527f7e2",
+      "c960da58",
+      "ec81a493",
+      "4fd1909e",
+      "c14c00dd",
+      "gpt4_15e38248",
+      "80ec1f4f",
+      "eeda8a6d",
+      "0edc2aef",
+      "35a27287",
+      "54026fce",
+      "95228167",
+      "a89d7624",
+      "1c0ddc50",
+      "4bc144e2",
+      "8979f9ec",
+      "a346bb18",
+      "gpt4_e061b84f",
+      "5e1b23de",
+      "gpt4_7bc6cf22",
+      "71017277",
+      "gpt4_d6585ce9",
+      "gpt4_9a159967",
+      "a1eacc2a",
+      "6a27ffc2",
+      "50635ada",
+      "dfde3500",
+      "42ec0761",
+      "f685340e_abs",
+      "7e00a6cb",
+      "8464fc84",
+      "8752c811",
+      "6222b6eb",
+      "352ab8bd",
+      "16c90bf4"
+    ],
+    "ordered_question_ids_sha256": "e714774973f9bfe0e478ceaad710a7d86ac62f9bdb03c4273e6f699aaa794adf"
+  },
+  "arms": [
+    "turns",
+    "belief",
+    "auto"
+  ],
+  "repetitions": 1,
+  "ingest": {
+    "mode": "dual",
+    "representations": [
+      "raw_memory",
+      "episode_turns"
+    ]
+  },
+  "retrieval": {
+    "top_k": 10,
+    "recall_k": 10,
+    "label_blind": true
+  },
+  "reader": {
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
+    "max_output_tokens": 256
+  },
+  "judge": {
+    "provider": "openai",
+    "model": "gpt-4o"
+  },
+  "cost": {
+    "questions": 36,
+    "arms": 3,
+    "repetitions": 1,
+    "reader_calls": 108,
+    "judge_calls": 108,
+    "reader_cost_usd": "0.098559",
+    "judge_cost_usd": "3.240000",
+    "total_cost_usd": "4.173198",
+    "reserve_factor": "1.250000",
+    "operational_stop_usd": "40.000000",
+    "authorization_ceiling_usd": "50.000000"
+  },
+  "source_hashes": {
+    "benchmarks/longmemeval/pilot.py": "1af07e69a799ead37aeb25f586600e25a306bed30743eee7fb7047effcdd0650",
+    "benchmarks/longmemeval/dataset.py": "bddab1f08b5676d38a8b013a0b91df257e1ca2923905fd57b72e4aef79edb4ab",
+    "benchmarks/longmemeval/ingest.py": "ce7caf18e2c84989e589e2658b4093789d9701fcfd3fc902e1ac5fe66dcf9c07",
+    "benchmarks/longmemeval/router.py": "6012ea7b21212f6794c2c394e2b5bf48a0ef13415a54847a6dc7de63d66ca34c",
+    "benchmarks/longmemeval/reader.py": "af5a39229c7b6e5db38e1bd9e32e94239f874a3c3f3bc61e9278cb5f7c66ed26",
+    "benchmarks/longmemeval/task_shape.py": "b8546ea119494029e744f90289134d59f25ef58540af85cde4fbdcb060ec0c0c",
+    "weft/text_generation.py": "5e64b3bc2998232c1f15590611dab728aa59e1adb2db66d35ae4b6e7b73f8293"
+  },
+  "execution_boundary": {
+    "preparation_only": true,
+    "provider_calls": false,
+    "database_writes": false,
+    "judge_calls": false,
+    "authorization_required_before_execution": true
+  },
+  "manifest_sha256": "85e98a2858b0970300f084ff551e45333b9234af3f89eb124c00ea504991f57a"
+}

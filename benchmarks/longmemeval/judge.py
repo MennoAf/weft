@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import ast
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-4o"
 SUPPORTED_MODELS = ("gpt-4o", "gpt-4o-mini")
+# Preserved evaluator model aliases (source/evaluation/evaluate_qa.py).
+_MODEL_ZOO = {
+    "gpt-4o": ("gpt-4o-2024-08-06", "openai"),
+    "gpt-4o-mini": ("gpt-4o-mini-2024-07-18", "openai"),
+}
 
 
 # ----------------------------------------------------------------------
@@ -346,6 +352,85 @@ def summarize_results(*, result_path: Path, ref_path: Path) -> dict:
 # ----------------------------------------------------------------------
 # Top-level orchestration
 # ----------------------------------------------------------------------
+
+
+def _official_prompt_loader(source_root: Path):
+    """Load the preserved evaluator's prompt function without changing it."""
+    source = source_root / "src" / "evaluation" / "evaluate_qa.py"
+    if not source.is_file():
+        raise FileNotFoundError(f"preserved evaluator not found: {source}")
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    function = next(
+        (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_anscheck_prompt"),
+        None,
+    )
+    if function is None:
+        raise RuntimeError(f"preserved evaluator lacks get_anscheck_prompt: {source}")
+    namespace: dict[str, object] = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["get_anscheck_prompt"]
+
+
+def run_bounded_judge(
+    *,
+    hyp_path: Path,
+    ref_path: Path,
+    source_root: Path,
+    model: str = DEFAULT_MODEL,
+    client=None,
+    max_retries: int = 4,
+) -> dict:
+    """Run official grading semantics with finite SDK and outer retries."""
+    if model not in SUPPORTED_MODELS:
+        raise ValueError(f"unsupported judge model {model!r}; pick one of {SUPPORTED_MODELS}")
+    if max_retries < 0:
+        raise ValueError("max_retries must be non-negative")
+    prompt_fn = _official_prompt_loader(source_root)
+    with ref_path.open(encoding="utf-8") as f:
+        references = json.load(f)
+    hypotheses = _load_jsonl(hyp_path, artifact="hypothesis")
+    reference_by_id = {row["question_id"]: row for row in references}
+    owned = client is None
+    if owned:
+        from openai import OpenAI
+        client = OpenAI(max_retries=0)
+    result_path = _result_path_for(hyp_path, model)
+    try:
+        with result_path.open("w", encoding="utf-8") as out:
+            for entry in hypotheses:
+                reference = reference_by_id[entry["question_id"]]
+                prompt = prompt_fn(
+                    reference["question_type"], reference["question"],
+                    reference["answer"], entry["hypothesis"],
+                    abstention="_abs" in entry["question_id"],
+                )
+                kwargs = {
+                    "model": _MODEL_ZOO[model][0],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "n": 1, "temperature": 0, "max_tokens": 10,
+                }
+                last_exc = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        completion = client.chat.completions.create(**kwargs)
+                        last_exc = None
+                        break
+                    except Exception as exc:  # bounded retry wrapper
+                        last_exc = exc
+                if last_exc is not None:
+                    raise last_exc
+                response = completion.choices[0].message.content.strip()
+                entry = dict(entry)
+                entry["autoeval_label"] = {
+                    "model": _MODEL_ZOO[model][0], "label": "yes" in response.lower()
+                }
+                out.write(json.dumps(entry) + "\n")
+    finally:
+        if owned:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    return summarize_pipeline(ref_path=ref_path, hyp_path=hyp_path, result_path=result_path)
 
 
 def run_judge(

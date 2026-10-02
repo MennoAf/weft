@@ -2,6 +2,7 @@
 # private deployment environment; do not commit production topology here.
 app = "weft-mcp-example"
 primary_region = "iad"
+kill_timeout = "15s"
 
 [deploy]
   strategy = "bluegreen"
