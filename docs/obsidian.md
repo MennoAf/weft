@@ -1,6 +1,6 @@
 # Obsidian Integration
 
-Weft can sync an Obsidian vault into memories, making your personal notes, tasks, contacts, recipes, and more available to AI agents via semantic search.
+Weft can sync an Obsidian vault into memories, making notes, tasks, contacts, and other information available to AI agents via semantic search.
 
 ## Quickstart
 
@@ -25,13 +25,13 @@ vault/
   notes/              Reminders, misc notes
   journal/daily/      Daily notes
   people/             Contacts (stored as user_model type)
-  wktw/               Side business
+  projects/           Project information
     clients/
     meetings/
     ideas/
     finances/
     operations/
-  recipes/            Meals (with lissy_approved field)
+  recipes/            Meals (with optional approval metadata)
   media/              Book/show/movie reviews
   writing/
     ideas/            Creative writing concepts
@@ -79,7 +79,7 @@ topic: [architecture, auth]
 pinned: true
 ---
 
-# Why we picked Supabase
+# Example architecture decision
 
 ...
 ```

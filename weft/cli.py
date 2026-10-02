@@ -12,9 +12,18 @@ from pathlib import Path
 
 import click
 
-from weft.config import CONFIG_PATH, load_config, load_config_file, save_config_value
+from weft.config import (
+    CONFIG_PATH,
+    config_data_with_updates,
+    initialize_config,
+    load_config,
+    load_config_file,
+    save_config_value,
+    write_config_data,
+)
+from weft.doctor import load_doctor_dependencies, run_doctor
+from weft.resources import compose_file_path
 
-COMPOSE_FILE = Path(__file__).parent.parent / "docker-compose.weft.yml"
 _COMPOSE_PROJECT_ENV = "WEFT_COMPOSE_PROJECT"
 
 
@@ -41,6 +50,165 @@ def mcp_server():
     """Start the Weft MCP server (stdio transport)."""
     from weft.mcp import mcp
     mcp.run()
+
+
+@cli.command(name="doctor")
+@click.option("--json", "as_json", is_flag=True, help="Emit the stable JSON Doctor schema.")
+def doctor_cmd(as_json: bool) -> None:
+    """Inspect configuration and dependencies without making changes."""
+    report = run_doctor(dependencies=load_doctor_dependencies())
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":")))
+    else:
+        for check in report.checks:
+            click.echo(f"{check.id} {check.status.upper()}: {check.name} — {check.remedy}")
+    raise click.exceptions.Exit(report.exit_code)
+
+
+def _redacted_lifecycle_value(key: str, value: str) -> str:
+    """Return an evidence-safe value for setup receipts."""
+    lowered = key.casefold()
+    if any(part in lowered for part in ("key", "token", "secret", "password", "credential", "url")):
+        return "[redacted]"
+    return value
+
+
+def _parse_config_updates(values: tuple[str, ...]) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise click.UsageError("--set values must use KEY=VALUE")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key or not value:
+            raise click.UsageError("--set values must use non-empty KEY=VALUE")
+        updates[key] = value
+    return updates
+
+
+@cli.command(name="init")
+@click.option("--json", "as_json", is_flag=True, help="Emit a stable JSON setup receipt.")
+def init_cmd(as_json: bool) -> None:
+    """Create missing local configuration without starting infrastructure."""
+    created = initialize_config()
+    payload = {
+        "command": "init",
+        "created": created,
+        "status": "initialized" if created else "already configured",
+        "read_only": not created,
+        "infrastructure_started": False,
+        "migrations_applied": False,
+        "credentials_rotated": False,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    elif created:
+        click.echo("Initialized local Weft configuration.")
+        click.echo("No infrastructure started; no migrations or credentials changed.")
+    else:
+        click.echo("Weft is already configured; no changes made.")
+
+
+@cli.command(name="repair")
+@click.option("--json", "as_json", is_flag=True, help="Emit the stable JSON Doctor schema.")
+def repair_cmd(as_json: bool) -> None:
+    """Diagnose setup issues without repairing or mutating anything."""
+    report = run_doctor(dependencies=load_doctor_dependencies())
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":")))
+    else:
+        click.echo("Repair is diagnostic-only; no changes made.")
+        for check in report.checks:
+            click.echo(f"{check.id} {check.status.upper()}: {check.name} — {check.remedy}")
+    raise click.exceptions.Exit(report.exit_code)
+
+
+@cli.command(name="reconfigure")
+@click.option("--set", "set_values", multiple=True, help="Explicit KEY=VALUE configuration change (repeatable).")
+@click.option("--confirm", is_flag=True, help="Authorize the planned configuration change.")
+@click.option("--backup", is_flag=True, help="Back up the current config before changing it.")
+@click.option("--stage", is_flag=True, help="Stage and atomically install the planned config.")
+@click.option("--plan", is_flag=True, help="Print the plan without changing configuration (default).")
+@click.option("--backup-path", type=click.Path(path_type=Path), default=None, hidden=True)
+def reconfigure_cmd(
+    set_values: tuple[str, ...],
+    confirm: bool,
+    backup: bool,
+    stage: bool,
+    plan: bool,
+    backup_path: Path | None,
+) -> None:
+    """Plan a configuration change, then require confirm/backup/stage to apply it."""
+    updates = _parse_config_updates(set_values)
+    try:
+        current = load_config_file(CONFIG_PATH)
+        proposed = config_data_with_updates(current, updates)
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("Reconfigure plan:")
+    if not updates:
+        click.echo("  (no changes requested)")
+    for key, value in updates.items():
+        old_value = current.get(key, "<default>") if "." not in key else "<configured>"
+        click.echo(
+            f"  {key}: {_redacted_lifecycle_value(key, str(old_value))} -> "
+            f"{_redacted_lifecycle_value(key, value)}"
+        )
+
+    # Planning is the safe default.  A caller must provide every gate; --plan
+    # explicitly documents the no-op intent but is not required for compatibility.
+    if plan or not (confirm and backup and stage):
+        if not plan and (confirm or backup or stage):
+            missing = [name for name, enabled in (("--confirm", confirm), ("--backup", backup), ("--stage", stage)) if not enabled]
+            raise click.ClickException("Refusing to mutate: also require " + ", ".join(missing) + ".")
+        click.echo("Plan only; no changes made.")
+        return
+    if not updates:
+        click.echo("No changes requested; no changes made.")
+        return
+
+    target = CONFIG_PATH
+    had_existing_config = target.exists()
+    backup_target = backup_path or target.with_suffix(target.suffix + ".bak")
+    if had_existing_config:
+        backup_target.parent.mkdir(parents=True, exist_ok=True)
+        backup_target.write_bytes(target.read_bytes())
+    staging = target.with_suffix(target.suffix + ".stage")
+    try:
+        write_config_data(proposed, staging)
+        staging.replace(target)
+    finally:
+        if staging.exists():
+            staging.unlink()
+    backup_label = str(backup_target) if had_existing_config else "[none]"
+    click.echo(f"Reconfigured safely; backup saved to {backup_label}.")
+
+
+def run_package_update() -> dict[str, str]:
+    """Package-update seam; installation is intentionally operator-controlled."""
+    return {"status": "package update delegated to the operator"}
+
+
+def run_schema_upgrade() -> dict[str, str]:
+    """Schema-upgrade seam; owner migration remains a separately authorized action."""
+    return {"status": "schema upgrade delegated to the owner migration command"}
+
+
+@cli.command(name="upgrade")
+@click.option("--confirm", is_flag=True, help="Explicitly authorize the selected upgrade.")
+@click.option("--package-update", is_flag=True, help="Perform only the package update operation.")
+@click.option("--schema-upgrade", is_flag=True, help="Perform only the schema upgrade operation.")
+def upgrade_cmd(confirm: bool, package_update: bool, schema_upgrade: bool) -> None:
+    """Run one explicitly confirmed upgrade operation, never both at once."""
+    selected = int(package_update) + int(schema_upgrade)
+    if selected != 1:
+        raise click.UsageError("Select exactly one of --package-update or --schema-upgrade.")
+    if not confirm:
+        raise click.ClickException("Upgrade is not implicit; rerun with --confirm.")
+    result = run_package_update() if package_update else run_schema_upgrade()
+    label = "package update" if package_update else "schema upgrade"
+    click.echo(f"{label}: {result.get('status', 'completed')}")
 
 
 def _register_mcp(project_dir: Path | None = None) -> None:
@@ -74,28 +242,29 @@ def _register_mcp(project_dir: Path | None = None) -> None:
 def up(global_: bool):
     """Start Weft infrastructure (Postgres + Redis) and run migrations."""
     click.echo("Starting Weft containers...")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", _compose_project_name(), "up", "-d"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Error: {result.stderr}", err=True)
-        sys.exit(1)
-    click.echo("Weft containers started.")
+    with compose_file_path() as compose_file:
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "-p", _compose_project_name(), "up", "-d"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            click.echo(f"Error: {result.stderr}", err=True)
+            sys.exit(1)
+        click.echo("Weft containers started.")
 
-    # Run migrations through the same owner-safe path used by deployments.
-    applied = asyncio.run(_run_owner_migrations(load_config()))
-    if applied:
-        click.echo(f"Applied {len(applied)} migration(s).")
-    else:
-        click.echo("Migrations up to date.")
+        # Run migrations through the same owner-safe path used by deployments.
+        applied = asyncio.run(_run_owner_migrations(load_config()))
+        if applied:
+            click.echo(f"Applied {len(applied)} migration(s).")
+        else:
+            click.echo("Migrations up to date.")
 
-    # Register MCP server
-    if global_:
-        _register_mcp()
-    else:
-        _register_mcp(Path.cwd())
+        # Register MCP server
+        if global_:
+            _register_mcp()
+        else:
+            _register_mcp(Path.cwd())
 
 
 def _migration_config(ca_cert_file: str | None, database_url: str | None):
@@ -218,15 +387,16 @@ def deploy_cmd(app: str, wait_timeout: str, ca_cert_file: Path | None, skip_pref
 def down():
     """Stop Weft infrastructure."""
     click.echo("Stopping Weft containers...")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", _compose_project_name(), "down"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(f"Error: {result.stderr}", err=True)
-        sys.exit(1)
-    click.echo("Weft containers stopped.")
+    with compose_file_path() as compose_file:
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "-p", _compose_project_name(), "down"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            click.echo(f"Error: {result.stderr}", err=True)
+            sys.exit(1)
+        click.echo("Weft containers stopped.")
 
 
 @cli.command()
@@ -284,13 +454,20 @@ def consolidate(dry_run: bool):
 
     async def _consolidate():
         import asyncpg
+        from weft.auth import current_user_id
+        from weft.config.user_identity import get_user_id
         from weft.consolidation import consolidate as run_consolidation
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        report = await run_consolidation(pool, dry_run=dry_run)
-        await pool.close()
-        return report
+        identity_token = None
+        try:
+            identity_token = current_user_id.set(get_user_id())
+            return await run_consolidation(pool, dry_run=dry_run)
+        finally:
+            if identity_token is not None:
+                current_user_id.reset(identity_token)
+            await pool.close()
 
     report = asyncio.run(_consolidate())
     console = Console()
@@ -316,11 +493,15 @@ def auto_consolidate(dry_run: bool, force: bool):
 
     async def _run():
         import asyncpg
+        from weft.auth import current_user_id
+        from weft.config.user_identity import get_user_id
         from weft.consolidation import consolidate_if_due, should_consolidate, consolidate, record_consolidation_run
 
         config = load_config()
         pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        identity_token = None
         try:
+            identity_token = current_user_id.set(get_user_id())
             if dry_run:
                 due = await should_consolidate(pool)
                 return {"ran": False, "due": due, "dry_run": True}
@@ -335,10 +516,13 @@ def auto_consolidate(dry_run: bool, force: bool):
                     "decayed": len(report.decayed),
                     "duplicates_merged": len(report.duplicates_merged),
                     "contradictions_flagged": len(report.contradictions_flagged),
+                    "errors": report.errors,
                 }
 
             return await consolidate_if_due(pool)
         finally:
+            if identity_token is not None:
+                current_user_id.reset(identity_token)
             await pool.close()
 
     result = asyncio.run(_run())
@@ -442,17 +626,36 @@ def recall(query: str, limit: int, topic: str | None):
     from rich.console import Console
 
     async def _recall():
-        import asyncpg
+        from weft.auth import current_user_id
+        from weft.config.user_identity import get_user_id
+        from weft.db.connection import acquire, create_pool
         from weft.embeddings import get_provider
         from weft.store import search_by_vector
 
         config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
-        embedding = await provider.embed(query)
-        results = await search_by_vector(pool, embedding, limit=limit, topic=topic)
-        await pool.close()
-        return results
+        pool = await create_pool(config)
+        identity_token = None
+        try:
+            caller_uid = get_user_id()
+            identity_token = current_user_id.set(caller_uid)
+            provider = get_provider(
+                config.embedding.provider,
+                model_name=config.embedding.model,
+                dimensions=config.embedding.dimensions,
+            )
+            embedding = await provider.embed(query)
+            async with acquire(pool):
+                return await search_by_vector(
+                    pool,
+                    embedding,
+                    limit=limit,
+                    topic=topic,
+                    user_id=caller_uid,
+                )
+        finally:
+            if identity_token is not None:
+                current_user_id.reset(identity_token)
+            await pool.close()
 
     results = asyncio.run(_recall())
     console = Console()
@@ -549,28 +752,57 @@ def ingest(path: str | None, project_id: str, depth: str):
 
     async def _ingest():
         import asyncpg
-        from anthropic import AsyncAnthropic
 
         from weft.embeddings import get_provider
         from weft.ingest import run_ingest
+        from weft.text_generation import managed_provider_for_role
 
+        # Resolve configuration once for this operation. Provider selection is
+        # handled by the managed scope, so alternate providers never need an
+        # Anthropic key or constructor.
         config = load_config()
-        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
-        # Use WEFT_API_KEY / config.api_key if ANTHROPIC_API_KEY isn't set
-        api_key = os.environ.get("ANTHROPIC_API_KEY") or config.api_key
-        if not api_key:
-            click.echo("Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.", err=True)
-            sys.exit(1)
-        client = AsyncAnthropic(api_key=api_key)
-        provider = get_provider(config.embedding.provider, model_name=config.embedding.model, dimensions=config.embedding.dimensions)
-        result = await run_ingest(
-            target, project_id, depth=depth, pool=pool, client=client,
-            embedding_provider=provider,
+        provider_name = config.text_generation.provider
+        api_key = (
+            os.environ.get("ANTHROPIC_API_KEY") or config.api_key
+            if provider_name == "anthropic"
+            else None
         )
-        await pool.close()
-        return result
+        if provider_name == "anthropic" and not api_key:
+            click.echo(
+                "Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
 
-    result = asyncio.run(_ingest())
+        pool = await asyncpg.create_pool(config.database.url, min_size=1, max_size=2)
+        try:
+            embedding_provider = get_provider(
+                config.embedding.provider,
+                model_name=config.embedding.model,
+                dimensions=config.embedding.dimensions,
+            )
+            async with managed_provider_for_role(
+                "codebase_summary",
+                config=config,
+                anthropic_api_key=api_key,
+            ) as generation_provider:
+                return await run_ingest(
+                    target,
+                    project_id,
+                    depth=depth,
+                    pool=pool,
+                    client=None,
+                    embedding_provider=embedding_provider,
+                    generation_provider=generation_provider,
+                    generation_config=config,
+                )
+        finally:
+            await pool.close()
+
+    try:
+        result = asyncio.run(_ingest())
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"\nIngest complete for {target}")
     click.echo(f"  Project: {project_id}")
     click.echo(f"  Depth: {depth}")
@@ -663,18 +895,23 @@ def restore(file: str, dry_run: bool, no_skip_duplicates: bool):
     click.echo(f"  With embeddings: {report['memories_with_embeddings']}")
 
     async def _restore():
+        from weft.backup import verify_backup_preconditions
         from weft.db.connection import create_pool
-        from weft.db.migrations import run_migrations
 
         config = load_config()
         pool = await create_pool(config)
-        await run_migrations(pool)
-        result = await restore_all(
-            pool, data,
-            dry_run=dry_run,
-            skip_duplicates=not no_skip_duplicates,
-        )
-        await pool.close()
+        try:
+            # Restore is an owner-managed logical-data operation.  Preflight is
+            # read-only and deliberately does not apply pending migrations;
+            # operators must run the explicit owner migration command first.
+            await verify_backup_preconditions(pool)
+            result = await restore_all(
+                pool, data,
+                dry_run=dry_run,
+                skip_duplicates=not no_skip_duplicates,
+            )
+        finally:
+            await pool.close()
         return result
 
     result = asyncio.run(_restore())
@@ -950,14 +1187,17 @@ def slack_sync(bot_token: str, limit_per_channel: int, state_path: str | None):
 
 
 @cli.command(name="re-embed")
-@click.option("--batch-size", default=64, help="Number of memories to embed per batch")
+@click.option("--batch-size", default=64, help="Number of rows to embed per batch")
 @click.option("--dry-run", is_flag=True, help="Show counts without re-embedding")
 @click.option("--table", "tables", multiple=True, default=("memories", "behaviors", "entities"),
               help="Tables to re-embed (default: all three)")
-def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
-    """Re-embed all memories/behaviors/entities with the current embedding provider.
+@click.option("--resume-run", default=None, metavar="RUN_ID", help="Resume a persisted interrupted run")
+def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...], resume_run: str | None):
+    """Run a resumable maintenance-window embedding migration.
 
-    Use after switching embedding providers or dimensions.
+    Existing vectors remain authoritative until a complete, verified run is
+    promoted atomically. An interrupted or failed run is never reported as
+    successful; pass its RUN_ID to resume it after the provider is available.
     """
     from rich.console import Console
 
@@ -965,50 +1205,60 @@ def re_embed(batch_size: int, dry_run: bool, tables: tuple[str, ...]):
 
     async def _re_embed():
         from weft.db.connection import create_pool
-        from weft.db.reembed import reembed_table
+        from weft.db.reembed import reembed_table, run_reembed, resume_reembed
         from weft.embeddings import get_provider
+        from weft.db.migrations import run_migrations
 
         config = load_config()
         pool = await create_pool(config)
-        provider = get_provider(
-            config.embedding.provider,
-            model_name=config.embedding.model,
-            dimensions=config.embedding.dimensions,
-        )
+        try:
+            provider = get_provider(
+                config.embedding.provider,
+                model_name=config.embedding.model,
+                dimensions=config.embedding.dimensions,
+            )
 
-        # Run migrations first to ensure schema is up to date
-        from weft.db.migrations import run_migrations
-        applied = await run_migrations(pool)
-        if applied:
-            console.print(f"Applied {len(applied)} pending migration(s)")
+            applied = await run_migrations(pool)
+            if applied:
+                console.print(f"Applied {len(applied)} pending migration(s)")
+            console.print(
+                f"Provider: [bold]{provider.provider_name}[/bold] ({provider.dimensions} dims)"
+            )
 
-        console.print(f"Provider: [bold]{provider.provider_name}[/bold] ({provider.dimensions} dims)")
+            if dry_run:
+                for table in tables:
+                    count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+                    console.print(f"\n[bold]{table}[/bold]: {count} rows")
+                return {"status": "dry-run", "completed": True, "embedded_rows": 0}
 
-        if dry_run:
-            for table in tables:
-                count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
-                console.print(f"\n[bold]{table}[/bold]: {count} rows")
+            if resume_run:
+                report = await resume_reembed(pool, provider, resume_run)
+            else:
+                report = await run_reembed(
+                    pool, provider, tables=list(tables), batch_size=batch_size, max_batches=None,
+                )
+            console.print(
+                "Run status: "
+                f"[bold]{report['status']}[/bold] "
+                f"run_id={report['run_id']} "
+                f"cursor={report['cursor']} "
+                f"rows={report['embedded_rows']}/{report['total_rows']}"
+            )
+            return report
+        finally:
             await pool.close()
-            return 0
 
-        total_updated = 0
-        for table in tables:
-            count = await pool.fetchval(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
-            console.print(f"\n[bold]{table}[/bold]: {count} rows")
-            if count == 0:
-                continue
-            updated = await reembed_table(pool, table, provider, batch_size, force=True)
-            console.print(f"  {updated} rows re-embedded")
-            total_updated += updated
-
-        await pool.close()
-        return total_updated
-
-    total = asyncio.run(_re_embed())
+    report = asyncio.run(_re_embed())
     if dry_run:
         console.print("\n[dim](dry run — no changes made)[/dim]")
-    else:
-        console.print(f"\n[bold]Re-embedded {total} rows.[/bold]")
+        return
+    if report["status"] != "promoted" or not report["completed"]:
+        click.echo(
+            "Re-embed incomplete; authoritative profile was not promoted.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    console.print(f"\n[bold]Re-embedded {report['embedded_rows']} rows.[/bold]")
 
 
 @cli.command(name="calendar-auth")

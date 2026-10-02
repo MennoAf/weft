@@ -46,13 +46,17 @@ def is_supabase_dsn(dsn: str) -> bool:
     return "supabase.co" in dsn or "supabase.com" in dsn
 
 
-async def restore_project(project_ref: str, access_token: str) -> bool:
+async def restore_project(
+    project_ref: str,
+    access_token: str,
+    *,
+    timeout: float = 30.0,
+) -> bool:
     """Attempt to restore (unpause) a Supabase project via the Management API.
 
     Returns True if the restore request was accepted, False on failure.
     Uses only stdlib (urllib) to avoid adding a dependency.
     """
-    import json
     import urllib.request
     import urllib.error
 
@@ -66,24 +70,27 @@ async def restore_project(project_ref: str, access_token: str) -> bool:
         },
         data=b"{}",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            status = resp.status
-            logger.info(
-                "Supabase restore API responded %d for project %s",
-                status, project_ref,
+    def _request() -> bool:
+        try:
+            with urllib.request.urlopen(req, timeout=max(0.001, timeout)) as resp:
+                status = resp.status
+                logger.info(
+                    "Supabase restore API responded %d for project %s",
+                    status, project_ref,
+                )
+                return 200 <= status < 300
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+            logger.warning(
+                "Supabase restore API returned %d for project %s: %s",
+                e.code, project_ref, body,
             )
-            return 200 <= status < 300
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")[:500]
-        logger.warning(
-            "Supabase restore API returned %d for project %s: %s",
-            e.code, project_ref, body,
-        )
-        return False
-    except Exception as e:
-        logger.warning("Supabase restore API request failed: %s", e)
-        return False
+            return False
+        except OSError as e:
+            logger.warning("Supabase restore API request failed: %s", e)
+            return False
+
+    return await asyncio.to_thread(_request)
 
 
 async def wait_for_restore(
@@ -102,28 +109,35 @@ async def wait_for_restore(
     import urllib.error
 
     url = f"https://api.supabase.com/v1/projects/{project_ref}"
-    elapsed = 0.0
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
 
-    while elapsed < timeout:
+    def _request(timeout: float) -> str:
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=max(0.001, timeout)) as resp:
+            return json.loads(resp.read()).get("status", "")
+
+    while (remaining := deadline - loop.time()) > 0:
         try:
-            req = urllib.request.Request(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
+            status = await asyncio.wait_for(
+                asyncio.to_thread(_request, min(15.0, remaining)),
+                timeout=remaining,
             )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
-                status = data.get("status", "")
-                logger.info(
-                    "Supabase project %s status: %s (%.0fs elapsed)",
-                    project_ref, status, elapsed,
-                )
-                if status == "ACTIVE_HEALTHY":
-                    return True
-        except Exception as e:
+            logger.info(
+                "Supabase project %s status: %s (%.0fs remaining)",
+                project_ref, status, remaining,
+            )
+            if status == "ACTIVE_HEALTHY":
+                return True
+        except (OSError, asyncio.TimeoutError) as e:
             logger.debug("Status poll failed: %s", e)
 
-        await asyncio.sleep(poll_interval)
-        elapsed += poll_interval
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(poll_interval, remaining))
 
     logger.warning(
         "Timed out waiting for Supabase project %s to restore (%.0fs)",

@@ -43,10 +43,17 @@ async def fetch_calibration_section(ctx: PrimerContext) -> SectionFetch:
         c for c, cs in summary.get("by_category", {}).items()
         if cs["total"] >= _MIN_RECORDS_TO_SHOW
     ]
-    evaluations = await asyncio.gather(*[
-        evaluate_tier_change(ctx.pool, c, project_id=ctx.project_id)
-        for c in categories
-    ]) if categories else []
+    if categories:
+        async with asyncio.TaskGroup() as task_group:
+            evaluation_tasks = [
+                task_group.create_task(
+                    evaluate_tier_change(ctx.pool, c, project_id=ctx.project_id)
+                )
+                for c in categories
+            ]
+        evaluations = [task.result() for task in evaluation_tasks]
+    else:
+        evaluations = []
 
     return SectionFetch(payload={
         "summary": summary,

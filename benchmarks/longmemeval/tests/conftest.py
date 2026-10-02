@@ -6,4 +6,8 @@ so pytest does not auto-discover the testcontainers session fixtures. Loading
 container start/stop hooks) without duplicating any code.
 """
 
-pytest_plugins = ["tests.conftest"]
+# Pytest loads this conftest as the benchmark package boundary. Import the
+# root fixture module under its canonical package name; unlike pytest_plugins,
+# this avoids registering the same module a second time when the root conftest
+# is already discovered from repository scope.
+from tests.conftest import *  # noqa: F401,F403

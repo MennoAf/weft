@@ -113,7 +113,7 @@ async def context_pool(pool):
         ("Redis cache uses 1hr TTL for memories", MemoryType.fact, ["redis", "caching"]),
         ("Use fastembed as default embedding provider", MemoryType.preference, ["embeddings"]),
         ("Testcontainers give best testing isolation", MemoryType.pattern, ["testing"]),
-        ("Jason Bauman owns Weft and Loom", MemoryType.relationship, ["people"]),
+        ("Casey Example owns two related projects", MemoryType.relationship, ["people"]),
         ("Three-layer config for flexibility", MemoryType.pattern, ["configuration"]),
         ("Weft MCP server uses FastMCP stdio", MemoryType.architecture, ["weft", "mcp"]),
         ("Docker infra should be per-project", MemoryType.preference, ["docker", "infrastructure"]),

@@ -9,8 +9,8 @@ belief tier for abstract, manually-tagged knowledge. The belief-view is
 *extracted* from raw dialogue; it captures facts that emerge from conversation
 without requiring the caller to explicitly classify and store them.
 
-Council decision reference: `weft-496166ed`. Scope expansion refinement:
-`weft-89e71528`. Wick use-case fixture: `benchmarks/wick_eval/dataset.json`.
+Design decisions: `weft-496166ed`, refined by `weft-89e71528`. Example
+use-case fixture in the evaluation dataset.
 
 ---
 
@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_belief_claims_attribute_prefix
 
 An HNSW index on a value-derived embedding is deferred. Named-artifact
 retrieval relies on attribute-name matching (`attribute_hint` in the query
-API), not value content — a fuzzy recipe search is out of scope for v1. If
+API), not value content — a fuzzy value search is out of scope for v1. If
 full-text value retrieval becomes necessary, add a `search_tsv` generated
 column and GIN index at that point rather than pre-committing to pgvector here.
 
@@ -63,7 +63,7 @@ column and GIN index at that point rather than pre-committing to pgvector here.
 reason `episode_turns` uses `et-{shortid}` — tier-specific prefixes make log
 correlation unambiguous without a type column. `attribute` is a
 dot-namespaced, kebab-cased key that the detector emits and the query API uses
-for exact-match retrieval (`"sleep.recent_hours"`, `"recipe.bourbon-pb-oatmeal-cookies"`,
+for exact-match retrieval (`"sleep.recent_hours"`, `"recipe.weeknight-pasta"`,
 `"linkedin.posting-frequency"`). The dot namespace separates domain from name;
 the kebab suffix makes attribute strings safe for use as keys in structured
 output without escaping.
@@ -128,7 +128,7 @@ ORDER BY occurred_at ASC;
 
 The chain is the answer to trajectory queries ("compared to last time",
 "at last review") and is the primary mechanism for fixture rows 1, 2, 4, 6,
-11, and 14 in `benchmarks/wick_eval/dataset.json`.
+11, and 14 in the example evaluation dataset.
 
 Retraction is a distinct operation: `status = 'retracted'` is set when the
 user explicitly corrects a belief ("I was wrong about that"). The chain is
@@ -190,7 +190,7 @@ the existing belief-tier search over `memories`. The belief-view augments
 rather than gates — a user asking "what is my sleep situation" will get a
 belief-view result if one exists, and a legacy `memories` result otherwise.
 
-**Worked example — Wick fixture row 2 ("How is my sleep doing compared to
+**Worked example — evaluation fixture row 2 ("How is my sleep doing compared to
 last time we talked?"):**
 
 The query routes to `tier='belief-view'` via the auto-router (no
@@ -300,26 +300,25 @@ shape and the attribute naming convention.
 
 **Attribute naming:** stable, dot-namespaced, kebab-cased.
 
-- `"recipe.daddy-issues-drink"` (Wick fixture row 7)
-- `"recipe.bourbon-pb-oatmeal-cookies"` (Wick fixture row 8)
-- `"workout.current-routine"` (Wick fixture row 12)
+- `"recipe.simple-pasta"` (synthetic fixture example)
+- `"recipe.weeknight-pasta"` (synthetic fixture example)
+- `"workout.current-routine"` (evaluation fixture row 12)
 
 The detector chooses the attribute name by slugifying the artifact's stated
-name. When the user says "my bourbon peanut butter oatmeal cookie recipe", the
-detector emits `attribute = "recipe.bourbon-pb-oatmeal-cookies"`. Slug
-collisions between artifacts are avoided by the `scope` field — a user with
-two drink recipes can store them under `"recipe.daddy-issues-drink"` and
-`"recipe.manhattan-variation"` respectively.
+name. When a user names a weeknight pasta recipe, the detector emits
+`attribute = "recipe.weeknight-pasta"`. Slug collisions between artifacts are
+avoided by the `scope` field — two weeknight pasta recipes can use distinct
+attributes such as `"recipe.simple-pasta"` and `"recipe.tomato-pasta"`.
 
 **Value shape:** a structured JSON document. The detector emits the structure
 based on artifact content, not a fixed schema. Recipes typically look like:
 
 ```json
 {
-  "ingredients": ["2 oz bourbon", "1 tbsp peanut butter", ...],
-  "steps": ["Mix dry ingredients.", "Fold in butter.", ...],
-  "notes": "Use dark chocolate chips. Bake at 350°F for 12 minutes.",
-  "yield": "24 cookies"
+  "ingredients": ["pasta", "olive oil", ...],
+  "steps": ["Boil pasta.", "Toss with olive oil.", ...],
+  "notes": "Serve warm.",
+  "yield": "2 servings"
 }
 ```
 
@@ -333,14 +332,14 @@ dictates a recipe verbatim may produce a `"user_stated"` artifact. An agent
 that generates a workout plan without user confirmation produces
 `"agent_suggested"`. All three are valid.
 
-**Supersession:** when the user says "actually, change the bourbon to rye in
-the drink recipe", the detector emits a new `ClaimUpdate` for
-`attribute = "recipe.daddy-issues-drink"` with the updated value. The new
+**Supersession:** when the user says "actually, add tomatoes to
+the weeknight pasta recipe", the detector emits a new `ClaimUpdate` for
+`attribute = "recipe.simple-pasta"` with the updated value. The new
 claim supersedes the prior recipe. `include_history=True` shows the full
 iterative refinement history — useful for understanding how a recipe evolved
 across sessions.
 
-**Query path:** `weft_recall(tier='belief-view', attribute_hint="recipe.daddy-issues-drink")`
+**Query path:** `weft_recall(tier='belief-view', attribute_hint="recipe.simple-pasta")`
 returns the current recipe. No embedding is computed; the lookup is a single
 indexed read by `(user_id, attribute, scope)`.
 
@@ -396,7 +395,7 @@ reward abstention: every training example set includes no-claim turns with
 explicit abstention output and a commentary explaining why the turn did not
 warrant a claim. Third, the eval harness measures the false-positive rate on a
 canary set of no-claim turns. The canary set is maintained separately from the
-main Wick fixture and should include greetings, clarifying questions, tool call
+main evaluation fixture and should include greetings, clarifying questions, tool call
 outputs, and narrative turns that contain facts about other people (not the
 user). If the false-positive rate on the canary set exceeds 15%, the detector
 version is classified as broken and is not deployed. This tripwire is the
@@ -452,7 +451,7 @@ to the originating dialogue.
 
 ## Out-of-Scope Rows — Fixture Coverage Notes
 
-The following Wick fixture rows are explicitly not addressed by the belief-view.
+The following evaluation fixture rows are explicitly not addressed by the belief-view.
 Each is deferred to a different shape-view.
 
 **Row 3 ("When was the last time I heard from Sarah?")** — `shape: event-anchored`.

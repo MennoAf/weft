@@ -25,7 +25,53 @@ from weft.store import (
     update_memory,
     bump_retrieval_telemetry,
     log_recall_query,
+    _row_to_memory,
 )
+
+
+class _RecordLikeWithoutGet:
+    """Minimal asyncpg.Record-shaped row with subscription only."""
+
+    def __init__(self, values):
+        self._values = values
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+
+@pytest.mark.parametrize("row_factory", [dict, _RecordLikeWithoutGet])
+def test_row_to_memory_accepts_mapping_rows_without_get(row_factory):
+    """Mapping and asyncpg.Record-shaped rows preserve optional defaults."""
+    now = datetime.now(timezone.utc)
+    values = {
+        "id": "weft-record-like",
+        "type": "fact",
+        "topic": ["store"],
+        "content": "record-like rows are supported",
+        "source": "conversation",
+        "confidence": 0.8,
+        "token_count": 5,
+        "created_at": now,
+        "updated_at": now,
+        "accessed_at": now,
+        "access_count": 0,
+        "project_id": None,
+        "agent_id": None,
+        "status": "active",
+    }
+
+    memory = _row_to_memory(row_factory(values))
+
+    assert memory.id == values["id"]
+    assert memory.content == values["content"]
+    assert memory.topic == values["topic"]
+    assert memory.pinned is False
+    assert memory.usefulness_score == 1.0
+    assert memory.usefulness_count == 0
+    assert memory.write_provenance == "supervisor"
+    assert memory.review_status == "active"
+    assert memory.project_facets == []
+    assert memory.preference_metadata is None
 
 
 @pytest.fixture

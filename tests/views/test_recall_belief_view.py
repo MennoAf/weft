@@ -369,7 +369,7 @@ async def test_belief_view_error_falls_back_gracefully(pool: asyncpg.Pool) -> No
     await store_memory(
         pool,
         MemoryCreate(
-            content="Jason enjoys running three times a week.",
+            content="Casey Example enjoys running three times a week.",
             type=MemoryType.fact,
             source=MemorySource.conversation,
         ),

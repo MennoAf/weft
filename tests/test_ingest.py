@@ -19,6 +19,7 @@ from weft.ingest import (
     run_ingest,
     summarize_file,
 )
+from weft.text_generation import GenerationResponse
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +196,19 @@ class TestBuildFileTree:
 class TestSummarizeFile:
     """Test summarize_file: LLM call for per-file summary."""
 
+    async def test_injected_provider_can_supply_summary(self):
+        class FakeProvider:
+            async def generate(self, request):
+                assert request.model == "claude-haiku-4-5-20251001"
+                return GenerationResponse(text="provider summary", model=request.model)
+
+        result = await summarize_file(
+            "src/auth.py", "\n".join(f"line {i}" for i in range(20)),
+            generation_provider=FakeProvider(),
+        )
+
+        assert result == "provider summary"
+
     async def test_returns_summary_text(self):
         client = _make_mock_client("This module handles user authentication.")
         content = "\n".join(f"line {i}" for i in range(20))
@@ -244,6 +258,18 @@ class TestSummarizeFile:
 
 class TestGenerateArchitectureOverview:
     """Test generate_architecture_overview: LLM call for project overview."""
+
+    async def test_injected_provider_can_supply_overview(self):
+        class FakeProvider:
+            async def generate(self, request):
+                assert request.model == "claude-haiku-4-5-20251001"
+                return GenerationResponse(text="provider overview", model=request.model)
+
+        result = await generate_architecture_overview(
+            "└── app.py", {"app.py": "application"}, generation_provider=FakeProvider()
+        )
+
+        assert result == "provider overview"
 
     async def test_returns_overview_text(self):
         client = _make_mock_client("This project is an API server.")

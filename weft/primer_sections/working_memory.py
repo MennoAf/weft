@@ -38,10 +38,14 @@ async def fetch_working_memory_section(ctx: PrimerContext) -> SectionFetch:
     if not episodes:
         return SectionFetch(skipped=True, skip_reason="no open episodes")
 
-    memory_lists = await asyncio.gather(*[
-        get_episode_memories(ctx.pool, ep.id, limit=_MAX_MEMORIES_PER_EPISODE)
-        for ep in episodes
-    ])
+    async with asyncio.TaskGroup() as task_group:
+        memory_tasks = [
+            task_group.create_task(
+                get_episode_memories(ctx.pool, ep.id, limit=_MAX_MEMORIES_PER_EPISODE)
+            )
+            for ep in episodes
+        ]
+    memory_lists = [task.result() for task in memory_tasks]
     return SectionFetch(payload=list(zip(episodes, memory_lists)))
 
 

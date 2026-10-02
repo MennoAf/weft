@@ -19,7 +19,7 @@ Include:
 - Corrections to previous assumptions
 - Behavioral rules discovered (e.g., "when writing tests, always use X" — these get auto-extracted as behaviors)
 
-If the session completed a tracked task (Loom, JIRA, GitHub issue, etc.), pass the identifier as `task_id` — that creates a linked milestone in the next session's prime.
+If the session completed a tracked task (for example, an issue or project-board item), pass its identifier as `task_id` — that creates a linked milestone in the next session's prime.
 
 ## Step 2: Behaviors
 

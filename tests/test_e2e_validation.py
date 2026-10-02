@@ -51,7 +51,7 @@ SEED_MEMORIES = [
     },
     {
         "type": MemoryType.relationship,
-        "content": "Jason Bauman owns Weft, Loom, and Muttr projects",
+        "content": "A project maintainer owns several related projects",
         "topic": ["people", "projects"],
         "confidence": 1.0,
         "source": MemorySource.conversation,

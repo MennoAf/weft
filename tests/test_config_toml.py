@@ -28,6 +28,24 @@ def test_load_config_file_missing(toml_path: Path):
     assert result == {}
 
 
+def test_text_generation_config_loads_from_toml_and_environment(
+    toml_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Provider and logical role models are configurable without code edits."""
+    save_config_value("text_generation.provider", "anthropic", path=toml_path)
+    save_config_value(
+        "text_generation.models.ingest_classifier", "configured-model", path=toml_path
+    )
+    monkeypatch.setattr("weft.config.CONFIG_PATH", toml_path)
+    monkeypatch.setenv("WEFT_TEXT_PROVIDER", "fake")
+    monkeypatch.setenv("WEFT_TEXT_MODEL_INGEST_CLASSIFIER", "env-model")
+
+    config = load_config()
+
+    assert config.text_generation.provider == "fake"
+    assert config.text_generation.models["ingest_classifier"] == "env-model"
+
+
 def test_save_and_load_string_value(toml_path: Path):
     """Save a string value and read it back."""
     save_config_value("database.url", "postgresql://custom:5432/db", path=toml_path)

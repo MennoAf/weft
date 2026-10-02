@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 
 # Prevent load_dotenv from polluting test environment
 os.environ["WEFT_TESTING"] = "1"
@@ -26,56 +25,28 @@ from weft.db.migrations import run_migrations
 # ``current_user_id.set(...)``.
 DEFAULT_TEST_USER_ID = "test-user-default"
 
-# Module-level containers — started once, shared across all tests
-_pg_container: PostgresContainer | None = None
-_redis_container: RedisContainer | None = None
-
-
-def _cleanup_stale_reaper():
-    """Remove stale Ryuk reaper containers from previous test runs."""
+@pytest.fixture(scope="session")
+def pg_container():
+    """Start Postgres only when a test requests a database fixture."""
     try:
-        result = subprocess.run(
-            [
-                "docker", "ps", "-a",
-                "--filter", "ancestor=testcontainers/ryuk",
-                "--format", "{{.ID}}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        container_ids = result.stdout.strip().split("\n")
-        for cid in container_ids:
-            if cid:
-                subprocess.run(
-                    ["docker", "rm", "-f", cid],
-                    capture_output=True,
-                    timeout=10,
-                )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        container = PostgresContainer("pgvector/pgvector:pg16")
+        container.start()
+    except Exception as exc:
+        pytest.skip(f"Docker unavailable: skipping DB-backed tests ({exc})")
+    yield container
+    container.stop()
 
 
-def pytest_configure(config):
-    """Start containers once for the entire test session."""
-    global _pg_container, _redis_container
-    _cleanup_stale_reaper()
-
-    # pgvector image instead of plain postgres
-    _pg_container = PostgresContainer("pgvector/pgvector:pg16")
-    _pg_container.start()
-
-    _redis_container = RedisContainer("redis:7-alpine")
-    _redis_container.start()
-
-
-def pytest_unconfigure(config):
-    """Stop containers at end of session."""
-    global _pg_container, _redis_container
-    if _pg_container:
-        _pg_container.stop()
-    if _redis_container:
-        _redis_container.stop()
+@pytest.fixture(scope="session")
+def redis_container():
+    """Start Redis only when a test requests a Redis fixture."""
+    try:
+        container = RedisContainer("redis:7-alpine")
+        container.start()
+    except Exception as exc:
+        pytest.skip(f"Docker unavailable: skipping Redis-backed tests ({exc})")
+    yield container
+    container.stop()
 
 
 async def _test_init(conn):
@@ -95,9 +66,9 @@ async def _test_setup(conn):
 
 
 @pytest.fixture
-async def pool():
+async def pool(pg_container):
     """Function-scoped asyncpg pool — migrations + clean slate each test."""
-    dsn = _pg_container.get_connection_url().replace("+psycopg2", "")
+    dsn = pg_container.get_connection_url().replace("+psycopg2", "")
     p = await asyncpg.create_pool(
         dsn, min_size=2, max_size=5, init=_test_init, setup=_test_setup,
     )
@@ -111,7 +82,7 @@ async def pool():
 
 
 @pytest.fixture
-def pg_dsn():
+def pg_dsn(pg_container):
     """Raw DSN for the shared test Postgres container.
 
     Lets a test open a *codec-less* asyncpg pool — mirroring the bare
@@ -119,14 +90,14 @@ def pg_dsn():
     codec registered) — to exercise serialization paths the codec-equipped
     `pool` fixture hides.
     """
-    return _pg_container.get_connection_url().replace("+psycopg2", "")
+    return pg_container.get_connection_url().replace("+psycopg2", "")
 
 
 @pytest.fixture
-async def redis_conn():
+async def redis_conn(redis_container):
     """Function-scoped Redis connection — flushed each test."""
-    host = _redis_container.get_container_host_ip()
-    port = _redis_container.get_exposed_port(6379)
+    host = redis_container.get_container_host_ip()
+    port = redis_container.get_exposed_port(6379)
     r = aioredis.Redis(host=host, port=int(port), decode_responses=True)
     await r.flushdb()
     yield r

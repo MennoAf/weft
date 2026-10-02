@@ -11,14 +11,16 @@ from __future__ import annotations
 
 import logging
 import math
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import AsyncIterator, Awaitable, Callable, TypeVar
 from datetime import datetime, timezone
 
 import asyncpg
 
 from weft.auth import current_user_id
 from weft.config import RetrievalConfig
-from weft.db.connection import get_db
+from weft.db.connection import _current_conn, _validate_user_id, acquire, get_db
 from weft.models import (
     ContradictionWarning,
     Memory,
@@ -36,6 +38,28 @@ from weft.store import (
 logger = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
+
+
+class _ConsolidationIdentityError(RuntimeError):
+    """A relationship mutation was refused because the owner identity is unusable."""
+
+
+async def _require_relationship_identity(
+    pool: asyncpg.Pool, operation: str,
+) -> None:
+    """Fail closed before relationship writes without an effective owner GUC."""
+    user_id = await get_db(pool).fetchval(
+        "SELECT nullif(current_setting('app.user_id', true), '')"
+    )
+    if isinstance(user_id, str) and user_id and _validate_user_id(user_id):
+        return
+
+    message = (
+        f"{operation} relationship write skipped: "
+        "app.user_id is missing or invalid"
+    )
+    logger.warning("consolidation.relationship_write_skipped: %s", message)
+    raise _ConsolidationIdentityError(message)
 
 # Types that should never be decayed
 IMMORTAL_TYPES = frozenset({MemoryType.preference, MemoryType.user_model, MemoryType.decision})
@@ -197,8 +221,9 @@ async def _batch_fetch_embeddings(
     Single query instead of N per-memory fetches.
     """
     uid = current_user_id.get(None)
+    db = get_db(pool)
     if uid is not None:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             "SELECT id, embedding FROM memories"
             " WHERE status = $1 AND embedding IS NOT NULL"
             " AND (user_id = $2 OR user_id = '__system_global_zathras__')",
@@ -206,7 +231,7 @@ async def _batch_fetch_embeddings(
             uid,
         )
     else:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             "SELECT id, embedding FROM memories"
             " WHERE status = $1 AND embedding IS NOT NULL",
             status.value,
@@ -214,7 +239,7 @@ async def _batch_fetch_embeddings(
     return {row["id"]: row["embedding"] for row in rows}
 
 
-async def find_duplicates(
+async def _find_duplicates(
     pool: asyncpg.Pool,
     *,
     threshold: float = 0.95,
@@ -230,8 +255,12 @@ async def find_duplicates(
     """
     merged: list[tuple[str, str]] = []
     seen_archived: set[str] = set()
+    uid = current_user_id.get(None)
+    scope = {"user_id": uid} if uid is not None else {}
 
-    memories = await list_memories(pool, status=MemoryStatus.active, limit=1000)
+    memories = await list_memories(
+        pool, status=MemoryStatus.active, limit=1000, **scope,
+    )
     embedding_map = await _batch_fetch_embeddings(pool, status=MemoryStatus.active)
 
     for mem in memories:
@@ -245,7 +274,8 @@ async def find_duplicates(
         # Search for similar memories
 
         similar = await search_by_vector(
-            pool, embedding, limit=10, threshold=threshold, status=MemoryStatus.active,
+            pool, embedding, limit=10, threshold=threshold,
+            status=MemoryStatus.active, **scope,
         )
 
         for result in similar:
@@ -269,8 +299,9 @@ async def find_duplicates(
                     keep, archive = other, mem
 
                 if not dry_run:
+                    await _require_relationship_identity(pool, "duplicate")
                     uid = current_user_id.get(None)
-                    async with pool.acquire() as conn:
+                    async with acquire(pool) as conn:
                         async with conn.transaction():
                             await conn.execute(
                                 """
@@ -308,10 +339,21 @@ async def find_duplicates(
     return merged
 
 
+async def find_duplicates(
+    pool: asyncpg.Pool,
+    *,
+    threshold: float = 0.95,
+    dry_run: bool = False,
+) -> list[tuple[str, str]]:
+    """Find and merge near-duplicate memories in the caller's identity scope."""
+    async with acquire(pool):
+        return await _find_duplicates(pool, threshold=threshold, dry_run=dry_run)
+
+
 # --- Contradiction Detection ---
 
 
-async def find_contradictions(
+async def _find_contradictions(
     pool: asyncpg.Pool,
     *,
     sim_min: float = 0.7,
@@ -327,8 +369,12 @@ async def find_contradictions(
     """
     flagged: list[tuple[str, str]] = []
     checked_pairs: set[tuple[str, str]] = set()
+    uid = current_user_id.get(None)
+    scope = {"user_id": uid} if uid is not None else {}
 
-    memories = await list_memories(pool, status=MemoryStatus.active, limit=500)
+    memories = await list_memories(
+        pool, status=MemoryStatus.active, limit=500, **scope,
+    )
     embedding_map = await _batch_fetch_embeddings(pool, status=MemoryStatus.active)
 
     for mem in memories:
@@ -337,7 +383,8 @@ async def find_contradictions(
             continue
 
         similar = await search_by_vector(
-            pool, embedding, limit=20, threshold=sim_min, status=MemoryStatus.active,
+            pool, embedding, limit=20, threshold=sim_min,
+            status=MemoryStatus.active, **scope,
         )
 
         for result in similar:
@@ -357,6 +404,7 @@ async def find_contradictions(
 
             if _content_conflicts(mem.content, other.content):
                 if not dry_run:
+                    await _require_relationship_identity(pool, "contradiction")
                     await add_relationship(
                         pool, mem.id, other.id, RelationType.contradicts,
                     )
@@ -367,6 +415,20 @@ async def find_contradictions(
                 )
 
     return flagged
+
+
+async def find_contradictions(
+    pool: asyncpg.Pool,
+    *,
+    sim_min: float = 0.7,
+    sim_max: float = 0.99,
+    dry_run: bool = False,
+) -> list[tuple[str, str]]:
+    """Find contradictions in the caller's identity scope."""
+    async with acquire(pool):
+        return await _find_contradictions(
+            pool, sim_min=sim_min, sim_max=sim_max, dry_run=dry_run,
+        )
 
 
 _STOP_WORDS = frozenset({
@@ -539,6 +601,44 @@ def _content_conflicts(content_a: str, content_b: str) -> bool:
 _CONSOLIDATION_LOCK_ID = 839272  # distinct from migration lock (839271)
 
 
+_T = TypeVar("_T")
+
+
+@asynccontextmanager
+async def _fresh_identity_scope(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
+    """Run one consolidation pass on a fresh owner-bound connection.
+
+    Consolidation can be scheduled from an MCP handler that already has a
+    connection bound in ``_current_conn``.  Clear only that inherited binding
+    so acquire() opens a new transaction for this independent pass; the
+    ambient current_user_id is intentionally preserved for SET LOCAL.
+    """
+    token = _current_conn.set(None)
+    try:
+        async with acquire(pool) as conn:
+            yield conn
+    finally:
+        _current_conn.reset(token)
+
+
+async def _run_identity_pass(
+    pool: asyncpg.Pool,
+    operation: Callable[[], Awaitable[_T]],
+) -> _T:
+    """Execute one owner-aware subsystem in its own transaction."""
+    async with _fresh_identity_scope(pool):
+        return await operation()
+
+
+async def _run_replay_fresh(pool: asyncpg.Pool, replay_runner: Callable) -> _T:
+    """Run replay without inheriting the caller's owner-bound connection."""
+    token = _current_conn.set(None)
+    try:
+        return await replay_runner(pool)
+    finally:
+        _current_conn.reset(token)
+
+
 async def consolidate(
     pool: asyncpg.Pool,
     *,
@@ -554,6 +654,9 @@ async def consolidate(
     cfg = config or ConsolidationConfig()
     report = ConsolidationReport()
 
+    # The advisory lock must live on its own raw session.  It is deliberately
+    # not an identity-scoped acquire() connection: this session performs only
+    # pg_advisory_lock/unlock and must remain usable after any pass rollback.
     async with pool.acquire() as lock_conn:
         locked = await lock_conn.fetchval(
             "SELECT pg_try_advisory_lock($1)", _CONSOLIDATION_LOCK_ID,
@@ -565,48 +668,57 @@ async def consolidate(
 
         try:
             try:
-                # Review-only lifecycle policy: scheduled/manual consolidation reports
-                # candidates but never mutates memory status. A separate,
-                # operator-controlled path must call run_decay(..., apply=True).
-                report.decayed = await run_decay(
+                # Each pass owns a short transaction. Review-only lifecycle
+                # policy remains unchanged: automatic decay reports candidates.
+                report.decayed = await _run_identity_pass(
                     pool,
-                    config=cfg.decay,
-                    dry_run=dry_run,
-                    apply=False,
+                    lambda: run_decay(
+                        pool, config=cfg.decay, dry_run=dry_run, apply=False,
+                    ),
                 )
             except Exception as e:
                 report.errors.append(f"Decay failed: {e}")
                 logger.exception("Decay subsystem failed")
 
             try:
-                report.duplicates_merged = await find_duplicates(
-                    pool, threshold=cfg.duplicate_threshold, dry_run=dry_run,
+                report.duplicates_merged = await _run_identity_pass(
+                    pool,
+                    lambda: find_duplicates(
+                        pool, threshold=cfg.duplicate_threshold, dry_run=dry_run,
+                    ),
                 )
+            except _ConsolidationIdentityError as e:
+                report.errors.append(f"Duplicate detection skipped: {e}")
+                logger.warning("Duplicate detection skipped: %s", e)
             except Exception as e:
                 report.errors.append(f"Duplicate detection failed: {e}")
                 logger.exception("Duplicate detection subsystem failed")
 
             try:
-                report.contradictions_flagged = await find_contradictions(
+                report.contradictions_flagged = await _run_identity_pass(
                     pool,
-                    sim_min=cfg.contradiction_similarity_min,
-                    sim_max=cfg.contradiction_similarity_max,
-                    dry_run=dry_run,
+                    lambda: find_contradictions(
+                        pool,
+                        sim_min=cfg.contradiction_similarity_min,
+                        sim_max=cfg.contradiction_similarity_max,
+                        dry_run=dry_run,
+                    ),
                 )
+            except _ConsolidationIdentityError as e:
+                report.errors.append(f"Contradiction detection skipped: {e}")
+                logger.warning("Contradiction detection skipped: %s", e)
             except Exception as e:
                 report.errors.append(f"Contradiction detection failed: {e}")
                 logger.exception("Contradiction detection subsystem failed")
 
-            # 4th sub-pass: aggregation replay (E2.L8). Drains the replay_queue
-            # via the Batch API, writing cross-turn enumeration beliefs the
-            # per-turn detector structurally can't see. Skipped on dry_run (it
-            # mutates belief_claims + the queue, not the `memories` table the
-            # other sub-passes' dry_run guards cover).
+            # Aggregation replay may hold a network wait for minutes. Never hold
+            # an owner-bound _current_conn across it; replay's own sentinel
+            # acquire() must get a fresh connection for its system reads.
             if not dry_run:
                 try:
                     from weft.replay_executor import run_replay_executor_batch
 
-                    replay = await run_replay_executor_batch(pool)
+                    replay = await _run_replay_fresh(pool, run_replay_executor_batch)
                     report.replay_rows_done = replay.rows_done
                     report.replay_claims_written = replay.claims_written
                 except Exception as e:
@@ -913,14 +1025,15 @@ async def check_contradictions_on_store(
 
     # Get the new memory's content
     uid = current_user_id.get(None)
+    db = get_db(pool)
     if uid is not None:
-        new_row = await pool.fetchrow(
+        new_row = await db.fetchrow(
             "SELECT content FROM memories WHERE id = $1 AND (user_id = $2 OR user_id = '__system_global_zathras__')",
             memory_id,
             uid,
         )
     else:
-        new_row = await pool.fetchrow("SELECT content FROM memories WHERE id = $1", memory_id)
+        new_row = await db.fetchrow("SELECT content FROM memories WHERE id = $1", memory_id)
     if not new_row:
         return warnings
     new_content = new_row["content"]

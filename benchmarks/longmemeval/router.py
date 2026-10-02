@@ -62,17 +62,46 @@ from weft.turn_recall import (
     temporal_anchor,
 )
 from weft.views.belief_query import BeliefClaimResult, search_belief_claims
+from benchmarks.longmemeval.task_shape import TaskShape, derive_task_shape
 
 logger = logging.getLogger(__name__)
 
 
-Tier = Literal["belief", "turns", "auto", "belief-view", "replay"]
+Tier = Literal["belief", "turns", "auto", "belief-view", "replay", "production-belief"]
 
 # Owner identity benchmark turns + claims are written under. Mirrors
 # adapter.BENCHMARK_USER_ID; duplicated here to avoid a router→adapter import
 # cycle (adapter imports router). The adapter passes its canonical constant
 # into retrieve(), so this default only matters for direct/standalone calls.
 _BENCHMARK_USER_ID = "longmemeval-bench"
+
+
+def _resolve_turn_tier_expansion_slots(
+    manifest_retrieval: dict | None,
+    requested: int,
+) -> int:
+    """Reconcile the manifest-pinned turn-tier expansion depth with the run.
+
+    Mirrors the dataset-checksum drift refusal: a manifest that pins
+    ``retrieval.turn_tier_expansion_slots`` must match the runner invocation
+    exactly; a manifest without the pin uses the requested value as-is.
+    """
+    pinned = None
+    if manifest_retrieval:
+        pinned = manifest_retrieval.get("turn_tier_expansion_slots")
+    if pinned is None:
+        return requested
+    if isinstance(pinned, bool) or not isinstance(pinned, int) or pinned < 0:
+        raise ValueError(
+            "manifest turn_tier_expansion_slots must be a non-negative int, "
+            f"got {pinned!r}"
+        )
+    if pinned != requested:
+        raise ValueError(
+            "turn_tier_expansion_slots drift: manifest pins "
+            f"{pinned}, runner invoked with {requested}"
+        )
+    return pinned
 
 
 # ----------------------------------------------------------------------
@@ -614,6 +643,7 @@ async def _retrieve_turns(
     representation_pool_limit: int | None = None,
     representation_max_sessions: int | None = None,
     session_centroid_selector: Callable[..., object] | None = None,
+    turn_tier_expansion_slots: int = 0,
 ) -> list[MemoryRecall]:
     """Turn-tier retrieval path. Returns Reader-compatible MemoryRecall list.
 
@@ -718,6 +748,7 @@ async def _retrieve_turns(
                     fusion_candidate_limit=policy.fusion_candidate_limit,
                     use_anchor_local_variant=use_anchor_local_variant,
                     include_embedded_temporal_variant=include_embedded_temporal_variant,
+                    expansion_slots=turn_tier_expansion_slots,
                 )
                 if temporal_window is not None:
                     # Keep the normal temporal retrieval as the primary list.
@@ -737,6 +768,7 @@ async def _retrieve_turns(
                         fusion_candidate_limit=policy.fusion_candidate_limit,
                         use_anchor_local_variant=use_anchor_local_variant,
                         include_embedded_temporal_variant=include_embedded_temporal_variant,
+                        expansion_slots=turn_tier_expansion_slots,
                     )
                     for anchor, window_turns in windowed.items():
                         baseline_turns = anchored.setdefault(anchor, [])
@@ -802,6 +834,7 @@ async def _retrieve_turns(
             representation_max_sessions=representation_max_sessions,
             turn_session_map=turn_session_map,
             session_centroid_selector=session_centroid_selector,
+            expansion_slots=turn_tier_expansion_slots,
         )
         if use_session_centroid_representation:
             turns_list = _apply_centroid_selection(
@@ -845,6 +878,7 @@ async def _recall_turns_scoped(
     representation_max_sessions: int | None = None,
     turn_session_map: Mapping[str, str] | None = None,
     session_centroid_selector: Callable[..., object] | None = None,
+    expansion_slots: int = 0,
 ) -> list[EpisodeTurn]:
     """Run one or two flat probes on one explicitly scoped connection.
 
@@ -910,6 +944,7 @@ async def _recall_turns_scoped(
                 candidate_sql_limit=candidate_sql_limit,
                 fusion_candidate_limit=fusion_candidate_limit,
                 result_limit=result_limit,
+                expansion_slots=expansion_slots,
             )
 
             if not turns_list:
@@ -919,17 +954,10 @@ async def _recall_turns_scoped(
                 # Diagnose on the SAME connection before releasing it.
                 # This observes the exact GUC/RLS state that produced
                 # the 0-return.
-                from benchmarks.longmemeval.diagnose import diagnose_zero_return
-
                 logger.warning(
                     "recall_turns returned 0 turns for q (project_id=%s, "
-                    "top_k=%d) — running diagnostics on same connection",
-                    project_id, top_k,
-                )
-                await diagnose_zero_return(
-                    conn,
-                    project_id=project_id,
-                    expected_count=expected_turn_count,
+                    "top_k=%d, expected_turn_count=%d) — retrying on same connection",
+                    project_id, top_k, expected_turn_count,
                 )
 
                 # Retry with the same embedding on the SAME connection.
@@ -948,6 +976,7 @@ async def _recall_turns_scoped(
                     candidate_sql_limit=candidate_sql_limit,
                     fusion_candidate_limit=fusion_candidate_limit,
                     result_limit=result_limit,
+                    expansion_slots=expansion_slots,
                 )
                 if turns_list and diagnostics is not None:
                     diagnostics.retry_rescued = True
@@ -995,6 +1024,7 @@ async def _recall_turns_scoped(
                         diag_callback=_variant_diag,
                         candidate_sql_limit=candidate_sql_limit,
                         fusion_candidate_limit=fusion_candidate_limit,
+                        expansion_slots=expansion_slots,
                     )
                 except Exception as exc:
                     # The optional arm must never turn a valid baseline into
@@ -1088,6 +1118,7 @@ async def _retrieve_belief(
     question: str,
     project_id: str,
     policy: RetrievalPolicy,
+    user_id: str = _BENCHMARK_USER_ID,
 ) -> list[MemoryRecall]:
     """Belief-tier hybrid recall over ``memories``, project-isolated.
 
@@ -1102,6 +1133,7 @@ async def _retrieve_belief(
         query_embedding,
         limit=policy.top_k * policy.overfetch_multiplier,
         project_id=project_id,
+        user_id=user_id,
     )
     memories = [r for r in raw if r.memory.project_id == project_id]
     return memories[: policy.top_k]
@@ -1112,8 +1144,9 @@ async def retrieve(
     embedder: EmbeddingProvider,
     *,
     question: str,
-    question_type: str,
     project_id: str,
+    question_type: str | None = None,
+    task_shape: TaskShape | None = None,
     policy: RetrievalPolicy | None = None,
     tier: Tier = "belief",
     user_id: str = _BENCHMARK_USER_ID,
@@ -1134,6 +1167,7 @@ async def retrieve(
     representation_pool_limit: int | None = None,
     representation_max_sessions: int | None = None,
     session_centroid_selector: Callable[..., object] | None = None,
+    turn_tier_expansion_slots: int = 0,
 ) -> list[MemoryRecall]:
     """Run the question-type-appropriate retrieval and return ranked memories.
 
@@ -1179,28 +1213,94 @@ async def retrieve(
     path. It requires the manifest's source-session mapping and overfetches
     ``session_selector_pool_limit`` fused turns before restoring ``top_k``.
     """
-    policy = policy or policy_for(question_type)
+    explicit_task_shape = task_shape is not None
+    task_shape = task_shape or derive_task_shape(question)
+    runtime_shape = task_shape.task_shape
+    shape_question_type = {
+        "temporal": "temporal-reasoning",
+        "temporal-multi": "temporal-reasoning",
+        "multi-session": "multi-session",
+        "single-session": "single-session-user",
+    }.get(runtime_shape, "single-session-user")
+    if explicit_task_shape:
+        # The adapter always supplies task_shape. From this boundary onward,
+        # runtime policy is shape/content-derived and question_type is ignored.
+        question_type = shape_question_type
+    else:
+        # Compatibility for direct standalone integrations that still call
+        # retrieve(question_type=...). This branch is intentionally unreachable
+        # from the adapter, which passes task_shape on every runtime path.
+        question_type = question_type or shape_question_type
+    if policy is None:
+        policy = (
+            RetrievalPolicy(top_k=task_shape.top_k, overfetch_multiplier=4)
+            if explicit_task_shape
+            else policy_for(question_type)
+        )
     if candidate_sql_limit is None:
         candidate_sql_limit = policy.candidate_sql_limit
     if fusion_candidate_limit is None:
         fusion_candidate_limit = policy.fusion_candidate_limit
 
-    # The validated policy is active only when the caller has the source-session
-    # map needed to make the selector meaningful. Explicit False remains a safe
-    # escape hatch for controlled baseline comparisons; unsupported types are
-    # always forced back to baseline.
+    # The selector is shape-derived for explicit runtime calls and retains the
+    # legacy question_type gate only for no-shape standalone callers. In both
+    # cases a source-session map is required for a meaningful selection.
     if use_session_selector is None:
-        use_session_selector = bool(
-            turn_session_map and session_rerank_enabled_for(question_type)
-        )
-    elif not session_rerank_enabled_for(question_type):
+        if explicit_task_shape:
+            use_session_selector = bool(
+                turn_session_map and runtime_shape in {"multi-session", "single-session"}
+            )
+        else:
+            use_session_selector = bool(
+                turn_session_map and session_rerank_enabled_for(question_type)
+            )
+    elif not explicit_task_shape and not session_rerank_enabled_for(question_type):
         use_session_selector = False
     if use_session_selector and session_selector_pool_limit is None:
-        session_selector_pool_limit = session_rerank_pool_limit_for(question_type)
+        session_selector_pool_limit = (
+            SESSION_RERANK_POOL_LIMIT
+            if not explicit_task_shape
+            else max(policy.top_k, SESSION_RERANK_POOL_LIMIT)
+        )
 
     if tier == "auto":
-        base_type = question_type.removesuffix("_abs")
-        tier = "turns" if base_type in ("multi-session", "temporal-reasoning") else "belief"
+        if explicit_task_shape:
+            tier = task_shape.routing_class
+        else:
+            tier = (
+                "turns"
+                if question_type.removesuffix("_abs")
+                in ("multi-session", "temporal-reasoning")
+                else "belief"
+            )
+
+    if tier == "production-belief":
+        # Corrected pilot arm: active belief claims first, then the same
+        # project-scoped hybrid-memory fallback as the public belief path.
+        # Claims have no project column, so this path intentionally uses only
+        # the benchmark's isolated global user partition and cleans claims per
+        # question before the next question starts.
+        claims = await search_belief_claims(
+            pool,
+            query=question,
+            user_id=user_id,
+            scope="global",
+            limit=policy.top_k,
+        )
+        if claims:
+            total = len(claims)
+            return [
+                _claim_to_recall(c, rank=i, total=total, project_id=project_id)
+                for i, c in enumerate(claims)
+            ]
+        return await _retrieve_belief(
+            pool,
+            embedder,
+            question=question,
+            project_id=project_id,
+            policy=policy,
+            user_id=user_id,
+        )
 
     if tier in ("belief-view", "replay"):
         # 'replay' reads the SAME claim view as 'belief-view' — the difference is
@@ -1221,8 +1321,6 @@ async def retrieve(
                 _claim_to_recall(c, rank=i, total=total, project_id=project_id)
                 for i, c in enumerate(claims)
             ]
-        # No claim matched — augment-not-gate: fall through to the turn
-        # substrate so non-belief questions still get answered.
         return await _retrieve_turns(
             pool, embedder,
             question=question,
@@ -1246,6 +1344,7 @@ async def retrieve(
             representation_pool_limit=representation_pool_limit,
             representation_max_sessions=representation_max_sessions,
             session_centroid_selector=session_centroid_selector,
+            turn_tier_expansion_slots=turn_tier_expansion_slots,
         )
 
     if tier == "turns":
@@ -1272,6 +1371,7 @@ async def retrieve(
             representation_pool_limit=representation_pool_limit,
             representation_max_sessions=representation_max_sessions,
             session_centroid_selector=session_centroid_selector,
+            turn_tier_expansion_slots=turn_tier_expansion_slots,
         )
         # Never-miss fallback — mirrors the same resilience added to
         # weft_recall (empty turns tier → belief recall). A question the
@@ -1288,6 +1388,7 @@ async def retrieve(
         fallback = await _retrieve_belief(
             pool, embedder,
             question=question, project_id=project_id, policy=policy,
+            user_id=user_id,
         )
         if diagnostics is not None:
             diagnostics.fallback_rescued = bool(fallback)

@@ -30,7 +30,9 @@ weft-backup-*.json
 # Benchmark run artifacts — regeneratable, large, and per-run timestamped.
 # Source code under benchmarks/ IS tracked; generated outputs stay local.
 benchmarks/**/results/
-artifacts/continuity/
+# All working artifacts (run reports, evidence bundles, local drafts such as
+# PRDs) stay local; release-facing docs live in docs/.
+artifacts/
 
 # Local-only personal acceptance cases — seeded from real Weft data, never
 # committed. The README in that directory IS tracked so the convention
@@ -48,9 +50,9 @@ posts/
 # Enumeration-eval runtime artifact (CL1 minted cases)
 benchmarks/enumeration_eval/minted_cases.jsonl
 
-# LongMemEval local dataset and generated benchmark artifacts.
+# LongMemEval local datasets (source + derived) and generated benchmark artifacts.
 # Keep benchmark source, tests, README files, and small manifests eligible.
-benchmarks/longmemeval/data/*_cleaned.json
+benchmarks/longmemeval/data/
 benchmarks/longmemeval/runs/
 benchmarks/longmemeval/results/
 benchmarks/retrieval_recovery_pilot/runs/

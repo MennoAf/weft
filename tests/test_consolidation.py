@@ -505,8 +505,8 @@ class TestCheckDedupOnStore:
     async def test_pinned_memory_not_revised(self, pool):
         """Pinned memories should never be revised — new content stores separately."""
         provider = get_provider("fastembed")
-        content_a = "Weft project is owned by Jason Bauman and uses PostgreSQL"
-        content_b = "Weft project is owned by Jason Bauman and uses PostgreSQL sixteen"
+        content_a = "Weft project uses PostgreSQL"
+        content_b = "Weft project uses PostgreSQL sixteen"
 
         emb_a = await provider.embed(content_a)
         emb_b = await provider.embed(content_b)

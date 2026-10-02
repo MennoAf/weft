@@ -118,19 +118,20 @@ class TestSupabaseTLS:
 async def test_pool_init_sets_extensions_search_path_before_vector_codec():
     """Supabase pooler connections must resolve unqualified ``::vector`` casts."""
     conn = AsyncMock()
+    conn.fetchrow.return_value = {"schema_name": "public"}
 
-    await _pgvector_codec_init(conn)
+    assert await _pgvector_codec_init(conn) is True
 
-    assert conn.mock_calls[:2] == [
-        call.execute("SET search_path TO public, extensions"),
-        call.set_type_codec(
-            "vector",
-            encoder=conn.set_type_codec.await_args.kwargs["encoder"],
-            decoder=conn.set_type_codec.await_args.kwargs["decoder"],
-            schema="public",
-            format="text",
-        ),
-    ]
+    assert conn.mock_calls[0] == call.execute("SET search_path TO public, extensions")
+    assert conn.mock_calls[1][0] == "fetchrow"
+    assert conn.mock_calls[1].args[1] == ["public", "extensions", "pg_catalog"]
+    assert conn.mock_calls[2] == call.set_type_codec(
+        "vector",
+        encoder=conn.set_type_codec.await_args.kwargs["encoder"],
+        decoder=conn.set_type_codec.await_args.kwargs["decoder"],
+        schema="public",
+        format="text",
+    )
 
 
 async def test_register_pgvector_codec_initializes_all_existing_connections(monkeypatch):
@@ -152,17 +153,51 @@ async def test_register_pgvector_codec_initializes_all_existing_connections(monk
 
     async def init(connection):
         events.append(("init", connection))
+        return True
+
+    async def catalog_state(connection):
+        events.append(("catalog", connection))
+        return {"vector_schema": "extensions"}
 
     monkeypatch.setattr("weft.db.connection._pgvector_codec_init", init)
+    monkeypatch.setattr("weft.db.connection.pgvector_catalog_state", catalog_state)
 
-    await register_pgvector_codec(Pool())
+    result = await register_pgvector_codec(Pool())
+    assert result["codec_registered"] is True
+    assert result["connections_checked"] == 3
+    assert result["connections_registered"] == 3
+    assert result["catalog"] == {"vector_schema": "extensions"}
 
     assert [event[0] for event in events] == [
-        "acquire", "acquire", "acquire", "init", "init", "init",
+        "acquire", "acquire", "acquire", "init", "init", "init", "catalog",
         "release", "release", "release",
     ]
     assert [event[1] for event in events if event[0] == "init"] == connections
     assert [event[1] for event in events if event[0] == "release"] == connections
+
+
+async def test_pgvector_init_registers_catalog_resolved_type_after_migration():
+    events = []
+
+    class Connection:
+        async def execute(self, sql):
+            events.append(("execute", sql))
+
+        async def fetchrow(self, sql, schemas):
+            events.append(("catalog", schemas))
+            return {"schema_name": "extensions"}
+
+        async def set_type_codec(self, name, **kwargs):
+            events.append(("codec", name, kwargs))
+
+    registered = await _pgvector_codec_init(Connection())
+
+    assert registered is True
+    assert events[0] == ("execute", "SET search_path TO public, extensions")
+    assert events[1] == ("catalog", ["public", "extensions", "pg_catalog"])
+    assert events[2][0:2] == ("codec", "vector")
+    assert events[2][2]["schema"] == "extensions"
+    assert events[2][2]["format"] == "text"
 
 
 async def test_register_pgvector_codec_empty_pool_is_noop(monkeypatch):
