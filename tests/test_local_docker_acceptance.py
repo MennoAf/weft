@@ -152,13 +152,9 @@ def test_run_compose_kills_process_group_and_does_not_wait_for_held_pipe(tmp_pat
     child_pid = tmp_path / "child.pid"
     fixture = tmp_path / "fake-compose.py"
     fixture.write_text(textwrap.dedent(f"""
-        import os, subprocess, sys, time
-        subprocess.Popen([sys.executable, '-c', "import os,pathlib,time; pathlib.Path({str(child_pid)!r}).write_text(str(os.getpid())); time.sleep(30)"])
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not os.path.exists({str(child_pid)!r}):
-            time.sleep(0.01)
-        if not os.path.exists({str(child_pid)!r}):
-            raise RuntimeError('child did not start before timeout')
+        import pathlib, subprocess, sys, time
+        child = subprocess.Popen([sys.executable, '-c', "import time; time.sleep(30)"])
+        pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
         print('WEFT_LOCAL_API_KEY=split-secret', flush=True)
         time.sleep(30)
     """), encoding="utf-8")
@@ -169,9 +165,21 @@ def test_run_compose_kills_process_group_and_does_not_wait_for_held_pipe(tmp_pat
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline and not child_pid.exists(): time.sleep(0.01)
     assert child_pid.exists()
-    try: os.kill(int(child_pid.read_text(encoding="utf-8")), 0)
-    except ProcessLookupError: pass
-    else: pytest.fail("same-session descendant survived group cancellation")
+    # os.killpg is asynchronous: the signaled descendant must still be
+    # scheduled to die and, as an orphan, reaped before its PID stops
+    # answering kill(pid, 0). A single-shot check races that window, so poll
+    # for actual exit within a bounded window; passing still requires the
+    # descendant to be provably gone.
+    descendant = int(child_pid.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(descendant, 0)
+        except ProcessLookupError:
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail(f"same-session descendant {descendant} survived group cancellation")
+        time.sleep(0.05)
 
 
 def test_checkpoint_is_atomic_and_phase_failure_is_durable(tmp_path: Path) -> None:
