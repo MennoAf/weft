@@ -1,0 +1,1714 @@
+{
+  "probe": "single-session-preference-turn-ranks",
+  "database": "local lme_bench (LONGMEMEVAL_DATABASE_URL override accepted; no DSN persisted)",
+  "manifest": ".recall-lift-worktree/benchmarks/longmemeval/manifests/longmemeval_s_full_turns_manifest.json",
+  "profile": "gpt6-luna-full-s-turns-v2-exp8",
+  "retrieval_settings": {
+    "label_blind": true,
+    "recall_k": 10,
+    "tier": "turns",
+    "top_k": 10,
+    "turn_tier_expansion_slots": 8
+  },
+  "production_recall_path": "weft.mcp.tools._weft_recall_turns -> weft.turn_recall.temporal_anchor -> weft.episode_turns.recall_turns -> _rrf_fuse_turn_rows -> rank_turns -> protected limit prefix + same-session expansion",
+  "product_parameters": {
+    "weights": {
+      "vector": 1.0,
+      "keyword": 0.3
+    },
+    "candidate_sql_limit": "5 * min(limit, 10)",
+    "expansion_slots": 8,
+    "stored_search_tsv": false,
+    "embedding_provider": "fastembed (local)",
+    "embedding_model": "BAAI/bge-small-en-v1.5",
+    "embedding_dimensions": 768,
+    "paid_provider_calls": 0,
+    "paid_embedding_calls": 0,
+    "query_embedding_count_after_dedup": 23,
+    "public_weft_recall_called": false,
+    "read_only_database_queries": true
+  },
+  "parity": {
+    "question_id": "d6233ab6",
+    "checkpoint_run": "faithful-run2-20260930",
+    "query": "LongMemEval user's feelings nostalgic high school reunion should attend concerns preferences",
+    "checkpoint_turn_count": 18,
+    "local_turn_count": 18,
+    "ordered_turn_ids_match": false,
+    "ordered_turn_content_match": true,
+    "checkpoint_ids": [
+      "et-98ffd83724f24c19a32e379f54dbaaa7",
+      "et-709304beae56463a91ce8f7a5e447423",
+      "et-640d8e2e063f43ecaf72b3ebd23c6a51",
+      "et-9461f0ddfb33417b9fe3810aa2bef12e",
+      "et-fe7c95396de24878a5f017ee7ac19775",
+      "et-1a6e50ed6c2a4df7bac8be6404ee04e5",
+      "et-46ad3b12a39a43febfd4afa5d68ffc3d",
+      "et-73062f43b1ef41928f0ce7079f9021bf",
+      "et-e0ef97d3379f4ede910fc4164ae1d200",
+      "et-5a97e37c1fbe42368f1e1fb5e9a28f89",
+      "et-1fda6897d2764b6ab6ad4a7b2421d948",
+      "et-f98633b1c764415c94bdb224eda2d278",
+      "et-d1318fd1c6e14060885b7a9c444bc62c",
+      "et-95174ce9b4ab47ffa70367b0be731078",
+      "et-1fc8f26826d740f697c2df26be146280",
+      "et-f688d3b9ad364e52a2cfa42eaa38865e",
+      "et-6e6c43e25c2c47e1bc0a406e2c688157",
+      "et-228424cec2cd45b3a4af5872ba22e37b"
+    ],
+    "local_ids": [
+      "et-f3ba98997b904033857b02094b27c494",
+      "et-58b3d68c12bf4be6848fc0286ed4f4e7",
+      "et-53cf1c986e894f7897f5b11306998070",
+      "et-dad9de8337f34981b45a04e12725b70f",
+      "et-8bbac9cac41742728e91891fd3ad2552",
+      "et-687d5ee11c6d4f5480fb117f6bfda1e2",
+      "et-e582f8a7bd0a48c0819a7d67862b9595",
+      "et-7ee535e002fa4e11ad65751f2f06ed97",
+      "et-832ee99b0d664dc49f74b55b9ed1aa43",
+      "et-a35f6ced10b949af9cea657593379e71",
+      "et-f3f00d1a0eff4af39967863e17abb04b",
+      "et-2449cda3679442cea0ff2afbdc9da13a",
+      "et-97dbe26d1dcf481bacfa83813610de55",
+      "et-2dc10f66f39b4f1484ee7c16cd5b1e59",
+      "et-d69837dfce8248a8a9b2c9da78127f20",
+      "et-b160bed6596646a49e0e631a0e2f1980",
+      "et-d46787a4ccf24ae3a6edccf3aa403df1",
+      "et-979378ffbc614ea181fb04b7627ee377"
+    ]
+  },
+  "primary_cases": [
+    {
+      "question_id": "32260d93",
+      "question": "Can you recommend a show or movie for me to watch tonight?",
+      "gold_statement": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?",
+      "gold_source_session_id": "answer_0250ae1c",
+      "gold_turn_id": "et-87e181d4f2cc4956bcfc88723510c1f7",
+      "checkpoint_context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "checkpoint_recall_queries_by_run": {
+        "faithful": [
+          {
+            "query": "User likes films or television shows, prior favorite genres, recommendations, shows watched",
+            "limit": 5,
+            "returned_turn_count": 13
+          }
+        ],
+        "faithful-run1-20260930": [
+          {
+            "query": "recommendation show movie watch tonight user preferences",
+            "limit": 10,
+            "returned_turn_count": 18
+          },
+          {
+            "query": "user watched true crime shows movies preferences favorite genre TV series films",
+            "limit": 10,
+            "returned_turn_count": 18
+          }
+        ],
+        "faithful-run2-20260930": [
+          {
+            "query": "user preferences entertainment shows movies watched liked recommend",
+            "limit": 5,
+            "returned_turn_count": 13
+          }
+        ]
+      },
+      "local_probe_results": [
+        {
+          "source": "original_dataset_question",
+          "query": "Can you recommend a show or movie for me to watch tonight?",
+          "limit": 10,
+          "project_id": "longmemeval-32260d93",
+          "gold_vector_rank_project_untruncated": 3,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 3,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 3,
+          "gold_rank_after_production_rerank": 1,
+          "gold_rank_in_production_return_limit_plus_8": 1,
+          "gold_in_protected_limit_prefix": true,
+          "returned_turn_ids": [
+            "et-87e181d4f2cc4956bcfc88723510c1f7",
+            "et-0f14c369ed424a5cb5144992cb0111d7",
+            "et-8f1d50fb7f144fc383216301a7d54c26",
+            "et-51c23be41bce440194bb06adeb36433e",
+            "et-77d527ebb0b548e688e10e141813a4ec",
+            "et-19a3dae21288408f949d3f8672cbe6e5",
+            "et-fb5dd77e0cfa4aec922198bc22fcf519",
+            "et-eecdcd8553be45da9815f1973ebf431c",
+            "et-b420ed738cc14c29b1086f6f862a42d3",
+            "et-3c2b2d068b644ac78e76569224e74231",
+            "et-b7ebeaebdc2b4a8c9b43c717e95daa17",
+            "et-2b48e1c3c92b416a8cceff943723c098",
+            "et-21dbbbf2dc0c4defbc605e46eb756d3f",
+            "et-4ac3303f81ef4880a9267b8b9bed0086",
+            "et-44816ea1ecbe475eac07efc3cbf727e9",
+            "et-8a73397a985d490ba3c4bb8f830b72f6",
+            "et-54dd00cf1d114f83b7f060c4aa44042c",
+            "et-74f28b61b4c74d7b93b9d94f656f412a"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "Can you recommend a show or movie for me to watch tonight?",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 3,
+              "gold_vector_project_rank_untruncated": 3,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 3,
+              "gold_recency_usefulness_rank_within_rrf_pool": 1,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-87e181d4f2cc4956bcfc88723510c1f7",
+            "role": "user",
+            "source_session_id": "answer_0250ae1c",
+            "turn_index": 414,
+            "content": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful:call0",
+          "query": "User likes films or television shows, prior favorite genres, recommendations, shows watched",
+          "limit": 5,
+          "project_id": "longmemeval-32260d93",
+          "gold_vector_rank_project_untruncated": 91,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": null,
+          "gold_rank_after_production_rerank": null,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-0291d5d9fc8b4138b218e64693f4362e",
+            "et-0fbaac3aabcf4e19bfe86aa1db799dcc",
+            "et-0f14c369ed424a5cb5144992cb0111d7",
+            "et-da7d3c2e68f140c490219d886c47f531",
+            "et-a3b40cf026474a85a3ddf7db4ad25782",
+            "et-e078d8f0047c45d1bd17aaf786afe4c2",
+            "et-88674d06d07e4915a9eadc9896a1069c",
+            "et-2674f7649f314dbe9a33403c7b0897af",
+            "et-01c772c51de54fa89532b2cf856b12ba",
+            "et-69c681c45ea24016935f93628e6c8944",
+            "et-02980f3d7b2044f9bc9c0a0a18cd0dfb",
+            "et-292f3ccdce3a4b4b9df9bb7c952fdffc",
+            "et-0bc532b4833e496fa8bd0a90259615d8"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "User likes films or television shows, prior favorite genres, recommendations, shows watched",
+              "vector_candidate_count": 25,
+              "keyword_candidate_count": 25,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 91,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": null,
+              "gold_recency_usefulness_rank_within_rrf_pool": null,
+              "production_candidate_limit": 25,
+              "production_rrf_output_width": 13
+            }
+          ],
+          "gold_turn": {
+            "id": "et-87e181d4f2cc4956bcfc88723510c1f7",
+            "role": "user",
+            "source_session_id": "answer_0250ae1c",
+            "turn_index": 414,
+            "content": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run1-20260930:call0",
+          "query": "recommendation show movie watch tonight user preferences",
+          "limit": 10,
+          "project_id": "longmemeval-32260d93",
+          "gold_vector_rank_project_untruncated": 82,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": null,
+          "gold_rank_after_production_rerank": null,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-0291d5d9fc8b4138b218e64693f4362e",
+            "et-2674f7649f314dbe9a33403c7b0897af",
+            "et-35909083220a402d9cc8b8eb38b4a2ab",
+            "et-0fbaac3aabcf4e19bfe86aa1db799dcc",
+            "et-da7d3c2e68f140c490219d886c47f531",
+            "et-1ca04babf6e940cda639b13f55dcb1cc",
+            "et-111fa1a13d0f488fbf81d6d31befefec",
+            "et-51c23be41bce440194bb06adeb36433e",
+            "et-57eb2f01ebad44b5b386279cf9b8df1f",
+            "et-b420ed738cc14c29b1086f6f862a42d3",
+            "et-e078d8f0047c45d1bd17aaf786afe4c2",
+            "et-88674d06d07e4915a9eadc9896a1069c",
+            "et-01c772c51de54fa89532b2cf856b12ba",
+            "et-69c681c45ea24016935f93628e6c8944",
+            "et-02980f3d7b2044f9bc9c0a0a18cd0dfb",
+            "et-292f3ccdce3a4b4b9df9bb7c952fdffc",
+            "et-0bc532b4833e496fa8bd0a90259615d8",
+            "et-6056b3ea507240a991c440d851ea30dd"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "recommendation show movie watch tonight user preferences",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 82,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": null,
+              "gold_recency_usefulness_rank_within_rrf_pool": null,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-87e181d4f2cc4956bcfc88723510c1f7",
+            "role": "user",
+            "source_session_id": "answer_0250ae1c",
+            "turn_index": 414,
+            "content": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run1-20260930:call1",
+          "query": "user watched true crime shows movies preferences favorite genre TV series films",
+          "limit": 10,
+          "project_id": "longmemeval-32260d93",
+          "gold_vector_rank_project_untruncated": 96,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": null,
+          "gold_rank_after_production_rerank": null,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-dae9b29d989341d9a8968b27335b0a5f",
+            "et-0f14c369ed424a5cb5144992cb0111d7",
+            "et-a3b40cf026474a85a3ddf7db4ad25782",
+            "et-35909083220a402d9cc8b8eb38b4a2ab",
+            "et-0291d5d9fc8b4138b218e64693f4362e",
+            "et-51c23be41bce440194bb06adeb36433e",
+            "et-2674f7649f314dbe9a33403c7b0897af",
+            "et-02980f3d7b2044f9bc9c0a0a18cd0dfb",
+            "et-8f1d50fb7f144fc383216301a7d54c26",
+            "et-ac67df2cf9e244cfa5e238fa798d48b7",
+            "et-77d527ebb0b548e688e10e141813a4ec",
+            "et-a8ad305ae772484aa407dbd46f16d6a9",
+            "et-9fc3e1fb344a411cb92773bea75a8051",
+            "et-0594ae2f666a47e8906e4dfc9ce3e2fb",
+            "et-f092cf053a574482bfa7248d5d97f8b4",
+            "et-976d244938a14ad7b34d692d7e1c2549",
+            "et-f2ecc5859a6c4e55a910e5047212e2ec",
+            "et-b47bcd452ee24766a7b010d3200f1d3c"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "user watched true crime shows movies preferences favorite genre TV series films",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 96,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": null,
+              "gold_recency_usefulness_rank_within_rrf_pool": null,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-87e181d4f2cc4956bcfc88723510c1f7",
+            "role": "user",
+            "source_session_id": "answer_0250ae1c",
+            "turn_index": 414,
+            "content": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run2-20260930:call0",
+          "query": "user preferences entertainment shows movies watched liked recommend",
+          "limit": 5,
+          "project_id": "longmemeval-32260d93",
+          "gold_vector_rank_project_untruncated": 78,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": null,
+          "gold_rank_after_production_rerank": null,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-0291d5d9fc8b4138b218e64693f4362e",
+            "et-2674f7649f314dbe9a33403c7b0897af",
+            "et-51c23be41bce440194bb06adeb36433e",
+            "et-53fc43539d2b4550ae7d605bc3f2bbb4",
+            "et-b420ed738cc14c29b1086f6f862a42d3",
+            "et-e078d8f0047c45d1bd17aaf786afe4c2",
+            "et-88674d06d07e4915a9eadc9896a1069c",
+            "et-0fbaac3aabcf4e19bfe86aa1db799dcc",
+            "et-01c772c51de54fa89532b2cf856b12ba",
+            "et-69c681c45ea24016935f93628e6c8944",
+            "et-02980f3d7b2044f9bc9c0a0a18cd0dfb",
+            "et-292f3ccdce3a4b4b9df9bb7c952fdffc",
+            "et-0bc532b4833e496fa8bd0a90259615d8"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "user preferences entertainment shows movies watched liked recommend",
+              "vector_candidate_count": 25,
+              "keyword_candidate_count": 25,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 78,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": null,
+              "gold_recency_usefulness_rank_within_rrf_pool": null,
+              "production_candidate_limit": 25,
+              "production_rrf_output_width": 13
+            }
+          ],
+          "gold_turn": {
+            "id": "et-87e181d4f2cc4956bcfc88723510c1f7",
+            "role": "user",
+            "source_session_id": "answer_0250ae1c",
+            "turn_index": 414,
+            "content": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?"
+          }
+        }
+      ]
+    },
+    {
+      "question_id": "75832dbd",
+      "question": "Can you recommend some recent publications or conferences that I might find interesting?",
+      "gold_statement": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?",
+      "gold_source_session_id": "answer_d87a6ef8",
+      "gold_turn_id": "et-c70fae779c4a425999d93b3ee7ad0283",
+      "checkpoint_context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "checkpoint_recall_queries_by_run": {
+        "faithful": [
+          {
+            "query": "recent publications or conferences user might find interesting recommendations preferences",
+            "limit": 10,
+            "returned_turn_count": 18
+          },
+          {
+            "query": "publications conferences academic sustainability fashion books recent articles conference recommendations interests",
+            "limit": 10,
+            "returned_turn_count": 18
+          }
+        ],
+        "faithful-run1-20260930": [
+          {
+            "query": "recent publications or conferences user interested recommend publications conferences",
+            "limit": 10,
+            "returned_turn_count": 18
+          },
+          {
+            "query": "user asked recent publications conferences specific interests reading publications conference recommendations",
+            "limit": 10,
+            "returned_turn_count": 18
+          },
+          {
+            "query": "publications conferences sustainable fashion latest research journals reports conference",
+            "limit": 10,
+            "returned_turn_count": 18
+          }
+        ],
+        "faithful-run2-20260930": [
+          {
+            "query": "recent publications or conferences user might find interesting",
+            "limit": 10,
+            "returned_turn_count": 18
+          },
+          {
+            "query": "publications conferences recent sustainable fashion",
+            "limit": 10,
+            "returned_turn_count": 18
+          },
+          {
+            "query": "publications conferences journals conference user interests recommendations",
+            "limit": 15,
+            "returned_turn_count": 23
+          }
+        ]
+      },
+      "local_probe_results": [
+        {
+          "source": "original_dataset_question",
+          "query": "Can you recommend some recent publications or conferences that I might find interesting?",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 30,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 30,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 32,
+          "gold_rank_after_production_rerank": 57,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-af458b3b95d44dd8bf685d1d83b4378e",
+            "et-3a0ed7450ab84102b971517afcbc9a79",
+            "et-87c83d9ad0da45c2a2bb8d83282320e9",
+            "et-519267a6eaf94cb5ba74ede996a3e1b0",
+            "et-29c721ca6ea14875a6d68b6a1ed682ea",
+            "et-75c0830077e04e829a198eff1ac05828",
+            "et-1ed1d54fb2a246f886a49238bd37bcb9",
+            "et-90a65f275ae44f19a3ac058fd80b8be9",
+            "et-9ca34f6355834658965b57bdaa3c24b9",
+            "et-d037840b42d94bc188f658a947c29847",
+            "et-92068681276046bda024645f029c878a",
+            "et-da991c9a234f4073bd2c665f0cc0a693",
+            "et-8eb6415237114e728a37ec2a0bce1cea",
+            "et-f163d1d51332451c911a4f3e170fbd15",
+            "et-ddf02e5bff564895950f93464fb4e25d",
+            "et-4f8f05386b60425fb4e67beb109c30dd",
+            "et-8d838b36e39f46019c01d5bd8aa8425b",
+            "et-e991e20232304f53a1e54131dff8e7d1"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "Can you recommend some recent publications or conferences that I might find interesting?",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 30,
+              "gold_vector_project_rank_untruncated": 30,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 32,
+              "gold_recency_usefulness_rank_within_rrf_pool": 57,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful:call0",
+          "query": "recent publications or conferences user might find interesting recommendations preferences",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 47,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 47,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 79,
+          "gold_rank_after_production_rerank": 85,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-3a0ed7450ab84102b971517afcbc9a79",
+            "et-da991c9a234f4073bd2c665f0cc0a693",
+            "et-f163d1d51332451c911a4f3e170fbd15",
+            "et-8eb6415237114e728a37ec2a0bce1cea",
+            "et-4f8f05386b60425fb4e67beb109c30dd",
+            "et-1ed1d54fb2a246f886a49238bd37bcb9",
+            "et-7bfce4df9a9d4dea86b3ee45bc85dd73",
+            "et-1c139d5e23cd45b0bad2bc37144a3521",
+            "et-90a65f275ae44f19a3ac058fd80b8be9",
+            "et-0d1df7d46b8e4688a3832cd0b5b3efaf",
+            "et-af458b3b95d44dd8bf685d1d83b4378e",
+            "et-92068681276046bda024645f029c878a",
+            "et-e991e20232304f53a1e54131dff8e7d1",
+            "et-519267a6eaf94cb5ba74ede996a3e1b0",
+            "et-ddf02e5bff564895950f93464fb4e25d",
+            "et-8d838b36e39f46019c01d5bd8aa8425b",
+            "et-a6dd2e59b5ec4de798345d491ba294bc",
+            "et-52de38f501614027980a12f56a145edb"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "recent publications or conferences user might find interesting recommendations preferences",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 47,
+              "gold_vector_project_rank_untruncated": 47,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 79,
+              "gold_recency_usefulness_rank_within_rrf_pool": 85,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful:call1",
+          "query": "publications conferences academic sustainability fashion books recent articles conference recommendations interests",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 98,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": null,
+          "gold_rank_after_production_rerank": null,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-f08e33899ab14acfbcc0dcd95034e252",
+            "et-803c546a15fc4171b76b573df7f4b6d5",
+            "et-0d1df7d46b8e4688a3832cd0b5b3efaf",
+            "et-65ea128080d7415b8e26d51a88321151",
+            "et-1c139d5e23cd45b0bad2bc37144a3521",
+            "et-e5b10306d1b14d87aa5d6095175659ce",
+            "et-90a65f275ae44f19a3ac058fd80b8be9",
+            "et-7bfce4df9a9d4dea86b3ee45bc85dd73",
+            "et-098434e5f9864026a2968937754c53b1",
+            "et-1c3822e8d49246369959d83d608e1107",
+            "et-d1e24dde21d94d528db304b29b694e4b",
+            "et-c06138ebe5244c02a83b04de0f20461a",
+            "et-1c08e8eb08fa48bdaef33d0143126d98",
+            "et-195961dbe4e24ff9b60269f3b46d3365",
+            "et-1ca34140218644b7b09c03eec5728b8c",
+            "et-3fed0cc371ac4d5199a7e1af65ff8ab9",
+            "et-49550a372c3143a2b4e1514ef049201e",
+            "et-8f0a0524b5254971b43dda1d770b6dfd"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "publications conferences academic sustainability fashion books recent articles conference recommendations interests",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 98,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": null,
+              "gold_recency_usefulness_rank_within_rrf_pool": null,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run1-20260930:call0",
+          "query": "recent publications or conferences user interested recommend publications conferences",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 26,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 26,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 27,
+          "gold_rank_after_production_rerank": 46,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-3a0ed7450ab84102b971517afcbc9a79",
+            "et-e519d2ff42f244bfb2a40aa510fecc9b",
+            "et-3114510b1dd14be6a83e896b7d3fd0de",
+            "et-af458b3b95d44dd8bf685d1d83b4378e",
+            "et-87c83d9ad0da45c2a2bb8d83282320e9",
+            "et-90a65f275ae44f19a3ac058fd80b8be9",
+            "et-c06138ebe5244c02a83b04de0f20461a",
+            "et-7bfce4df9a9d4dea86b3ee45bc85dd73",
+            "et-0d1df7d46b8e4688a3832cd0b5b3efaf",
+            "et-1ed1d54fb2a246f886a49238bd37bcb9",
+            "et-da991c9a234f4073bd2c665f0cc0a693",
+            "et-f163d1d51332451c911a4f3e170fbd15",
+            "et-4f8f05386b60425fb4e67beb109c30dd",
+            "et-92068681276046bda024645f029c878a",
+            "et-e991e20232304f53a1e54131dff8e7d1",
+            "et-519267a6eaf94cb5ba74ede996a3e1b0",
+            "et-8eb6415237114e728a37ec2a0bce1cea",
+            "et-ddf02e5bff564895950f93464fb4e25d"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "recent publications or conferences user interested recommend publications conferences",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 26,
+              "gold_vector_project_rank_untruncated": 26,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 27,
+              "gold_recency_usefulness_rank_within_rrf_pool": 46,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run1-20260930:call1",
+          "query": "user asked recent publications conferences specific interests reading publications conference recommendations",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 49,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 49,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 80,
+          "gold_rank_after_production_rerank": 85,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-4f8f05386b60425fb4e67beb109c30dd",
+            "et-da991c9a234f4073bd2c665f0cc0a693",
+            "et-e991e20232304f53a1e54131dff8e7d1",
+            "et-af458b3b95d44dd8bf685d1d83b4378e",
+            "et-3a0ed7450ab84102b971517afcbc9a79",
+            "et-f163d1d51332451c911a4f3e170fbd15",
+            "et-7bfce4df9a9d4dea86b3ee45bc85dd73",
+            "et-c06138ebe5244c02a83b04de0f20461a",
+            "et-0d1df7d46b8e4688a3832cd0b5b3efaf",
+            "et-5d2bc3dfa8f342698ff14ed1166ba650",
+            "et-92068681276046bda024645f029c878a",
+            "et-519267a6eaf94cb5ba74ede996a3e1b0",
+            "et-8eb6415237114e728a37ec2a0bce1cea",
+            "et-ddf02e5bff564895950f93464fb4e25d",
+            "et-8d838b36e39f46019c01d5bd8aa8425b",
+            "et-a6dd2e59b5ec4de798345d491ba294bc",
+            "et-803c546a15fc4171b76b573df7f4b6d5",
+            "et-1c139d5e23cd45b0bad2bc37144a3521"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "user asked recent publications conferences specific interests reading publications conference recommendations",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 49,
+              "gold_vector_project_rank_untruncated": 49,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 80,
+              "gold_recency_usefulness_rank_within_rrf_pool": 85,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run1-20260930:call2",
+          "query": "publications conferences sustainable fashion latest research journals reports conference",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 79,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": null,
+          "gold_rank_after_production_rerank": null,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-7fb5b1aca81842e686205b71eca361f9",
+            "et-f08e33899ab14acfbcc0dcd95034e252",
+            "et-803c546a15fc4171b76b573df7f4b6d5",
+            "et-0d1df7d46b8e4688a3832cd0b5b3efaf",
+            "et-65ea128080d7415b8e26d51a88321151",
+            "et-098434e5f9864026a2968937754c53b1",
+            "et-7bfce4df9a9d4dea86b3ee45bc85dd73",
+            "et-1c3822e8d49246369959d83d608e1107",
+            "et-1c139d5e23cd45b0bad2bc37144a3521",
+            "et-732db4601f1045d5a0211c7f24dad97f",
+            "et-c0e6636909a34ed2b260eaddf793b53b",
+            "et-6c3a0e10fcba4fa2ba950483c5101848",
+            "et-5d0d039117734979b061ffe892623b88",
+            "et-be3d39c5b0c849c2b04e23eda52ef187",
+            "et-7af2df03b299463c832e456053a68ad0",
+            "et-6356183e4edf407686b5bc4571728bdf",
+            "et-e4330e1ac3054bc998b83c16033c3afd",
+            "et-f898f7d6c73e4f74a28dfcd245607c0d"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "publications conferences sustainable fashion latest research journals reports conference",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 79,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": null,
+              "gold_recency_usefulness_rank_within_rrf_pool": null,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run2-20260930:call0",
+          "query": "recent publications or conferences user might find interesting",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 30,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 30,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 32,
+          "gold_rank_after_production_rerank": 52,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-4f8f05386b60425fb4e67beb109c30dd",
+            "et-87c83d9ad0da45c2a2bb8d83282320e9",
+            "et-3a0ed7450ab84102b971517afcbc9a79",
+            "et-da991c9a234f4073bd2c665f0cc0a693",
+            "et-e519d2ff42f244bfb2a40aa510fecc9b",
+            "et-af458b3b95d44dd8bf685d1d83b4378e",
+            "et-8d838b36e39f46019c01d5bd8aa8425b",
+            "et-29c721ca6ea14875a6d68b6a1ed682ea",
+            "et-c630ea2ae5e04136842d76686c9d5c9d",
+            "et-7bfce4df9a9d4dea86b3ee45bc85dd73",
+            "et-f163d1d51332451c911a4f3e170fbd15",
+            "et-e991e20232304f53a1e54131dff8e7d1",
+            "et-92068681276046bda024645f029c878a",
+            "et-519267a6eaf94cb5ba74ede996a3e1b0",
+            "et-8eb6415237114e728a37ec2a0bce1cea",
+            "et-ddf02e5bff564895950f93464fb4e25d",
+            "et-a6dd2e59b5ec4de798345d491ba294bc",
+            "et-006c41c30d7e4da89d0cdc47d3d3e628"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "recent publications or conferences user might find interesting",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 30,
+              "gold_vector_project_rank_untruncated": 30,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 32,
+              "gold_recency_usefulness_rank_within_rrf_pool": 52,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run2-20260930:call1",
+          "query": "publications conferences recent sustainable fashion",
+          "limit": 10,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 160,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": null,
+          "gold_rank_after_production_rerank": null,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-4af64c51fb9e40c58c764c10104e3bfd",
+            "et-f08e33899ab14acfbcc0dcd95034e252",
+            "et-7fb5b1aca81842e686205b71eca361f9",
+            "et-803c546a15fc4171b76b573df7f4b6d5",
+            "et-65ea128080d7415b8e26d51a88321151",
+            "et-0d1df7d46b8e4688a3832cd0b5b3efaf",
+            "et-7bfce4df9a9d4dea86b3ee45bc85dd73",
+            "et-1c139d5e23cd45b0bad2bc37144a3521",
+            "et-1c3822e8d49246369959d83d608e1107",
+            "et-90a65f275ae44f19a3ac058fd80b8be9",
+            "et-d168bf9bbe3e4f658360309ca6e65628",
+            "et-3e12fe00ae564e108a9db24a2de9b7ba",
+            "et-a3ab918c42204f4a9290a51ea9dd2144",
+            "et-f3c1c21774e44aaeb211c1af7cf54279",
+            "et-64c41b60b07c4819bebe385e7d36f098",
+            "et-c3236550fdc94ecebd0657725c96ae8e",
+            "et-88154aeb7c59461fbeda2e63e51875fb",
+            "et-eb227580f01840a1a6067ba7a0d7396f"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "publications conferences recent sustainable fashion",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 160,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": null,
+              "gold_recency_usefulness_rank_within_rrf_pool": null,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run2-20260930:call2",
+          "query": "publications conferences journals conference user interests recommendations",
+          "limit": 15,
+          "project_id": "longmemeval-75832dbd",
+          "gold_vector_rank_project_untruncated": 25,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 25,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 27,
+          "gold_rank_after_production_rerank": 42,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-6c035971a0c048b994d187b41812c7a1",
+            "et-248187e75b314c7eb9e886c67adfae81",
+            "et-4f8f05386b60425fb4e67beb109c30dd",
+            "et-af458b3b95d44dd8bf685d1d83b4378e",
+            "et-87c83d9ad0da45c2a2bb8d83282320e9",
+            "et-8d838b36e39f46019c01d5bd8aa8425b",
+            "et-711e18ad9f8144b88c741da04f746efa",
+            "et-3114510b1dd14be6a83e896b7d3fd0de",
+            "et-365d3abd246843b28b41dabd54c40e20",
+            "et-92068681276046bda024645f029c878a",
+            "et-29c721ca6ea14875a6d68b6a1ed682ea",
+            "et-e7e472bb90e14181b6651de544470393",
+            "et-90a65f275ae44f19a3ac058fd80b8be9",
+            "et-68f52d216dfd436caf034f9ef943bd96",
+            "et-1c3822e8d49246369959d83d608e1107",
+            "et-5f4906cfedc9480db76f54f44f962018",
+            "et-74e0a12201324b298231c36f1b691c8d",
+            "et-09b200577f9b4e8a8b1c112e557db14f",
+            "et-7f0201cf2de042faab1fbe46db5cd874",
+            "et-2029cef0e99a430cbc2a624aa0cddc39",
+            "et-269f90539a40438ea435989b5bb83ca0",
+            "et-006c41c30d7e4da89d0cdc47d3d3e628",
+            "et-e519d2ff42f244bfb2a40aa510fecc9b"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "publications conferences journals conference user interests recommendations",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 25,
+              "gold_vector_project_rank_untruncated": 25,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 27,
+              "gold_recency_usefulness_rank_within_rrf_pool": 42,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 23
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c70fae779c4a425999d93b3ee7ad0283",
+            "role": "user",
+            "source_session_id": "answer_d87a6ef8",
+            "turn_index": 87,
+            "content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+          }
+        }
+      ]
+    },
+    {
+      "question_id": "d6233ab6",
+      "question": "I've been feeling nostalgic lately. Do you think it would be a good idea to attend my high school reunion?",
+      "gold_statement": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?",
+      "gold_source_session_id": "answer_b0fac439",
+      "gold_turn_id": "et-0685392d73ab49428359e3bf3cc157a8",
+      "checkpoint_context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "checkpoint_recall_queries_by_run": {
+        "faithful": [
+          {
+            "query": "high school reunion nostalgic attendee advice memories feelings reunion",
+            "limit": 5,
+            "returned_turn_count": 13
+          }
+        ],
+        "faithful-run1-20260930": [
+          {
+            "query": "high school reunion nostalgic user attendance opinion preference",
+            "limit": 10,
+            "returned_turn_count": 18
+          }
+        ],
+        "faithful-run2-20260930": [
+          {
+            "query": "LongMemEval user's feelings nostalgic high school reunion should attend concerns preferences",
+            "limit": 10,
+            "returned_turn_count": 18
+          }
+        ]
+      },
+      "local_probe_results": [
+        {
+          "source": "original_dataset_question",
+          "query": "I've been feeling nostalgic lately. Do you think it would be a good idea to attend my high school reunion?",
+          "limit": 10,
+          "project_id": "longmemeval-d6233ab6",
+          "gold_vector_rank_project_untruncated": 20,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 20,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 20,
+          "gold_rank_after_production_rerank": 27,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-58b3d68c12bf4be6848fc0286ed4f4e7",
+            "et-dad9de8337f34981b45a04e12725b70f",
+            "et-50b8e7bb8b624f28857f7352e25a6755",
+            "et-f3ba98997b904033857b02094b27c494",
+            "et-c077c10ea0b94f02a9595ad8d523e7ea",
+            "et-0eb425f41a3a4e87b4b3944927350b82",
+            "et-b2440a5954a142e88ec133404d8183bb",
+            "et-2a4741f5a6e348ef8ed6896a24bdaa74",
+            "et-687d5ee11c6d4f5480fb117f6bfda1e2",
+            "et-a35f6ced10b949af9cea657593379e71",
+            "et-6d3614d24fbd4a86aef5e8adcaa780ed",
+            "et-da2ba3acc3254f31a5922359dd3be077",
+            "et-6c237ac8a2eb4f9a81290381b400e773",
+            "et-0c3d52731f9349058752ef16e7654978",
+            "et-6c6ef4d7f29d4805bd4c1313e5d1de53",
+            "et-2d371814e4c9476293899ed31861f83b",
+            "et-f567e85e407b45dda1e877e8fa3835d9",
+            "et-19275a2e843d411e9da9e1e9afa0a502"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "I've been feeling nostalgic lately. Do you think it would be a good idea to attend my high school reunion?",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 20,
+              "gold_vector_project_rank_untruncated": 20,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 20,
+              "gold_recency_usefulness_rank_within_rrf_pool": 27,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-0685392d73ab49428359e3bf3cc157a8",
+            "role": "user",
+            "source_session_id": "answer_b0fac439",
+            "turn_index": 113,
+            "content": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful:call0",
+          "query": "high school reunion nostalgic attendee advice memories feelings reunion",
+          "limit": 5,
+          "project_id": "longmemeval-d6233ab6",
+          "gold_vector_rank_project_untruncated": 32,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": null,
+          "gold_keyword_rank_in_recall_candidate_window": 12,
+          "gold_rrf_rank_candidate_union": 32,
+          "gold_rank_after_production_rerank": 36,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-dad9de8337f34981b45a04e12725b70f",
+            "et-f3ba98997b904033857b02094b27c494",
+            "et-58b3d68c12bf4be6848fc0286ed4f4e7",
+            "et-53cf1c986e894f7897f5b11306998070",
+            "et-687d5ee11c6d4f5480fb117f6bfda1e2",
+            "et-c077c10ea0b94f02a9595ad8d523e7ea",
+            "et-2a4741f5a6e348ef8ed6896a24bdaa74",
+            "et-6c6ef4d7f29d4805bd4c1313e5d1de53",
+            "et-b2440a5954a142e88ec133404d8183bb",
+            "et-50b8e7bb8b624f28857f7352e25a6755",
+            "et-f567e85e407b45dda1e877e8fa3835d9",
+            "et-da2ba3acc3254f31a5922359dd3be077",
+            "et-19275a2e843d411e9da9e1e9afa0a502"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "high school reunion nostalgic attendee advice memories feelings reunion",
+              "vector_candidate_count": 25,
+              "keyword_candidate_count": 25,
+              "gold_vector_rank_in_candidate_window": null,
+              "gold_vector_project_rank_untruncated": 32,
+              "gold_keyword_rank_in_candidate_window": 12,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 32,
+              "gold_recency_usefulness_rank_within_rrf_pool": 36,
+              "production_candidate_limit": 25,
+              "production_rrf_output_width": 13
+            }
+          ],
+          "gold_turn": {
+            "id": "et-0685392d73ab49428359e3bf3cc157a8",
+            "role": "user",
+            "source_session_id": "answer_b0fac439",
+            "turn_index": 113,
+            "content": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run1-20260930:call0",
+          "query": "high school reunion nostalgic user attendance opinion preference",
+          "limit": 10,
+          "project_id": "longmemeval-d6233ab6",
+          "gold_vector_rank_project_untruncated": 16,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 16,
+          "gold_keyword_rank_in_recall_candidate_window": 12,
+          "gold_rrf_rank_candidate_union": 9,
+          "gold_rank_after_production_rerank": 12,
+          "gold_rank_in_production_return_limit_plus_8": 7,
+          "gold_in_protected_limit_prefix": true,
+          "returned_turn_ids": [
+            "et-8bbac9cac41742728e91891fd3ad2552",
+            "et-f3ba98997b904033857b02094b27c494",
+            "et-58b3d68c12bf4be6848fc0286ed4f4e7",
+            "et-dad9de8337f34981b45a04e12725b70f",
+            "et-687d5ee11c6d4f5480fb117f6bfda1e2",
+            "et-e582f8a7bd0a48c0819a7d67862b9595",
+            "et-0685392d73ab49428359e3bf3cc157a8",
+            "et-1599eee2feb24722823ae1c6ce277b31",
+            "et-70dd697005a34f46af479db20434080f",
+            "et-893c67f339824efc9206040c14ce4012",
+            "et-9cdaaa7e670b4d3aaa5ea5a45739248c",
+            "et-2a1d07b7298d42aeb552b13e135b11bf",
+            "et-45326f9f8bb74663b1730366579842be",
+            "et-1dab65a482fb4d7f9a14167b0fc200c4",
+            "et-79c39e2b27ff4b1f8d33b0306335b481",
+            "et-f3f00d1a0eff4af39967863e17abb04b",
+            "et-2449cda3679442cea0ff2afbdc9da13a",
+            "et-53cf1c986e894f7897f5b11306998070"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "high school reunion nostalgic user attendance opinion preference",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 16,
+              "gold_vector_project_rank_untruncated": 16,
+              "gold_keyword_rank_in_candidate_window": 12,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 9,
+              "gold_recency_usefulness_rank_within_rrf_pool": 12,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-0685392d73ab49428359e3bf3cc157a8",
+            "role": "user",
+            "source_session_id": "answer_b0fac439",
+            "turn_index": 113,
+            "content": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run2-20260930:call0",
+          "query": "LongMemEval user's feelings nostalgic high school reunion should attend concerns preferences",
+          "limit": 10,
+          "project_id": "longmemeval-d6233ab6",
+          "gold_vector_rank_project_untruncated": 49,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 49,
+          "gold_keyword_rank_in_recall_candidate_window": 20,
+          "gold_rrf_rank_candidate_union": 51,
+          "gold_rank_after_production_rerank": 65,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-f3ba98997b904033857b02094b27c494",
+            "et-58b3d68c12bf4be6848fc0286ed4f4e7",
+            "et-53cf1c986e894f7897f5b11306998070",
+            "et-dad9de8337f34981b45a04e12725b70f",
+            "et-8bbac9cac41742728e91891fd3ad2552",
+            "et-687d5ee11c6d4f5480fb117f6bfda1e2",
+            "et-e582f8a7bd0a48c0819a7d67862b9595",
+            "et-7ee535e002fa4e11ad65751f2f06ed97",
+            "et-832ee99b0d664dc49f74b55b9ed1aa43",
+            "et-a35f6ced10b949af9cea657593379e71",
+            "et-f3f00d1a0eff4af39967863e17abb04b",
+            "et-2449cda3679442cea0ff2afbdc9da13a",
+            "et-97dbe26d1dcf481bacfa83813610de55",
+            "et-2dc10f66f39b4f1484ee7c16cd5b1e59",
+            "et-d69837dfce8248a8a9b2c9da78127f20",
+            "et-b160bed6596646a49e0e631a0e2f1980",
+            "et-d46787a4ccf24ae3a6edccf3aa403df1",
+            "et-979378ffbc614ea181fb04b7627ee377"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "LongMemEval user's feelings nostalgic high school reunion should attend concerns preferences",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 49,
+              "gold_vector_project_rank_untruncated": 49,
+              "gold_keyword_rank_in_candidate_window": 20,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 51,
+              "gold_recency_usefulness_rank_within_rrf_pool": 65,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-0685392d73ab49428359e3bf3cc157a8",
+            "role": "user",
+            "source_session_id": "answer_b0fac439",
+            "turn_index": 113,
+            "content": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?"
+          }
+        }
+      ]
+    },
+    {
+      "question_id": "0a34ad58",
+      "question": "I’m a bit anxious about getting around Tokyo. Do you have any helpful tips?",
+      "gold_statement": "I'm also planning to take a guided tour to Nikko National Park. Can you tell me what I need to prepare for the tour, and how I can get to the meeting point using my Suica card? I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip.",
+      "gold_source_session_id": "answer_cebb7159",
+      "gold_turn_id": "et-768e57155c334a978b2760323d329f45",
+      "checkpoint_context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": true
+      },
+      "checkpoint_recall_queries_by_run": {
+        "faithful": [],
+        "faithful-run1-20260930": [],
+        "faithful-run2-20260930": [
+          {
+            "query": "Tokyo getting around tips transportation advice anxious Tokyo",
+            "limit": 5,
+            "returned_turn_count": 13
+          }
+        ]
+      },
+      "local_probe_results": [
+        {
+          "source": "original_dataset_question",
+          "query": "I’m a bit anxious about getting around Tokyo. Do you have any helpful tips?",
+          "limit": 10,
+          "project_id": "longmemeval-0a34ad58",
+          "gold_vector_rank_project_untruncated": 13,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 13,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 14,
+          "gold_rank_after_production_rerank": 19,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-ff3e1bcbf8d44cb59dfc8119d3f1711e",
+            "et-97d37a1908d44d839eeaf0cb1ef6b39e",
+            "et-23087169ed9f4d0c80dcfd7f3d4078de",
+            "et-55c14b3c71b74f6c80d21eac4426fa4c",
+            "et-f9ab370e9f4d41afa662999ca6e58705",
+            "et-d2810144585543488c49e1c3e5651d36",
+            "et-7b7f1ee01625486fb5f66d8f9039201f",
+            "et-c272f6b5a44b4f7985af268aa230b0a1",
+            "et-3d0bce6f108841ef805819483e679a12",
+            "et-209d892a8e744140b9a2f9b896dc2815",
+            "et-3b21329f40d5470894e4707637a64412",
+            "et-bf382b62e4694407ac1f5468e6b8a8b3",
+            "et-1e977e95ae664417ba9d747d0a5fe2d4",
+            "et-98c9c08189ee4446aae9ba89cccb5958",
+            "et-36e93c5335b54825bb730bea051a3085",
+            "et-117b8e4077704a02b444fd0080538579",
+            "et-f5af05f7357646f581e78d4e73eeb946",
+            "et-35d104396689470b9c35b51e643ac37c"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "I’m a bit anxious about getting around Tokyo. Do you have any helpful tips?",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 13,
+              "gold_vector_project_rank_untruncated": 13,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 14,
+              "gold_recency_usefulness_rank_within_rrf_pool": 19,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-768e57155c334a978b2760323d329f45",
+            "role": "user",
+            "source_session_id": "answer_cebb7159",
+            "turn_index": 138,
+            "content": "I'm also planning to take a guided tour to Nikko National Park. Can you tell me what I need to prepare for the tour, and how I can get to the meeting point using my Suica card? I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip."
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run2-20260930:call0",
+          "query": "Tokyo getting around tips transportation advice anxious Tokyo",
+          "limit": 5,
+          "project_id": "longmemeval-0a34ad58",
+          "gold_vector_rank_project_untruncated": 20,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 20,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 23,
+          "gold_rank_after_production_rerank": 29,
+          "gold_rank_in_production_return_limit_plus_8": 7,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-7b7f1ee01625486fb5f66d8f9039201f",
+            "et-23087169ed9f4d0c80dcfd7f3d4078de",
+            "et-c272f6b5a44b4f7985af268aa230b0a1",
+            "et-97d37a1908d44d839eeaf0cb1ef6b39e",
+            "et-f9ab370e9f4d41afa662999ca6e58705",
+            "et-f14d141ec3fc45d5b65cc4a19dba99e2",
+            "et-768e57155c334a978b2760323d329f45",
+            "et-d2810144585543488c49e1c3e5651d36",
+            "et-e4f837256d9f422e93da1dce26d873fc",
+            "et-5b2987b67e2c4d64a9d7d7277d19a573",
+            "et-209d892a8e744140b9a2f9b896dc2815",
+            "et-24a4a68870b5483899e59df2ed7b314a",
+            "et-8a7938655b4c4fc0a731300a1f54c7b8"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "Tokyo getting around tips transportation advice anxious Tokyo",
+              "vector_candidate_count": 25,
+              "keyword_candidate_count": 25,
+              "gold_vector_rank_in_candidate_window": 20,
+              "gold_vector_project_rank_untruncated": 20,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 23,
+              "gold_recency_usefulness_rank_within_rrf_pool": 29,
+              "production_candidate_limit": 25,
+              "production_rrf_output_width": 13
+            }
+          ],
+          "gold_turn": {
+            "id": "et-768e57155c334a978b2760323d329f45",
+            "role": "user",
+            "source_session_id": "answer_cebb7159",
+            "turn_index": 138,
+            "content": "I'm also planning to take a guided tour to Nikko National Park. Can you tell me what I need to prepare for the tour, and how I can get to the meeting point using my Suica card? I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip."
+          }
+        }
+      ]
+    },
+    {
+      "question_id": "1c0ddc50",
+      "question": "Can you suggest some activities I can do during my commute to work?",
+      "gold_statement": "I'm particularly interested in the history podcasts. Can you give me some recommendations on how to organize my listening schedule, considering my commute is about 40 minutes each way?",
+      "gold_source_session_id": "answer_8da8c7e0",
+      "gold_turn_id": "et-c2e4fc0370ae4a749a9cd3bcf10994a3",
+      "checkpoint_context_presence_by_run": {
+        "main": false,
+        "run1": true,
+        "run2": false
+      },
+      "checkpoint_recall_queries_by_run": {
+        "faithful": [
+          {
+            "query": "commute to work activities user preferences suggested activities",
+            "limit": 10,
+            "returned_turn_count": 18
+          }
+        ],
+        "faithful-run1-20260930": [
+          {
+            "query": "commute activities things do during commute to work suggest",
+            "limit": 10,
+            "returned_turn_count": 18
+          }
+        ],
+        "faithful-run2-20260930": []
+      },
+      "local_probe_results": [
+        {
+          "source": "original_dataset_question",
+          "query": "Can you suggest some activities I can do during my commute to work?",
+          "limit": 10,
+          "project_id": "longmemeval-1c0ddc50",
+          "gold_vector_rank_project_untruncated": 14,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 14,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 19,
+          "gold_rank_after_production_rerank": 11,
+          "gold_rank_in_production_return_limit_plus_8": 14,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-3b5bd29b6c4c493bb6cff8c8c8329e09",
+            "et-cd9fe96e339b48e0aca695bfcf547996",
+            "et-1c40370f43d34bf3bfd2fb2437bff8d8",
+            "et-fd2533609db44018a2c4589c8c6e5249",
+            "et-f069bfbcc76045599829eac84bf137fd",
+            "et-801155594b524edc998fd10ecf23d9eb",
+            "et-605af3d8d04848c0a31de6bc42519d72",
+            "et-d994acfc0f4447ea83d512da1b90037a",
+            "et-cbb3104b0c514a03b63663e722dace6c",
+            "et-880930c6be0240f384789676903c86f6",
+            "et-3c34e1bced0e4b34be148f31af41816f",
+            "et-4d43eb52ad674b46a89bb4e17c444c93",
+            "et-19ac13141ff640d7837ec8e7cb111769",
+            "et-c2e4fc0370ae4a749a9cd3bcf10994a3",
+            "et-e66ed1d1cf0f483ea7298e743120aa3d",
+            "et-d661a7a9170c4f6b8d8c41f53c2b1621",
+            "et-f129af6edcd64fc5973e49a557346513",
+            "et-f321dab70b744cadad7e70b4074620c5"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "Can you suggest some activities I can do during my commute to work?",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 14,
+              "gold_vector_project_rank_untruncated": 14,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 19,
+              "gold_recency_usefulness_rank_within_rrf_pool": 11,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c2e4fc0370ae4a749a9cd3bcf10994a3",
+            "role": "user",
+            "source_session_id": "answer_8da8c7e0",
+            "turn_index": 355,
+            "content": "I'm particularly interested in the history podcasts. Can you give me some recommendations on how to organize my listening schedule, considering my commute is about 40 minutes each way?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful:call0",
+          "query": "commute to work activities user preferences suggested activities",
+          "limit": 10,
+          "project_id": "longmemeval-1c0ddc50",
+          "gold_vector_rank_project_untruncated": 29,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 29,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 31,
+          "gold_rank_after_production_rerank": 26,
+          "gold_rank_in_production_return_limit_plus_8": null,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-3b5bd29b6c4c493bb6cff8c8c8329e09",
+            "et-f94afd3d7b3643e6adac03bc4270279a",
+            "et-cbb3104b0c514a03b63663e722dace6c",
+            "et-605af3d8d04848c0a31de6bc42519d72",
+            "et-d994acfc0f4447ea83d512da1b90037a",
+            "et-801155594b524edc998fd10ecf23d9eb",
+            "et-fd2533609db44018a2c4589c8c6e5249",
+            "et-880930c6be0240f384789676903c86f6",
+            "et-3c34e1bced0e4b34be148f31af41816f",
+            "et-0d6b9c329a4d4ea1bcfe0aad044c0b67",
+            "et-1c40370f43d34bf3bfd2fb2437bff8d8",
+            "et-f069bfbcc76045599829eac84bf137fd",
+            "et-4d43eb52ad674b46a89bb4e17c444c93",
+            "et-19ac13141ff640d7837ec8e7cb111769",
+            "et-c37eee79daa44f928bc2cae4d6d36dae",
+            "et-cd4eab35df804563a14d71853c03fc4a",
+            "et-b1fa41f81eda48bf9d6e77447a75477b",
+            "et-f3205380e6ed4fbebca5b4328613a1a1"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "commute to work activities user preferences suggested activities",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 29,
+              "gold_vector_project_rank_untruncated": 29,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 31,
+              "gold_recency_usefulness_rank_within_rrf_pool": 26,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c2e4fc0370ae4a749a9cd3bcf10994a3",
+            "role": "user",
+            "source_session_id": "answer_8da8c7e0",
+            "turn_index": 355,
+            "content": "I'm particularly interested in the history podcasts. Can you give me some recommendations on how to organize my listening schedule, considering my commute is about 40 minutes each way?"
+          }
+        },
+        {
+          "source": "checkpoint:faithful-run1-20260930:call0",
+          "query": "commute activities things do during commute to work suggest",
+          "limit": 10,
+          "project_id": "longmemeval-1c0ddc50",
+          "gold_vector_rank_project_untruncated": 19,
+          "gold_keyword_rank_project_if_match": null,
+          "gold_vector_rank_in_recall_candidate_window": 19,
+          "gold_keyword_rank_in_recall_candidate_window": null,
+          "gold_rrf_rank_candidate_union": 21,
+          "gold_rank_after_production_rerank": 14,
+          "gold_rank_in_production_return_limit_plus_8": 11,
+          "gold_in_protected_limit_prefix": false,
+          "returned_turn_ids": [
+            "et-cd9fe96e339b48e0aca695bfcf547996",
+            "et-3b5bd29b6c4c493bb6cff8c8c8329e09",
+            "et-f069bfbcc76045599829eac84bf137fd",
+            "et-801155594b524edc998fd10ecf23d9eb",
+            "et-1c40370f43d34bf3bfd2fb2437bff8d8",
+            "et-880930c6be0240f384789676903c86f6",
+            "et-fd2533609db44018a2c4589c8c6e5249",
+            "et-605af3d8d04848c0a31de6bc42519d72",
+            "et-41c20188b9fa4f648800892cfeb723f5",
+            "et-d994acfc0f4447ea83d512da1b90037a",
+            "et-c2e4fc0370ae4a749a9cd3bcf10994a3",
+            "et-e66ed1d1cf0f483ea7298e743120aa3d",
+            "et-d661a7a9170c4f6b8d8c41f53c2b1621",
+            "et-f129af6edcd64fc5973e49a557346513",
+            "et-f321dab70b744cadad7e70b4074620c5",
+            "et-99584ad601cd4e9794d89a384f700124",
+            "et-effdcec112054dc3aa1617d95af16111",
+            "et-76b756b3056e4f46aa9ec8c8cf39adeb"
+          ],
+          "probe_details": [
+            {
+              "probe_index": 0,
+              "anchor": "commute activities things do during commute to work suggest",
+              "vector_candidate_count": 50,
+              "keyword_candidate_count": 50,
+              "gold_vector_rank_in_candidate_window": 19,
+              "gold_vector_project_rank_untruncated": 19,
+              "gold_keyword_rank_in_candidate_window": null,
+              "gold_keyword_project_rank_if_match": null,
+              "gold_rrf_rank_in_candidate_union": 21,
+              "gold_recency_usefulness_rank_within_rrf_pool": 14,
+              "production_candidate_limit": 50,
+              "production_rrf_output_width": 18
+            }
+          ],
+          "gold_turn": {
+            "id": "et-c2e4fc0370ae4a749a9cd3bcf10994a3",
+            "role": "user",
+            "source_session_id": "answer_8da8c7e0",
+            "turn_index": 355,
+            "content": "I'm particularly interested in the history podcasts. Can you give me some recommendations on how to organize my listening schedule, considering my commute is about 40 minutes each way?"
+          }
+        }
+      ]
+    }
+  ],
+  "secondary_reader_item_context_absence": {
+    "09d032c9": {
+      "main": true,
+      "run1": false,
+      "run2": true
+    },
+    "0edc2aef": {
+      "main": true,
+      "run1": false,
+      "run2": true
+    },
+    "35a27287": {
+      "main": true,
+      "run1": true,
+      "run2": false
+    },
+    "afdc33df": {
+      "main": true,
+      "run1": false,
+      "run2": true
+    }
+  },
+  "budget_ledger_validation": {
+    "source": ".recall-lift-worktree/artifacts/longmemeval-gpt6-full-s-turns/faithful/budget-ledger.json",
+    "costs_by_question": {
+      "09d032c9": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00176075,
+        "reserved_estimate_usd": 0.00918375
+      },
+      "0a34ad58": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00096825,
+        "reserved_estimate_usd": 0.00795462
+      },
+      "0edc2aef": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00255054,
+        "reserved_estimate_usd": 0.01295738
+      },
+      "1c0ddc50": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00169775,
+        "reserved_estimate_usd": 0.00910812
+      },
+      "32260d93": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00117425,
+        "reserved_estimate_usd": 0.00801813
+      },
+      "35a27287": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00268435,
+        "reserved_estimate_usd": 0.01304813
+      },
+      "75832dbd": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00291799,
+        "reserved_estimate_usd": 0.01400787
+      },
+      "afdc33df": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00162475,
+        "reserved_estimate_usd": 0.00904963
+      },
+      "d6233ab6": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00123175,
+        "reserved_estimate_usd": 0.00838812
+      },
+      "06878be2": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00198862,
+        "reserved_estimate_usd": 0.00927025
+      },
+      "195a1a1b": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00091238,
+        "reserved_estimate_usd": 0.0078355
+      },
+      "38146c39": {
+        "reservation_count": 5,
+        "ledger_rows_found": 5,
+        "actual_usd": 0.00469928,
+        "reserved_estimate_usd": 0.01740712
+      },
+      "57f827a0": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00153787,
+        "reserved_estimate_usd": 0.008714
+      },
+      "6b7dfb22": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00190612,
+        "reserved_estimate_usd": 0.00954137
+      },
+      "95228167": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.0018435,
+        "reserved_estimate_usd": 0.009237
+      },
+      "b6025781": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.0016725,
+        "reserved_estimate_usd": 0.00896138
+      },
+      "caf03d32": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00293221,
+        "reserved_estimate_usd": 0.01346412
+      },
+      "d24813b1": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00181925,
+        "reserved_estimate_usd": 0.00919388
+      }
+    },
+    "focused_18_item_actual_usd": 0.03592211,
+    "focused_18_item_reserved_usd": 0.18534037,
+    "classification_report_actual_usd": 0.03592211,
+    "classification_report_reserved_usd": 0.18534037
+  }
+}

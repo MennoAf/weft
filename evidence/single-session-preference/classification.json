@@ -1,0 +1,1567 @@
+{
+  "fields_used": {
+    "verdict": "checkpoint evidence[question_id].judge.label (boolean recorded by the GPT-4o judge); independently validated counts 17/30, 15/30, 18/30.",
+    "judge_text": "checkpoint evidence[question_id].judge.raw",
+    "reader_answer": "checkpoint evidence[question_id].answer.text (the faithful-agent final answer text)",
+    "source_session_receipts": "checkpoint evidence[question_id].sessions[*].session_id and .result.ingested; these are ingestion receipts, not raw stored-text readbacks.",
+    "retrieved_context": "checkpoint evidence[question_id].tool_results[*] where name == weft_recall, result.turns[*].content; exact/normalized sentence substring test.",
+    "source_sentence": "Dataset question.answer_session_ids joined to haystack_session_ids/haystack_sessions; sentence ranked by informative token overlap with gold answer plus explicit preference-cue and user-role tie-breaks.",
+    "cost": "faithful/budget-ledger.json reservations joined by answer.reservations and judge.reservation_id; summed actual_usd and reserved estimated_usd."
+  },
+  "runs": [
+    "faithful",
+    "faithful-run1-20260930",
+    "faithful-run2-20260930"
+  ],
+  "verdict_counts": {
+    "faithful": 17,
+    "faithful-run1-20260930": 15,
+    "faithful-run2-20260930": 18
+  },
+  "sets": {
+    "stable_failure": [
+      "09d032c9",
+      "0a34ad58",
+      "0edc2aef",
+      "1c0ddc50",
+      "32260d93",
+      "35a27287",
+      "75832dbd",
+      "afdc33df",
+      "d6233ab6"
+    ],
+    "flicker": [
+      "06878be2",
+      "195a1a1b",
+      "38146c39",
+      "57f827a0",
+      "6b7dfb22",
+      "95228167",
+      "b6025781",
+      "caf03d32",
+      "d24813b1"
+    ],
+    "always_correct": [
+      "06f04340",
+      "07b6f563",
+      "1a1907b4",
+      "1d4e3b97",
+      "1da05512",
+      "505af2f5",
+      "54026fce",
+      "75f70248",
+      "8a2466db",
+      "a89d7624",
+      "b0479f84",
+      "fca70973"
+    ]
+  },
+  "classification_method_caveat": "Checkpoint receipts show the source session was marked ingested but do not include a raw post-write database readback. Sentence matching is a lexical heuristic against answer-designated dataset sessions; manually audit weak matches before treating the stage label as ground truth.",
+  "dominant_stage": "RETRIEVAL",
+  "stage_counts": {
+    "STORAGE": 0,
+    "RETRIEVAL": 5,
+    "READER": 4,
+    "JUDGE": 0
+  },
+  "stable_failure_items": [
+    {
+      "question_id": "09d032c9",
+      "question_type": "single-session-preference",
+      "question": "I've been having trouble with the battery life on my phone lately. Any tips?",
+      "gold_answer": "The user would prefer responses that build upon their previous mention of purchasing a portable power bank, such as suggestions on how to optimize its use, like ensuring it's fully charged before use. They might also appreciate tips on utilizing battery-saving features on their phone. The user may not prefer responses that suggest alternative solutions or unrelated advice.",
+      "answer_session_ids": [
+        "answer_b10dce5e"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.2731,
+          "token_overlap": 0.1481,
+          "preference_cue": true,
+          "session_id": "answer_b10dce5e",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "I'm looking for some advice on the best way to organize my tech accessories, like my new portable power bank and wireless charging pad, when I'm traveling.",
+          "source_turn_content": "I'm looking for some advice on the best way to organize my tech accessories, like my new portable power bank and wireless charging pad, when I'm traveling."
+        },
+        {
+          "score": 0.162,
+          "token_overlap": 0.037,
+          "preference_cue": true,
+          "session_id": "answer_b10dce5e",
+          "turn_index": 14,
+          "role": "user",
+          "sentence": "I'd like to know more about the features and performance of the LG OLED C9 series.",
+          "source_turn_content": "I'd like to know more about the features and performance of the LG OLED C9 series. Can you tell me more about its picture quality, viewing angles, and HDR support?"
+        },
+        {
+          "score": 0.162,
+          "token_overlap": 0.037,
+          "preference_cue": true,
+          "session_id": "answer_b10dce5e",
+          "turn_index": 18,
+          "role": "user",
+          "sentence": "I'd like to know more about the audio features of the LG OLED C9 series.",
+          "source_turn_content": "I'd like to know more about the audio features of the LG OLED C9 series. Can you tell me about the Dolby Atmos support, the speaker system, and any other audio enhancements?"
+        },
+        {
+          "score": 0.1361,
+          "token_overlap": 0.1111,
+          "preference_cue": false,
+          "session_id": "answer_b10dce5e",
+          "turn_index": 2,
+          "role": "user",
+          "sentence": "What are some good options for travel cases or pouches that can fit my Apple Watch, portable power bank, and wireless charging pad all together?",
+          "source_turn_content": "What are some good options for travel cases or pouches that can fit my Apple Watch, portable power bank, and wireless charging pad all together?"
+        },
+        {
+          "score": 0.125,
+          "token_overlap": 0.0,
+          "preference_cue": true,
+          "session_id": "answer_b10dce5e",
+          "turn_index": 12,
+          "role": "user",
+          "sentence": "What would you like to know about LG's 4K smart TVs or the deals available?",
+          "source_turn_content": "What would you like to know about LG's 4K smart TVs or the deals available?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": true,
+        "run1": false,
+        "run2": true
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "READER",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "I'm looking for some advice on the best way to organize my tech accessories, like my new portable power bank and wireless charging pad, when I'm traveling.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "The context mentions carrying a portable power bank to recharge your phone on the go. It doesn’t include tips for making the phone’s battery last longer.",
+          "retrieved_context_turn_count": 18,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I'm looking for some advice on the best way to organize my tech accessories, like my new portable power bank and wireless charging pad, when I'm traveling.",
+            "context_session_id": "answer_b10dce5e",
+            "context_turn_index": 294
+          },
+          "answer_session_import": {
+            "answer_b10dce5e": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00176075,
+            "reserved_estimate_usd": 0.00918375
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know—there isn’t any phone battery-life advice in the context I can draw on.",
+          "retrieved_context_turn_count": 13,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_b10dce5e": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.001525,
+            "reserved_estimate_usd": 0.00876462
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t have any battery-saving tips in the recalled context. You had discussed carrying a portable power bank, which could help keep your phone charged while you’re out.",
+          "retrieved_context_turn_count": 13,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I'm looking for some advice on the best way to organize my tech accessories, like my new portable power bank and wireless charging pad, when I'm traveling.",
+            "context_session_id": "answer_b10dce5e",
+            "context_turn_index": 294
+          },
+          "answer_session_import": {
+            "answer_b10dce5e": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00152788,
+            "reserved_estimate_usd": 0.0087685
+          }
+        }
+      }
+    },
+    {
+      "question_id": "0a34ad58",
+      "question_type": "single-session-preference",
+      "question": "I’m a bit anxious about getting around Tokyo. Do you have any helpful tips?",
+      "gold_answer": "The user would prefer responses that utilize their existing resources, such as their Suica card and TripIt app, to provide personalized tips for navigating Tokyo's public transportation. They might not prefer general tips or recommendations that do not take into account their prior preparations.",
+      "answer_session_ids": [
+        "answer_cebb7159"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.25,
+          "token_overlap": 0.125,
+          "preference_cue": true,
+          "session_id": "answer_cebb7159",
+          "turn_index": 6,
+          "role": "user",
+          "sentence": "I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip.",
+          "source_turn_content": "I'm also planning to take a guided tour to Nikko National Park. Can you tell me what I need to prepare for the tour, and how I can get to the meeting point using my Suica card? I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip."
+        },
+        {
+          "score": 0.15,
+          "token_overlap": 0.125,
+          "preference_cue": false,
+          "session_id": "answer_cebb7159",
+          "turn_index": 2,
+          "role": "user",
+          "sentence": "Can you tell me the best way to get there from Shinjuku using my Suica card I just got?",
+          "source_turn_content": "I'm also planning to visit the Tsukiji Fish Market. Can you tell me the best way to get there from Shinjuku using my Suica card I just got?"
+        },
+        {
+          "score": 0.15,
+          "token_overlap": 0.125,
+          "preference_cue": false,
+          "session_id": "answer_cebb7159",
+          "turn_index": 6,
+          "role": "user",
+          "sentence": "Can you tell me what I need to prepare for the tour, and how I can get to the meeting point using my Suica card?",
+          "source_turn_content": "I'm also planning to take a guided tour to Nikko National Park. Can you tell me what I need to prepare for the tour, and how I can get to the meeting point using my Suica card? I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip."
+        },
+        {
+          "score": 0.125,
+          "token_overlap": 0.0,
+          "preference_cue": true,
+          "session_id": "answer_cebb7159",
+          "turn_index": 12,
+          "role": "user",
+          "sentence": "What are the hotel's amenities and services like?",
+          "source_turn_content": "Can you tell me more about the Park Hyatt Tokyo, where I'll be staying? What are the hotel's amenities and services like?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": true
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "RETRIEVAL",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t have any Tokyo-specific tips in the information I can recall. What part of getting around worries you most?",
+          "retrieved_context_turn_count": 0,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_cebb7159": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00096825,
+            "reserved_estimate_usd": 0.00795462
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No",
+          "answer": "I don’t know what Tokyo travel tips you’ve already received—the available context doesn’t mention Tokyo.",
+          "retrieved_context_turn_count": 0,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_cebb7159": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00094025,
+            "reserved_estimate_usd": 0.00794862
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "It’s understandable to feel anxious, but you have a few ways to make it easier: use your Suica card by tapping in and out, plan each route in a transit app or Google Maps, and follow the station signs. If you’re unsure, the advice in your trip notes is to ask station staff or a local for help.",
+          "retrieved_context_turn_count": 13,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I have downloaded the TripIt app to stay organized, but I'm still nervous about the trip.",
+            "context_session_id": "answer_cebb7159",
+            "context_turn_index": 138
+          },
+          "answer_session_import": {
+            "answer_cebb7159": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.0014485,
+            "reserved_estimate_usd": 0.00857362
+          }
+        }
+      }
+    },
+    {
+      "question_id": "0edc2aef",
+      "question_type": "single-session-preference",
+      "question": "Can you suggest a hotel for my upcoming trip to Miami?",
+      "gold_answer": "The user would prefer suggestions of hotels in Miami that offer great views, possibly of the ocean or the city skyline, and have unique features such as a rooftop pool or a hot tub on the balcony. They may not prefer suggestions of basic or budget hotels without these features.",
+      "answer_session_ids": [
+        "answer_d586e9cd"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.6012,
+          "token_overlap": 0.4762,
+          "preference_cue": true,
+          "session_id": "answer_d586e9cd",
+          "turn_index": 2,
+          "role": "user",
+          "sentence": "Besides great views, I also like hotels with unique features, such as a rooftop pool or a hot tub on the balcony.",
+          "source_turn_content": "Besides great views, I also like hotels with unique features, such as a rooftop pool or a hot tub on the balcony. Do you know if any of these hotels have those features?"
+        },
+        {
+          "score": 0.3583,
+          "token_overlap": 0.3333,
+          "preference_cue": false,
+          "session_id": "answer_d586e9cd",
+          "turn_index": 4,
+          "role": "user",
+          "sentence": "Do any of these hotels have a hot tub on the balcony with a view of the city skyline?",
+          "source_turn_content": "Do any of these hotels have a hot tub on the balcony with a view of the city skyline?"
+        },
+        {
+          "score": 0.2679,
+          "token_overlap": 0.1429,
+          "preference_cue": true,
+          "session_id": "answer_d586e9cd",
+          "turn_index": 10,
+          "role": "user",
+          "sentence": "I'd like to know if they have any special packages or promotions that include a room with a hot tub on the balcony and a complimentary room service breakfast.",
+          "source_turn_content": "I'd like to know if they have any special packages or promotions that include a room with a hot tub on the balcony and a complimentary room service breakfast."
+        },
+        {
+          "score": 0.2155,
+          "token_overlap": 0.1905,
+          "preference_cue": false,
+          "session_id": "answer_d586e9cd",
+          "turn_index": 18,
+          "role": "user",
+          "sentence": "The hot tub on the balcony with a view of the Space Needle sounds amazing, and the complimentary room service breakfast and $100 credit towards a couples' massage are great perks.",
+          "source_turn_content": "I think I'll stick with the Space Needle Romance Package at The Edgewater Hotel. The hot tub on the balcony with a view of the Space Needle sounds amazing, and the complimentary room service breakfast and $100 credit towards a couples' massage are great perks. Thank you for your help in booking this package!"
+        },
+        {
+          "score": 0.1679,
+          "token_overlap": 0.1429,
+          "preference_cue": false,
+          "session_id": "answer_d586e9cd",
+          "turn_index": 2,
+          "role": "user",
+          "sentence": "Do you know if any of these hotels have those features?",
+          "source_turn_content": "Besides great views, I also like hotels with unique features, such as a rooftop pool or a hot tub on the balcony. Do you know if any of these hotels have those features?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": true,
+        "run1": false,
+        "run2": true
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "READER",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "Besides great views, I also like hotels with unique features, such as a rooftop pool or a hot tub on the balcony.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know which Miami hotels would suit you—the recall context doesn’t include any Miami hotel recommendations.",
+          "retrieved_context_turn_count": 36,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "Besides great views, I also like hotels with unique features, such as a rooftop pool or a hot tub on the balcony.",
+            "context_session_id": "answer_d586e9cd",
+            "context_turn_index": 390
+          },
+          "answer_session_import": {
+            "answer_d586e9cd": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 4,
+            "ledger_rows_found": 4,
+            "actual_usd": 0.00255054,
+            "reserved_estimate_usd": 0.01295738
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t have enough information to suggest a specific hotel. What’s your budget, and what area or style of stay are you looking for?",
+          "retrieved_context_turn_count": 0,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_d586e9cd": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00094925,
+            "reserved_estimate_usd": 0.00800113
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know of a Miami-specific hotel recommendation from the information I have. If you share your budget or what matters most—such as beach access, nightlife, or a pool—I can help narrow it down.",
+          "retrieved_context_turn_count": 18,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "Besides great views, I also like hotels with unique features, such as a rooftop pool or a hot tub on the balcony.",
+            "context_session_id": "answer_d586e9cd",
+            "context_turn_index": 390
+          },
+          "answer_session_import": {
+            "answer_d586e9cd": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00157725,
+            "reserved_estimate_usd": 0.00883362
+          }
+        }
+      }
+    },
+    {
+      "question_id": "1c0ddc50",
+      "question_type": "single-session-preference",
+      "question": "Can you suggest some activities I can do during my commute to work?",
+      "gold_answer": "The user would prefer suggestions related to listening to new podcasts or audiobooks, especially the genre beyond true crime or self-improvement, such as history. They may not be interested in activities that require visual attention, such as reading or watching videos, as they are commuting. The user would not prefer general podcast topics such as true crime or self-improvement, as the user wants to explore other topics.",
+      "answer_session_ids": [
+        "answer_8da8c7e0"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.2361,
+          "token_overlap": 0.1111,
+          "preference_cue": true,
+          "session_id": "answer_8da8c7e0",
+          "turn_index": 4,
+          "role": "user",
+          "sentence": "I'm particularly interested in the history podcasts.",
+          "source_turn_content": "I'm particularly interested in the history podcasts. Can you give me some recommendations on how to organize my listening schedule, considering my commute is about 40 minutes each way?"
+        },
+        {
+          "score": 0.2361,
+          "token_overlap": 0.1111,
+          "preference_cue": true,
+          "session_id": "answer_8da8c7e0",
+          "turn_index": 6,
+          "role": "user",
+          "sentence": "Can I also get some recommendations on history books or documentaries related to the topics I'm interested in?",
+          "source_turn_content": "Can I also get some recommendations on history books or documentaries related to the topics I'm interested in?"
+        },
+        {
+          "score": 0.2102,
+          "token_overlap": 0.1852,
+          "preference_cue": false,
+          "session_id": "answer_8da8c7e0",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "I've been listening to a lot of true crime and self-improvement stuff.",
+          "source_turn_content": "I'm looking for some new podcast recommendations. I've been listening to a lot of true crime and self-improvement stuff. I enjoy listening to then during my commute, but I want to branch out into other genres."
+        },
+        {
+          "score": 0.1991,
+          "token_overlap": 0.0741,
+          "preference_cue": true,
+          "session_id": "answer_8da8c7e0",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "I'm looking for some new podcast recommendations.",
+          "source_turn_content": "I'm looking for some new podcast recommendations. I've been listening to a lot of true crime and self-improvement stuff. I enjoy listening to then during my commute, but I want to branch out into other genres."
+        },
+        {
+          "score": 0.1991,
+          "token_overlap": 0.0741,
+          "preference_cue": true,
+          "session_id": "answer_8da8c7e0",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "I enjoy listening to then during my commute, but I want to branch out into other genres.",
+          "source_turn_content": "I'm looking for some new podcast recommendations. I've been listening to a lot of true crime and self-improvement stuff. I enjoy listening to then during my commute, but I want to branch out into other genres."
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": false,
+        "run1": true,
+        "run2": false
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "RETRIEVAL",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "I'm particularly interested in the history podcasts.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "Since you’ve mentioned enjoying podcasts—especially *How I Built This*—you could listen to more podcasts or audiobooks, try language-learning audio, or put together a music playlist. If you’re biking, keep your attention on traffic and make sure you can hear your surroundings.",
+          "retrieved_context_turn_count": 18,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_8da8c7e0": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00169775,
+            "reserved_estimate_usd": 0.00910812
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No",
+          "answer": "Since you’ve enjoyed podcasts on your bus ride, you could keep listening to **How I Built This** or try a history or science podcast. You could also listen to an audiobook, learn a language, or use the ride to plan your day. If you’re biking, prioritize awareness and keep the audio low—or skip headphones if they distract you.",
+          "retrieved_context_turn_count": 18,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I'm particularly interested in the history podcasts.",
+            "context_session_id": "answer_8da8c7e0",
+            "context_turn_index": 355
+          },
+          "answer_session_import": {
+            "answer_8da8c7e0": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00194938,
+            "reserved_estimate_usd": 0.009443
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No",
+          "answer": "I don’t know what activities you’d enjoy based on the context provided. Tell me how you commute and what you like, and I can suggest some options.",
+          "retrieved_context_turn_count": 0,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_8da8c7e0": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00086425,
+            "reserved_estimate_usd": 0.00772187
+          }
+        }
+      }
+    },
+    {
+      "question_id": "32260d93",
+      "question_type": "single-session-preference",
+      "question": "Can you recommend a show or movie for me to watch tonight?",
+      "gold_answer": "The user would prefer recommendations for stand-up comedy specials on Netflix, especially those that are known for their storytelling. They may not prefer recommendations for other genres or platforms.",
+      "answer_session_ids": [
+        "answer_0250ae1c"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.5795,
+          "token_overlap": 0.4545,
+          "preference_cue": true,
+          "session_id": "answer_0250ae1c",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?",
+          "source_turn_content": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?"
+        },
+        {
+          "score": 0.2159,
+          "token_overlap": 0.0909,
+          "preference_cue": true,
+          "session_id": "answer_0250ae1c",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft.",
+          "source_turn_content": "As an aspiring stand-up comedian, I'm looking for some advice on how to improve my craft. Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?"
+        },
+        {
+          "score": 0.2159,
+          "token_overlap": 0.0909,
+          "preference_cue": true,
+          "session_id": "answer_0250ae1c",
+          "turn_index": 10,
+          "role": "user",
+          "sentence": "I'm looking forward to learning from experienced instructors, getting feedback on my work, and networking with other writers.",
+          "source_turn_content": "I'm going to attend the comedy writing workshop on Friday. I'm looking forward to learning from experienced instructors, getting feedback on my work, and networking with other writers."
+        },
+        {
+          "score": 0.2068,
+          "token_overlap": 0.1818,
+          "preference_cue": false,
+          "session_id": "answer_0250ae1c",
+          "turn_index": 4,
+          "role": "user",
+          "sentence": "Can you recommend some online resources or books on comedy writing and storytelling that can help me improve my craft?",
+          "source_turn_content": "Can you recommend some online resources or books on comedy writing and storytelling that can help me improve my craft?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "RETRIEVAL",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "Can you recommend some stand-up comedy specials on Netflix with strong storytelling abilities like John Mulaney's 'Kid Gorgeous'?",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know a specific title you’d enjoy from the context I have. Since you got hooked on true crime, a true-crime show or documentary might be a good fit tonight.",
+          "retrieved_context_turn_count": 13,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_0250ae1c": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00117425,
+            "reserved_estimate_usd": 0.00801813
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I know you’ve been hooked on true crime podcasts, but I don’t have enough context to recommend a specific show or movie. Want to try a true-crime documentary, or something in another genre?",
+          "retrieved_context_turn_count": 36,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_0250ae1c": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 4,
+            "ledger_rows_found": 4,
+            "actual_usd": 0.00235482,
+            "reserved_estimate_usd": 0.01219775
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know your viewing preferences yet. Tell me what genres or mood you’re in, and I can suggest something.",
+          "retrieved_context_turn_count": 13,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_0250ae1c": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00105963,
+            "reserved_estimate_usd": 0.00795875
+          }
+        }
+      }
+    },
+    {
+      "question_id": "35a27287",
+      "question_type": "single-session-preference",
+      "question": "Can you recommend some interesting cultural events happening around me this weekend?",
+      "gold_answer": "The user would prefer responses that suggest cultural events where they can practice their language skills, particularly Spanish and French. They would also appreciate if the event has a focus on language learning resources. They would not prefer events that do not provide opportunities for language practice or cultural exchange.",
+      "answer_session_ids": [
+        "answer_9b182436"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.4821,
+          "token_overlap": 0.3571,
+          "preference_cue": true,
+          "session_id": "answer_9b182436",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "I'm looking for some new language learning resources, specifically podcasts in French that can help me improve my listening skills.",
+          "source_turn_content": "I'm looking for some new language learning resources, specifically podcasts in French that can help me improve my listening skills. Do you have any recommendations?"
+        },
+        {
+          "score": 0.4821,
+          "token_overlap": 0.3571,
+          "preference_cue": true,
+          "session_id": "answer_9b182436",
+          "turn_index": 6,
+          "role": "user",
+          "sentence": "I'm interested in attending language exchange events, especially those that focus on conversational practice.",
+          "source_turn_content": "I'm interested in attending language exchange events, especially those that focus on conversational practice. Can you suggest some websites or apps that can help me find language exchange partners or events in my area?"
+        },
+        {
+          "score": 0.4821,
+          "token_overlap": 0.3571,
+          "preference_cue": true,
+          "session_id": "answer_9b182436",
+          "turn_index": 12,
+          "role": "user",
+          "sentence": "I'd like to explore more language exchange opportunities and cultural events in my area.",
+          "source_turn_content": "I'd like to explore more language exchange opportunities and cultural events in my area. Can you suggest some ways to find language exchange partners or events that focus on French and Spanish languages?"
+        },
+        {
+          "score": 0.4536,
+          "token_overlap": 0.4286,
+          "preference_cue": false,
+          "session_id": "answer_9b182436",
+          "turn_index": 10,
+          "role": "user",
+          "sentence": "Can you recommend some language learning podcasts that focus on conversational skills and everyday language usage in French and Spanish?",
+          "source_turn_content": "Can you recommend some language learning podcasts that focus on conversational skills and everyday language usage in French and Spanish? I'd love to listen to podcasts that are engaging, informative, and fun."
+        },
+        {
+          "score": 0.4536,
+          "token_overlap": 0.4286,
+          "preference_cue": false,
+          "session_id": "answer_9b182436",
+          "turn_index": 12,
+          "role": "user",
+          "sentence": "Can you suggest some ways to find language exchange partners or events that focus on French and Spanish languages?",
+          "source_turn_content": "I'd like to explore more language exchange opportunities and cultural events in my area. Can you suggest some ways to find language exchange partners or events that focus on French and Spanish languages?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": true,
+        "run1": true,
+        "run2": false
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "READER",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "I'm looking for some new language learning resources, specifically podcasts in French that can help me improve my listening skills.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know what’s specifically scheduled this weekend. I have context suggesting you may be in Belo Horizonte—if so, the Feira de Arte e Artesanato de Belo Horizonte is a Sunday market featuring local artists and craftspeople, though I can’t confirm its schedule for this weekend. Is Belo Horizonte the right area?",
+          "retrieved_context_turn_count": 31,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I'm looking for some new language learning resources, specifically podcasts in French that can help me improve my listening skills.",
+            "context_session_id": "answer_9b182436",
+            "context_turn_index": 407
+          },
+          "answer_session_import": {
+            "answer_9b182436": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 4,
+            "ledger_rows_found": 4,
+            "actual_usd": 0.00268435,
+            "reserved_estimate_usd": 0.01304813
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No",
+          "answer": "I don’t know what specific cultural events are happening this weekend—the context doesn’t include current listings, and I’m not sure which city you’re in. What city or neighborhood should I look in?",
+          "retrieved_context_turn_count": 49,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I'm looking for some new language learning resources, specifically podcasts in French that can help me improve my listening skills.",
+            "context_session_id": "answer_9b182436",
+            "context_turn_index": 407
+          },
+          "answer_session_import": {
+            "answer_9b182436": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 5,
+            "ledger_rows_found": 5,
+            "actual_usd": 0.00533663,
+            "reserved_estimate_usd": 0.01859712
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know what’s happening near you—your location isn’t in the context. Tell me your city or area, and I can help narrow it down.",
+          "retrieved_context_turn_count": 0,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_9b182436": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00092012,
+            "reserved_estimate_usd": 0.00783538
+          }
+        }
+      }
+    },
+    {
+      "question_id": "75832dbd",
+      "question_type": "single-session-preference",
+      "question": "Can you recommend some recent publications or conferences that I might find interesting?",
+      "gold_answer": "The user would prefer suggestions related to recent research papers, articles, or conferences that focus on artificial intelligence in healthcare, particularly those that involve deep learning for medical image analysis. They would not be interested in general AI topics or those unrelated to healthcare.",
+      "answer_session_ids": [
+        "answer_d87a6ef8"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.525,
+          "token_overlap": 0.4,
+          "preference_cue": true,
+          "session_id": "answer_d87a6ef8",
+          "turn_index": 10,
+          "role": "user",
+          "sentence": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models.",
+          "source_turn_content": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models. Can you recommend some papers on this topic?"
+        },
+        {
+          "score": 0.475,
+          "token_overlap": 0.35,
+          "preference_cue": true,
+          "session_id": "answer_d87a6ef8",
+          "turn_index": 8,
+          "role": "user",
+          "sentence": "Can you recommend some research papers or articles on topics like multi-modal image fusion, transfer learning, and domain adaptation in medical imaging?",
+          "source_turn_content": "I'd like to explore some more advanced topics in deep learning for medical image analysis. Can you recommend some research papers or articles on topics like multi-modal image fusion, transfer learning, and domain adaptation in medical imaging?"
+        },
+        {
+          "score": 0.425,
+          "token_overlap": 0.3,
+          "preference_cue": true,
+          "session_id": "answer_d87a6ef8",
+          "turn_index": 8,
+          "role": "user",
+          "sentence": "I'd like to explore some more advanced topics in deep learning for medical image analysis.",
+          "source_turn_content": "I'd like to explore some more advanced topics in deep learning for medical image analysis. Can you recommend some research papers or articles on topics like multi-modal image fusion, transfer learning, and domain adaptation in medical imaging?"
+        },
+        {
+          "score": 0.325,
+          "token_overlap": 0.3,
+          "preference_cue": false,
+          "session_id": "answer_d87a6ef8",
+          "turn_index": 0,
+          "role": "user",
+          "sentence": "Can you give me an overview of the recent advancements in this field of deep learning for medical image analysis?",
+          "source_turn_content": "Can you give me an overview of the recent advancements in this field of deep learning for medical image analysis? Skip the basics as I am working in the field."
+        },
+        {
+          "score": 0.325,
+          "token_overlap": 0.3,
+          "preference_cue": false,
+          "session_id": "answer_d87a6ef8",
+          "turn_index": 6,
+          "role": "user",
+          "sentence": "Can you recommend some relevant research papers or articles on explainable AI in medical image analysis that I can read to learn more about this topic?",
+          "source_turn_content": "Can you recommend some relevant research papers or articles on explainable AI in medical image analysis that I can read to learn more about this topic?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "RETRIEVAL",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "I'd like to explore some more research papers and articles on the topic of explainable AI in medical image analysis, specifically on techniques for visualizing and interpreting deep learning models.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No",
+          "answer": "Based on your interest in sustainable fashion and environmental issues, you might enjoy publications or conferences focused on circular fashion, textile recycling, and supply-chain transparency. I don’t know specific recent titles or conference names from what you’ve shared.",
+          "retrieved_context_turn_count": 36,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_d87a6ef8": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 4,
+            "ledger_rows_found": 4,
+            "actual_usd": 0.00291799,
+            "reserved_estimate_usd": 0.01400787
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "You’ve discussed sustainable fashion, sustainability, and regenerative agriculture, but I don’t have specific publications or conferences from our context to recommend. Which of those topics should I focus on?",
+          "retrieved_context_turn_count": 54,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_d87a6ef8": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 5,
+            "ledger_rows_found": 5,
+            "actual_usd": 0.00634184,
+            "reserved_estimate_usd": 0.02107787
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "Based on your interest in sustainable fashion, you might enjoy publications or events focused on circular fashion, supply-chain transparency, and textile recycling. I don’t have specific recent titles or conference names in the context, though.",
+          "retrieved_context_turn_count": 59,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_d87a6ef8": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 5,
+            "ledger_rows_found": 5,
+            "actual_usd": 0.00647327,
+            "reserved_estimate_usd": 0.02109963
+          }
+        }
+      }
+    },
+    {
+      "question_id": "afdc33df",
+      "question_type": "single-session-preference",
+      "question": "My kitchen's becoming a bit of a mess again. Any tips for keeping it clean?",
+      "gold_answer": "The user would prefer responses that acknowledge and build upon their existing efforts to organize their kitchen, such as utilizing their new utensil holder to keep countertops clutter-free. They would also appreciate tips that address their concern for maintaining their granite surface, particularly around the sink area. Preferred responses would provide practical and actionable steps to maintain cleanliness, leveraging the user's current tools and setup. They might not prefer generic or vague suggestions that do not take into account their specific kitchen setup or concerns.",
+      "answer_session_ids": [
+        "answer_8549e5e0"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.2045,
+          "token_overlap": 0.1795,
+          "preference_cue": false,
+          "session_id": "answer_8549e5e0",
+          "turn_index": 2,
+          "role": "user",
+          "sentence": "I recently bought a new utensil holder to keep countertops clutter-free.",
+          "source_turn_content": "I also need some help with organizing my kitchen utensils, can you give me some tips on how to maximize the space in my utensil holder? I recently bought a new utensil holder to keep countertops clutter-free."
+        },
+        {
+          "score": 0.1506,
+          "token_overlap": 0.0256,
+          "preference_cue": true,
+          "session_id": "answer_8549e5e0",
+          "turn_index": 8,
+          "role": "user",
+          "sentence": "I'm also having some issues with my slow cooker, I want to try making yogurt in it, can you give me some tips on how to do that?",
+          "source_turn_content": "I'm also having some issues with my slow cooker, I want to try making yogurt in it, can you give me some tips on how to do that?"
+        },
+        {
+          "score": 0.1276,
+          "token_overlap": 0.1026,
+          "preference_cue": false,
+          "session_id": "answer_8549e5e0",
+          "turn_index": 2,
+          "role": "user",
+          "sentence": "I also need some help with organizing my kitchen utensils, can you give me some tips on how to maximize the space in my utensil holder?",
+          "source_turn_content": "I also need some help with organizing my kitchen utensils, can you give me some tips on how to maximize the space in my utensil holder? I recently bought a new utensil holder to keep countertops clutter-free."
+        },
+        {
+          "score": 0.125,
+          "token_overlap": 0.0,
+          "preference_cue": true,
+          "session_id": "answer_8549e5e0",
+          "turn_index": 10,
+          "role": "user",
+          "sentence": "I'd like to know more about using different types of milk to create non-dairy yogurt alternatives.",
+          "source_turn_content": "I'd like to know more about using different types of milk to create non-dairy yogurt alternatives. Can you provide more information on that?"
+        },
+        {
+          "score": 0.125,
+          "token_overlap": 0.0,
+          "preference_cue": true,
+          "session_id": "answer_8549e5e0",
+          "turn_index": 12,
+          "role": "user",
+          "sentence": "I'd like to know more about thickening agents and how to use them in non-dairy yogurt alternatives.",
+          "source_turn_content": "I'd like to know more about thickening agents and how to use them in non-dairy yogurt alternatives. Can you provide more information on that?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": true,
+        "run1": false,
+        "run2": true
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "READER",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "I recently bought a new utensil holder to keep countertops clutter-free.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "A few ideas from what we’ve discussed: give items a designated place, group similar utensils together, and use dividers or small containers to keep them from becoming cluttered. Store only what you use often within easy reach, and clean the utensil holder regularly.",
+          "retrieved_context_turn_count": 13,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I recently bought a new utensil holder to keep countertops clutter-free.",
+            "context_session_id": "answer_8549e5e0",
+            "context_turn_index": 75
+          },
+          "answer_session_import": {
+            "answer_8549e5e0": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00162475,
+            "reserved_estimate_usd": 0.00904963
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No",
+          "answer": "I don’t know from the context provided; it doesn’t include any kitchen-cleaning tips.",
+          "retrieved_context_turn_count": 0,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_8549e5e0": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00089437,
+            "reserved_estimate_usd": 0.00792475
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "Try giving utensils a designated place, grouping similar items, and using dividers or small containers to keep them from becoming cluttered. Put frequently used tools where they’re easy to reach, and clean the utensil holder regularly so food residue doesn’t build up.",
+          "retrieved_context_turn_count": 18,
+          "source_sentence_present": {
+            "present": true,
+            "matched_sentence": "I recently bought a new utensil holder to keep countertops clutter-free.",
+            "context_session_id": "answer_8549e5e0",
+            "context_turn_index": 75
+          },
+          "answer_session_import": {
+            "answer_8549e5e0": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00193088,
+            "reserved_estimate_usd": 0.00953912
+          }
+        }
+      }
+    },
+    {
+      "question_id": "d6233ab6",
+      "question_type": "single-session-preference",
+      "question": "I've been feeling nostalgic lately. Do you think it would be a good idea to attend my high school reunion?",
+      "gold_answer": "The user would prefer responses that draw upon their personal experiences and memories, specifically their positive high school experiences such as being part of the debate team and taking advanced placement courses. They would prefer suggestions that highlight the potential benefits of attending the reunion, such as reconnecting with old friends and revisiting favorite subjects like history and economics. The user might not prefer generic or vague responses that do not take into account their individual experiences and interests.",
+      "answer_session_ids": [
+        "answer_b0fac439"
+      ],
+      "supporting_statements": [
+        {
+          "score": 0.3375,
+          "token_overlap": 0.3125,
+          "preference_cue": false,
+          "session_id": "answer_b0fac439",
+          "turn_index": 2,
+          "role": "user",
+          "sentence": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics.",
+          "source_turn_content": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?"
+        },
+        {
+          "score": 0.1562,
+          "token_overlap": 0.0312,
+          "preference_cue": true,
+          "session_id": "answer_b0fac439",
+          "turn_index": 8,
+          "role": "user",
+          "sentence": "I'd like to explore more courses or certifications that can help me build my skills in data science, specifically in machine learning and deep learning.",
+          "source_turn_content": "I've already taken some online certification courses in Python programming and data visualization, and I've been reading books on machine learning and artificial intelligence. I'd like to explore more courses or certifications that can help me build my skills in data science, specifically in machine learning and deep learning. Can you recommend some courses or certifications that can help me achieve this goal?"
+        },
+        {
+          "score": 0.15,
+          "token_overlap": 0.125,
+          "preference_cue": false,
+          "session_id": "answer_b0fac439",
+          "turn_index": 6,
+          "role": "user",
+          "sentence": "I am asking because a lot of old high school friends plan to work after the graduate from university.",
+          "source_turn_content": "I'm not sure if I'm ready to commit to a full Master's program yet. I am asking because a lot of old high school friends plan to work after the graduate from university. Can you recommend some online courses or certifications that can help me build my skills in data science and get a feel for the field?"
+        },
+        {
+          "score": 0.125,
+          "token_overlap": 0.0,
+          "preference_cue": true,
+          "session_id": "answer_b0fac439",
+          "turn_index": 4,
+          "role": "user",
+          "sentence": "How can I assess whether I have a strong enough foundation in math and statistics to succeed in a Data Science program?",
+          "source_turn_content": "I'm still weighing the pros and cons of pursuing a Master's degree. How can I assess whether I have a strong enough foundation in math and statistics to succeed in a Data Science program?"
+        }
+      ],
+      "statement_found_in_dataset_source": true,
+      "checkpoint_imported_answer_sessions_all_runs": true,
+      "context_presence_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "verdict_by_run": {
+        "main": false,
+        "run1": false,
+        "run2": false
+      },
+      "stage": "RETRIEVAL",
+      "classification_rule": "STORAGE if no matched source statement or any answer-session ingestion receipt is absent/false; otherwise READER if exact/normalized matched sentence appears in >=2/3 run contexts; otherwise RETRIEVAL.",
+      "evidence_quote": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics.",
+      "runs": {
+        "main": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know enough about your past experience with your classmates to say. If the nostalgia feels positive and you’d enjoy reconnecting, it may be worth considering.",
+          "retrieved_context_turn_count": 13,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_b0fac439": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00123175,
+            "reserved_estimate_usd": 0.00838812
+          }
+        },
+        "run1": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "I don’t know enough about your experiences with your classmates to say whether it’s a good idea for you. Since you’re feeling nostalgic, you could consider going if you’re curious and feel comfortable—but there’s no need to go just because you feel nostalgic.",
+          "retrieved_context_turn_count": 18,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_b0fac439": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.00171075,
+            "reserved_estimate_usd": 0.009046
+          }
+        },
+        "run2": {
+          "correct": false,
+          "judge_raw": "No.",
+          "answer": "Since you’re feeling nostalgic, going could be a nice way to reconnect and revisit old memories—if the idea feels exciting rather than stressful. You could go with modest expectations and give yourself permission to leave early if it doesn’t feel right.",
+          "retrieved_context_turn_count": 18,
+          "source_sentence_present": {
+            "present": false,
+            "matched_sentence": null,
+            "context_session_id": null,
+            "context_turn_index": null
+          },
+          "answer_session_import": {
+            "answer_b0fac439": {
+              "ingested": true,
+              "mode": "dual"
+            }
+          },
+          "cost": {
+            "reservation_count": 3,
+            "ledger_rows_found": 3,
+            "actual_usd": 0.0016865,
+            "reserved_estimate_usd": 0.00904337
+          }
+        }
+      }
+    }
+  ],
+  "validation_plan": {
+    "question_ids": [
+      "09d032c9",
+      "0a34ad58",
+      "0edc2aef",
+      "1c0ddc50",
+      "32260d93",
+      "35a27287",
+      "75832dbd",
+      "afdc33df",
+      "d6233ab6",
+      "06878be2",
+      "195a1a1b",
+      "38146c39",
+      "57f827a0",
+      "6b7dfb22",
+      "95228167",
+      "b6025781",
+      "caf03d32",
+      "d24813b1"
+    ],
+    "treatment_ids": [
+      "09d032c9",
+      "0a34ad58",
+      "0edc2aef",
+      "1c0ddc50",
+      "32260d93",
+      "35a27287",
+      "75832dbd",
+      "afdc33df",
+      "d6233ab6"
+    ],
+    "control_ids": [
+      "06878be2",
+      "195a1a1b",
+      "38146c39",
+      "57f827a0",
+      "6b7dfb22",
+      "95228167",
+      "b6025781",
+      "caf03d32",
+      "d24813b1"
+    ],
+    "n": 18,
+    "writer_model": "gpt-6-luna",
+    "judge_model": "gpt-4o (faithful checkpoint judge model)",
+    "parity_settings_from_faithful_run_manifest": {
+      "run_profile": "gpt6-luna-full-s-turns-v2-exp8",
+      "retrieval_tier": "turns",
+      "embedding_provider": "fastembed",
+      "embedding_model": "BAAI/bge-small-en-v1.5",
+      "embedding_dimensions": "768",
+      "selection_policy_include_question_ids": "null",
+      "selection_policy_exclude_question_ids": "null",
+      "tool_round_policy_json": "{\"allow_final_response_after_tool_rounds\":true,\"final_response_instruction\":\"This is the final response. Do not call tools; finish with a concise text response or acknowledgement.\",\"final_response_tools\":false,\"max_output_tokens\":2048,\"max_responses\":4,\"max_tool_rounds\":3}",
+      "max_budget_usd": "150.0",
+      "operational_stop_usd": "150.0",
+      "agent_id": "faithful-s36",
+      "owner_id": "faithful-gpt6-fulls-exp8-20260930"
+    },
+    "cost_basis": "Main faithful-run item cost: all answer.text (gpt-6-luna answerer) reservations plus that item's GPT-4o judge reservation, joined to budget-ledger actual_usd and estimated_usd. FULL_S_PROFILE imports the source sessions locally (faithful_s36.py:1933-1945), so there is no separate paid session-writer call to add.",
+    "per_item_actual_usd_mean": 0.00199567,
+    "per_item_actual_usd_median": 0.00179,
+    "per_item_reserved_estimate_usd_mean": 0.01029669,
+    "18_item_actual_cost_estimate_usd": 0.03592211,
+    "18_item_reserved_estimate_usd": 0.18534037,
+    "item_costs": {
+      "09d032c9": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00176075,
+        "reserved_estimate_usd": 0.00918375
+      },
+      "0a34ad58": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00096825,
+        "reserved_estimate_usd": 0.00795462
+      },
+      "0edc2aef": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00255054,
+        "reserved_estimate_usd": 0.01295738
+      },
+      "1c0ddc50": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00169775,
+        "reserved_estimate_usd": 0.00910812
+      },
+      "32260d93": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00117425,
+        "reserved_estimate_usd": 0.00801813
+      },
+      "35a27287": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00268435,
+        "reserved_estimate_usd": 0.01304813
+      },
+      "75832dbd": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00291799,
+        "reserved_estimate_usd": 0.01400787
+      },
+      "afdc33df": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00162475,
+        "reserved_estimate_usd": 0.00904963
+      },
+      "d6233ab6": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00123175,
+        "reserved_estimate_usd": 0.00838812
+      },
+      "06878be2": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00198862,
+        "reserved_estimate_usd": 0.00927025
+      },
+      "195a1a1b": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00091238,
+        "reserved_estimate_usd": 0.0078355
+      },
+      "38146c39": {
+        "reservation_count": 5,
+        "ledger_rows_found": 5,
+        "actual_usd": 0.00469928,
+        "reserved_estimate_usd": 0.01740712
+      },
+      "57f827a0": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00153787,
+        "reserved_estimate_usd": 0.008714
+      },
+      "6b7dfb22": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00190612,
+        "reserved_estimate_usd": 0.00954137
+      },
+      "95228167": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.0018435,
+        "reserved_estimate_usd": 0.009237
+      },
+      "b6025781": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.0016725,
+        "reserved_estimate_usd": 0.00896138
+      },
+      "caf03d32": {
+        "reservation_count": 4,
+        "ledger_rows_found": 4,
+        "actual_usd": 0.00293221,
+        "reserved_estimate_usd": 0.01346412
+      },
+      "d24813b1": {
+        "reservation_count": 3,
+        "ledger_rows_found": 3,
+        "actual_usd": 0.00181925,
+        "reserved_estimate_usd": 0.00919388
+      }
+    },
+    "execution_warning": "Plan only. Do not run the benchmark in this analysis script; treatment requires authorized provider execution."
+  }
+}
