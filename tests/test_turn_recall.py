@@ -347,6 +347,51 @@ async def test_turn_keyword_query_uses_or_joined_content_lexemes():
     assert build_or_tsquery("added many") == "added | many"
 
 
+async def test_recall_turns_keyword_sql_uses_sanitized_or_tsquery():
+    class CapturingExecutor:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch(self, *args):
+            self.calls.append(args)
+            return []
+
+    executor = CapturingExecutor()
+    query = "What preference did I share about a rooftop pool?"
+    results = await recall_turns(
+        None, query, embedding=None, executor=executor, top_k=5,
+    )
+
+    assert results == []
+    assert len(executor.calls) == 1
+    sql, *args = executor.calls[0]
+    assert "to_tsquery('english', $1)" in sql
+    assert "websearch_to_tsquery" not in sql
+    assert args[0] == "what | preference | did | i | share | about | a | rooftop | pool"
+
+
+async def test_recall_turns_empty_sanitized_keyword_query_skips_fetch():
+    class CapturingExecutor:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch(self, *args):
+            self.calls.append(args)
+            return []
+
+    executor = CapturingExecutor()
+    diagnostics = []
+    results = await recall_turns(
+        None, "!@#$%^&*()", embedding=None, executor=executor, top_k=5,
+        sql_diag_callback=diagnostics.append,
+    )
+
+    assert results == []
+    assert executor.calls == []
+    assert diagnostics[-1]["phase"] == "keyword"
+    assert diagnostics[-1]["row_count"] == 0
+
+
 async def test_recall_turns_keyword_or_matches_separate_terms(pool):
     episode = await create_episode(
         pool, EpisodeCreate(title="OR keyword fixture", project_id="proj-or-keyword")
