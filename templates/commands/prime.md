@@ -1,6 +1,6 @@
 ---
 description: Session boot sequence — load Weft persistent memory and report status
-allowed-tools: [mcp__weft__weft_prime, mcp__weft__weft_focus]
+allowed-tools: [mcp__weft__weft_prime, mcp__weft__weft_focus, mcp__weft__weft_recall]
 ---
 
 # Session Prime
@@ -11,10 +11,15 @@ Run at the start of every session before doing other work.
 
 Call `weft_prime(disclosure="progressive", project_id="<project-id>")`
 when the repo instructions name a Weft project id (for example,
-`AGENTS.md` or `CLAUDE.md` says `project_id="weft"`). If no explicit
-project id is available, call `weft_prime(disclosure="progressive")` and
-report any project-resolution warning instead of treating an unscoped prime
-as project continuity.
+`AGENTS.md` or `CLAUDE.md` says `project_id="weft"`).
+
+Only use a project id the instructions state explicitly for Weft, copied
+verbatim. Don't guess or reuse ids from other tooling (task queues, CI,
+other MCP servers) — different systems use different keys.
+
+If no explicit project id is available, call
+`weft_prime(disclosure="progressive")` and report any project-resolution
+warning instead of treating an unscoped prime as project continuity.
 
 The response contains:
 
@@ -25,6 +30,11 @@ The response contains:
 - `behaviors`, `decisions`, `entities`, `recent_work` — returned as counts only; load specific sections later via `weft_focus(intent="<what you're doing>")`
 
 Read the returned context carefully — don't skim. The handoff in particular sets up where to start.
+
+If the response shows `degraded: true` (or a database-unavailable error), treat it
+as untrusted — sections may be silently missing or falsely empty. Verify any
+"nothing found" conclusion with `weft_recall(query="<keywords>")` before acting,
+and prefer `weft_recall` for the rest of the session.
 
 ## Step 2: Report
 

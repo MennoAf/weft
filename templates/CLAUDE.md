@@ -12,7 +12,7 @@ Strip the HTML comment when copying.
 
 Use `/prime` if the slash command is installed (see `templates/commands/prime.md`). Otherwise, at the start of every session:
 
-1. Call `weft_prime(disclosure="progressive")` — your persistent memory. Behaviors, rules, handoffs, and context live there.
+1. Call `weft_prime(disclosure="progressive")` — your persistent memory. Behaviors, rules, handoffs, and context live there. If your repo instructions give an explicit Weft project id (e.g. `weft_prime(project_id="my-project")`), pass it verbatim; don't reuse project ids from other tooling — different systems use different keys.
 2. Read the returned context carefully. The handoff is the bridge from the prior session.
 3. Report a brief status to the user, then ask what they're working on.
 
