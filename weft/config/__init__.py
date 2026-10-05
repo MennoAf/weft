@@ -760,6 +760,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.embedding.provider = provider
     if model := os.environ.get("WEFT_EMBEDDING_MODEL"):
         config.embedding.model = model
+    if dims := os.environ.get("WEFT_EMBEDDING_DIMENSIONS"):
+        config.embedding.dimensions = int(dims)
     if provider := os.environ.get("WEFT_TEXT_PROVIDER"):
         config.text_generation.provider = provider
     for role in (

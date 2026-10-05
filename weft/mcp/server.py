@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import sys
@@ -640,6 +641,83 @@ async def _prepare_database_schema(
         raise
 
 
+def _unconfigured_embedding_provider_warning(
+    *,
+    provider_env_set: bool,
+    config_provider: str,
+    legacy_active: bool,
+) -> str | None:
+    """Startup tripwire for a silently-swapped embedding provider.
+
+    A corpus embedded by a configured provider silently falls back to the
+    fastembed default when the deploy environment never sets
+    ``WEFT_EMBEDDING_PROVIDER``, and nothing at boot says so. Return the
+    warning text when the operator left the provider unconfigured AND the
+    persisted active profile was still the v75 ``'legacy'`` placeholder (no
+    boot has ever recorded a real provider identity); otherwise None.
+    """
+    if provider_env_set or config_provider != "fastembed" or not legacy_active:
+        return None
+    return (
+        "Embedding provider not explicitly configured; corpus may have been "
+        "embedded by a different provider (check WEFT_EMBEDDING_PROVIDER/"
+        "MODEL/DIMENSIONS against the model that produced stored vectors)."
+    )
+
+
+async def _ensure_embedding_profile(
+    pool: asyncpg.Pool, embedding: EmbeddingProvider
+) -> bool:
+    """Record the configured embedding identity as a real profile row.
+
+    The v75 migration tags every pre-existing corpus with a ``'legacy'``
+    placeholder profile (provider/model unknown, dimensions=1) and points
+    ``embedding_profile_state`` at it. Once the configured provider has been
+    validated at startup, seed a real profile row using the same
+    ``emb-<sha256>`` identity the re-embed workflow builds
+    (``ReembedProfile.from_provider``) and move the active pointer off the
+    placeholder. The ``'legacy'`` row itself is never modified — it stays the
+    honest identity for vectors written before profiles existed — and stored
+    vectors are not rewritten here (that belongs to a future re-embed run).
+
+    Idempotent: the profile insert is ``ON CONFLICT DO NOTHING`` and the
+    active pointer only moves while it is still NULL or ``'legacy'``, so a
+    second boot performs no activation writes. Returns True when the
+    persisted active pointer was NULL/``'legacy'`` before this boot (feeds
+    the unconfigured-provider startup warning).
+    """
+    from weft.db.reembed import ReembedProfile
+
+    was_legacy_active = bool(await pool.fetchval(
+        "SELECT active_profile_id IS NULL OR active_profile_id = 'legacy' "
+        "FROM embedding_profile_state WHERE state_key = 'default'",
+    ))
+    profile = ReembedProfile.from_provider(embedding)
+    await pool.execute(
+        "INSERT INTO embedding_profiles "
+        "(profile_id, provider, model, dimensions, composition, state) "
+        "VALUES ($1, $2, $3, $4, $5::jsonb, 'pending') "
+        "ON CONFLICT (profile_id) DO NOTHING",
+        profile.profile_id, profile.provider, profile.model,
+        profile.dimensions, json.dumps(profile.composition),
+    )
+    flipped = await pool.execute(
+        "UPDATE embedding_profile_state "
+        "SET active_profile_id = $1, updated_at = now() "
+        "WHERE state_key = 'default' "
+        "AND (active_profile_id IS NULL OR active_profile_id = 'legacy')",
+        profile.profile_id,
+    )
+    if flipped == "UPDATE 1":
+        await pool.execute(
+            "UPDATE embedding_profiles SET state = 'active', "
+            "activated_at = COALESCE(activated_at, now()) "
+            "WHERE profile_id = $1",
+            profile.profile_id,
+        )
+    return was_legacy_active
+
+
 @asynccontextmanager
 async def _lifespan_impl(server: FastMCP):
     """Initialize database, Redis, and embedding provider."""
@@ -740,6 +818,28 @@ async def _lifespan_impl(server: FastMCP):
             embedding.provider_name, exc,
         )
         raise
+
+    # Embedding profile identity (best-effort): record the validated
+    # provider/model/dimensions as a real profile and move the active pointer
+    # off the v75 'legacy' placeholder. Bookkeeping must never block startup.
+    try:
+        was_legacy_active = await _ensure_embedding_profile(pool, embedding)
+    except (asyncpg.PostgresError, OSError) as exc:
+        logger.warning("Embedding profile seeding failed (non-fatal): %s", exc)
+        was_legacy_active = False
+
+    profile_warning = _unconfigured_embedding_provider_warning(
+        provider_env_set=bool(os.environ.get("WEFT_EMBEDDING_PROVIDER")),
+        config_provider=config.embedding.provider,
+        legacy_active=was_legacy_active,
+    )
+    if profile_warning:
+        logger.warning(
+            "%s Active embedding profile was still the 'legacy' placeholder; "
+            "current config: provider=%s model=%s dimensions=%s",
+            profile_warning, config.embedding.provider,
+            config.embedding.model, config.embedding.dimensions,
+        )
 
     # Re-embed rows nulled by dimension migration (best-effort)
     if migrated_tables:

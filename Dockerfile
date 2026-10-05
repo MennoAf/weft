@@ -16,13 +16,13 @@ WORKDIR /app
 # Copy dependency files first (layer caching)
 COPY pyproject.toml uv.lock README.md docker-compose.weft.yml ./
 
-# Install dependencies (no dev deps) and build the package
-RUN uv sync --no-dev --frozen
+# Install dependencies (no dev deps, all provider extras) and build the package
+RUN uv sync --no-dev --frozen --all-extras
 
 # Copy source code and rebuild with source included
 COPY weft/ weft/
 COPY capability_registry/ capability_registry/
-RUN find /app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null; uv sync --no-dev --frozen
+RUN find /app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null; uv sync --no-dev --frozen --all-extras
 
 # Make everything accessible to appuser
 RUN chown -R appuser:appuser /app
