@@ -1316,6 +1316,7 @@ def show():
         "redis.url": "WEFT_REDIS_URL",
         "embedding.provider": "WEFT_EMBEDDING_PROVIDER",
         "embedding.model": "WEFT_EMBEDDING_MODEL",
+        "embedding.dimensions": "WEFT_EMBEDDING_DIMENSIONS",
         "log_level": "WEFT_LOG_LEVEL",
     }
 

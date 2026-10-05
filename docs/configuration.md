@@ -17,6 +17,7 @@ To inspect what's actually in effect: `weft config show` prints the resolved con
 | `WEFT_REDIS_URL` | Redis connection string | `redis://localhost:6380` |
 | `WEFT_EMBEDDING_PROVIDER` | Embedding provider | `fastembed` |
 | `WEFT_EMBEDDING_MODEL` | Embedding model | `BAAI/bge-small-en-v1.5` |
+| `WEFT_EMBEDDING_DIMENSIONS` | Embedding vector width | `768` |
 | `WEFT_LOG_LEVEL` | Log level | `INFO` |
 | `WEFT_MIGRATION_MODE` | `apply` runs owner-managed DDL; `verify` performs a read-only exact migration-version check for restricted hosted runtimes | `apply` |
 | `WEFT_API_KEY` | Hosted-server bearer (legacy — auto-bootstraps a token row at startup; see [authentication](user-identity.md)) | unset |
@@ -160,3 +161,58 @@ copy benchmark content into the image. Internal benchmark source and RC work
 belong on separate branches or worktrees and must never be the production deploy
 ref. Leave production on the known-good recovery image until the RC has passed
 review and a new production tag is explicitly approved.
+
+## Production deploy: embedding provider
+
+The MCP server resolves its embedding provider at boot. Set these variables on
+the hosting environment **before** deploying, and keep them identical for the
+lifetime of a corpus — vectors written under one provider/model/dimensions are
+not comparable with vectors from another:
+
+| Variable | Example | Notes |
+|----------|---------|-------|
+| `WEFT_EMBEDDING_PROVIDER` | `openai` | `fastembed` (default, no API key), `openai`, `google` |
+| `WEFT_EMBEDDING_MODEL` | `text-embedding-3-small` | Must match the model that produced the stored vectors |
+| `WEFT_EMBEDDING_DIMENSIONS` | `768` | Must match the width of the stored `vector` columns |
+
+OpenAI example, matching a corpus embedded with `text-embedding-3-small` at 768
+dimensions:
+
+```bash
+fly secrets set WEFT_EMBEDDING_PROVIDER=openai \
+    WEFT_EMBEDDING_MODEL=text-embedding-3-small \
+    WEFT_EMBEDDING_DIMENSIONS=768 \
+    OPENAI_API_KEY=...
+```
+
+The image must include the provider's optional dependency. The shipped
+`Dockerfile` installs every extra (`uv sync --no-dev --frozen --all-extras`),
+so any built-in provider works out of the box; if you build your own image,
+keep that flag — otherwise `WEFT_EMBEDDING_PROVIDER=openai` aborts startup with
+`Embedding provider 'openai' is unavailable or unknown. Install the matching
+optional dependency`.
+
+At startup the server records the configured provider/model/dimensions as a
+real row in `embedding_profiles` and points `embedding_profile_state` at it,
+moving off the v75 `legacy` placeholder (the placeholder row is never
+rewritten). If you boot **without** setting `WEFT_EMBEDDING_PROVIDER` while
+the active profile is still the `legacy` placeholder, startup logs a loud
+warning — treat it as a deploy blocker, not noise: the stored corpus may have
+been embedded by a different provider, in which case vector recall degrades
+until the environment matches the model that produced the vectors. Switching
+providers after data exists requires a full re-embed (see `weft re-embed`).
+
+### Bluegreen deploys with a Supabase session-mode pooler
+
+If `DATABASE_URL` points at a Supabase **session-mode** pooler, the pooler
+caps concurrent client sessions (observed in production: `EMAXCONNSESSION`
+with pool size 15). A default bluegreen deploy starts the new machine while
+the old machine still holds its pool, so the new machine cannot obtain
+sessions and fails its health checks. Either deploy with
+
+```bash
+fly deploy --strategy=immediate
+```
+
+so the old machine is replaced instead of overlapped, or stop the old machine
+first (`fly machine stop <machine-id>`) to free the session budget.
