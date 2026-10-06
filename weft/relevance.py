@@ -208,7 +208,9 @@ def rank_memories(
     Returns results sorted by score descending.
     """
     scored = [score_memory(r, weights=weights, now=now) for r in recalls]
-    scored.sort(key=lambda s: s.score, reverse=True)
+    # Secondary sort by memory ID keeps tie order deterministic regardless
+    # of input order — mirrors rank_turns' reproducible A/B comparisons.
+    scored.sort(key=lambda s: (-s.score, s.memory.id))
     return scored
 
 
