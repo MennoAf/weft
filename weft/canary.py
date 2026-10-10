@@ -745,6 +745,19 @@ _CANARY_MISS_RATE_ALERT_THRESHOLD = 0.10
 # cohorts, enough samples for the >=30-check trustworthy gate while staying recent.
 _CANARY_HEALTH_WINDOW_DAYS = 14
 
+# Recent sub-window (days) that decides whether the drift tripwire is CURRENTLY
+# firing. The 14-day windowed rate is the reported metric, but tripping on it
+# lets one catastrophic-but-resolved incident keep the tripwire screaming for
+# two clean weeks: the Oct 2026 FastEmbed-fallback burst (~990 miss events over
+# 2 runs) held the windowed rate above the ceiling until its events aged out,
+# even after four consecutive 100%-hit audits. Tripping on the RECENT rate fires
+# immediately on a real regression (an acute burst and a chronic elevated rate
+# both cross the ceiling within the recent window) and clears within
+# _CANARY_TRIP_WINDOW_DAYS of recovery. Low-frequency deployments whose recent
+# window carries fewer than _CANARY_MIN_TRIP_SAMPLE checks fall back to the
+# windowed rate, preserving the old behavior where the recent sample is too thin.
+_CANARY_TRIP_WINDOW_DAYS = 3
+
 # Retention horizon (days) for recall_canary_audit rows. Kept > the health window
 # so the trailing window is always fully covered, with a buffer of history for
 # ad-hoc diagnostics; rows older than this can never affect a windowed rate and
@@ -782,9 +795,13 @@ async def canary_health(
     Trustworthiness is sample-based, not probe-type-based: an arm is
     ``trustworthy`` once its WINDOWED ``checks >= _CANARY_MIN_TRIP_SAMPLE``
     (below that it carries ``label='uncalibrated'``). The drift ``tripwire``
-    fires only for a trustworthy arm whose windowed ``miss_rate`` crosses
-    ``_CANARY_MISS_RATE_ALERT_THRESHOLD`` — gated on the min-sample so a thin
-    sample can't false-trip.
+    fires for a trustworthy arm whose RECENT rate — over the trailing
+    ``_CANARY_TRIP_WINDOW_DAYS``, when that window carries at least
+    ``_CANARY_MIN_TRIP_SAMPLE`` checks, else the 14-day rate — crosses
+    ``_CANARY_MISS_RATE_ALERT_THRESHOLD``. Tripping on the recent rate keeps a
+    resolved incident burst from holding the tripwire open while its events age
+    out of the reported 14-day rate, without losing sensitivity to chronic or
+    acute regressions.
 
     ``user_id`` scopes the read EXPLICITLY rather than relying on the
     ``app.user_id`` GUC — the primer and scheduler contexts do not reliably set
@@ -833,6 +850,25 @@ async def canary_health(
             _CANARY_HEALTH_WINDOW_DAYS,
             user_id,
         )
+        # Query 2b — RECENT outcomes over the trip sub-window. The drift tripwire
+        # fires on this rate (see _CANARY_TRIP_WINDOW_DAYS); the 14-day rate above
+        # stays the reported metric so a resolved incident decays visibly instead
+        # of vanishing.
+        recent = await get_db(pool).fetch(
+            f"""
+            SELECT c.probe_type,
+                   count(a.id)                             AS checks,
+                   count(a.id) FILTER (WHERE NOT a.hit)    AS misses
+            FROM recall_canary_audit a
+            JOIN recall_canary c ON c.probe_id = a.probe_id AND c.enabled = TRUE
+            JOIN memories m ON m.id = c.memory_id AND {_UNIVERSE}
+            WHERE a.audited_at > now() - make_interval(days => $1)
+              AND a.user_id = $2
+            GROUP BY c.probe_type
+            """,
+            _CANARY_TRIP_WINDOW_DAYS,
+            user_id,
+        )
     except Exception:
         logger.debug("canary_health: aggregate query failed", exc_info=True)
         return None
@@ -852,6 +888,7 @@ async def canary_health(
         }
 
     windowed = {r["probe_type"]: r for r in window}
+    recent = {r["probe_type"]: r for r in recent}
 
     arms: dict[str, dict] = {}
     overall_last = None
@@ -867,12 +904,23 @@ async def canary_health(
         # mean something — arm-type-agnostic. Below the threshold the arm is
         # flagged 'uncalibrated' so a thin sample is never mistaken for a rate.
         trustworthy = checks >= _CANARY_MIN_TRIP_SAMPLE
-        # Drift tripwire: only a trustworthy arm whose rate crosses the absolute
-        # ceiling counts — the min-sample gate is baked into `trustworthy`.
+        # Drift tripwire: decided on the RECENT sub-window rate when it carries
+        # enough sample; fall back to the windowed rate when the deployment
+        # audits too rarely for a meaningful recent sample. Either way the
+        # min-sample gate is baked in, so a thin recent window can't trip.
+        rec = recent.get(r["probe_type"])
+        recent_checks = int(rec["checks"]) if rec else 0
+        recent_misses = int(rec["misses"]) if rec else 0
+        recent_miss_rate = (
+            round(recent_misses / recent_checks, 4) if recent_checks else None
+        )
+        if recent_checks >= _CANARY_MIN_TRIP_SAMPLE:
+            trip_rate = recent_miss_rate
+        else:
+            trip_rate = miss_rate if trustworthy else None
         tripped = (
-            trustworthy
-            and miss_rate is not None
-            and miss_rate > _CANARY_MISS_RATE_ALERT_THRESHOLD
+            trip_rate is not None
+            and trip_rate > _CANARY_MISS_RATE_ALERT_THRESHOLD
         )
         arm = {
             "probes": int(r["probes"]),
@@ -880,6 +928,9 @@ async def canary_health(
             "misses": misses,
             "checks": checks,
             "miss_rate": miss_rate,
+            "recent_checks": recent_checks,
+            "recent_miss_rate": recent_miss_rate,
+            "recent_window_days": _CANARY_TRIP_WINDOW_DAYS,
             "last_audit_at": last.isoformat() if last else None,
             "trustworthy": trustworthy,
             "tripped": tripped,
@@ -887,7 +938,7 @@ async def canary_health(
         if not trustworthy:
             arm["label"] = "uncalibrated"
         if tripped:
-            tripped_arms.append((r["probe_type"], miss_rate))
+            tripped_arms.append((r["probe_type"], trip_rate))
         arms[r["probe_type"]] = arm
         if last is not None and (overall_last is None or last > overall_last):
             overall_last = last
@@ -921,8 +972,9 @@ async def canary_health(
         worst_arm, worst_rate = max(tripped_arms, key=lambda t: t[1])
         health["tripwire"] = (
             f"⚠️ recall canary miss-rate {worst_rate:.1%} on the '{worst_arm}' arm "
-            f"exceeds the {_CANARY_MISS_RATE_ALERT_THRESHOLD:.0%} ceiling — recall "
-            "may be regressing (embedding drift, index corruption, or a filter "
+            f"over the last {_CANARY_TRIP_WINDOW_DAYS} days exceeds the "
+            f"{_CANARY_MISS_RATE_ALERT_THRESHOLD:.0%} ceiling — recall may be "
+            "regressing (embedding drift, index corruption, or a filter "
             "mismatch). Investigate before trusting recall."
         )
     return health

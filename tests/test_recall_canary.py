@@ -1220,3 +1220,81 @@ async def test_canary_health_no_trip_below_min_sample(pool, embedder):
     assert active["tripped"] is False
     assert active.get("label") == "uncalibrated"
     assert "tripwire" not in health
+
+
+async def test_canary_health_trip_clears_when_recent_window_recovered(pool, embedder):
+    """A resolved incident burst keeps the 14d rate above the ceiling but must
+    NOT hold the tripwire once the recent sub-window is clean (Oct 2026
+    FastEmbed-fallback failure mode: four 100%-hit audits after a ~99%-miss
+    burst still read 14%+ on the windowed rate for two more weeks)."""
+    mem = await _store_active_memory(pool, embedder, "resolved burst probe content")
+    pid = await enroll_canary(
+        pool, mem.id, "resolved burst probe content", probe_type="active"
+    )
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
+    )
+    # Resolved incident: 10 misses + 21 hits, 5 days old (inside the 14d
+    # window, outside the 3d trip window).
+    for _ in range(10):
+        await _record_audit_event(pool, pid, hit=False, age_days=5)
+    for _ in range(21):
+        await _record_audit_event(pool, pid, hit=True, age_days=5)
+    # Recovery: 30 consecutive hits inside the recent window.
+    for _ in range(30):
+        await _record_audit_event(pool, pid, hit=True, age_days=1)
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    active = health["arms"]["active"]
+    assert active["trustworthy"] is True
+    assert active["miss_rate"] is not None and active["miss_rate"] > 0.10
+    assert active["recent_checks"] == 30
+    assert active["recent_miss_rate"] == 0.0
+    assert active["tripped"] is False
+    assert "tripwire" not in health
+
+
+async def test_canary_health_trips_on_recent_regression(pool, embedder):
+    """Misses inside the recent sub-window cross the ceiling -> trip on the
+    RECENT rate, not the diluted windowed rate."""
+    mem = await _store_active_memory(pool, embedder, "recent regression probe")
+    pid = await enroll_canary(
+        pool, mem.id, "recent regression probe", probe_type="active"
+    )
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
+    )
+    for _ in range(10):
+        await _record_audit_event(pool, pid, hit=False, age_days=1)
+    for _ in range(21):
+        await _record_audit_event(pool, pid, hit=True, age_days=1)
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    active = health["arms"]["active"]
+    assert active["tripped"] is True
+    assert active["recent_checks"] == 31
+    assert active["recent_miss_rate"] == round(10 / 31, 4)
+    assert "tripwire" in health
+    assert "last 3 days" in health["tripwire"]
+
+
+async def test_canary_health_thin_recent_sample_falls_back_to_windowed(pool, embedder):
+    """When the recent sub-window is too thin to trust, the trip decision falls
+    back to the windowed rate (low-frequency audit deployments)."""
+    mem = await _store_active_memory(pool, embedder, "fallback probe content")
+    pid = await enroll_canary(
+        pool, mem.id, "fallback probe content", probe_type="active"
+    )
+    await pool.execute(
+        "UPDATE recall_canary SET last_audit_at = now() WHERE probe_id = $1", pid
+    )
+    # 31 checks all older than the 3d trip window; 32% miss rate on the 14d window.
+    for _ in range(10):
+        await _record_audit_event(pool, pid, hit=False, age_days=7)
+    for _ in range(21):
+        await _record_audit_event(pool, pid, hit=True, age_days=7)
+    health = await canary_health(pool, DEFAULT_TEST_USER_ID)
+    active = health["arms"]["active"]
+    assert active["recent_checks"] == 0
+    assert active["trustworthy"] is True
+    assert active["miss_rate"] is not None and active["miss_rate"] > 0.10
+    assert active["tripped"] is True
+    assert "tripwire" in health
