@@ -44,6 +44,38 @@ jobs:
       - name: Run provider-free test suite
         run: uv run --python ${{ matrix.python-version }} pytest tests/ -q
 
+  proptest:
+    name: Property tests (Hypothesis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.x'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras --python 3.13
+
+      - name: Run property-test suite
+        run: uv run --python 3.13 pytest tests/proptest -q
+
+      - name: Report test count
+        if: always()
+        run: |
+          count=$(uv run --python 3.13 pytest tests/proptest --collect-only -q 2>/dev/null | tail -1 | grep -oE '^[0-9]+' || echo "0")
+          echo "### Property Tests" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Collected **${count}** property test(s)" >> $GITHUB_STEP_SUMMARY
+
   wheel-smoke:
     name: Wheel install and Docker image smoke
     runs-on: ubuntu-latest
