@@ -1,6 +1,6 @@
 """Regression tests: non-finite inputs must not poison the relevance pipeline.
 
-Found by the property-based discovery harness (branch proptest-discovery):
+Found by property-based discovery:
 
 1. ``MemoryRecall.similarity`` had no finiteness constraint, so a NaN or
    inf similarity constructed cleanly and ``score_memory`` multiplied it

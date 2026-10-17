@@ -65,7 +65,7 @@ from weft.relevance import (
     usefulness_factor,
 )
 
-# Module-level profile per harness spec.
+# Module-level profile for the property suite.
 settings.register_profile("proptest", max_examples=200, deadline=None)
 settings.load_profile("proptest")
 
