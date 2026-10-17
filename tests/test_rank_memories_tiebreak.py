@@ -1,6 +1,6 @@
 """Regression test: rank_memories must tiebreak deterministically on memory id.
 
-Found by the property-based discovery harness (branch proptest-discovery):
+Found by property-based discovery:
 ``rank_memories`` used a bare stable sort with no tiebreaker, so tied
 scores came out in input order — memory-level rankings were
 input-order dependent. ``rank_turns`` in the same module already
