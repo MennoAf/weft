@@ -1,10 +1,10 @@
 """Property-based tests for the relevance scoring engine — ``weft/relevance.py``.
 
-Harness #3 of the proptest-praxis discovery series. The module is verified
-pure (imports: ``math``, ``dataclasses``, ``datetime``, ``weft.models`` — no
-DB code), so all properties run without fixtures or containers.
+The module is pure (imports: ``math``, ``dataclasses``, ``datetime``,
+``weft.models`` — no DB code), so all properties run without fixtures or
+containers.
 
-Properties implemented (numbering matches the harness task list):
+Properties covered:
 
 1.  Closed-form factor checks — recency at half-life == 0.5, recency(0) == 1,
     recency monotonically non-increasing in age, every factor bounded in its
@@ -31,10 +31,10 @@ Properties implemented (numbering matches the harness task list):
     huge, confidence 0 and 1: no crashes, no sign flips, in-bounds results.
 9.  Determinism — same inputs produce bit-identical scores across calls.
 
-Known doc/scan discrepancies pinned here rather than trusted:
-  * The prior scan claimed type boost range [1, 1.2]; the actual default
-    mapping boosts anti_pattern by 1.3 and everything else 1.0. The code is
-    authoritative; the tests pin {1.0, 1.3}.
+Known behavior difference:
+  * The stated type boost range [1, 1.2] does not match the actual default
+    mapping, which boosts anti_pattern by 1.3 and everything else by 1.0.
+    The code is authoritative; the tests pin {1.0, 1.3}.
 """
 
 from __future__ import annotations
@@ -238,8 +238,7 @@ def test_confidence_factor_monotone(c1: float, c2: float) -> None:
 
 @given(t=st.sampled_from(ALL_MEMORY_TYPES))
 def test_type_boost_defaults_pinned(t: MemoryType) -> None:
-    """Actual default range is {1.0, 1.3} — the prior scan's claimed [1, 1.2]
-    does not match the code. Code is authoritative; anti_pattern == 1.3."""
+    """The actual default range is {1.0, 1.3}; anti_pattern receives 1.3."""
     tb = type_boost_factor(t)
     if t is MemoryType.anti_pattern:
         assert tb == 1.3
@@ -491,8 +490,8 @@ def test_composite_finite_under_arbitrary_weights(recall: MemoryRecall,
 
 
 def test_nan_similarity_propagates_unguarded() -> None:
-    """CHARACTERIZATION (not fixed here, documented as harness finding):
-    MemoryRecall.similarity has no pydantic bound, and score_memory does not
+    """CHARACTERIZATION: MemoryRecall.similarity has no pydantic bound, and
+    score_memory does not
     re-guard it. A NaN similarity from upstream poisons the composite and,
     through it, rank_memories comparisons. The factor functions are guarded;
     the similarity pass-through is not."""
@@ -529,13 +528,11 @@ def test_rank_memories_equals_stable_descending_sort(items: list[MemoryRecall]) 
     assert scores == sorted(scores, reverse=True)
 
 
-@given(items=st.lists(recalls, min_size=1, max_size=10),
-       flip=st.booleans())
+@given(items=st.lists(recalls, min_size=1, max_size=10), data=st.data())
 def test_rank_memories_score_sequence_permutation_invariant(
-    items: list[MemoryRecall], flip: bool,
+    items: list[MemoryRecall], data: st.DataObject,
 ) -> None:
-    shuffled = list(reversed(items)) if flip else items
-    # Ensure an actual permutation happens even for palindromic inputs.
+    shuffled = data.draw(st.permutations(items))
     seq_a = [s.score for s in rank_memories(items, now=NOW)]
     seq_b = [s.score for s in rank_memories(shuffled, now=NOW)]
     assert seq_a == seq_b
