@@ -17,13 +17,14 @@ Properties covered:
     access_count, usefulness_score, accessed_at, last_boosted_at,
     similarity) never decreases the composite score.
 5.  NaN poisoning — composite is a finite float for all valid inputs.
-    (Characterization: NaN similarity IS accepted by the pydantic model and
-    propagates; see the two explicit characterization tests.)
-6.  rank_memories is an honest descending sort — equal to a stable
-    sorted(..., reverse=True) computed in the test; score sequence is
-    permutation invariant; ties preserve input order (documented actual
-    behavior: Python's stable Timsort, no tiebreaker — unlike rank_turns,
-    which tiebreaks on turn id).
+    (NaN/inf similarity is rejected by the pydantic model at construction,
+    and the confidence/usefulness factor functions floor non-finite input;
+    see the guarded-semantics tests.)
+6.  rank_memories is an honest descending sort — equal to a
+    sorted(..., key=(-score, memory.id)) computed in the test; score
+    sequence is permutation invariant; ties order by memory id ascending,
+    independent of input order (the same id-tiebreak convention as
+    rank_turns, which tiebreaks on turn id).
 7.  score_turn omits exactly {confidence, frequency, type_boost} — pinned
     structurally (ScoredTurn dataclass fields) and algebraically
     (score == base_score * recency * usefulness).
@@ -46,6 +47,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from weft.models import EpisodeTurn, Memory, MemoryRecall, MemoryType, TurnRole
 from weft.relevance import (
@@ -63,7 +65,7 @@ from weft.relevance import (
     usefulness_factor,
 )
 
-# Module-level profile per harness spec.
+# Module-level profile for the property suite.
 settings.register_profile("proptest", max_examples=200, deadline=None)
 settings.load_profile("proptest")
 
@@ -489,39 +491,41 @@ def test_composite_finite_under_arbitrary_weights(recall: MemoryRecall,
     assert math.isfinite(score_memory(recall, weights=weights, now=NOW).score)
 
 
-def test_nan_similarity_propagates_unguarded() -> None:
-    """CHARACTERIZATION: MemoryRecall.similarity has no pydantic bound, and
-    score_memory does not
-    re-guard it. A NaN similarity from upstream poisons the composite and,
-    through it, rank_memories comparisons. The factor functions are guarded;
-    the similarity pass-through is not."""
-    recall = _rec(confidence=1.0, accessed=NOW, count=0, use=1.0, boost=None,
-                  sim=float("nan"))
-    assert math.isnan(score_memory(recall, now=NOW).score)
-    inf_recall = _rec(confidence=1.0, accessed=NOW, count=0, use=1.0, boost=None,
-                      sim=float("inf"))
-    assert math.isinf(score_memory(inf_recall, now=NOW).score)
+def test_nonfinite_similarity_rejected_and_factors_floor() -> None:
+    """PINNED GUARD: MemoryRecall.similarity rejects NaN/inf at construction
+    (pydantic allow_inf_nan=False), and the public factor functions floor
+    non-finite input instead of letting it read as best quality: confidence
+    maps to 0.0, usefulness to its floor. Poison cannot reach the composite
+    and, through it, rank_memories comparisons."""
+    with pytest.raises(ValidationError):
+        _rec(confidence=1.0, accessed=NOW, count=0, use=1.0, boost=None,
+             sim=float("nan"))
+    with pytest.raises(ValidationError):
+        _rec(confidence=1.0, accessed=NOW, count=0, use=1.0, boost=None,
+             sim=float("inf"))
+    assert confidence_factor(float("nan")) == 0.0
+    assert confidence_factor(float("inf")) == 0.0
+    assert usefulness_factor(float("nan"), floor=0.5) == 0.5
+    assert usefulness_factor(float("inf"), floor=0.5) == 0.5
 
 
-def test_nan_confidence_and_usefulness_clamp_to_max() -> None:
-    """CHARACTERIZATION: the clamp's comparison ordering silently maps NaN to
-    the *maximum* factor — min(1.0, nan) keeps 1.0, max(0.0, 1.0) keeps 1.0.
-    Pydantic's ge/le bounds keep NaN out of stored models, but the pure
-    functions are public API and do not reject NaN inputs themselves."""
-    assert confidence_factor(float("nan")) == 1.0
-    assert usefulness_factor(float("nan"), floor=0.5) == 1.0
+def test_nonfinite_confidence_and_usefulness_floor_to_minimum() -> None:
+    """PINNED GUARD: the factor functions' isfinite check maps NaN to the
+    floor, so poison reads as worst quality — the bare clamp ordering
+    (max(0.0, min(1.0, nan)) keeps 1.0) would have read it as best quality."""
+    assert confidence_factor(float("nan")) == 0.0
+    assert usefulness_factor(float("nan"), floor=0.5) == 0.5
 
 
 # --- 6. rank_memories is an honest descending sort -----------------------------
 
 
 @given(items=st.lists(recalls, max_size=12))
-def test_rank_memories_equals_stable_descending_sort(items: list[MemoryRecall]) -> None:
+def test_rank_memories_equals_descending_sort_with_id_tiebreak(items: list[MemoryRecall]) -> None:
     result = rank_memories(items, now=NOW)
     expected = sorted(
         (score_memory(r, now=NOW) for r in items),
-        key=lambda s: s.score,
-        reverse=True,
+        key=lambda s: (-s.score, s.memory.id),
     )
     assert result == expected
     scores = [s.score for s in result]
@@ -538,21 +542,24 @@ def test_rank_memories_score_sequence_permutation_invariant(
     assert seq_a == seq_b
 
 
-@given(sim=unit_float, conf=unit_float, n=st.integers(2, 6))
-def test_rank_memories_ties_preserve_input_order(
-    sim: float, conf: float, n: int,
+@given(sim=unit_float, conf=unit_float, n=st.integers(2, 6), flip=st.booleans())
+def test_rank_memories_ties_order_by_memory_id(
+    sim: float, conf: float, n: int, flip: bool,
 ) -> None:
-    """DOCUMENTED ACTUAL TIE BEHAVIOR: rank_memories uses list.sort with no
-    tiebreaker, so equal scores come out in input (stable Timsort) order.
-    Distinct ids make the identity check meaningful; every other scoring
-    field is identical, so scores tie exactly."""
+    """PINNED TIE BEHAVIOR: rank_memories tiebreaks on (-score, memory.id),
+    so equal scores come out in memory-id ascending order regardless of
+    input order (mirrors rank_turns' turn-id tiebreak). Distinct ids make
+    the ordering check meaningful; every other scoring field is identical,
+    so scores tie exactly."""
     items = [
         _rec(conf, NOW - timedelta(days=1), 3, 0.8, None, sim, mem_id=f"weft-tie{i:04d}")
         for i in range(n)
     ]
+    if flip:
+        items.reverse()
     result = rank_memories(items, now=NOW)
-    assert [s.memory.id for s in result] == [r.memory.id for r in items]
-    assert len({s.score for s in result}) == 1  # genuine tie, not ordered by id
+    assert [s.memory.id for s in result] == sorted(r.memory.id for r in items)
+    assert len({s.score for s in result}) == 1  # genuine tie, ordered by id
 
 
 @given(sims=st.lists(unit_float, min_size=2, max_size=8, unique=True),
@@ -580,8 +587,9 @@ def test_rank_memories_empty_list_is_empty() -> None:
                     min_size=2, max_size=2, unique=True),
        base_score=unit_float)
 def test_rank_turns_tiebreak_is_turn_id_ascending(ids: list[str], base_score: float) -> None:
-    """rank_turns pins a secondary sort on turn id; rank_memories does not
-    (see tie test above). Same scored fields → exact tie → id order."""
+    """rank_turns pins a secondary sort on turn id, and rank_memories now
+    mirrors it on memory id (see tie test above). Same scored fields →
+    exact tie → id order."""
     turn_items = [
         (
             EpisodeTurn(

@@ -63,7 +63,11 @@ def confidence_factor(confidence: float) -> float:
     """Confidence contributes directly as a multiplicative factor.
 
     Range: [0.0, 1.0]. Higher confidence = higher score.
+    Non-finite input maps to the floor (0.0) so a NaN/inf confidence
+    reads as zero quality, never best quality.
     """
+    if not math.isfinite(confidence):
+        return 0.0
     return max(0.0, min(1.0, confidence))
 
 
@@ -123,6 +127,10 @@ def usefulness_factor(
     The floor controls the minimum factor (default 0.5 = worst memories
     get halved, not zeroed).
     """
+    # Non-finite input reads as worst-quality (the floor), never the
+    # ceiling — CPython's max(0.0, min(1.0, nan)) would otherwise keep 1.0.
+    if not math.isfinite(usefulness_score):
+        return floor
     clamped = max(0.0, min(1.0, usefulness_score))
 
     # Apply time decay if we know when the memory was last boosted
@@ -200,7 +208,9 @@ def rank_memories(
     Returns results sorted by score descending.
     """
     scored = [score_memory(r, weights=weights, now=now) for r in recalls]
-    scored.sort(key=lambda s: s.score, reverse=True)
+    # Secondary sort by memory ID keeps tie order deterministic regardless
+    # of input order — mirrors rank_turns' reproducible A/B comparisons.
+    scored.sort(key=lambda s: (-s.score, s.memory.id))
     return scored
 
 

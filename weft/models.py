@@ -1037,7 +1037,11 @@ class MemoryRecall(BaseModel):
     """Result from a recall/search operation."""
 
     memory: Memory
-    similarity: float = 0.0
+    # Reject NaN/inf at construction so poison cannot flow through
+    # score_memory. Finite values outside [0, 1] are allowed: vector
+    # search yields 1 - cosine_distance (can be negative) and
+    # facet-boosted keyword ranks exceed 1.0.
+    similarity: float = Field(default=0.0, allow_inf_nan=False)
 
     @property
     def relevance_score(self) -> float:
