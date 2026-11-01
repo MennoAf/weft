@@ -26,6 +26,26 @@ from weft.text_generation import GenerationResponse
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _anthropic_legacy_provider(monkeypatch):
+    """Pin the legacy Anthropic provider for this module.
+
+    These tests exercise the Haiku default-model pipeline with
+    Anthropic-shaped mock clients. The package default is now ``openai``
+    with bring-your-own models, so tests targeting the legacy pipeline pin
+    ``anthropic`` explicitly instead of relying on the implicit default.
+    """
+    from weft.config import WeftConfig
+
+    def _legacy_config():
+        cfg = WeftConfig()
+        cfg.text_generation.provider = "anthropic"
+        return cfg
+
+    monkeypatch.setattr("weft.config.load_config", _legacy_config)
+
+
 _GIT_ENV = {
     **os.environ,
     "GIT_AUTHOR_NAME": "test",
@@ -197,14 +217,24 @@ class TestSummarizeFile:
     """Test summarize_file: LLM call for per-file summary."""
 
     async def test_injected_provider_can_supply_summary(self):
+        from types import SimpleNamespace
+
         class FakeProvider:
             async def generate(self, request):
                 assert request.model == "claude-haiku-4-5-20251001"
                 return GenerationResponse(text="provider summary", model=request.model)
 
+        # Pin the legacy Anthropic provider so the role-default model is the
+        # documented Haiku name; non-Anthropic providers require an explicitly
+        # configured model (bring-your-own-model).
+        config = SimpleNamespace(
+            text_generation=SimpleNamespace(provider="anthropic", model="", models={})
+        )
+
         result = await summarize_file(
             "src/auth.py", "\n".join(f"line {i}" for i in range(20)),
             generation_provider=FakeProvider(),
+            config=config,
         )
 
         assert result == "provider summary"

@@ -59,23 +59,23 @@ decay.floor_score               Minimum review score used to propose candidates
 ### Text-generation provider routing
 
 LLM-powered features use the provider-neutral text-generation seam in
-`weft.text_generation`. Anthropic remains the default provider and existing
-Haiku model behavior is unchanged. The provider and logical role models can be
-configured without editing feature code:
+`weft.text_generation`. The default provider is `openai`, and models are
+bring-your-own: no model is assumed for non-Anthropic providers. The provider
+and logical role models can be configured without editing feature code:
 
 ```toml
 [text_generation]
-provider = "anthropic"
+provider = "openai"
+model = "your-model-id"          # one model for every role
 
-[text_generation.models]
-ingest_classifier = "claude-haiku-4-5-20251001"
-codebase_summary = "claude-haiku-4-5-20251001"
-codebase_architecture = "claude-haiku-4-5-20251001"
+[text_generation.models]          # optional per-role overrides
+ingest_classifier = "another-model-id"
 ```
 
 Environment variables override TOML values:
 
 - `WEFT_TEXT_PROVIDER`
+- `WEFT_TEXT_MODEL` (provider-level default for all roles)
 - `WEFT_TEXT_MODEL_INGEST_CLASSIFIER`
 - `WEFT_TEXT_MODEL_CODEBASE_SUMMARY`
 - `WEFT_TEXT_MODEL_CODEBASE_ARCHITECTURE`
@@ -83,6 +83,11 @@ Environment variables override TOML values:
 - `WEFT_TEXT_MODEL_BELIEF_DETECTOR`
 - `WEFT_TEXT_MODEL_TOPIC_SYNTHESIS`
 - `WEFT_TEXT_MODEL_REPLAY_AGGREGATE`
+
+When a non-Anthropic provider has no model configured for a role, feature
+code raises an actionable error naming the missing setting instead of
+assuming a model name. The `anthropic` provider keeps its legacy Haiku
+defaults for backward compatibility.
 
 Provider adapters are opt-in and must preserve each feature's existing
 bounded-call, parsing, and fail-closed behavior. Selecting an unregistered
@@ -99,16 +104,14 @@ spend-limit failures are not retryable. Responses requests set `store = false`
 and normalize `output_text`; structured output can be supplied through the
 provider-neutral `GenerationRequest.response_format` field.
 
-For example, to opt low-risk roles into GPT-5.6 Luna after installing the
-extra:
+For example, to point the configurable roles at one OpenAI model after
+installing the extra:
 
 ```bash
 uv sync --extra openai
 export OPENAI_API_KEY=...
 export WEFT_TEXT_PROVIDER=openai
-export WEFT_TEXT_MODEL_INGEST_CLASSIFIER=gpt-5.6-luna
-export WEFT_TEXT_MODEL_CODEBASE_SUMMARY=gpt-5.6-luna
-export WEFT_TEXT_MODEL_CODEBASE_ARCHITECTURE=gpt-5.6-luna
+export WEFT_TEXT_MODEL=gpt-6-luna
 ```
 
 Do not use this switch as production approval for quarantine review, belief

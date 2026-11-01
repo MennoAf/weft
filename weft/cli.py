@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -225,7 +226,7 @@ def _register_mcp(project_dir: Path | None = None) -> None:
             return  # already registered
         servers["weft"] = _MCP_ENTRY
         mcp_path.write_text(json.dumps(data, indent=2) + "\n")
-        click.echo(f"Registered Weft MCP server in {mcp_path}")
+        click.echo(f"Registered Weft MCP server for Claude Code in {mcp_path}")
     else:
         claude_json = Path.home() / ".claude.json"
         data = json.loads(claude_json.read_text()) if claude_json.exists() else {}
@@ -234,34 +235,115 @@ def _register_mcp(project_dir: Path | None = None) -> None:
             return
         servers["weft"] = _MCP_ENTRY
         claude_json.write_text(json.dumps(data, indent=2) + "\n")
-        click.echo(f"Registered Weft MCP server globally in {claude_json}")
+        click.echo(f"Registered Weft MCP server for Claude Code globally in {claude_json}")
+
+
+_COMPOSE_HEALTH_TIMEOUT_SECONDS = 120
+_COMPOSE_HEALTH_POLL_SECONDS = 2
+
+
+def _wait_for_compose_health(base_args: list[str]) -> None:
+    """Poll both services until they answer their readiness probes, bounded.
+
+    Freshly created containers (first ``weft up`` after installing Docker)
+    can take tens of seconds before PostgreSQL accepts connections; running
+    migrations immediately resets the connection with an uncaught traceback.
+    Polling the in-container readiness probes removes that race.
+    """
+    probes = {
+        "postgres": base_args + ["exec", "-T", "postgres", "pg_isready", "-U", "weft"],
+        "redis": base_args + ["exec", "-T", "redis", "redis-cli", "ping"],
+    }
+    deadline = time.monotonic() + _COMPOSE_HEALTH_TIMEOUT_SECONDS
+    while probes and time.monotonic() < deadline:
+        for name, probe in list(probes.items()):
+            probe_result = subprocess.run(probe, capture_output=True, text=True)
+            if probe_result.returncode == 0:
+                del probes[name]
+        if probes:
+            time.sleep(_COMPOSE_HEALTH_POLL_SECONDS)
+    if probes:
+        raise click.ClickException(
+            "Weft containers did not become healthy within "
+            f"{_COMPOSE_HEALTH_TIMEOUT_SECONDS}s (still waiting on: "
+            f"{', '.join(sorted(probes))}). Inspect them with: docker compose logs"
+        )
+
+
+def _warn_redis_overcommit() -> None:
+    """Surface the Redis background-persistence prerequisite on Linux hosts.
+
+    Redis logs a vm.overcommit_memory warning that background persistence
+    can fail under memory pressure; ``weft up`` should not hide it. The fix
+    is host-level and root-gated, so it is reported, never applied.
+    """
+    try:
+        value = Path("/proc/sys/vm/overcommit_memory").read_text().strip()
+    except OSError:
+        return  # Non-Linux host or restricted /proc: nothing to check.
+    if value == "1":
+        return
+    click.echo(
+        "Warning: host vm.overcommit_memory is not 1; Redis background "
+        "persistence can fail under memory pressure. Opt-in fix (requires "
+        "root):\n"
+        "  printf 'vm.overcommit_memory = 1\\n' | sudo tee /etc/sysctl.d/99-weft-redis.conf\n"
+        "  sudo sysctl --system",
+        err=True,
+    )
 
 
 @cli.command()
-@click.option("--global", "global_", is_flag=True, help="Register MCP server globally instead of per-project")
-def up(global_: bool):
-    """Start Weft infrastructure (Postgres + Redis) and run migrations."""
+@click.option(
+    "--global", "global_", is_flag=True,
+    help="Register the MCP server for Claude Code in ~/.claude.json instead of <project>/.mcp.json.",
+)
+@click.option(
+    "--no-register", is_flag=True,
+    help="Start infrastructure only; do not write any MCP registration.",
+)
+def up(global_: bool, no_register: bool):
+    """Start Weft infrastructure (Postgres + Redis), wait for health, run migrations."""
     click.echo("Starting Weft containers...")
     with compose_file_path() as compose_file:
+        base_args = [
+            "docker", "compose", "-f", str(compose_file),
+            "-p", _compose_project_name(),
+        ]
         result = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "-p", _compose_project_name(), "up", "-d"],
+            base_args + ["up", "-d"],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
             click.echo(f"Error: {result.stderr}", err=True)
             sys.exit(1)
-        click.echo("Weft containers started.")
+        _wait_for_compose_health(base_args)
+        _warn_redis_overcommit()
+        click.echo("Weft containers started and healthy.")
 
         # Run migrations through the same owner-safe path used by deployments.
-        applied = asyncio.run(_run_owner_migrations(load_config()))
+        try:
+            applied = asyncio.run(_run_owner_migrations(load_config()))
+        except Exception as exc:
+            raise click.ClickException(
+                "Migrations failed, possibly while PostgreSQL was still "
+                "initializing. The containers are left running; wait a few "
+                "seconds and run `weft migrate` (or rerun `weft up`). "
+                f"Underlying error: {type(exc).__name__}"
+            ) from exc
         if applied:
             click.echo(f"Applied {len(applied)} migration(s).")
         else:
             click.echo("Migrations up to date.")
 
-        # Register MCP server
+        # Register the MCP server. Both destinations are Claude Code
+        # configuration files; other harnesses register `weft mcp` in their
+        # own configuration (see docs/wiring-your-agent.md).
+        if no_register:
+            return
         if global_:
+            click.echo("Registering the Weft MCP server for Claude Code (~/.claude.json)...")
             _register_mcp()
         else:
             _register_mcp(Path.cwd())
@@ -969,38 +1051,56 @@ def quarantine():
     help="Do not advance the persisted watermark — useful for dry diagnosis.",
 )
 @click.option(
-    "--model", default="claude-haiku-4-5-20251001",
-    help="Anthropic model to use (Haiku by default for cost).",
+    "--model", default=None,
+    help=(
+        "Model override for the configured text-generation provider. "
+        "Defaults to text_generation.model / models.quarantine_review "
+        "(legacy Anthropic default: Haiku)."
+    ),
 )
 def quarantine_review_llm(
     limit: int,
     concurrency: int,
     since_iso: str | None,
     no_watermark: bool,
-    model: str,
+    model: str | None,
 ):
     """Run an LLM-review pass on agent-provenance memories that bypassed Layer 3.
 
     Reads memories with ``write_provenance='agent'`` and
-    ``review_status='active'`` newer than the stored watermark, asks Haiku
-    to classify each as FACT or INSTRUCTION, and flips the
-    INSTRUCTION-verdict rows to ``pending_review`` for supervisor review.
+    ``review_status='active'`` newer than the stored watermark, asks the
+    configured text-generation model to classify each as FACT or
+    INSTRUCTION, and flips the INSTRUCTION-verdict rows to
+    ``pending_review`` for supervisor review.
     """
     async def _run():
         import asyncpg
-        from anthropic import AsyncAnthropic
 
         from weft.quarantine_review import llm_review_pending
+        from weft.text_generation import (
+            managed_provider_for_role,
+            model_for_role,
+            text_generation_preflight,
+        )
 
         config = load_config()
-        api_key = os.environ.get("ANTHROPIC_API_KEY") or config.api_key
-        if not api_key:
+        preflight = text_generation_preflight(config)
+        if not preflight.get("ready"):
             click.echo(
-                "Error: No API key found. Set ANTHROPIC_API_KEY or WEFT_API_KEY.",
+                f"Error: text generation is unavailable — {preflight.get('reason')}",
                 err=True,
             )
             sys.exit(1)
-        client = AsyncAnthropic(api_key=api_key)
+        try:
+            resolved_model = (
+                model if model is not None
+                else model_for_role(
+                    "quarantine_review", "claude-haiku-4-5-20251001", config=config
+                )
+            )
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
         pool = await asyncpg.create_pool(
             config.database.url, min_size=1, max_size=2,
         )
@@ -1008,14 +1108,17 @@ def quarantine_review_llm(
             datetime.fromisoformat(since_iso) if since_iso else None
         )
         try:
-            return await llm_review_pending(
-                pool, client,
-                since=since,
-                limit=limit,
-                concurrency=concurrency,
-                model=model,
-                advance_watermark=not no_watermark,
-            )
+            async with managed_provider_for_role(
+                "quarantine_review", config=config
+            ) as provider:
+                return await llm_review_pending(
+                    pool, provider,
+                    since=since,
+                    limit=limit,
+                    concurrency=concurrency,
+                    model=resolved_model,
+                    advance_watermark=not no_watermark,
+                )
         finally:
             await pool.close()
 
@@ -1317,6 +1420,8 @@ def show():
         "embedding.provider": "WEFT_EMBEDDING_PROVIDER",
         "embedding.model": "WEFT_EMBEDDING_MODEL",
         "embedding.dimensions": "WEFT_EMBEDDING_DIMENSIONS",
+        "text_generation.provider": "WEFT_TEXT_PROVIDER",
+        "text_generation.model": "WEFT_TEXT_MODEL",
         "log_level": "WEFT_LOG_LEVEL",
     }
 
@@ -1327,6 +1432,11 @@ def show():
         if key in toml_flat:
             return f"toml ({CONFIG_PATH})"
         return "default"
+
+    def _format_role_models(models: dict[str, str]) -> str:
+        if not models:
+            return "(no per-role overrides)"
+        return ", ".join(f"{role}={model}" for role, model in sorted(models.items()))
 
     rows = [
         ("project_name", cfg.project_name),
@@ -1340,6 +1450,9 @@ def show():
         ("embedding.model", cfg.embedding.model),
         ("embedding.dimensions", str(cfg.embedding.dimensions)),
         ("embedding.batch_size", str(cfg.embedding.batch_size)),
+        ("text_generation.provider", cfg.text_generation.provider),
+        ("text_generation.model", cfg.text_generation.model or "(not set)"),
+        ("text_generation.models", _format_role_models(cfg.text_generation.models)),
         ("retrieval.default_top_k", str(cfg.retrieval.default_top_k)),
         ("retrieval.similarity_threshold", str(cfg.retrieval.similarity_threshold)),
         ("retrieval.context_budget_tokens", str(cfg.retrieval.context_budget_tokens)),

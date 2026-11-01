@@ -31,8 +31,6 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
-from anthropic import AsyncAnthropic
-
 from weft.models import EpisodeTurn, TurnRole
 from weft.views._pricing import HAIKU_MODEL, haiku_cost_usd
 
@@ -250,13 +248,26 @@ each "reason" under 15 words, so the array always fits in the output budget.\
 # LLM client singleton (mirrors ingest_pipeline.py pattern)
 # ---------------------------------------------------------------------------
 
-_client: AsyncAnthropic | None = None
+_client: Any | None = None
 
 
-def _get_client() -> AsyncAnthropic:
-    """Lazy singleton for the default Anthropic async client."""
+def _get_client() -> Any:
+    """Lazy singleton for the default Anthropic async client.
+
+    The ``anthropic`` package is an optional extra: importing it at first
+    use (not at module import) keeps module import safe on base installs
+    and lets the error name the exact prerequisite.
+    """
     global _client
     if _client is None:
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise ValueError(
+                "belief_detector requires the 'anthropic' package and "
+                "ANTHROPIC_API_KEY. Install it with: pip install "
+                "weft-memory[anthropic]"
+            ) from exc
         _client = AsyncAnthropic()
     return _client
 

@@ -226,9 +226,14 @@ class TextGenerationConfig(BaseModel):
 
     The role map is deliberately abstract: feature code asks for a role such
     as ``ingest_classifier`` rather than assuming a provider-specific model.
+    Bring your own model: ``model`` points every role at one user-chosen
+    model, and per-role entries in ``models`` override individual roles. No
+    model is assumed for non-Anthropic providers — missing model
+    configuration is an actionable error, not a guessed model name.
     """
 
-    provider: str = "anthropic"
+    provider: str = "openai"
+    model: str = ""
     models: dict[str, str] = Field(default_factory=dict)
 
 
@@ -764,6 +769,8 @@ def load_config(project_dir: str | Path | None = None) -> WeftConfig:
         config.embedding.dimensions = int(dims)
     if provider := os.environ.get("WEFT_TEXT_PROVIDER"):
         config.text_generation.provider = provider
+    if model := os.environ.get("WEFT_TEXT_MODEL"):
+        config.text_generation.model = model
     for role in (
         "ingest_classifier",
         "codebase_summary",

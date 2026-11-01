@@ -34,6 +34,7 @@ from typing import Any
 import asyncpg
 
 from weft.db.connection import get_db
+from weft.text_generation import GenerationRequest, TextGenerationProvider
 
 logger = logging.getLogger(__name__)
 
@@ -149,33 +150,23 @@ async def set_watermark(pool: asyncpg.Pool, last_checked_at: datetime) -> None:
 
 
 async def _classify_one(
-    client: Any, model: str, content: str, *, timeout: float = 10.0
+    provider: TextGenerationProvider, model: str, content: str, *, timeout: float = 10.0
 ) -> str | None:
-    """Ask Haiku to classify *content*.
+    """Classify *content* via the configured text-generation provider.
 
     Returns ``"INSTRUCTION"``, ``"FACT"``, or ``None`` if the response was
     ambiguous / unparseable. Raises only on transport-level failures.
     """
-    response = await asyncio.wait_for(
-        client.messages.create(
-            model=model,
-            max_tokens=_MAX_TOKENS,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
-        ),
+    request = GenerationRequest(
+        model=model,
+        system=_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": content}],
+        max_tokens=_MAX_TOKENS,
         timeout=timeout,
     )
-    # Anthropic SDK returns content as a list of blocks; first text block.
-    text = ""
-    for block in response.content:
-        if getattr(block, "type", None) == "text":
-            text = block.text
-            break
-        # Some mocks expose .text directly.
-        if hasattr(block, "text"):
-            text = block.text
-            break
-    verdict = text.strip().upper().split()[0] if text.strip() else ""
+    response = await asyncio.wait_for(provider.generate(request), timeout=timeout)
+    text = (response.text or "").strip()
+    verdict = text.upper().split()[0] if text else ""
     if verdict in ("INSTRUCTION", "FACT"):
         return verdict
     return None
@@ -204,7 +195,7 @@ async def _flag_pending(pool: asyncpg.Pool, memory_id: str) -> bool:
 
 async def llm_review_pending(
     pool: asyncpg.Pool,
-    client: Any,
+    provider: TextGenerationProvider,
     *,
     since: datetime | None = None,
     limit: int = 50,
@@ -216,8 +207,10 @@ async def llm_review_pending(
 
     Selects up to ``limit`` agent-provenance, currently-active memories
     with ``created_at > since`` (or > stored watermark, or > now-24h on
-    first run), classifies each via ``client``, and flips the verdict-
-    INSTRUCTION rows to ``pending_review``.
+    first run), classifies each via ``provider`` (any TextGenerationProvider
+    adapter), and flips the verdict-INSTRUCTION rows to ``pending_review``.
+    The ``model`` default is the legacy Anthropic Haiku name; callers using
+    another provider resolve the model through ``model_for_role``.
 
     The watermark advances to the highest ``created_at`` among
     *successfully-classified* rows (FACT or INSTRUCTION). Rows that
@@ -268,7 +261,7 @@ async def llm_review_pending(
     async def _one(row):
         async with sem:
             try:
-                verdict = await _classify_one(client, model, row["content"])
+                verdict = await _classify_one(provider, model, row["content"])
             except Exception as e:  # transport / timeout / SDK errors
                 report.errors.append(f"{row['id']}: {e}")
                 return

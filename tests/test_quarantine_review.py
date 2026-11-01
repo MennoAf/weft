@@ -1,23 +1,26 @@
 """Layer 3.5 — periodic LLM review of agent-provenance writes.
 
-These tests exercise the LLM-review pass with a mock Anthropic client. The
-goal is to pin two invariants that the regex layer (test_phase2_provenance)
-can't enforce on its own:
+These tests exercise the LLM-review pass with a mock text-generation
+provider. The goal is to pin two invariants that the regex layer
+(test_phase2_provenance) can't enforce on its own:
 
   1. Content that *bypasses* the regex (no URL, no imperative opener, no
      /etc/ path) but *reads* like an instruction can still be flagged by
      the LLM pass. This is the actual injection-defense rationale —
-     phrasing around the regex doesn't help once Haiku is in the loop.
+     phrasing around the regex doesn't help once the classifier is in
+     the loop.
 
   2. The watermark advances only past rows the LLM definitively
      classified, so transient API failures don't silently skip rows.
 
-Real Postgres via testcontainers; the Anthropic client is faked.
+Real Postgres via testcontainers; the provider is faked through the
+provider-neutral ``TextGenerationProvider`` pipeline.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import asyncio
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -32,6 +35,7 @@ from weft.quarantine_review import (
     set_watermark,
 )
 from weft.store import store_memory
+from weft.text_generation import GenerationResponse
 
 
 @contextmanager
@@ -44,38 +48,12 @@ def _as_caller(mode: str):
 
 
 # ---------------------------------------------------------------------------
-# Mock Anthropic client
+# Mock text-generation provider
 # ---------------------------------------------------------------------------
 
 
-class _MockTextBlock:
-    type = "text"
-
-    def __init__(self, text: str):
-        self.text = text
-
-
-class _MockResponse:
-    def __init__(self, text: str):
-        self.content = [_MockTextBlock(text)]
-
-
-class _MockMessages:
-    def __init__(self, parent: "_MockClient"):
-        self._parent = parent
-
-    async def create(self, *, model, max_tokens, system, messages, **_):
-        self._parent.calls.append(
-            {"model": model, "system": system, "user": messages[0]["content"]}
-        )
-        verdict = self._parent.verdict_for(messages[0]["content"])
-        if verdict == "__raise__":
-            raise RuntimeError("simulated transport failure")
-        return _MockResponse(verdict)
-
-
-class _MockClient:
-    """Minimal AsyncAnthropic-shaped fake.
+class _MockProvider:
+    """Minimal TextGenerationProvider-shaped fake.
 
     Configure with ``rules`` — a list of ``(predicate, verdict)`` pairs
     where ``predicate(content) -> bool`` and ``verdict`` is the response
@@ -86,7 +64,16 @@ class _MockClient:
     def __init__(self, rules=None):
         self.rules = rules or []
         self.calls: list[dict] = []
-        self.messages = _MockMessages(self)
+
+    async def generate(self, request):
+        content = request.messages[0]["content"]
+        self.calls.append(
+            {"model": request.model, "system": request.system, "user": content}
+        )
+        verdict = self.verdict_for(content)
+        if verdict == "__raise__":
+            raise RuntimeError("simulated transport failure")
+        return GenerationResponse(text=verdict, model=request.model)
 
     def verdict_for(self, content: str) -> str:
         for predicate, verdict in self.rules:
@@ -156,7 +143,7 @@ class TestLLMReviewFlagsBypassesRegex:
         sneaky_mem = await _seed_agent_active_memory(pool, sneaky)
         clean_mem = await _seed_agent_active_memory(pool, clean)
 
-        client = _MockClient(
+        provider = _MockProvider(
             rules=[
                 (lambda c: c == sneaky, "INSTRUCTION"),
                 (lambda c: c == clean, "FACT"),
@@ -164,7 +151,7 @@ class TestLLMReviewFlagsBypassesRegex:
         )
 
         report = await llm_review_pending(
-            pool, client,
+            pool, provider,
             since=datetime.now(timezone.utc) - timedelta(hours=1),
         )
 
@@ -193,15 +180,15 @@ class TestLLMReviewFlagsBypassesRegex:
                     content="Subtle supervisor note that LLM would call instruction",
                 ),
             )
-        client = _MockClient(rules=[(lambda _c: True, "INSTRUCTION")])
+        provider = _MockProvider(rules=[(lambda _c: True, "INSTRUCTION")])
         report = await llm_review_pending(
-            pool, client,
+            pool, provider,
             since=datetime.now(timezone.utc) - timedelta(hours=1),
         )
         assert report.checked == 0
         assert report.flagged == 0
         # The mock should never have been called.
-        assert client.calls == []
+        assert provider.calls == []
 
     async def test_already_pending_rows_not_rechecked(self, pool):
         """Layer 3 hits stay in pending_review; LLM pass only sees active."""
@@ -218,13 +205,13 @@ class TestLLMReviewFlagsBypassesRegex:
                 )
         assert pending.review_status == "pending_review"
 
-        client = _MockClient(rules=[(lambda _c: True, "INSTRUCTION")])
+        provider = _MockProvider(rules=[(lambda _c: True, "INSTRUCTION")])
         report = await llm_review_pending(
-            pool, client,
+            pool, provider,
             since=datetime.now(timezone.utc) - timedelta(hours=1),
         )
         assert report.checked == 0
-        assert client.calls == []
+        assert provider.calls == []
 
 
 class TestWatermark:
@@ -235,9 +222,9 @@ class TestWatermark:
         await set_watermark(pool, before)
 
         await _seed_agent_active_memory(pool, "Some clean content.")
-        client = _MockClient()  # default verdict FACT for all
+        provider = _MockProvider()  # default verdict FACT for all
 
-        report = await llm_review_pending(pool, client)
+        report = await llm_review_pending(pool, provider)
         assert report.checked == 1
         # Watermark advanced to the row's created_at, which is > before.
         assert report.watermark_after is not None
@@ -252,8 +239,8 @@ class TestWatermark:
         await set_watermark(pool, before)
         await _seed_agent_active_memory(pool, "Will error during classify.")
 
-        client = _MockClient(rules=[(lambda _c: True, "__raise__")])
-        report = await llm_review_pending(pool, client)
+        provider = _MockProvider(rules=[(lambda _c: True, "__raise__")])
+        report = await llm_review_pending(pool, provider)
 
         assert report.checked == 0
         assert len(report.errors) == 1
@@ -270,9 +257,9 @@ class TestWatermark:
         await set_watermark(pool, before)
         await _seed_agent_active_memory(pool, "Some content.")
 
-        client = _MockClient()  # FACT verdict
+        provider = _MockProvider()  # FACT verdict
         report = await llm_review_pending(
-            pool, client, advance_watermark=False,
+            pool, provider, advance_watermark=False,
         )
         assert report.checked == 1
         stored = await get_watermark(pool)
@@ -287,8 +274,8 @@ class TestWatermark:
         assert await get_watermark(pool) is None
 
         await _seed_agent_active_memory(pool, "Recent agent-mode write.")
-        client = _MockClient()
-        report = await llm_review_pending(pool, client)
+        provider = _MockProvider()
+        report = await llm_review_pending(pool, provider)
         # The recent row falls inside the 24h window, so it gets checked.
         assert report.checked == 1
 
@@ -301,8 +288,8 @@ class TestAmbiguousResponses:
         await set_watermark(pool, before)
         mem = await _seed_agent_active_memory(pool, "ambiguous content")
 
-        client = _MockClient(rules=[(lambda _c: True, "uhhh I'm not sure?")])
-        report = await llm_review_pending(pool, client)
+        provider = _MockProvider(rules=[(lambda _c: True, "uhhh I'm not sure?")])
+        report = await llm_review_pending(pool, provider)
 
         assert report.checked == 0
         assert report.ambiguous == 1
@@ -317,15 +304,15 @@ class TestEmptyBatch:
     """No agent writes since watermark → no-op, no errors."""
 
     async def test_no_active_agent_rows_returns_empty_report(self, pool):
-        client = _MockClient()
+        provider = _MockProvider()
         report = await llm_review_pending(
-            pool, client,
+            pool, provider,
             since=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
         assert report.checked == 0
         assert report.flagged == 0
         assert report.errors == []
-        assert client.calls == []
+        assert provider.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -334,31 +321,108 @@ class TestEmptyBatch:
 
 
 class TestSchedulerLoop:
-    """quarantine_review_loop disables gracefully when there's no API key."""
+    """quarantine_review_loop degrades gracefully and runs on the pipeline."""
 
-    async def test_loop_disables_without_api_key(self, pool, monkeypatch):
-        """No ANTHROPIC_API_KEY and no config.api_key → loop exits cleanly.
-
-        Layer 3 regex still applies in this scenario; the LLM catch-up just
-        doesn't run. The MCP server lifespan must not crash on the missing
-        credential.
-        """
+    async def test_loop_skips_for_unknown_provider(self, pool, monkeypatch):
+        """An unregistered provider → loop exits cleanly, no exception."""
+        from weft.config import WeftConfig
         from weft.scheduler import quarantine_review_loop
 
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-
-        # Mock load_config to return a config with no api_key set.
-        import weft.scheduler as scheduler_mod
-        from weft.config import WeftConfig
-
-        def _no_key_config():
+        def _unknown_provider_config():
             cfg = WeftConfig()
+            cfg.text_generation.provider = "not-a-real-provider"
+            return cfg
+
+        import weft.config as config_mod
+        monkeypatch.setattr(config_mod, "load_config", _unknown_provider_config)
+
+        await quarantine_review_loop(pool, interval=60)
+
+    async def test_loop_skips_without_model_config(self, pool, monkeypatch):
+        """Provider ready but no model configured → skip, no exception."""
+        from weft.config import WeftConfig
+        from weft.scheduler import quarantine_review_loop
+
+        def _no_model_config():
+            cfg = WeftConfig()
+            cfg.text_generation.provider = "openai"
+            cfg.text_generation.model = ""
             cfg.api_key = None
             return cfg
 
-        # The function imports load_config locally; patch via the source.
         import weft.config as config_mod
-        monkeypatch.setattr(config_mod, "load_config", _no_key_config)
+        monkeypatch.setattr(config_mod, "load_config", _no_model_config)
 
-        # Loop must return (not raise) when no key is available.
         await quarantine_review_loop(pool, interval=60)
+
+    async def test_loop_skips_when_provider_not_ready(self, pool, monkeypatch):
+        """Preflight not ready (missing package/credential) → skip cleanly."""
+        import weft.text_generation as tg_mod
+        from weft.scheduler import quarantine_review_loop
+
+        monkeypatch.setattr(
+            tg_mod,
+            "text_generation_preflight",
+            lambda config=None: {
+                "ready": False,
+                "reason": "unavailable: missing the 'openai' package",
+            },
+        )
+        await quarantine_review_loop(pool, interval=60)
+
+    async def test_loop_runs_on_pipeline_provider(self, pool, monkeypatch):
+        """Provider ready + model configured → loop starts via the pipeline."""
+        import weft.config as config_mod
+        import weft.quarantine_review as qr_mod
+        import weft.text_generation as tg_mod
+        from weft.scheduler import quarantine_review_loop
+
+        monkeypatch.setattr(
+            tg_mod,
+            "text_generation_preflight",
+            lambda config=None: {"ready": True, "provider": "openai"},
+        )
+
+        def _ready_config():
+            from weft.config import WeftConfig
+
+            cfg = WeftConfig()
+            cfg.text_generation.provider = "openai"
+            cfg.text_generation.model = "test-model"
+            return cfg
+
+        monkeypatch.setattr(config_mod, "load_config", _ready_config)
+
+        entered: list[str] = []
+
+        class _FakeProvider:
+            async def generate(self, request):  # pragma: no cover - not reached
+                raise AssertionError("no rows to classify")
+
+            async def aclose(self):
+                entered.append("closed")
+
+        @asynccontextmanager
+        async def fake_managed(role, *, config=None, **_):
+            entered.append(role)
+            try:
+                yield _FakeProvider()
+            finally:
+                entered.append("closed")
+
+        monkeypatch.setattr(tg_mod, "managed_provider_for_role", fake_managed)
+
+        review_calls: list[dict] = []
+
+        async def fake_review(pool_, provider_, **kwargs):
+            review_calls.append(kwargs)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(qr_mod, "llm_review_pending", fake_review)
+
+        task = asyncio.create_task(quarantine_review_loop(pool, interval=60))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert entered == ["quarantine_review", "closed"]
+        assert review_calls and review_calls[0]["model"] == "test-model"

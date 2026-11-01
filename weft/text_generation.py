@@ -7,6 +7,7 @@ provider SDK and return a normalized response. This keeps future providers
 """
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import os
 from collections.abc import AsyncIterator
@@ -243,16 +244,101 @@ class AnthropicTextGenerationProvider:
 def model_for_role(role: str, default: str, config: Any | None = None) -> str:
     """Resolve a configured model for a logical role.
 
-    Explicit ``text_generation.models`` configuration wins. Environment
-    overrides are applied by ``load_config`` and therefore remain available to
-    deployments without exposing provider-specific logic here.
+    Resolution order: explicit ``text_generation.models[role]``, then the
+    provider-level ``text_generation.model`` (bring-your-own-model: one
+    user-chosen model for every role), then the legacy ``default`` argument
+    for the ``anthropic`` provider, whose per-role models predate the role
+    map. Any other provider without explicit model configuration raises an
+    actionable error instead of assuming a model name.
     """
     if config is None:
         from weft.config import load_config
 
         config = load_config()
-    models = getattr(getattr(config, "text_generation", None), "models", {})
-    return models.get(role, default)
+    text_config = getattr(config, "text_generation", None)
+    models = getattr(text_config, "models", {})
+    if role in models:
+        return models[role]
+    provider_model = getattr(text_config, "model", "")
+    if provider_model:
+        return provider_model
+    provider = getattr(text_config, "provider", "openai")
+    if provider == "anthropic":
+        return default
+    raise ValueError(
+        f"No model configured for text-generation role {role!r} with provider {provider!r}. "
+        "Set text_generation.model in ~/.weft/config.toml (env WEFT_TEXT_MODEL) to your "
+        f"provider's model, or set a per-role model via text_generation.models.{role} "
+        f"(env WEFT_TEXT_MODEL_{role.upper()})."
+    )
+
+
+# Provider name -> importable package / credential environment variable.
+# Both are optional packaging extras; preflight keeps feature code from
+# constructing providers whose prerequisites are missing.
+_TEXTGEN_PROVIDER_PACKAGES = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+}
+_TEXTGEN_CREDENTIAL_VARIABLES = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
+
+def text_generation_preflight(config: Any | None = None) -> dict[str, Any]:
+    """Check provider package and credential prerequisites without side effects.
+
+    Never constructs a provider or imports an optional SDK: package presence
+    is checked with :func:`importlib.util.find_spec`. Returns small facts for
+    Doctor and background-task gating: ``provider``, ``package_available``,
+    ``credential_required``, ``credential_variable``, ``credential_present``,
+    ``ready``, and ``reason`` (set only when not ready). Unknown providers
+    are reported as not ready rather than raising.
+    """
+    if config is None:
+        from weft.config import load_config
+
+        config = load_config()
+    provider = str(
+        getattr(getattr(config, "text_generation", None), "provider", "openai")
+    )
+    package_name = _TEXTGEN_PROVIDER_PACKAGES.get(provider)
+    if package_name is None:
+        return {
+            "provider": provider,
+            "package_available": False,
+            "credential_required": True,
+            "credential_variable": None,
+            "credential_present": False,
+            "ready": False,
+            "reason": (
+                f"unknown provider {provider!r}; supported providers: "
+                f"{sorted(_TEXTGEN_PROVIDER_PACKAGES)}"
+            ),
+        }
+    package_available = importlib.util.find_spec(package_name) is not None
+    variable = _TEXTGEN_CREDENTIAL_VARIABLES[provider]
+    config_key = getattr(config, "api_key", None) if provider == "anthropic" else None
+    credential_present = bool(os.environ.get(variable) or config_key)
+    missing: list[str] = []
+    if not package_available:
+        missing.append(
+            f"the {package_name!r} package "
+            f"(install with: pip install weft-memory[{provider}])"
+        )
+    if not credential_present:
+        missing.append(f"the {variable} environment variable")
+    reason = "unavailable: missing " + " and ".join(missing) if missing else None
+    return {
+        "provider": provider,
+        "package_available": package_available,
+        "credential_required": True,
+        "credential_variable": variable,
+        "credential_present": credential_present,
+        "ready": not missing,
+        "reason": reason,
+    }
 
 
 def provider_for_role(
@@ -353,4 +439,5 @@ __all__ = [
     "managed_provider_for_role",
     "model_for_role",
     "provider_for_role",
+    "text_generation_preflight",
 ]

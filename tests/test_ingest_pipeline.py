@@ -22,6 +22,25 @@ from weft.ingest_pipeline import (
 from weft.text_generation import GenerationResponse
 
 
+@pytest.fixture(autouse=True)
+def _anthropic_legacy_provider(monkeypatch):
+    """Pin the legacy Anthropic provider for this module.
+
+    Classifier tests inject fake providers and rely on the legacy Haiku
+    role default for model resolution. The package default is now
+    ``openai`` with bring-your-own models, so the legacy pipeline is
+    pinned explicitly.
+    """
+    from weft.config import WeftConfig
+
+    def _legacy_config():
+        cfg = WeftConfig()
+        cfg.text_generation.provider = "anthropic"
+        return cfg
+
+    monkeypatch.setattr("weft.config.load_config", _legacy_config)
+
+
 # --- Date parser ---
 
 

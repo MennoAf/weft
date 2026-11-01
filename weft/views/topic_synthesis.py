@@ -44,8 +44,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from anthropic import AsyncAnthropic
-
 from weft.models import Memory
 from weft.tokens import estimate_tokens
 from weft.views._pricing import (
@@ -160,13 +158,26 @@ OUTPUT FORMAT (return ONLY valid JSON, no markdown fences):
 # Client singleton — same pattern as belief_detector.py
 # ---------------------------------------------------------------------------
 
-_client: AsyncAnthropic | None = None
+_client: Any | None = None
 
 
-def _get_client() -> AsyncAnthropic:
-    """Lazy singleton for the Anthropic async client."""
+def _get_client() -> Any:
+    """Lazy singleton for the Anthropic async client.
+
+    The ``anthropic`` package is an optional extra: importing it at first
+    use (not at module import) keeps module import safe on base installs
+    and lets the error name the exact prerequisite.
+    """
     global _client
     if _client is None:
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise ValueError(
+                "topic_synthesis requires the 'anthropic' package and "
+                "ANTHROPIC_API_KEY. Install it with: pip install "
+                "weft-memory[anthropic]"
+            ) from exc
         _client = AsyncAnthropic()
     return _client
 
