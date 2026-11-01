@@ -1,0 +1,49 @@
+---
+name: prime
+description: Load Weft persistent memory at session start with weft_prime and report status. Use at the start of every session.
+---
+
+# Session Prime
+
+Run at the start of every session before doing other work.
+
+## Step 1: Load context
+
+Call `weft_prime(disclosure="progressive", project_id="<project-id>")`
+when the repo instructions name a Weft project id (for example,
+`AGENTS.md` or `CLAUDE.md` says `project_id="weft"`).
+
+Only use a project id the instructions state explicitly for Weft, copied
+verbatim. Don't guess or reuse ids from other tooling (task queues, CI,
+other MCP servers) — different systems use different keys.
+
+If no explicit project id is available, call
+`weft_prime(disclosure="progressive")` and report any project-resolution
+warning instead of treating an unscoped prime as project continuity.
+
+The response contains:
+
+- `rules` — pinned facts about this project
+- `handoff` — the most recent session handoff (the bridge from the prior session)
+- `issues` — open issues to be aware of
+- `anti_patterns` — things to avoid
+- `behaviors`, `decisions`, `entities`, `recent_work` — returned as counts only; load specific sections later via `weft_focus(intent="<what you're doing>")`
+
+Read the returned context carefully — don't skim. The handoff in particular sets up where to start.
+
+If the response shows `degraded: true` (or a database-unavailable error), treat it
+as untrusted — sections may be silently missing or falsely empty. Verify any
+"nothing found" conclusion with `weft_recall(query="<keywords>")` before acting,
+and prefer `weft_recall` for the rest of the session.
+
+## Step 2: Report
+
+Give the user a brief status:
+
+- What the last handoff said (summary + next steps + open questions)
+- Any open issues that look load-bearing for current work
+- Confirm you're ready and ask what they're working on
+
+## Fallback
+
+If Weft is unreachable (MCP disconnected), say so explicitly and proceed without persistent memory — don't error out.

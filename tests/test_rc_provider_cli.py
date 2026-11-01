@@ -168,7 +168,13 @@ def test_alternate_provider_does_not_construct_anthropic_or_require_anthropic_ke
     repo = _git_repo(tmp_path)
     pool = _FakePool()
     stored: list[dict] = []
-    config = _config("openai")
+    config = _config(
+        "openai",
+        models={
+            "codebase_summary": "summary-model",
+            "codebase_architecture": "architecture-model",
+        },
+    )
     sdk_module = _SDKModule()
     anthropic_module = ModuleType("anthropic")
 
@@ -270,7 +276,13 @@ def test_cli_error_closes_owned_provider_and_pool_without_response_leak(monkeypa
 def test_real_click_ingest_cancellation_closes_provider_and_pool_once(monkeypatch, tmp_path):
     repo = _git_repo(tmp_path)
     pool = _FakePool()
-    config = _config("openai")
+    config = _config(
+        "openai",
+        models={
+            "codebase_summary": "summary-model",
+            "codebase_architecture": "architecture-model",
+        },
+    )
     sdk_module = _SDKModule()
     _patch_cli_boundaries(monkeypatch, config, pool, [])
     monkeypatch.setitem(sys.modules, "openai", sdk_module)

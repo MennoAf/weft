@@ -671,70 +671,93 @@ async def quarantine_review_loop(
 ) -> None:
     """Periodic Layer 3.5 LLM review of agent-provenance writes.
 
-    Builds an ``AsyncAnthropic`` client once from the configured API key
-    and reuses it across cycles. Skips quietly (no exception) if no API
-    key is available — Layer 3 regex still applies. Per-cycle errors are
-    logged and the loop continues.
+    Runs on the configured text-generation provider through the standard
+    provider pipeline (``managed_provider_for_role``) and reuses it across
+    cycles. Skips with one actionable log line — never an exception — when
+    the provider package, credential, or per-role model is not configured;
+    Layer 3 regex still applies. Per-cycle errors are logged and the loop
+    continues.
 
     See ``weft.quarantine_review.llm_review_pending`` for the per-cycle
     semantics.
     """
-    from anthropic import AsyncAnthropic
-
     from weft.config import load_config
     from weft.quarantine_review import llm_review_pending
+    from weft.text_generation import (
+        managed_provider_for_role,
+        model_for_role,
+        text_generation_preflight,
+    )
 
     config = load_config()
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or config.api_key
-    if not api_key:
+    preflight = text_generation_preflight(config)
+    if not preflight.get("ready"):
         logger.warning(
-            "quarantine_review.no_api_key — Layer 3.5 LLM review disabled "
-            "(Layer 3 regex still applies)"
+            "quarantine_review.provider_unavailable — Layer 3.5 LLM review "
+            "disabled (Layer 3 regex still applies): %s",
+            preflight.get("reason"),
+        )
+        return
+    try:
+        resolved_model = model_for_role("quarantine_review", model, config=config)
+    except ValueError as exc:
+        logger.warning(
+            "quarantine_review.no_model — Layer 3.5 LLM review disabled "
+            "(Layer 3 regex still applies): %s",
+            exc,
         )
         return
 
     interval = max(interval, _MIN_QUARANTINE_REVIEW_INTERVAL)
-    client = AsyncAnthropic(api_key=api_key)
-    logger.info(
-        "quarantine_review.started",
-        extra={"interval": interval, "limit": limit, "concurrency": concurrency},
-    )
     try:
-        while True:
-            t0 = time.monotonic()
-            try:
-                report = await llm_review_pending(
-                    pool, client,
-                    limit=limit,
-                    concurrency=concurrency,
-                    model=model,
-                )
-                elapsed = time.monotonic() - t0
-                if report.checked or report.flagged or report.errors:
-                    logger.info(
-                        "quarantine_review.cycle",
-                        extra={
-                            "checked": report.checked,
-                            "flagged": report.flagged,
-                            "ambiguous": report.ambiguous,
-                            "errors": len(report.errors),
-                            "elapsed_s": round(elapsed, 1),
-                        },
+        async with managed_provider_for_role(
+            "quarantine_review", config=config
+        ) as provider:
+            logger.info(
+                "quarantine_review.started",
+                extra={
+                    "interval": interval,
+                    "limit": limit,
+                    "concurrency": concurrency,
+                    "provider": preflight.get("provider"),
+                    "model": resolved_model,
+                },
+            )
+            while True:
+                t0 = time.monotonic()
+                try:
+                    report = await llm_review_pending(
+                        pool, provider,
+                        limit=limit,
+                        concurrency=concurrency,
+                        model=resolved_model,
                     )
-                if report.flagged:
-                    logger.warning(
-                        "quarantine_review.flagged_pending_review",
-                        extra={
-                            "flagged_count": report.flagged,
-                            "flagged_ids": report.flagged_ids,
-                        },
-                    )
-            except Exception:
-                logger.exception("quarantine_review.cycle_error")
-                # Loop continues — watermark is preserved on failure so the
-                # next cycle picks up where this one left off.
+                    elapsed = time.monotonic() - t0
+                    if report.checked or report.flagged or report.errors:
+                        logger.info(
+                            "quarantine_review.cycle",
+                            extra={
+                                "checked": report.checked,
+                                "flagged": report.flagged,
+                                "ambiguous": report.ambiguous,
+                                "errors": len(report.errors),
+                                "elapsed_s": round(elapsed, 1),
+                            },
+                        )
+                    if report.flagged:
+                        logger.warning(
+                            "quarantine_review.flagged_pending_review",
+                            extra={
+                                "flagged_count": report.flagged,
+                                "flagged_ids": report.flagged_ids,
+                            },
+                        )
+                except Exception:
+                    logger.exception("quarantine_review.cycle_error")
+                    # Loop continues — watermark is preserved on failure so the
+                    # next cycle picks up where this one left off.
 
-            await asyncio.sleep(interval)
+                await asyncio.sleep(interval)
     except asyncio.CancelledError:
         logger.info("quarantine_review.stopped")
         raise

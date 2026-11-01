@@ -27,18 +27,39 @@ Five steps, ~5 minutes.
 
 ### 1. Install
 
+Prerequisite: Python 3.12+. [Docker](https://docs.docker.com/get-docker/) is needed to run the local PostgreSQL and Redis services with `weft up` (and to run the database-backed test suite). Other containerization methods may work, but at this time only Docker is supported.
+
+**Recommended installer: [uv](https://docs.astral.sh/uv/).** If `uv` is not installed yet, bootstrap it first:
+
 ```bash
-# Recommended: pipx for system-wide availability
-pipx install git+https://github.com/MennoAf/weft.git
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Or as a uv tool
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Then install Weft as a system-wide tool:
+
+```bash
 uv tool install git+https://github.com/MennoAf/weft.git
+```
 
-# Or local development install
+<details>
+<summary>Alternative installers</summary>
+
+```bash
+# pipx (bootstrap first if missing: pip install pipx, or use your package manager)
+pipx install git+https://github.com/MennoAf/weft.git
+```
+
+Local development checkout:
+
+```bash
 git clone https://github.com/MennoAf/weft.git && cd weft && uv sync
 ```
 
-Prerequisites: Python 3.12+ and [uv](https://docs.astral.sh/uv/). Docker Desktop is needed only to run local PostgreSQL and Redis services with `weft up` or to run the database-backed test suite. Other containerization methods may work, but at this time only Docker is supported.
+</details>
 
 ### 2. Start infrastructure
 
@@ -46,17 +67,17 @@ Prerequisites: Python 3.12+ and [uv](https://docs.astral.sh/uv/). Docker Desktop
 weft up
 ```
 
-This launches Postgres 16 (with pgvector) on port 5433 and Redis 7 on port 6380, then runs migrations.
+This launches Postgres 16 (with pgvector) on port 5433 and Redis 7 on port 6380, waits for both to become healthy, then runs migrations. The containers ship with `restart: unless-stopped`, so as long as Docker itself starts at boot, your services come back after a reboot without rerunning `weft up`.
 
 ### 3. Register Weft as an MCP server
 
-Register the Weft MCP server with your agent harness — see [AGENTS.md](AGENTS.md) for a copy-paste memory protocol and [the wiring guide](docs/wiring-your-agent.md) for full setup. Claude-specific setup: [CLAUDE.md](CLAUDE.md). Use the harness's own MCP documentation for its configuration format.
+After `weft doctor` reports no blocking failures, register the Weft MCP server with your agent harness — see [AGENTS.md](AGENTS.md) for a copy-paste memory protocol and [the wiring guide](docs/wiring-your-agent.md) for full setup. Claude-specific setup: [CLAUDE.md](CLAUDE.md). Use the harness's own MCP documentation for its configuration format.
 
 ### 4. Point your agent at Weft
 
 Use the MCP registration details in [AGENTS.md](AGENTS.md), then give your agent the copy-paste memory protocol or equivalent context for your harness. Claude-specific options are in [CLAUDE.md](CLAUDE.md). See the [agent wiring guide](docs/wiring-your-agent.md) for full connection steps.
 
-You'll also want to set up [handoff](https://github.com/MennoAf/weft/blob/main/templates/commands/handoff.md) and [prime](https://github.com/MennoAf/weft/blob/main/templates/commands/prime.md) as skills your agents can access. 
+You'll also want to set up [prime](https://github.com/MennoAf/weft/blob/main/skills/prime/SKILL.md) and [handoff](https://github.com/MennoAf/weft/blob/main/skills/handoff/SKILL.md) as skills your agents can access. The repo ships Agent Skills-compatible directories under [`skills/`](skills/) (`<skill-name>/SKILL.md` with a `description`); harnesses that load command templates can use [`templates/commands/`](templates/commands/) instead. See [the wiring guide](docs/wiring-your-agent.md) for per-harness installation notes.
 
 ### 5. First session
 

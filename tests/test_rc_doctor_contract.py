@@ -127,3 +127,56 @@ def test_exit_semantics_for_warning_invalid_config_and_unexpected_error(healthy_
 
 def test_report_exit_code_is_derived_from_statuses():
     assert DoctorReport([]).exit_code == 0
+
+
+def test_d004_accepts_local_owner_role():
+    deps = DoctorDependencies(
+        config_loader=lambda: {"valid": True},
+        database_probe=lambda config: {"reachable": True, "role": "weft"},
+        provider_probe=lambda config: {"configured": True, "credential_present": True},
+    )
+    report = run_doctor(dependencies=deps)
+    d004 = next(check for check in report.checks if check.id == "D004")
+    assert d004.status == "pass"
+    assert d004.details["role"] == "weft"
+    assert d004.details["expected_roles"] == ["weft_app", "weft"]
+
+
+def test_d004_reports_connected_role_on_unexpected_role_failure():
+    deps = DoctorDependencies(
+        config_loader=lambda: {"valid": True},
+        database_probe=lambda config: {"reachable": True, "role": "postgres"},
+        provider_probe=lambda config: {"configured": True, "credential_present": True},
+    )
+    report = run_doctor(dependencies=deps)
+    d004 = next(check for check in report.checks if check.id == "D004")
+    assert d004.status == "fail"
+    assert "postgres" in d004.remedy
+    assert d004.details["role"] == "postgres"
+
+
+def test_d008_names_package_and_credential_separately():
+    deps = DoctorDependencies(
+        config_loader=lambda: {"valid": True},
+        database_probe=lambda config: {"reachable": True, "role": "weft_app"},
+        provider_probe=lambda config: {
+            "configured": False,
+            "provider": "openai",
+            "credential_present": False,
+            "credential_variable": "OPENAI_API_KEY",
+            "package_available": False,
+            "reason": (
+                "unavailable: missing the 'openai' package and the "
+                "OPENAI_API_KEY environment variable"
+            ),
+        },
+    )
+    report = run_doctor(dependencies=deps)
+    d008 = next(check for check in report.checks if check.id == "D008")
+    assert d008.status == "fail"
+    assert "openai" in d008.remedy
+    assert "weft-memory[openai]" in d008.remedy
+    assert "OPENAI_API_KEY" in d008.remedy
+    # The old remedy suggested a local provider that does not exist.
+    assert "local provider" not in d008.remedy
+    assert d008.details["package_available"] is False

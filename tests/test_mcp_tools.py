@@ -101,6 +101,16 @@ async def _fake_ingest_acquire(_pool):
 class TestWeftIngestProviderConfig:
     """Public ingest exercises the real process/classify/provider path."""
 
+    @pytest.fixture(autouse=True)
+    def _anthropic_pipeline(self, app):
+        """These tests fake the Anthropic SDK; pin the legacy provider.
+
+        The package default is ``openai`` with bring-your-own models, so
+        tests targeting the Anthropic pipeline must not rely on the
+        implicit default.
+        """
+        app.config.text_generation.provider = "anthropic"
+
     @staticmethod
     def _patch_boundaries(monkeypatch, intents=None):
         from weft.ingest_pipeline import IngestResult, Intent
@@ -142,6 +152,7 @@ class TestWeftIngestProviderConfig:
     async def test_alternate_provider_does_not_construct_wrong_sdk(self, ctx, app, monkeypatch):
         client = _IngestSdkClient()
         app.config.text_generation.provider = "openai"
+        app.config.text_generation.model = "test-openai-model"
         monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
         monkeypatch.setitem(__import__("sys").modules, "openai", SimpleNamespace(AsyncOpenAI=lambda **_: client))
         monkeypatch.setattr("anthropic.AsyncAnthropic", lambda **_: (_ for _ in ()).throw(AssertionError("anthropic constructed")))
@@ -151,7 +162,7 @@ class TestWeftIngestProviderConfig:
         result = await weft_ingest(ctx, "an alternate provider note")
 
         assert result["intents"] == 1
-        assert client.models == ["claude-haiku-4-5-20251001"]
+        assert client.models == ["test-openai-model"]
         assert client.close_calls == 1
 
     @pytest.mark.asyncio

@@ -212,11 +212,18 @@ def test_up_uses_compose_context_and_preserves_order(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert [event[0] for event in events] == [
         "enter",
-        "docker",
+        "docker",  # compose up -d
+        "docker",  # postgres readiness probe
+        "docker",  # redis readiness probe
         "migrations",
         "register",
         "exit",
     ]
+    up_argv = events[1][1]
+    assert up_argv[-2:] == ("up", "-d")
+    probe_argvs = [event[1] for event in events[2:4]]
+    assert all(argv[6:8] == ("exec", "-T") for argv in probe_argvs)
+    assert {argv[8] for argv in probe_argvs} == {"postgres", "redis"}
 
 
 def test_up_preserves_error_and_closes_compose_context(tmp_path: Path) -> None:

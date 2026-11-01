@@ -64,7 +64,7 @@ UID = "rc-smoke-user"
 async def main():
     runtime = weft.__version__
     package = importlib.metadata.version("weft-memory")
-    assert runtime == package == "1.0.0rc1", (runtime, package)
+    assert runtime == package, (runtime, package)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     applied = await run_migrations(pool)
     if PHASE == "init":

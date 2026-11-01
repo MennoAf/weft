@@ -492,10 +492,14 @@ async def _close_one_resource(resource: object, deadline: float) -> None:
 
     wait = getattr(resource, "wait", None)
     returncode = getattr(resource, "returncode", None)
-    if callable(wait) and returncode is None:
-        terminate = getattr(resource, "terminate", None)
-        if callable(terminate):
-            terminate()
+    # This wait/terminate path is for process-like resources (Popen). Redis
+    # clients also expose a ``wait`` method — the Redis WAIT command, which
+    # requires arguments — so requiring ``terminate`` keeps database clients
+    # on the close/aclose path below instead of crashing shutdown with
+    # ``wait() missing required arguments``.
+    terminate = getattr(resource, "terminate", None)
+    if callable(wait) and returncode is None and callable(terminate):
+        terminate()
         try:
             await _await_until(wait(), deadline)
         except TimeoutError:

@@ -124,11 +124,93 @@ async def test_openai_adapter_extracts_raw_output_and_incomplete_reason() -> Non
 
 def test_model_for_role_uses_configured_role_model() -> None:
     config = SimpleNamespace(
-        text_generation=SimpleNamespace(models={"ingest_classifier": "luna-small"})
+        text_generation=SimpleNamespace(
+            provider="anthropic", models={"ingest_classifier": "luna-small"}
+        )
     )
 
     assert model_for_role("ingest_classifier", "haiku", config) == "luna-small"
     assert model_for_role("unknown", "haiku", config) == "haiku"
+
+
+def test_model_for_role_uses_provider_level_model() -> None:
+    config = SimpleNamespace(
+        text_generation=SimpleNamespace(provider="openai", model="my-model", models={})
+    )
+
+    assert model_for_role("ingest_classifier", "haiku", config) == "my-model"
+
+
+def test_model_for_role_prefers_role_model_over_provider_model() -> None:
+    config = SimpleNamespace(
+        text_generation=SimpleNamespace(
+            provider="openai", model="my-model", models={"ingest_classifier": "role-model"}
+        )
+    )
+
+    assert model_for_role("ingest_classifier", "haiku", config) == "role-model"
+    assert model_for_role("codebase_summary", "haiku", config) == "my-model"
+
+
+def test_model_for_role_requires_model_for_non_anthropic_provider() -> None:
+    config = SimpleNamespace(
+        text_generation=SimpleNamespace(provider="openai", model="", models={})
+    )
+
+    with pytest.raises(ValueError, match="WEFT_TEXT_MODEL"):
+        model_for_role("ingest_classifier", "haiku", config)
+
+
+def test_preflight_openai_reports_package_and_credential(monkeypatch) -> None:
+    import importlib.util
+
+    import weft.text_generation as tg
+
+    config = SimpleNamespace(
+        text_generation=SimpleNamespace(provider="openai"), api_key=None
+    )
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name: object() if name == "openai" else None
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    result = tg.text_generation_preflight(config)
+    assert result["ready"] is False
+    assert result["package_available"] is True
+    assert result["credential_present"] is False
+    assert result["credential_variable"] == "OPENAI_API_KEY"
+    assert "OPENAI_API_KEY" in result["reason"]
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    result = tg.text_generation_preflight(config)
+    assert result["ready"] is True
+    assert result["reason"] is None
+
+
+def test_preflight_anthropic_missing_package_and_credential(monkeypatch) -> None:
+    import importlib.util
+
+    import weft.text_generation as tg
+
+    config = SimpleNamespace(
+        text_generation=SimpleNamespace(provider="anthropic"), api_key=None
+    )
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = tg.text_generation_preflight(config)
+    assert result["ready"] is False
+    assert result["package_available"] is False
+    assert result["credential_present"] is False
+    assert "weft-memory[anthropic]" in result["reason"]
+    assert "ANTHROPIC_API_KEY" in result["reason"]
+
+
+def test_preflight_unknown_provider_is_not_ready() -> None:
+    import weft.text_generation as tg
+
+    config = SimpleNamespace(text_generation=SimpleNamespace(provider="luna"))
+    result = tg.text_generation_preflight(config)
+    assert result["ready"] is False
+    assert result["reason"] is not None
 
 
 def test_provider_for_role_reuses_injected_openai_client() -> None:

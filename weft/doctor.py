@@ -27,7 +27,7 @@ _CHECK_NAMES = {
     "D005": "Redis connectivity",
     "D006": "migration ledger",
     "D007": "conflicting configuration",
-    "D008": "provider credential prerequisite",
+    "D008": "text-generation provider prerequisites",
     "D009": "MCP/client environment",
     "D010": "filesystem/resource/package wiring",
 }
@@ -205,21 +205,18 @@ def _default_migration_probe(config: Any) -> Any:
 
 def _default_provider_probe(config: Any) -> dict[str, Any]:
     # Check the configured generation provider because Doctor must identify a
-    # missing paid-provider prerequisite without constructing or calling it.
-    generation = getattr(config, "text_generation", None)
-    provider = str(getattr(generation, "provider", "anthropic"))
-    required = {"openai": "OPENAI_API_KEY", "google": "GOOGLE_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
-    variable = required.get(provider)
-    if variable is None:
-        return {"configured": False, "provider": provider, "credential_required": True}
-    config_key = getattr(config, "api_key", None) if provider == "anthropic" else None
-    present = bool(os.environ.get(variable) or config_key)
+    # missing provider prerequisite without constructing or calling it.
+    from weft.text_generation import text_generation_preflight
+
+    result = text_generation_preflight(config)
     return {
-        "configured": present,
-        "provider": provider,
-        "credential_required": True,
-        "credential_present": present,
-        "credential_variable": variable,
+        "configured": bool(result.get("ready")),
+        "provider": result.get("provider"),
+        "credential_required": bool(result.get("credential_required")),
+        "credential_present": bool(result.get("credential_present")),
+        "credential_variable": result.get("credential_variable"),
+        "package_available": bool(result.get("package_available")),
+        "reason": result.get("reason"),
     }
 
 
@@ -332,9 +329,25 @@ def run_doctor(*, dependencies: DoctorDependencies | None = None) -> DoctorRepor
 
         database = _mapping(_run(deps.database_probe(config)))
         db_status = _status(database, "reachable")
-        if db_status == "pass" and database.get("role") not in (None, "weft_app"):
+        # Role hardening is separate from connectivity: the documented local
+        # quickstart connects as the container owner role ``weft``, which is
+        # expected and supported; only unexpected roles fail the check.
+        connected_role = database.get("role")
+        if db_status == "pass" and connected_role not in (None, "weft_app", "weft"):
             db_status = "fail"
-        checks.append(_check("D004", db_status, "error" if db_status == "fail" else "info", "Verify the database endpoint, TLS, credentials, and restricted runtime role." if db_status == "fail" else "No action required.", {"reachable": bool(database.get("reachable")), "role": database.get("role", "not reported")}))
+        if db_status == "fail":
+            if database.get("reachable") and connected_role:
+                d004_remedy = (
+                    f"Database is reachable as role {connected_role!r}; this check "
+                    "expects the restricted weft_app runtime role or the local "
+                    "weft owner role. Point the configured database URL at the "
+                    "intended role connection."
+                )
+            else:
+                d004_remedy = "Verify the database endpoint, TLS, credentials, and restricted runtime role."
+        else:
+            d004_remedy = "No action required."
+        checks.append(_check("D004", db_status, "error" if db_status == "fail" else "info", d004_remedy, {"reachable": bool(database.get("reachable")), "role": connected_role if connected_role else "not reported", "expected_roles": ["weft_app", "weft"]}))
 
         redis = _mapping(_run(deps.redis_probe(config)))
         checks.append(_check("D005", _status(redis, "reachable", warning=True), "warning", "Start or configure Redis separately if caching is enabled; Doctor never starts it.", {"reachable": bool(redis.get("reachable"))}))
@@ -352,7 +365,31 @@ def run_doctor(*, dependencies: DoctorDependencies | None = None) -> DoctorRepor
 
         provider = _mapping(_run(deps.provider_probe(config)))
         provider_status = "pass" if provider.get("configured", True) and provider.get("credential_present", True) else "fail"
-        checks.append(_check("D008", provider_status, "error" if provider_status == "fail" else "info", "Configure the selected provider and its credential, or select the local provider." if provider_status == "fail" else "No action required.", {"provider": provider.get("provider", "configured"), "credential_required": bool(provider.get("credential_required", False)), "credential_present": bool(provider.get("credential_present", not provider.get("credential_required", False)))}))
+        provider_name = str(provider.get("provider", "configured"))
+        if provider_status == "pass":
+            d008_remedy = "No action required."
+        else:
+            needs: list[str] = []
+            if provider.get("package_available") is False:
+                needs.append(
+                    f"install the {provider_name!r} package "
+                    f"(pip install weft-memory[{provider_name}])"
+                )
+            if not provider.get("credential_present", True):
+                variable = provider.get("credential_variable") or "the provider API key"
+                needs.append(f"set {variable}")
+            if needs:
+                d008_remedy = (
+                    f"Text generation is configured to use {provider_name}: "
+                    + " and ".join(needs)
+                    + ". Core memory operations continue without text generation."
+                )
+            else:
+                d008_remedy = (
+                    "Configure the selected text-generation provider "
+                    f"({provider_name}) and its credential."
+                )
+        checks.append(_check("D008", provider_status, "error" if provider_status == "fail" else "info", d008_remedy, {"provider": provider_name, "credential_required": bool(provider.get("credential_required", False)), "credential_present": bool(provider.get("credential_present", not provider.get("credential_required", False))), "package_available": provider.get("package_available", True), "reason": provider.get("reason")}))
 
         client = _mapping(_run(deps.client_probe(config)))
         client_status = "pass" if client.get("compatible", True) else "fail"

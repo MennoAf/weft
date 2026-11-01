@@ -134,7 +134,12 @@ async def test_invalid_provider_is_visible_without_constructing_provider(
         constructed.append((args, kwargs))
         raise AssertionError("provider must not be constructed")
 
-    monkeypatch.setattr("anthropic.AsyncAnthropic", fail_constructor)
+    try:
+        import anthropic  # optional extra; absent on base installs
+    except ImportError:
+        anthropic = None
+    if anthropic is not None:
+        monkeypatch.setattr("anthropic.AsyncAnthropic", fail_constructor)
 
     from weft.mcp.tools import weft_ingest
 
