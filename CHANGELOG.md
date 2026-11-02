@@ -6,6 +6,8 @@ This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0rc2] - 2026-11-01
+
 ### Fixed
 
 - `weft up` waits for container health checks before running migrations, reports an actionable error instead of a raw connection-reset traceback when PostgreSQL is still initializing, surfaces the Redis `vm.overcommit_memory` prerequisite on Linux hosts with an opt-in fix, and names Claude Code as the `--global` registration target (new `--no-register` flag skips registration).
@@ -27,7 +29,7 @@ This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Agent Skills-compatible skill packages at `skills/prime/SKILL.md` and `skills/handoff/SKILL.md` for harnesses that load `<skill-name>/SKILL.md` directories (command templates remain under `templates/commands/`).
 - `weft.text_generation.text_generation_preflight`, a side-effect-free package/credential check shared by Doctor and background-task gating.
 
-## [1.0.0rc1] - release date TBD
+## [1.0.0rc1] - 2026-09-28
 
 ### Added
 
